@@ -58,6 +58,8 @@ Example out-of-tree tier configuration:
 import math
 from typing import Any
 
+import torch
+import torch.distributed as dist
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -628,15 +630,21 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         workers if they span nodes. Raises for the setups the mirror cannot
         serve.
         """
+        from vllm.distributed.parallel_state import get_world_group
+
         if not _workers_span_nodes():
             return None
         parallel = self.config.parallel
-        if parallel.data_parallel_size > 1:
+        if (
+            parallel.data_parallel_size > 1
+            or get_world_group().world_size != parallel.world_size
+        ):
             # The mirror locates workers in the world group, which then holds
-            # every replica.
+            # every replica, external ones (torchrun launchers) included.
             raise NotImplementedError(
                 "TieringOffloadingSpec secondary tiers support engines whose "
-                "workers span several nodes only without data parallelism."
+                "workers span several nodes only without data parallelism and "
+                "without other engines in the same world group (external_launcher)."
             )
         if self.config.canonical_layout:
             raise ValueError(
@@ -728,8 +736,10 @@ def _is_kvcr_tier(tier_cls: type) -> bool:
 def _workers_span_nodes() -> bool:
     """Whether the engine's workers span several nodes.
 
-    An engine's workers form a grid of TP, PP and PCP groups, so they share
-    one node if every such group does. Collective over each group.
+    A rank sees only its own TP, PP and PCP groups: with TP=2, PP=2 and ranks
+    0-2 on one node, rank 0's groups share that node while rank 3's do not.
+    The engine's workers form a grid of these groups, so a maximum over each
+    group in turn gives every rank the same answer.
     """
     from vllm.distributed.parallel_state import (
         get_pcp_group,
@@ -738,10 +748,16 @@ def _workers_span_nodes() -> bool:
         in_the_same_node_as,
     )
 
-    # Every rank must join every collective, so none is skipped.
-    spans = [
-        group.world_size > 1
-        and not all(in_the_same_node_as(group.cpu_group, source_rank=0))
+    groups = [
+        group
         for group in (get_tp_group(), get_pp_group(), get_pcp_group())
+        if group.world_size > 1
     ]
-    return any(spans)
+    # Group sizes match on every rank, so all ranks run the same collectives.
+    spans = [
+        not all(in_the_same_node_as(group.cpu_group, source_rank=0)) for group in groups
+    ]
+    flag = torch.tensor([any(spans)], dtype=torch.int32)
+    for group in groups:
+        dist.all_reduce(flag, op=dist.ReduceOp.MAX, group=group.cpu_group)
+    return bool(flag.item())

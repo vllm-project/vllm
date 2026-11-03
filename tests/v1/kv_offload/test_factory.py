@@ -767,10 +767,16 @@ def test_build_metric_definitions_returns_counter_at_threshold():
     assert CPUOffloadingMetrics.STORES_SKIPPED in metrics
 
 
-def _fake_node_groups(monkeypatch, spanning_group: str | None) -> list[str]:
-    """Fake the TP, PP and PCP groups; ``spanning_group`` spans two nodes."""
+def _fake_node_groups(
+    monkeypatch, spanning_group: str | None, world_size: int
+) -> list[str]:
+    """Fake the TP, PP, PCP and world groups; ``spanning_group`` spans two
+    nodes."""
     import vllm.distributed.parallel_state as parallel_state
 
+    monkeypatch.setattr(
+        parallel_state, "get_world_group", lambda: MagicMock(world_size=world_size)
+    )
     groups = {
         name: MagicMock(world_size=2, cpu_group=name) for name in ("tp", "pp", "pcp")
     }
@@ -784,7 +790,71 @@ def _fake_node_groups(monkeypatch, spanning_group: str | None) -> list[str]:
         return [True, group != spanning_group]
 
     monkeypatch.setattr(parallel_state, "in_the_same_node_as", same_node_as)
+    # A single process: each group's maximum is this rank's own answer.
+    monkeypatch.setattr(torch.distributed, "all_reduce", lambda *args, **kwargs: None)
     return queried
+
+
+def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
+    """Run ``_workers_span_nodes`` on one rank of a TP=2, PP=2 engine whose
+    ranks 0-2 share a node and rank 3 sits on another.
+
+    The groups are Gloo groups of vLLM's rank layout, built by hand:
+    ``initialize_model_parallel`` would open a device communicator per group,
+    which needs a GPU per rank.
+    """
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    import torch.distributed as dist
+
+    import vllm.distributed.parallel_state as parallel_state
+    from vllm.v1.kv_offload.tiering.spec import _workers_span_nodes
+
+    dist.init_process_group(
+        "gloo",
+        init_method=init_method,
+        rank=rank,
+        world_size=4,
+        timeout=timedelta(seconds=60),
+    )
+    node = {0: "a", 1: "a", 2: "a", 3: "b"}
+    # Every rank creates every group, in the same order.
+    tp = [dist.new_group(ranks) for ranks in ([0, 1], [2, 3])][rank // 2]
+    pp = [dist.new_group(ranks) for ranks in ([0, 2], [1, 3])][rank % 2]
+    parallel_state.get_tp_group = lambda: SimpleNamespace(world_size=2, cpu_group=tp)
+    parallel_state.get_pp_group = lambda: SimpleNamespace(world_size=2, cpu_group=pp)
+    parallel_state.get_pcp_group = lambda: SimpleNamespace(world_size=1)
+
+    def same_node_as(group, source_rank):
+        ranks = dist.get_process_group_ranks(group)
+        return [node[r] == node[ranks[source_rank]] for r in ranks]
+
+    parallel_state.in_the_same_node_as = same_node_as
+    results.put((rank, _workers_span_nodes()))
+    dist.destroy_process_group()
+
+
+def test_workers_span_nodes_agrees_across_ranks(tmp_path):
+    """Rank 0's TP and PP groups share its node, but rank 3's do not; ranks
+    that disagreed would split between the mirror's collectives and hang."""
+    import torch.multiprocessing as mp
+
+    context = mp.get_context("spawn")
+    results = context.SimpleQueue()
+    init_method = f"file://{tmp_path / 'store'}"
+    mp.start_processes(
+        _span_nodes_on_rank,
+        args=(init_method, results),
+        nprocs=4,
+        start_method="spawn",
+    )
+    assert sorted(results.get() for _ in range(4)) == [
+        (0, True),
+        (1, True),
+        (2, True),
+        (3, True),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -814,7 +884,7 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
         extra_config={"secondary_tiers": secondary_tiers},
     )
     assert isinstance(spec, TieringOffloadingSpec)
-    queried = _fake_node_groups(monkeypatch, spanning_group)
+    queried = _fake_node_groups(monkeypatch, spanning_group, world_size=4)
     topology = MagicMock(rank=1, on_head=on_head)
     monkeypatch.setattr(tiering_spec_module, "mirror_topology", lambda: topology)
     monkeypatch.setattr(
@@ -852,6 +922,8 @@ def test_tiering_spec_mirrors_secondary_tiers_across_nodes(
     ("change", "error"),
     [
         ({"data_parallel_size": 2}, NotImplementedError),
+        # A torchrun launcher's world group holds every external replica.
+        ({"world_group_size": 4}, NotImplementedError),
         ({"replicated_layout": True}, ValueError),
         ({"secondary_tiers": [{"type": "kvcr"}]}, ValueError),
     ],
@@ -868,6 +940,8 @@ def test_tiering_spec_rejects_unmirrorable_engines_across_nodes(
         world_size=2,
         extra_config={"secondary_tiers": [{"type": "example"}]},
     )
+    change = dict(change)
+    world_group_size = change.pop("world_group_size", 2)
     if "secondary_tiers" in change:
         kwargs["extra_config"] = change
     else:
@@ -882,7 +956,7 @@ def test_tiering_spec_rejects_unmirrorable_engines_across_nodes(
             classmethod(lambda cls, config: kvcr_cls),
         )
     spec = _create_spec(**kwargs)
-    _fake_node_groups(monkeypatch, "tp")
+    _fake_node_groups(monkeypatch, "tp", world_size=world_group_size)
     monkeypatch.setattr(tiering_spec_module, "mirror_topology", MagicMock())
     monkeypatch.setattr(tiering_spec_module, "SharedOffloadRegion", MagicMock())
     monkeypatch.setattr(tiering_spec_module, "CPUOffloadingWorker", MagicMock())

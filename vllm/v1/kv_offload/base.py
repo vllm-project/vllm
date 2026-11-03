@@ -710,6 +710,16 @@ class OffloadingWorker(ABC):
     @abstractmethod
     def wait(self, job_ids: set[int]) -> None: ...
 
+    def unregister_kv_caches(self) -> None:
+        """Drop registrations of the GPU KV caches before sleep mode remaps
+        them. Must not return while a transfer can still touch them.
+        Idempotent."""
+        return
+
+    def restore_kv_caches(self) -> None:
+        """Redo `unregister_kv_caches` after wake-up. Idempotent."""
+        return
+
     def shutdown(self) -> None:
         return
 

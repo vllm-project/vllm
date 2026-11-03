@@ -182,9 +182,9 @@ class RegionMirrorClient:
         self._agent = _new_agent(name)
         self._head = self._agent.add_remote_agent(head_metadata)
         self._device = gpu_ranges[0][2]
-        self._reg = self._agent.register_memory(
-            [(addr, size, dev, "") for addr, size, dev in gpu_ranges], "VRAM"
-        )
+        self._gpu_ranges = gpu_ranges
+        self._reg: Any = None
+        self.restore_kv_caches()
 
     @property
     def metadata(self) -> bytes:
@@ -248,9 +248,24 @@ class RegionMirrorClient:
         self._stop_reason = reason
         self._stopped.set()
 
+    def unregister_kv_caches(self) -> None:
+        """Release the GPU memory registration, which sleep mode's remap
+        would leave pointing at stale pages."""
+        if self._reg is not None:
+            self._agent.deregister_memory(self._reg)
+            self._reg = None
+
+    def restore_kv_caches(self) -> None:
+        """Register the GPU memory again, at its addresses after wake-up."""
+        if self._reg is None:
+            self._reg = self._agent.register_memory(
+                [(addr, size, dev, "") for addr, size, dev in self._gpu_ranges],
+                "VRAM",
+            )
+
     def shutdown(self) -> None:
         self._agent.remove_remote_agent(self._head)
-        self._agent.deregister_memory(self._reg)
+        self.unregister_kv_caches()
 
 
 @dataclass
@@ -260,13 +275,16 @@ class _Copy:
     steps: list[Callable[[], None]]
     is_load: bool
     result: TransferResult
+    expedited: bool = False
     error: BaseException | None = None
     done: threading.Event = field(default_factory=threading.Event)
     next_step: int = 0
 
 
-# Loads go first, but a waiting store runs after this many consecutive loads,
-# so a stream of loads cannot keep stored blocks pinned indefinitely.
+# Expedited loads go first and do not count toward the streak: the step
+# blocks on them, so they cannot keep a store waiting for long. Then loads,
+# but a waiting store runs after this many consecutive loads, so a stream of
+# loads cannot keep stored blocks pinned indefinitely.
 _LOADS_PER_STORE = 4
 
 
@@ -361,6 +379,7 @@ class RegionMirrorWorker(OffloadingWorker):
         self._copies: dict[int, _Copy] = {}
         self._ready: list[TransferResult] = []
         self._cv = threading.Condition()
+        self._expedited: deque[_Copy] = deque()
         self._loads: deque[_Copy] = deque()
         self._stores: deque[_Copy] = deque()
         self._load_streak = 0
@@ -378,10 +397,14 @@ class RegionMirrorWorker(OffloadingWorker):
 
     def _next_copy(self) -> _Copy | None:
         with self._cv:
-            while not (self._stopping or self._loads or self._stores):
+            while not (
+                self._stopping or self._expedited or self._loads or self._stores
+            ):
                 self._cv.wait()
             if self._stopping:
                 return None
+            if self._expedited:
+                return self._expedited.popleft()
             if self._loads and (
                 self._load_streak < _LOADS_PER_STORE or not self._stores
             ):
@@ -408,11 +431,16 @@ class RegionMirrorWorker(OffloadingWorker):
                 # The rest goes back to the front of its queue, so a load
                 # queued meanwhile waits for one transfer, not the whole copy.
                 with self._cv:
-                    (self._loads if copy.is_load else self._stores).appendleft(copy)
+                    self._queue(copy).appendleft(copy)
                 continue
             # Queue before signalling: wait() drains the queue once signalled.
             self._completed.put(copy)
             copy.done.set()
+
+    def _queue(self, copy: _Copy) -> deque[_Copy]:
+        if copy.expedited:
+            return self._expedited
+        return self._loads if copy.is_load else self._stores
 
     def _enqueue(
         self,
@@ -422,6 +450,7 @@ class RegionMirrorWorker(OffloadingWorker):
         head: np.ndarray,
         sizes: np.ndarray,
         is_load: bool,
+        expedited: bool = False,
     ) -> None:
         # The copy reads or writes GPU blocks that the compute stream may
         # still be writing (a store's KV, a load's zeroing), so it waits.
@@ -436,19 +465,20 @@ class RegionMirrorWorker(OffloadingWorker):
             event.synchronize()
             start = time.perf_counter()
             copy_fn(gpu, head, sizes)
+            assert result.transfer_time is not None
             result.transfer_time += time.perf_counter() - start
 
         # Each transfer holds the blocks whose end falls in its byte window.
         window = (np.cumsum(sizes) - 1) // self._max_transfer_bytes
         bounds = np.flatnonzero(np.diff(window)) + 1
-        steps = [
+        steps: list[Callable[[], None]] = [
             functools.partial(step, *batch)
             for batch in zip(*(np.split(a, bounds) for a in (gpu, head, sizes)))
         ]
-        copy = _Copy(job_id, steps, is_load, result)
+        copy = _Copy(job_id, steps, is_load, result, expedited=expedited)
         self._copies[job_id] = copy
         with self._cv:
-            (self._loads if is_load else self._stores).append(copy)
+            self._queue(copy).append(copy)
             self._cv.notify()
 
     def _finish_copy(self, copy: _Copy) -> None:
@@ -504,7 +534,15 @@ class RegionMirrorWorker(OffloadingWorker):
         expedited: bool = False,
     ) -> bool:
         head, gpu, sizes = self._load_planner.copy_ops(src_spec, dst_spec)
-        self._enqueue(job_id, self._client.read, gpu, head, sizes, is_load=True)
+        self._enqueue(
+            job_id,
+            self._client.read,
+            gpu,
+            head,
+            sizes,
+            is_load=True,
+            expedited=expedited,
+        )
         return True
 
     def get_finished(self) -> list[TransferResult]:
@@ -525,6 +563,15 @@ class RegionMirrorWorker(OffloadingWorker):
                         "KV offload mirror thread stopped with a copy pending"
                     )
         self._drain_completed()
+
+    def unregister_kv_caches(self) -> None:
+        # sleep() synchronizes the device, not this thread: finish
+        # queued copies while the GPU memory is still mapped.
+        self.wait(set(self._copies))
+        self._client.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        self._client.restore_kv_caches()
 
     def shutdown(self) -> None:
         # Pending copies cannot complete once the engine stops, and the head
@@ -574,6 +621,24 @@ def gather_construction_errors(
     the others blocked in a later collective.
     """
     _gather_raising(topology, error, None, "worker construction")
+
+
+def _storage_ranges(kv_caches: CanonicalKVCaches) -> list[tuple[int, int, int]]:
+    """(address, size, device) of each storage behind the KV cache tensors.
+
+    A strided view (HiSparse keeps per-layer views of block-outermost caches)
+    reaches past ``numel() * element_size()``, so its whole storage is
+    registered; views of one storage share one range.
+    """
+    ranges: dict[int, tuple[int, int, int]] = {}
+    for t in kv_caches.tensors:
+        storage = t.tensor.untyped_storage()
+        ranges[storage.data_ptr()] = (
+            storage.data_ptr(),
+            storage.nbytes(),
+            t.tensor.device.index or 0,
+        )
+    return list(ranges.values())
 
 
 def attach_region_mirror(
@@ -646,14 +711,7 @@ def attach_region_mirror(
                     head_base + topology.rank * head_layout.size,
                 )
                 client = RegionMirrorClient(
-                    [
-                        (
-                            t.tensor.data_ptr(),
-                            t.tensor.numel() * t.tensor.element_size(),
-                            t.tensor.device.index or 0,
-                        )
-                        for t in kv_caches.tensors
-                    ],
+                    _storage_ranges(kv_caches),
                     head_metadata,
                     name,
                     timeout_s=timeout_s,

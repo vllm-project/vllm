@@ -1393,3 +1393,19 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+@pytest.mark.parametrize(
+    "backend, placement_known",
+    [("mp", True), ("uni", True), ("ray", False), ("external_launcher", False)],
+)
+def test_only_mp_and_uni_report_worker_placement(
+    backend: str, placement_known: bool
+) -> None:
+    """Other executors do not place workers by the configured node count, so
+    the multi-node row namespace cannot rely on it."""
+    config = _make_vllm_config(tensor_parallel_size=2)
+    config.parallel_config.distributed_executor_backend = backend
+    parallel = build_offloading_config(config, _make_kv_cache_config()).parallel
+    assert parallel.placement_known is placement_known
+    assert parallel.spans_nodes is (not placement_known)

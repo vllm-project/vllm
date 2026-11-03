@@ -95,7 +95,7 @@ def test_write_fills_only_the_remote_slot(nixl_mirror):
     head_rows[:] = 7
     for block in range(NUM_CHUNKS):
         blocks[block] = 100 + block
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     client.write(*_plan(blocks, slot, [(0, 2), (1, 5)]))
 
@@ -104,6 +104,20 @@ def test_write_fills_only_the_remote_slot(nixl_mirror):
         expected = {2: 100, 5: 101}.get(chunk, 7)
         assert (head_rows[chunk, SLOT:] == expected).all()
         assert (head_rows[chunk, :SLOT] == 7).all()
+
+
+def test_write_after_reregistration(nixl_mirror):
+    """Sleep mode remaps the GPU KV caches between these two hooks."""
+    head_rows, blocks, client, slot = nixl_mirror
+    client.unregister_kv_caches()
+    client.unregister_kv_caches()
+    client.restore_kv_caches()
+    blocks[0] = 42
+    torch.accelerator.synchronize()
+
+    client.write(*_plan(blocks, slot, [(0, 1)]))
+
+    assert (head_rows[1, SLOT:] == 42).all()
 
 
 def test_read_fills_the_gpu_blocks_from_the_remote_slot(nixl_mirror):
@@ -166,6 +180,23 @@ def test_slot_planners_reject_a_slot_too_small_for_the_kv():
         slot_planners(_kv_caches([SLOT, 512]), 1, layout, 0)
 
 
+def test_strided_views_register_their_whole_storage():
+    """Per-layer views of a block-outermost cache are strided: their blocks
+    reach past ``numel() * element_size()`` bytes from the view's start."""
+    blocks = torch.zeros((16, 2, 512), dtype=torch.int8)
+    caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(tensor=blocks[:, layer], page_size_bytes=512)
+            for layer in range(2)
+        ],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]],
+    )
+
+    assert region_mirror._storage_ranges(caches) == [
+        (blocks.data_ptr(), blocks.nbytes, 0)
+    ]
+
+
 class _FakeClient:
     """Stands in for RegionMirrorClient: copies run when the test lets them."""
 
@@ -173,12 +204,15 @@ class _FakeClient:
         self.calls: list[tuple[str, list[int]]] = []
         self.gate = threading.Event()
         self.gate.set()
+        # Set once a copy has started and waits on the gate.
+        self.entered = threading.Event()
         self.fail: str | None = None
         self.stuck: str | None = None
         self.stopped = False
         self.shut_down = False
 
     def _copy(self, op: str, gpu: np.ndarray) -> None:
+        self.entered.set()
         self.gate.wait()
         self.calls.append((op, gpu.tolist()))
         if self.stuck == op:
@@ -195,6 +229,12 @@ class _FakeClient:
     def stop(self, reason: str = "") -> None:
         self.stopped = True
         self.gate.set()
+
+    def unregister_kv_caches(self) -> None:
+        self.calls.append(("unregister", []))
+
+    def restore_kv_caches(self) -> None:
+        self.calls.append(("restore", []))
 
     def shutdown(self) -> None:
         self.shut_down = True
@@ -246,7 +286,7 @@ def test_store_is_reported_after_its_write_behind_the_compute_stream(events):
     try:
         assert worker.submit_store(1, MagicMock(), MagicMock())
         events[0].record.assert_called_once()
-        time.sleep(0.05)
+        assert client.entered.wait(10)
         assert worker.get_finished() == []
 
         client.gate.set()
@@ -280,6 +320,34 @@ def test_wait_covers_stores_too(events):
         worker.wait({3})
         assert client.calls == [("write", [10, 11])]
         assert worker.get_finished()[0].job_id == 3
+    finally:
+        worker.shutdown()
+
+
+def test_unregister_waits_for_copies_in_flight(events):
+    """sleep() does not wait for this thread: a queued store must finish
+    while the GPU memory is still registered."""
+    client = _FakeClient()
+    client.gate.clear()
+    worker, _, _ = _mirror_worker(client)
+    try:
+        assert worker.submit_store(4, MagicMock(), MagicMock())
+        assert client.entered.wait(10)
+        unregistered = threading.Event()
+        thread = threading.Thread(
+            target=lambda: (worker.unregister_kv_caches(), unregistered.set())
+        )
+        thread.start()
+        # Still blocked on the copy: the registration must not be dropped yet.
+        assert not unregistered.wait(0.2)
+        assert client.calls == []
+        client.gate.set()
+        assert unregistered.wait(10)
+        thread.join(10)
+        assert client.calls == [("write", [10, 11]), ("unregister", [])]
+        worker.restore_kv_caches()
+        assert client.calls[-1] == ("restore", [])
+        assert [r.job_id for r in worker.get_finished()] == [4]
     finally:
         worker.shutdown()
 
@@ -332,6 +400,25 @@ def test_loads_overtake_waiting_stores(events):
         client.gate.set()
         _wait_for(lambda: len(client.calls) == 4)
         assert [op for op, _ in client.calls] == ["write", "read", "write", "write"]
+    finally:
+        worker.shutdown()
+
+
+def test_expedited_loads_overtake_waiting_loads(events):
+    client = _FakeClient()
+    client.gate.clear()
+    worker, _, load = _mirror_worker(client)
+    load.copy_ops.side_effect = [
+        (np.array([40]), np.array([job_id]), np.array([64])) for job_id in (14, 15, 16)
+    ]
+    try:
+        assert worker.submit_load(14, MagicMock(), MagicMock())
+        assert client.entered.wait(10)
+        assert worker.submit_load(15, MagicMock(), MagicMock())
+        assert worker.submit_load(16, MagicMock(), MagicMock(), expedited=True)
+        client.gate.set()
+        worker.wait({14, 15, 16})
+        assert client.calls == [("read", [14]), ("read", [16]), ("read", [15])]
     finally:
         worker.shutdown()
 

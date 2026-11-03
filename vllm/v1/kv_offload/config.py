@@ -67,10 +67,17 @@ class OffloadingParallelConfig:
     is_parallelism_agnostic: bool
     # Workers of this engine on each node; world_size when unknown.
     local_world_size: int | None = None
+    # False when the executor does not place workers by the configured node
+    # count (Ray, external_launcher, executor classes): local_world_size then
+    # says nothing about the nodes.
+    placement_known: bool = True
 
     @property
     def spans_nodes(self) -> bool:
-        """Whether the executor reports workers on several nodes."""
+        """Whether workers may be on several nodes: as the executor reports,
+        or for any engine of several workers whose placement is unknown."""
+        if not self.placement_known:
+            return self.world_size > 1
         return (
             self.local_world_size is not None
             and self.local_world_size < self.world_size

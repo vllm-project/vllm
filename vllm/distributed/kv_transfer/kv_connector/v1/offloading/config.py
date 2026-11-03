@@ -317,6 +317,10 @@ def build_offloading_config(
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
             local_world_size=parallel_config.local_world_size,
+            # Only these executors place workers by the configured nnodes.
+            placement_known=(
+                parallel_config.distributed_executor_backend in ("mp", "uni")
+            ),
         ),
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
