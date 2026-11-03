@@ -34,6 +34,12 @@ class MoEStep:
             self.top_k = config.experts_per_token
         if self._weights is None:
             return
+        if getattr(block, "monokernel", False):
+            # the mono layers read the shared expert's [N, K] storage in
+            # place; prepare_weights would replace it with a [K, N] copy, so
+            # the steps they do not serve run the stock MoE
+            self._weights = None
+            return
         try:
             from vllm_xpu_kernels.moe_shared_fused_interface import (
                 XpuFusedMoeWithSharedExpert as FusedMoe,

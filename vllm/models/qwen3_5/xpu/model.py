@@ -107,7 +107,11 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
-from .specialized_decode.hooks import initialize_specialized_decode
+from .specialized_decode.hooks import (
+    SpecializedDecodeMixin,
+    initialize_specialized_decode,
+    model_state_cls,
+)
 from .specialized_decode.moe import MoEStep
 
 if TYPE_CHECKING:
@@ -118,6 +122,14 @@ logger = init_logger(__name__)
 
 class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
     _decode: MoEStep | None = None
+
+    def __init__(
+        self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
+    ):
+        super().__init__(vllm_config, prefix=prefix, reduce_results=reduce_results)
+        # --monokernel: the mono layers read the shared expert's weights in
+        # place, so the fused MoE leaves them alone (``MoEStep``)
+        self.monokernel = vllm_config.kernel_config.monokernel
 
     @property
     def _xpu_moe_shared_fused_plan(self) -> "XpuFusedMoeWithSharedExpert | None":
@@ -236,6 +248,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
 
 
 class Qwen3_5Model(nn.Module, EagleModelMixin):
+    # the mono decode's executor (``--monokernel``), set by the model state
+    specialized_decode = None
     # Qwen3.5 ships the GDN in_proj checkpoints separately (qwen3-next
     # pre-fuses them); fuse them on top of the qwen3-next QKV/gate_up mapping.
     hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
@@ -349,12 +363,15 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
 
+        decode = self.specialized_decode
+        step = None if decode is None else decode.plan(positions, intermediate_tensors)
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            hidden_states, residual = layer(
+            kernel = None if step is None else step.layer(layer_idx)
+            hidden_states, residual = (kernel or layer)(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
@@ -390,6 +407,7 @@ class Qwen3_5Model(nn.Module, EagleModelMixin):
 
 
 class Qwen3_5ForCausalLMBase(
+    SpecializedDecodeMixin,
     nn.Module,
     HasInnerState,
     IsHybrid,
@@ -436,6 +454,8 @@ class Qwen3_5ForCausalLMBase(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
+        # the mono decode's config check, before any module allocates weights
+        self.init_specialized_decode(vllm_config)
         self.model = Qwen3_5Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -460,6 +480,9 @@ class Qwen3_5ForCausalLMBase(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def get_model_state_cls(self):
+        return model_state_cls(self)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -684,6 +707,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
 
     def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.language_model.compute_logits_local(hidden_states)
+
+    def get_model_state_cls(self):
+        return model_state_cls(self.language_model)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
