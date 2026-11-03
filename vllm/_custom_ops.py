@@ -3355,8 +3355,8 @@ def swap_blocks(
     and their matching destination block number on the destination tensor.
     block_mapping is expected to be a tensor of shape (num_blocks_to_copy, 2)
     where each block_mapping[i] represents a single copy operation, copying
-    block #block_mapping[i][0] from the source tensor
-    to block #block_mapping[i][1] on the destination tensor.
+    block `block_mapping[i][0]` from the source tensor
+    to block `block_mapping[i][1]` on the destination tensor.
     block_mapping should have dtype int64.
 
     The source and the destination tensors can be either on cpu or gpu,
