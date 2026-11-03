@@ -36,7 +36,10 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNormWithInputScale,
 )
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
-from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSparkTrtLlmNvFp4Experts
+from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+    MusePostExpertFinalize,
+    MuseSparkTrtLlmNvFp4Experts,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -538,3 +541,24 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     finally:
         buffer.destroy()
+
+
+def test_post_expert_norm_weight_refilled_after_reload():
+    """The activation-dtype norm weight is built on the first forward; a weight
+    reload must refresh it where captured CUDA graphs read it."""
+    from types import SimpleNamespace
+
+    norm = SimpleNamespace(has_weight=True, weight=torch.rand(8), hidden_size=8)
+    finalize = MusePostExpertFinalize.__new__(MusePostExpertFinalize)
+    finalize._norm = norm
+    finalize._fused_weight = None
+
+    finalize.process_weights_after_loading()  # cold start: not built yet
+    assert finalize._fused_weight is None
+    first = finalize._effective_weight(torch.bfloat16, torch.device("cpu"))
+
+    norm.weight = norm.weight * 3
+    finalize.process_weights_after_loading()
+
+    assert finalize._fused_weight is first
+    torch.testing.assert_close(first, norm.weight.to(torch.bfloat16))

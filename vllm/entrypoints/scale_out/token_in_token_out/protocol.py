@@ -11,12 +11,15 @@ from pydantic import (
     NonNegativeInt,
     PrivateAttr,
     Tag,
+    field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
     PerRequestMetrics,
     StreamOptions,
     validate_cache_salt,
@@ -307,8 +310,8 @@ class GenerateRequest(BaseModel):
             "strings. 'derender' returns the parsed assistant message and "
             "needs `parse_context` when the server has a parser. 'text' and "
             "'derender' need a server that loads a tokenizer and "
-            "sampling_params.detokenize to be true. 'derender' does not "
-            "support `stream`."
+            "sampling_params.detokenize to be true. With `stream`, "
+            "'derender' returns a parsed chat `delta` per chunk."
         ),
     )
     parse_context: ParseContext | None = Field(
@@ -379,6 +382,16 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        # `SamplingParams` omits fields equal to their defaults, so a resolved
+        # `max_tokens=16` would be dropped and read back as not provided.
+        data = handler(self)
+        sp = data.get("sampling_params")
+        if isinstance(sp, dict) and self.is_sampling_param_provided("max_tokens"):
+            sp.setdefault("max_tokens", self.sampling_params.max_tokens)
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -554,6 +567,19 @@ class GenerateTextStreamChoice(GenerateStreamChoiceBase):
     logprobs: ChatCompletionLogProbs | None = None
 
 
+class GenerateDerenderStreamChoice(GenerateStreamChoiceBase):
+    delta: DeltaMessage
+    """Parsed delta since the previous chunk of this choice."""
+
+    logprobs: ChatCompletionLogProbs | None = None
+    """Logprobs with decoded token strings and `bytes`. None when reasoning
+    is hidden by `include_reasoning=false`."""
+
+    @field_serializer("delta")
+    def _serialize_delta(self, delta: DeltaMessage) -> dict[str, Any]:
+        return delta.model_dump(exclude_none=True)
+
+
 class GenerateStreamResponseBase(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -577,6 +603,11 @@ class GenerateTokensStreamResponse(GenerateStreamResponseBase):
 class GenerateTextStreamResponse(GenerateStreamResponseBase):
     output_mode: Literal["text"] = "text"
     choices: list[GenerateTextStreamChoice]
+
+
+class GenerateDerenderStreamResponse(GenerateStreamResponseBase):
+    output_mode: Literal["derender"] = "derender"
+    choices: list[GenerateDerenderStreamChoice]
 
 
 class GenerateDerenderChoice(GenerateChoiceBase):
@@ -655,9 +686,16 @@ GenerateResponse: TypeAlias = Annotated[
 ]
 GenerateStreamResponse: TypeAlias = Annotated[
     Annotated[GenerateTokensStreamResponse, Tag("tokens")]
-    | Annotated[GenerateTextStreamResponse, Tag("text")],
+    | Annotated[GenerateTextStreamResponse, Tag("text")]
+    | Annotated[GenerateDerenderStreamResponse, Tag("derender")],
     Discriminator(output_mode_or_tokens),
 ]
+
+
+class AbortRequestsRequest(BaseModel):
+    """Request for the /inference/v1/abort_requests endpoint."""
+
+    request_ids: str | list[str]
 
 
 class DerenderChatRequest(BaseModel):
@@ -694,7 +732,11 @@ class DerenderChatRequest(BaseModel):
     leading space on SentencePiece tokenizers. Falls back to
     `generate_response.prompt_token_ids`, then to unseeded decoding.
 
-    Only the last few IDs are read, so a suffix of the prompt is enough.
+    With a tool or reasoning parser configured, the parser also reads these
+    IDs when `generate_response.prompt_token_ids` is unset, so send the full
+    list: parsers look back to the last reasoning marker, which can be
+    anywhere in the prompt. Without a parser, only the last few IDs are
+    read, so a suffix is enough.
     """
 
     chat_request: ChatCompletionRequest | None = None

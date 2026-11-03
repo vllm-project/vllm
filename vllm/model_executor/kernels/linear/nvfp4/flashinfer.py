@@ -96,7 +96,9 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
             x_2d = torch.nn.functional.pad(x_2d, (0, weights_padding_bytes * 2))
         x_2d = x_2d.contiguous()
 
-        out = torch.ops.vllm.flashinfer_mm_bf16_fp4(
+        from vllm.utils.flashinfer import flashinfer_mm_bf16_fp4
+
+        out = flashinfer_mm_bf16_fp4(
             x_2d,
             layer.weight,
             layer.weight_scale,
