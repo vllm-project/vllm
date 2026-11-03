@@ -14,6 +14,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
@@ -159,12 +160,6 @@ class LogitsProcessor(PluggableLayer):
         # required for RL training-inference consistency.
         model_config = get_current_vllm_config().model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
-        # Set to torch.float32 by a caller that would cast the gathered logits
-        # to FP32 anyway (the model runner, for a model that opts in with
-        # SupportsFP32LogitsGather); the fused gather then writes FP32
-        # where nothing in this layer runs on the logits after the gather.
-        # None keeps the head's dtype.
-        self.gather_out_dtype: torch.dtype | None = None
 
     def forward(
         self,
@@ -192,8 +187,14 @@ class LogitsProcessor(PluggableLayer):
 
     def _fused_gather_dtype(self, logits: torch.Tensor) -> torch.dtype | None:
         """Output dtype of the fused vocab-parallel gather of ``logits``, or
-        None where the fused gather does not apply."""
-        if not (
+        None for the unfused gather: the forward context's
+        ``logits_gather_dtype`` if set (see `ForwardContext`)."""
+        requested = (
+            get_forward_context().logits_gather_dtype
+            if is_forward_context_available()
+            else None
+        )
+        if requested is None or not (
             self.use_all_gather
             and current_platform.is_cuda()
             and logits.dim() == 2
@@ -203,7 +204,7 @@ class LogitsProcessor(PluggableLayer):
         ):
             return None
         if (
-            self.gather_out_dtype == torch.float32
+            requested == torch.float32
             # The scale and soft cap run after the gather, in its dtype.
             and self.scale == 1.0
             and self.soft_cap is None

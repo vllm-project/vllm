@@ -128,25 +128,16 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
-    def needs_processing(self, idx_mapping_np: np.ndarray) -> bool:
-        """Whether any of the given requests needs its logits processed."""
-        return bool(np.any(self.needs_logits_processing[idx_mapping_np]))
-
-    def can_process_logits_in_place(self, idx_mapping_np: np.ndarray) -> bool:
-        """Whether the given requests' logits are processed and no returned
-        logprobs read the raw logits, so the processing may overwrite them."""
-        return self.needs_processing(idx_mapping_np) and (
+    def wants_fp32_logits(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether sampling the given requests would copy their logits to FP32
+        (some request needs processing) and no returned logprobs read the raw
+        logits. Only then may the model runner have the TP gather write FP32
+        logits (exact), which the sampler then processes in place
+        (``logits_writable``) instead of copying."""
+        return bool(np.any(self.needs_logits_processing[idx_mapping_np])) and (
             self.logprobs_mode in PROCESSED_LOGPROBS_MODES
             or self.get_logprobs_dims(idx_mapping_np) is None
         )
-
-    def wants_fp32_logits(self, idx_mapping_np: np.ndarray) -> bool:
-        """Whether sampling the given requests would copy their logits to FP32
-        and may then process them in place: only then may the model runner
-        have the TP gather write FP32 logits directly (exact), which the
-        sampler then processes in place instead of copying. Otherwise the
-        logits stay in the head dtype."""
-        return self.can_process_logits_in_place(idx_mapping_np)
 
     def __call__(
         self,
@@ -154,8 +145,9 @@ class Sampler:
         input_batch: InputBatch,
         logits_writable: bool = False,
     ) -> SamplerOutput:
-        """``logits_writable``: sampling may process ``logits`` in place (see
-        ``can_process_logits_in_place``)."""
+        """``logits_writable``: the model runner's FP32 gather wrote
+        ``logits`` for this sampler, which may process them in place (see
+        ``wants_fp32_logits``)."""
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
@@ -259,7 +251,7 @@ class Sampler:
     ) -> torch.Tensor:
         """``logits_writable``: the caller does not read ``logits`` afterwards,
         so FP32 logits are processed in place instead of copied."""
-        if not self.needs_processing(idx_mapping_np):
+        if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
         if not (logits_writable and logits.dtype == torch.float32):
