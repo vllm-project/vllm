@@ -241,3 +241,39 @@ def test_decode_block_outer_pages_bitwise(num_kv_heads, decode_query_len):
     ]
     assert torch.isfinite(outs[0]).all()
     assert torch.equal(outs[0], outs[1])
+
+
+def test_xcd_splits_table():
+    """Splits of the XCD-aware grid: 4 up to 8 requests (one per XCD) and for
+    17-24, 2 for 9-16, the cost model beyond and off the tuned shape."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    got = [host._xcd_splits(n, 8, 16, 8) for n in (1, 5, 8, 9, 16, 17, 24, 25)]
+    assert got == [4, 4, 4, 2, 2, 4, 4, None]
+    assert host._xcd_splits(5, 8, 16, 4) is None  # DSpark 3: not tuned
+    assert host._xcd_splits(5, 0, 16, 8) is None  # no XCD-aware grid
+    assert host._xcd_splits(5, 8, 32, 8) is None  # other top-k width
+
+
+@pytest.mark.parametrize("num_reqs", [1, 3, 5, 8, 9, 12, 16, 17, 24, 40])
+@pytest.mark.parametrize("ctx", [30000, 500000])
+def test_default_splits_match_unsplit(num_reqs, ctx):
+    """The default split count agrees with the unsplit kernel (the summation
+    order is the only difference) and repeats bitwise, at DSpark 7 batch sizes."""
+    torch.manual_seed(num_reqs)
+    lens = torch.randint(ctx * 6 // 10, ctx * 14 // 10 + 1, (num_reqs,)).tolist()
+    table, num_blocks = _block_table(lens)
+    seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
+    topk = _selections(lens, 8)
+    cache = torch.randint(
+        0, 256, (num_blocks, 2, BLOCK, 72), dtype=torch.uint8, device="cuda"
+    )
+    for side in range(2):
+        sf = cache.view(num_blocks, -1)[:, side * 9216 + 8192 : (side + 1) * 9216]
+        sf.masked_fill_((sf & 0x7F) == 0x7F, 0x38)  # no NaN scales
+    q = (torch.randn(num_reqs * 8, GROUP, D, device="cuda") * 0.05).bfloat16()
+    out = _decode(q, cache, topk, table, seq_lens, 8)
+    unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
+    assert torch.isfinite(out).all()
+    assert _rel(out, unsplit) < 3e-3
+    assert torch.equal(out, _decode(q, cache, topk, table, seq_lens, 8))
