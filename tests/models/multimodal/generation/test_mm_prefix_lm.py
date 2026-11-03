@@ -181,6 +181,7 @@ def test_mm_prefix_lm_cache_hit_inside_image(
         enable_chunked_prefill=True,
         max_num_batched_tokens=512,
         enable_prefix_caching=True,
+        disable_chunked_mm_input=True,
         limit_mm_per_prompt={"image": 1},
     ) as vllm_model:
         llm = vllm_model.get_llm()
