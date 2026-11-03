@@ -123,6 +123,41 @@ def test_early_kv_load_does_not_overtake_finished_load():
     assert scheduler.running == [older]
 
 
+def test_aborted_kv_load_counts_until_transfer_done():
+    """An aborted load keeps its place under the cap while its transfer still
+    writes its blocks, so cancelling loading requests can't exceed the cap."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=1
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    aborted, waiting = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    scheduler.add_request(aborted)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert aborted.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.finish_requests(aborted.request_id, RequestStatus.FINISHED_ABORTED)
+    scheduler.add_request(waiting)
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler_output = scheduler.schedule()
+    assert waiting.status == RequestStatus.WAITING
+
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output([local], finished_recving={aborted.request_id}),
+    )
+    scheduler.schedule()
+    assert aborted.request_id not in scheduler.requests
+    assert waiting.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
 def test_inflight_kv_load_cap_does_not_block_local_requests():
     """Async-load requests past the cap don't hold back local ones."""
     scheduler, block_size = _remote_scheduler(

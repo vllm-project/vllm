@@ -504,6 +504,7 @@ class Scheduler(SchedulerInterface):
             else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        self._aborted_kv_loads: set[str] = set()
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -2788,6 +2789,7 @@ class Scheduler(SchedulerInterface):
         return limit is None or (
             self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
             + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+            + len(self._aborted_kv_loads)
             < limit
         )
 
@@ -3106,6 +3108,8 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if delay_free_blocks:
+                self._aborted_kv_loads.add(request.request_id)
 
         return valid_requests
 
@@ -3656,6 +3660,7 @@ class Scheduler(SchedulerInterface):
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
+                self._aborted_kv_loads.discard(req_id)
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
