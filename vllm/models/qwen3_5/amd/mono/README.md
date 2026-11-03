@@ -151,12 +151,12 @@ output, as above.
 
 | Concurrency | Output tok/s, non-mono → mono | Median TPOT (ms) |
 | --- | --- | --- |
-| 1 | 104.4 → 117.5 (+12.5%) | 9.23 → 8.15 (+11.7%) |
-| 2 | 196.3 → 212.5 (+8.3%) | 9.82 → 9.06 (+7.7%) |
-| 4 | 343.2 → 366.5 (+6.8%) | 11.03 → 10.31 (+6.5%) |
-| 8 | 574.7 → 567.1 (−1.3%) | 13.15 → 13.35 (−1.5%) |
-| 4, default caps | 343.2 → 365.8 (+6.6%) | 11.03 → 10.32 (+6.4%) |
-| 8, default caps | 574.7 → 578.0 (+0.6%) | 13.15 → 13.10 (+0.4%) |
+| 1 | 104.6 → 117.5 (+12.4%) | 9.21 → 8.15 (+11.5%) |
+| 2 | 196.7 → 212.5 (+8.0%) | 9.81 → 9.06 (+7.6%) |
+| 4 | 341.9 → 366.5 (+7.2%) | 11.05 → 10.31 (+6.7%) |
+| 8 | 570.6 → 567.1 (−0.6%) | 13.27 → 13.35 (−0.6%) |
+| 4, default caps | 341.9 → 365.8 (+7.0%) | 11.05 → 10.32 (+6.6%) |
+| 8, default caps | 570.6 → 578.0 (+1.3%) | 13.27 → 13.10 (+1.3%) |
 
 At 8 rows K1 and K2 take about as long as the MI350P stock MXFP4 GEMMs
 they replace, so keep the default TP1 caps (4) on MI350P.
@@ -168,6 +168,14 @@ inside the caps (8) and K1 and K2 produce nearly every token:
 | --- | --- |
 | GSM8K 5-shot, chat, 250 questions, flexible / strict | 0.920 / 0.916 → 0.932 / 0.916 |
 | GPQA Diamond, thinking on, 198 questions | 0.773 → 0.768 |
+| RULER `niah_single_2` 64k / 128k, 50 samples | 1.000 / 1.000 → 1.000 / 1.000 |
+| GSM8K, model card setting, thinking, mean of 3 seeds | 0.933 → 0.932 |
+| GSM8K, model card setting, non-thinking, mean of 3 seeds | 0.899 → 0.894 |
+
+The model card setting is `lm_eval` `local-completions`, 5-shot, all
+1319 questions, sampled (thinking: temperature 1.0, max_gen_toks 3072;
+non-thinking: the card's `gsm8k_nothink` task). The paired differences
+over the three seeds are −0.18 ± 0.36 and −0.45 ± 0.45 points.
 
 ## Tests
 
