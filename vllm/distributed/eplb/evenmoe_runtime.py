@@ -819,20 +819,44 @@ class EvenMoeRoutingRuntime:
         # kernel's gather strides by 1 instead of by the candidate map's padded
         # width of MAX_EXPERT_REDUNDANCY + 1, and reads a table small enough to
         # stay cached.
-        self._fixed_map = (
+        fixed_map = (
             self._default_replicas.to(self._logical_to_physical_map.dtype)
             .unsqueeze(-1)
             .contiguous()
         )
+        # Same in-place rule as the default table above. The fused mapping
+        # kernel runs inside captured CUDA graphs, which hold this tensor's
+        # address: re-allocating it on every commit left each replay reading
+        # the freed table once the allocator reused it (garbage physical ids,
+        # then an illegal / misaligned address inside the MegaMoE kernel a few
+        # steps to a few minutes after the second rearrangement). After the
+        # first commit the new map is copied into the storage the graphs hold.
+        current_map = getattr(self, "_fixed_map", None)
+        if (
+            current_map is not None
+            and current_map.shape == fixed_map.shape
+            and current_map.dtype == fixed_map.dtype
+        ):
+            current_map.copy_(fixed_map)
+        else:
+            self._fixed_map = fixed_map.clone()
         # Every expert has exactly one candidate in that layout, so `hash %
         # count` is 0 for every token and the kernel returns column 0 -- which
         # is the replica this policy chose. Same answer as calling the policy
-        # per forward, without the call.
-        self._fixed_counts = torch.ones(
-            self._default_replicas.shape[1],
-            dtype=self._logical_replica_count.dtype,
-            device=self._default_replicas.device,
-        ).contiguous()
+        # per forward, without the call. All ones, so it is allocated once and
+        # never re-allocated (captured graphs hold its address as well).
+        current_counts = getattr(self, "_fixed_counts", None)
+        if (
+            current_counts is None
+            or current_counts.shape[0] != self._default_replicas.shape[1]
+            or current_counts.dtype != self._logical_replica_count.dtype
+            or current_counts.device != self._default_replicas.device
+        ):
+            self._fixed_counts = torch.ones(
+                self._default_replicas.shape[1],
+                dtype=self._logical_replica_count.dtype,
+                device=self._default_replicas.device,
+            ).contiguous()
 
     def fixed_dispatch_maps(
         self, layer_id: int
