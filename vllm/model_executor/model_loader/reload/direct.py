@@ -174,10 +174,7 @@ def _checkpoint_views(
             )
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
-        if storage.data_ptr() != ckpt[3]:
-            # moved into another storage (rebound to a new tensor, or `set_` into
-            # a buffer it shares, e.g. a fused GEMM weight): the recorded offset
-            # was into the old one, so lay the checkpoint out where it now starts
+        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
             offset = t.storage_offset()
         span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
         need = (offset + span) * dtype.itemsize
