@@ -1,7 +1,9 @@
 # Features
 
-See [KV Offloading](kv_offloading_usage.md) for CPU cache configuration and
-[concurrent prefix sharing](kv_offloading_usage.md#concurrent-requests-sharing-a-prefix).
+## KV Cache Offloading
+
+- [UMBPStoreConnector](umbp_store_connector_usage.md)
+- [CPU offloading and concurrent prefix sharing](kv_offloading_usage.md)
 
 ## Compatibility Matrix
 
@@ -81,4 +83,4 @@ th:not(:first-child) {
 | beam-search | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 !!! note
-    For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on feature support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/) documentation.

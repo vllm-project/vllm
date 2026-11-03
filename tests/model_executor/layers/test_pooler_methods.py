@@ -678,6 +678,49 @@ class TestGetTokPoolingMethod:
 
 
 @pytest.mark.parametrize(
+    ("overrides", "expected_calls"),
+    [
+        pytest.param({}, 1, id="matching"),
+        pytest.param({"dimensions": 2}, 3, id="mixed-dimensions"),
+        pytest.param({"use_activation": False}, 2, id="mixed-activation"),
+    ],
+)
+def test_token_pooler_batches_projection_with_mixed_params(
+    overrides, expected_calls, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    torch.manual_seed(0)
+    lengths = [3, 4, 2]
+    hidden = torch.randn(sum(lengths), 4, dtype=torch.bfloat16)
+    projector = torch.nn.Sequential(torch.nn.Linear(4, 3), torch.nn.Tanh())
+    activation = PoolerNormalize()
+    head = TokenEmbeddingPoolerHead(torch.float32, projector, activation)
+    params = [PoolingParams(task="token_embed", use_activation=True) for _ in lengths]
+    for name, value in overrides.items():
+        setattr(params[1], name, value)
+    pooler = TokenPooler(TestAllPool._make_all_pool(async_scheduling=True), head)
+    metadata = _make_metadata(lengths, pooling_params=params)
+    expected = [
+        head.forward_chunk(chunk, param)
+        for chunk, param in zip(hidden.split(lengths), params, strict=True)
+    ]
+    projections, activations = [], []
+    with (
+        projector.register_forward_hook(
+            lambda _module, _inputs, output: projections.append(output)
+        ),
+        activation.register_forward_hook(
+            lambda _module, _inputs, output: activations.append(output)
+        ),
+    ):
+        outputs = pooler(hidden, metadata)
+    for actual, reference in zip(outputs, expected, strict=True):
+        torch.testing.assert_close(actual, reference)
+    assert len(projections) == 1
+    assert len(activations) == expected_calls
+
+
+@pytest.mark.parametrize(
     ("chunk_size", "dtype", "head_dtype"),
     [
         (1, torch.float32, None),
@@ -727,7 +770,10 @@ def test_late_chunk_pool_reduces_before_nonlinear_projector():
     assert not torch.allclose(actual, wrong_order)
 
 
-def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
+@pytest.mark.parametrize("late_chunking", [False, True])
+def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage(
+    late_chunking,
+):
     hidden = torch.arange(36, dtype=torch.float32).reshape(9, 4)
     params = [
         PoolingParams(
@@ -738,6 +784,9 @@ def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
             task="token_embed", late_chunking_params=LateChunkingParams(chunk_size=1)
         ),
     ]
+    if not late_chunking:
+        for param in params:
+            param.late_chunking_params = None
     pooler = TokenPooler(
         TestAllPool._make_all_pool(async_scheduling=True), TokenEmbeddingPoolerHead()
     )
@@ -747,6 +796,8 @@ def test_late_chunk_pool_isolates_mixed_requests_and_owns_finished_storage():
         hidden[3:7].clone(),
         hidden[7:].clone(),
     ]
+    if not late_chunking:
+        expected[0] = hidden[:3].clone()
     hidden.fill_(-999)
     for actual, reference in zip(outputs, expected):
         torch.testing.assert_close(actual, reference)

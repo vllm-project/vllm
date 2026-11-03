@@ -523,8 +523,13 @@ class KimiMoE(nn.Module):
                     f"EP size {ep_size}."
                 )
             num_local_experts = num_experts // ep_size
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            if use_sequence_parallel:
+                # The layer only sees this rank's shard of the batch.
+                max_num_tokens = cdiv(max_num_tokens, self.tp_size)
             self.experts = DeepGemmMegaMoEExperts(
                 vllm_config,
+                max_num_tokens=max_num_tokens,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,
                 experts_start_idx=ep_rank * num_local_experts,
@@ -1541,6 +1546,12 @@ class KimiLinearForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def process_weights_after_loading(self) -> None:
+        """The specialized decode is built after the first load and keeps copies
+        derived from the weights; refresh them after a reload."""
+        if self.specialized_decode is not None:
+            self.specialized_decode.process_weights_after_loading()
 
 
 def get_spec_layer_idx_from_weight_name(

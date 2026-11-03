@@ -175,7 +175,7 @@ def test_shared_external_prefix_requires_aligned_partial_hit(
     assert not scheduler._shared_load_owners
 
 
-@pytest.mark.parametrize("isolation", ["salt", "tokens", "skip", "opt_out"])
+@pytest.mark.parametrize("isolation", ["salt", "tokens", "skip", "opt_out", "limit"])
 def test_shared_external_prefix_preserves_isolation(monkeypatch, isolation):
     scheduler = _shared_load_scheduler(monkeypatch)
     owner = create_request(num_tokens=48, common_prefix_len=32)
@@ -187,7 +187,9 @@ def test_shared_external_prefix_preserves_isolation(monkeypatch, isolation):
         follower.block_hashes.clear()
         follower.update_block_hashes()
     elif isolation == "skip":
-        follower.skip_reading_prefix_cache = True
+        follower.prefix_cache_hit_limit = 0
+    elif isolation == "limit":
+        follower.kv_transfer_params = {"max_load_tokens": 0}
     elif isolation == "opt_out":
         monkeypatch.setattr(
             scheduler.connector, "supports_shared_prefix_loads", lambda: False
@@ -885,6 +887,7 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
         mamba_enabled=True,
         num_blocks=10000,
     )
+    kv_cache_config.hash_block_size = BLOCK_SIZE
 
     scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 
