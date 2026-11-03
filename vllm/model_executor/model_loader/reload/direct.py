@@ -120,7 +120,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
-            t._ckpt = (model._ckpt_owner, _layout(t), attrs)
+            storage = t.untyped_storage().data_ptr()
+            t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -173,6 +174,8 @@ def _checkpoint_views(
             )
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
+        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
+            offset = t.storage_offset()
         span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
         need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
