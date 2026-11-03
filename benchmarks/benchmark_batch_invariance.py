@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark to measure the performance overhead of VLLM_BATCH_INVARIANT mode.
+"""Benchmark to measure the performance overhead of VLLM_BATCH_INVARIANT mode.
 
 This benchmark runs the same workload twice:
 1. With VLLM_BATCH_INVARIANT=0 (baseline)
@@ -96,8 +95,7 @@ def run_benchmark_with_batch_invariant(
     batch_invariant: bool,
     seed: int = 12345,
 ) -> dict:
-    """
-    Run the benchmark with the specified configuration.
+    """Run the benchmark with the specified configuration.
 
     Returns a dict with timing and throughput metrics.
     """

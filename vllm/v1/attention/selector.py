@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import cache
-from typing import TYPE_CHECKING, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import torch
 
 import vllm.envs as envs
-from vllm.config.cache import CacheDType
+from vllm.config.cache import (
+    KV_CACHE_DTYPES,
+    CacheDType,
+    is_known_kv_cache_dtype,
+)
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
@@ -85,6 +89,7 @@ def get_attn_spec_kind(
 
     Returns:
         The ``KVCacheSpecKind`` the layer maps to.
+
     """
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
@@ -115,12 +120,10 @@ def get_attn_backend(
     has_sliding_window: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-
     if kv_cache_dtype is not None:
-        valid_cache_dtypes = get_args(CacheDType)
-        assert kv_cache_dtype in valid_cache_dtypes, (
+        assert is_known_kv_cache_dtype(kv_cache_dtype), (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
-            f"Valid values are: {valid_cache_dtypes}"
+            f"Valid values are: {KV_CACHE_DTYPES}"
         )
 
     from vllm.config import get_current_vllm_config
@@ -194,6 +197,9 @@ def get_attn_backend(
         backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
+        _run_kv_cache_dtype=(
+            cache_config.cache_dtype if cache_config is not None else None
+        ),
     )
 
 
@@ -202,7 +208,11 @@ def _cached_get_attn_backend(
     backend,
     attn_selector_config: AttentionSelectorConfig,
     num_heads: int | None = None,
+    *,
+    _run_kv_cache_dtype: CacheDType | None = None,
 ) -> type[AttentionBackend]:
+    # Some platform selectors inspect the run-wide cache dtype. Keep it in the
+    # cache key even though they read the value from the current config.
     from vllm.platforms import current_platform
 
     attention_cls = current_platform.get_attn_backend_cls(

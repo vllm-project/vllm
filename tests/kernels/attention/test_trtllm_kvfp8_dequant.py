@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Standalone unit tests for trtllm_prefill_attn_kvfp8_dequant.
+"""Standalone unit tests for trtllm_prefill_attn_kvfp8_dequant.
 
 Tests both contiguous and non-contiguous (cross-layer unified) KV cache
 layouts against a pure-PyTorch reference implementation.
@@ -43,8 +42,7 @@ def make_random_kv_cache(
     layout=KVCacheLayout.LBHNC,
     num_layers=None,
 ):
-    """
-    Create a random fp8 KV cache mimicking the production allocation.
+    """Create a random fp8 KV cache mimicking the production allocation.
 
     Physical layout: [L, B, H, N, 2 * hs] permuted by ``layout.stride_order``
     Returned view:   (num_blocks, 2, num_kv_heads, block_size, head_size)
@@ -382,8 +380,7 @@ def test_large_block_size():
 
 @torch.inference_mode()
 def test_cross_layer_many_layers():
-    """
-    Non-contiguous with 36 layers -- matches real gpt-oss-120b.
+    """Non-contiguous with 36 layers -- matches real gpt-oss-120b.
     Cross-layer (BLHNC) strides are far from contiguous (factor of 36 in the gaps).
     """
     from vllm.v1.attention.backends.flashinfer import (

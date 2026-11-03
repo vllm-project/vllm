@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-End-to-end example for routed experts capture with hybrid models.
+"""End-to-end example for routed experts capture with hybrid models.
 
 Validates that:
 1. routed_experts is returned in CompletionOutput for MoE models.

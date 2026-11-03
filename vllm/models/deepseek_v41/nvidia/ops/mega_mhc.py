@@ -5,9 +5,6 @@ import functools
 
 import torch
 
-from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_fused_post_pre_delayed_tilelang,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
@@ -29,6 +26,22 @@ def is_mega_mhc_supported(hidden_size: int, hc_mult: int) -> bool:
         return False
     deep_gemm = _import_deep_gemm()
     return deep_gemm is not None and callable(getattr(deep_gemm, "mega_mhc", None))
+
+
+def can_use_mega_mhc(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    pre_mix: torch.Tensor | None,
+    norm_weight: torch.Tensor | None,
+    capture_aux: bool,
+) -> bool:
+    return (
+        pre_mix is not None
+        and norm_weight is not None
+        and not capture_aux
+        and x.shape[0] <= 1 << 20
+        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
+    )
 
 
 def mhc_shifted_post_pre_deep_gemm(
@@ -86,71 +99,4 @@ def mhc_shifted_post_pre_deep_gemm(
         new_comb_res_mix,
         y_bf16,
         new_prev_mix.squeeze(-1),
-    )
-
-
-def mhc_shifted_post_pre(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    post_layer_mix: torch.Tensor,
-    comb_res_mix: torch.Tensor,
-    fn: torch.Tensor,
-    hc_scale: torch.Tensor,
-    hc_base: torch.Tensor,
-    rms_eps: float,
-    hc_pre_eps: float,
-    hc_sinkhorn_eps: float,
-    hc_post_mult_value: float,
-    sinkhorn_repeat: int,
-    pre_mix: torch.Tensor | None = None,
-    norm_weight: torch.Tensor | None = None,
-    norm_eps: float = 1e-6,
-    capture_aux: bool = False,
-) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
-]:
-    """Use Mega-mHC for carried mixing, retaining TileLang for aux capture."""
-    if (
-        pre_mix is not None
-        and norm_weight is not None
-        and not capture_aux
-        and x.shape[0] <= 1 << 20
-        and is_mega_mhc_supported(x.shape[1], residual.shape[1])
-    ):
-        outputs = mhc_shifted_post_pre_deep_gemm(
-            x,
-            residual,
-            pre_mix,
-            post_layer_mix,
-            comb_res_mix,
-            fn,
-            hc_scale,
-            hc_base,
-            rms_eps,
-            hc_pre_eps,
-            hc_post_mult_value,
-            hc_sinkhorn_eps,
-            sinkhorn_repeat,
-            norm_weight,
-            norm_eps,
-        )
-        return *outputs, x.new_empty(0, x.shape[1])
-
-    return mhc_fused_post_pre_delayed_tilelang(
-        x,
-        residual,
-        post_layer_mix,
-        comb_res_mix,
-        fn,
-        hc_scale,
-        hc_base,
-        rms_eps,
-        hc_pre_eps,
-        hc_sinkhorn_eps,
-        hc_post_mult_value,
-        sinkhorn_repeat,
-        pre_mix=pre_mix,
-        norm_weight=norm_weight,
-        norm_eps=norm_eps,
-        capture_aux=capture_aux,
     )

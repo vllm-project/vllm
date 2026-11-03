@@ -241,6 +241,7 @@ def test_cross_topology_roundtrip(writer_tp: int, reader_tp: int):
         # The Triton load path dereferences CPU pointers on the GPU, which is
         # only legal on pinned memory; production pins via CPUOffloadingWorker
         pin_mmap_region(region)
+        assert region.is_pinned
         return region.create_next_canonical_view(_CANONICAL_PAGE)
 
     try:

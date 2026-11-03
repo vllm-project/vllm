@@ -48,8 +48,13 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  10: Add dense virtual transfer pages for compressed MLA caches
 #  11: Add per-region transfer geometry and memory types to NixlAgentMetadata
 #  12: Add per-region member names for PP push
+#  13: Add packed-member layouts and order-independent packed-push backend hashes
+#  14: Add Qwen3.8-Flash-Next PLE page length - #59997
+#  15: Add remote_registration_generation to kv_transfer_params
+#  16: Pair regions by the layers both sides hold: every peer advertises
+#      region_members and the cache group of each layer
 #
-NIXL_CONNECTOR_VERSION: int = 12
+NIXL_CONNECTOR_VERSION: int = 16
 
 
 @dataclass
@@ -72,14 +77,19 @@ class NixlAgentMetadata:
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
+    # Page length of the PLE short-conv state (None when the model has none).
+    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Cache group of each layer in region_members.
+    layer_group_ids: dict[str, int] = field(default_factory=dict)
+    # Packed member -> (byte offset in its region's block, bytes per page).
+    packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 @dataclass
 class NixlHandshakePayload(KVConnectorHandshakeMetadata):
-    """
-    Wrapper for NIXL handshake sent over the wire.
+    """Wrapper for NIXL handshake sent over the wire.
 
     Enables two-phase decoding for graceful compatibility checking:
     1. Decode NixlHandshakePayload to get compatibility_hash
@@ -99,7 +109,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config
@@ -142,8 +152,7 @@ def compute_nixl_compatibility_hash(
     attn_backend_name: str,
     transfer_mode: str = "pull",
 ) -> str:
-    """
-    Compute compatibility hash for NIXL KV transfer.
+    """Compute compatibility hash for NIXL KV transfer.
 
     Hash only the factors that affect whether two NIXL instances can
     successfully transfer KV cache data.
@@ -169,6 +178,7 @@ def compute_nixl_compatibility_hash(
 
     Returns:
         SHA-256 hex digest
+
     """
     from vllm import __version__ as vllm_version
     from vllm.config.utils import hash_factors
@@ -230,6 +240,9 @@ class RemoteMeta:
     engine_id: str
     request_id: str
     blocks_expiry_time: float | None = None
+    num_tokens: int | None = None
+    # Bumped each time the remote publishes a changed KV cache registration.
+    registration_generation: int = 0
 
 
 @dataclass
@@ -252,6 +265,9 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
+    # Worker-only, per-region physical pages to zero after a successful pull.
+    # None selects group-based completion; empty lists mean no zeroing.
+    region_blocks_to_zero: BlockIds | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -326,5 +342,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
             blocks_expiry_time=kv_transfer_params.get("remote_blocks_expiry_time"),
+            num_tokens=kv_transfer_params.get("remote_num_tokens"),
+            registration_generation=kv_transfer_params.get(
+                "remote_registration_generation", 0
+            ),
         )
         self.reqs_to_recv[request_id] = req

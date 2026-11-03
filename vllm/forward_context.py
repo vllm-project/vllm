@@ -28,8 +28,7 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass(frozen=True)
 class BatchDescriptor:
-    """
-    Batch descriptor for cudagraph dispatching. We should keep the num of
+    """Batch descriptor for cudagraph dispatching. We should keep the num of
     items as minimal as possible to properly and uniquely describe the padded
     batch for cudagraph.
     """
@@ -59,8 +58,17 @@ class BatchDescriptor:
 
 
 def _compute_sp_num_tokens(
-    num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int
+    num_tokens_across_dp_cpu: torch.Tensor,
+    sequence_parallel_size: int,
+    pcp_size: int = 1,
+    use_ep: bool = True,
 ) -> list[int]:
+    if pcp_size > 1:
+        num_tokens_across_dp_cpu = (
+            num_tokens_across_dp_cpu.repeat_interleave(pcp_size)
+            if use_ep
+            else num_tokens_across_dp_cpu * pcp_size
+        )
     sp_tokens = (
         num_tokens_across_dp_cpu + sequence_parallel_size - 1
     ) // sequence_parallel_size
@@ -99,13 +107,14 @@ class DPMetadata:
         return DPMetadata(num_tokens_across_dp_cpu)
 
     @contextmanager
-    def sp_local_sizes(self, sequence_parallel_size: int):
-        """
-        Context manager for setting self.local_sizes. Same as self.chunked_sizes
+    def sp_local_sizes(
+        self, sequence_parallel_size: int, pcp_size: int = 1, use_ep: bool = False
+    ):
+        """Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
         self.local_sizes = _compute_sp_num_tokens(
-            self.num_tokens_across_dp_cpu, sequence_parallel_size
+            self.num_tokens_across_dp_cpu, sequence_parallel_size, pcp_size, use_ep
         )
         try:
             yield self.local_sizes
@@ -318,10 +327,8 @@ def set_forward_context(
             vllm_config.parallel_config, num_tokens or 0, num_tokens_across_dp
         )
 
-    # Convenience: if cudagraph is used and num_tokens is given, we can just
-    # create a batch descriptor here if not given (there's no harm since if it
-    # doesn't match in the wrapper it'll fall through).
-    if cudagraph_runtime_mode != CUDAGraphMode.NONE and num_tokens is not None:
+    # Preserve the batch size before model-level sequence parallelism.
+    if num_tokens is not None:
         batch_descriptor = batch_descriptor or BatchDescriptor(num_tokens=num_tokens)
 
     additional_kwargs = current_platform.set_additional_forward_context(

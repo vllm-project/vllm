@@ -10,7 +10,7 @@ from ..op import register_op
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
-    """Weighted root-mean-square layer normalization"""
+    """Weighted root-mean-square layer normalization."""
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     x_var = x if variance_size is None else x[..., :variance_size]
@@ -48,7 +48,7 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    """Fused add and weighted root-mean-square layer normalization"""
+    """Fused add and weighted root-mean-square layer normalization."""
     orig_dtype = x.dtype
     x = x.to(torch.float32)
     x = x + x_residual.to(torch.float32)

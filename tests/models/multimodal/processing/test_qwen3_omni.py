@@ -25,8 +25,7 @@ def test_processor_with_audio_sample_rate(
     audio_sample_rate: int,
     audio_duration_sec: float,
 ) -> None:
-    """
-    Test that vLLM's processor generates expected outputs with audio_sample_rate.
+    """Test that vLLM's processor generates expected outputs with audio_sample_rate.
 
     This validates that the processor correctly handles audio_sample_rate
     passed via hf_processor_mm_kwargs and generates audio tokens.
@@ -70,8 +69,7 @@ def test_processor_with_audio_sample_rate(
 
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen3-Omni-30B-A3B-Instruct"])
 def test_longer_audio_generates_more_tokens(model_id: str) -> None:
-    """
-    Test that longer audio generates more tokens than shorter audio.
+    """Test that longer audio generates more tokens than shorter audio.
 
     This validates that audio_sample_rate is being used correctly by checking
     that audio duration affects token count as expected.
@@ -110,3 +108,33 @@ def test_longer_audio_generates_more_tokens(model_id: str) -> None:
         f"Expected longer audio (2s) to have more tokens than shorter (1s). "
         f"Got short={short_tokens}, long={long_tokens}"
     )
+
+
+@pytest.mark.parametrize("model_id", ["Cloudflare/clef-omni"])
+def test_audio_in_video_follows_requested_fps(model_id: str) -> None:
+    """Audio and video tokens interleave by the fps the video was processed
+    at, as in HF, not by the default of one frame a second."""
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    rng = np.random.RandomState(42)
+    video = rng.randint(0, 255, (4, 64, 64, 3), dtype=np.uint8)
+    audio = rng.rand(32000).astype(np.float32)
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_kwargs: dict[str, Any] = {
+        "use_audio_in_video": True,
+        "videos_kwargs": {"fps": 2.0, "do_sample_frames": False},
+    }
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(
+            {"video": [video], "audio": [(audio, 16000)]}
+        ),
+        hf_processor_mm_kwargs=mm_kwargs,
+    )
+    expected = processor.info.get_hf_processor()(
+        text=[prompt], videos=[video], audio=[audio], return_tensors="pt", **mm_kwargs
+    )
+    assert processed["prompt_token_ids"] == expected["input_ids"][0].tolist()

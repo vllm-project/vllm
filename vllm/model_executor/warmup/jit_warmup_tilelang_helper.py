@@ -99,7 +99,6 @@ def compile_tilelang(jit_impl: Any, *args: Any, **kwargs: Any) -> None:
     parsed key as ``__call__`` so runtime does not report a cache miss for an
     already materialized specialization.
     """
-
     with _quiet_tilelang_warmup_logs():
         compiled = jit_impl.compile(*args, **kwargs)
     func = getattr(jit_impl, "func", None)

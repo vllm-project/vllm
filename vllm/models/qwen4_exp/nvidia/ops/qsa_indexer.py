@@ -10,6 +10,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import round_up
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -317,7 +318,6 @@ def warmup_qsa_mqa_paged_decode(
     max_num_batched_tokens: int,
 ) -> tuple[tuple[int, int], ...]:
     """Compile every reachable decode specialization without launching it."""
-
     page_size = k_cache.shape[1]
     page_table_width = page_table.shape[1]
     columns = page_table_width * page_size
@@ -384,6 +384,7 @@ def _prefill_logits(
     page_table: torch.Tensor,
     query_start_loc: torch.Tensor,
     visible_blocks: torch.Tensor,
+    logits_workspace: torch.Tensor,
     max_query_len: int,
     logits_width: int,
     query_offset: int,
@@ -393,10 +394,14 @@ def _prefill_logits(
     assert visible_blocks.shape == (q.shape[0],)
     assert 0 <= query_offset <= query_offset + num_queries <= q.shape[0]
     assert 0 < logits_width <= page_table.shape[1] * k_cache.shape[1]
+    assert logits_workspace.is_contiguous()
+    assert logits_workspace.numel() >= num_queries * logits_width
 
-    logits = torch.empty(
-        (num_queries, logits_width), dtype=torch.float32, device=q.device
+    # slice from pre-allocated workspace
+    logits = logits_workspace[: num_queries * logits_width].view(
+        num_queries, logits_width
     )
+
     # tuned on GB300
     if k_cache.dtype == torch.float8_e4m3fn:
         TILE_R, STAGES, num_warps = 32, 2, 8
@@ -444,7 +449,6 @@ def expand_qsa_block_indices(
     out: torch.Tensor,
 ) -> None:
     """Expand compressed blocks and compact the causal tail of the open group."""
-
     assert token_topk % compress_ratio == 0
     block_topk = token_topk // compress_ratio
     output_width = token_topk + compress_ratio - 1
@@ -524,8 +528,8 @@ def qsa_select_paged_decode(
         compress_ratio: Number of logical tokens represented by a cache row.
         decode_query_len: Number of query tokens per request.
         block_indices: Compressed-index output buffer.
-    """
 
+    """
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert decode_query_len > 0 and q.shape[0] % decode_query_len == 0
@@ -599,8 +603,8 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
-    """
 
+    """
     assert token_topk % compress_ratio == 0
     assert block_indices.shape == (q.shape[0], token_topk // compress_ratio)
     assert q.dtype == k_cache.dtype, "Q and the compressed K cache must match"
@@ -608,12 +612,17 @@ def qsa_select_paged_prefill(
     # No row scores beyond cdiv(max_seq_len, compress_ratio) compressed
     # columns. Round up to 64 to keep the logits row stride
     # cooperative_topk-compatible.
-    logits_width = triton.cdiv(triton.cdiv(max_seq_len, compress_ratio), 64) * 64
+    logits_width = round_up(triton.cdiv(max_seq_len, compress_ratio), 64)
     logits_width = min(max(64, logits_width), page_table.shape[1] * k_cache.shape[1])
 
     # chunk the inputs to keep temp logits below VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+    # always allocate the worst case to avoid memory fragmentation.
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     rows_per_chunk = max(1, max_logits_bytes // (logits_width * 4))
+
+    budget_bytes = max(max_logits_bytes, page_table.shape[1] * k_cache.shape[1] * 4)
+    logits_workspace = q.new_empty(budget_bytes // 4, dtype=torch.float32)
+
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
@@ -627,6 +636,7 @@ def qsa_select_paged_prefill(
             page_table,
             query_start_loc,
             visible_blocks,
+            logits_workspace,
             max_query_len,
             logits_width,
             query_offset=query_start,

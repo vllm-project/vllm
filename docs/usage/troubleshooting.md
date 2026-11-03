@@ -8,7 +8,7 @@ This document outlines some troubleshooting strategies you can consider. If you 
 ## Hangs downloading a model
 
 If the model isn't already downloaded to disk, vLLM will download it from the internet which can take time and depend on your internet connection.
-It's recommended to download the model first using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli) and passing the local path to the model to vLLM. This way, you can isolate the issue.
+It's recommended to download the model first using the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli) and passing the local path to the model to vLLM. This way, you can isolate the issue.
 
 ## Hangs loading a model from disk
 

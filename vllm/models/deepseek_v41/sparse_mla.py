@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.distributed import get_pcp_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -18,15 +19,17 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_swa import (
     _LAYER_TYPE_C1A,
     _LAYER_TYPE_C2A,
     _LAYER_TYPE_SWAONLY,
+    DeepseekSparseSWAMetadata,
     DeepseekSparseSWAMetadataBuilder,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 # v4.1 per-layer compress ratios: 0 = pure sliding window, 1 = full-length
 # compressed cache, 2 = ratio-2 compressed cache. Ratio-1 and ratio-2 layers
@@ -60,12 +63,36 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        if self.pcp_size > 1:
+            self.no_replay_start = self.no_replay_start.new_zeros(
+                2 * self.vllm_config.scheduler_config.max_num_seqs + 1
+            )
         compress_ratios = getattr(
             self.vllm_config.model_config.hf_config, "compress_ratios", None
         ) or [0]
         self._layer_types = {
             deepseek_v41_layer_type(int(ratio)) for ratio in compress_ratios
         }
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
+    ) -> DeepseekSparseSWAMetadata:
+        cm = common_attn_metadata
+        if self.pcp_size > 1:
+            local_slots = cm.slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
+            cm = cm.replace(slot_mapping=local_slots)
+        metadata = super().build(common_prefix_len, cm, fast_build, replay_start)
+        if self.pcp_size > 1:
+            metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
+            assert cm.positions is not None
+            metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
+        return metadata
 
 
 class DeepseekV4SparseMLABackend(AttentionBackend):
@@ -86,7 +113,7 @@ class DeepseekV4SparseMLABackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [64 if current_platform.is_device_capability_family(90) else 128]
 
     @staticmethod
@@ -155,6 +182,8 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Classify single-token queries (plus num_speculative_tokens via
         # supports_spec_as_decode=True) as decodes; longer queries go to prefill.
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
@@ -193,8 +222,12 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
+            local_slots = slot_mapping
+            if self.pcp_size > 1:
+                local_slots = slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
             slot_mapping = get_compressed_slot_mapping(
                 cm.num_actual_tokens,
+                local_slots,
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.block_table_tensor.clamp_(min=0),
@@ -202,6 +235,10 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
+            if self.pcp_size > 1:
+                slot_mapping = get_pcp_group().all_gather(
+                    self.compressed_slot_mapping_buffer[: local_slots.numel()], dim=0
+                )
 
         return DeepseekV4FlashMLAMetadata(
             num_reqs=cm.num_reqs,
@@ -218,10 +255,24 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
 
 class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV41"
@@ -229,3 +280,58 @@ class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_builder_cls() -> type[DeepseekV4FlashMLAMetadataBuilder]:
         return DeepseekV4FlashMLAMetadataBuilder
+
+
+class FlashMLAMegaAttnBackend(DeepseekV4FlashMLABackend):
+    """FlashMLA's mega-attention kernel: Q RoPE + sparse attention + inverse
+    RoPE + FP8 cast of the output, in one launch.
+
+    Same metadata and KV-cache geometry as ``FLASHMLA_SPARSE_DSV41`` -- what
+    differs is the attention layer's interface contract (it takes an unnormed,
+    unroped Q and returns an already-inverse-RoPE'd, quantized output) and the
+    extra ``nvfp4_ds_mla`` compressed-cache record only this kernel can read.
+    SM100 only; the kernel has no SM90 instantiation.
+    """
+
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8_ds_mla",
+        "fp8",  # alias for fp8_ds_mla
+        "nvfp4_ds_mla",  # V4.1 fp8 SWA cache + NVFP4 compressed cache
+    ]
+
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return False
+
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_MEGA_ATTN_DSV41"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
+        return [128]
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 10
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        # Imported here: the layer module imports this backend class.
+        from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
+            is_flashmla_mega_attn_supported,
+        )
+
+        return is_flashmla_mega_attn_supported()[1]

@@ -36,7 +36,7 @@ from torch.nn.functional import scaled_dot_product_attention
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
@@ -61,6 +61,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.processing.processor import HFMultiModalInputs
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -511,11 +512,9 @@ class AudioProjectorSubsample(nn.Module):
 
 # === Audio Inputs === #
 class MiDashengLMAudioInputs(TensorSchema):
-    """
-
-    Dimensions:
-        - bn: Batch size * number of audios
-        - p: Number of sampling points
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - p: Number of sampling points
     """
 
     input_values: Annotated[torch.Tensor, TensorShape("n", "p")]
@@ -565,18 +564,13 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
-
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-
         return {
             "audio": self._get_dummy_audios(
                 length=self.info.get_max_audio_len(),
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -584,35 +578,33 @@ class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessing
 class MiDashengLMMultiModalProcessor(
     BaseMultiModalProcessor[MiDashengLMProcessingInfo]
 ):
-    def _get_hf_processor_text(self, mm_counts: Mapping[str, int]) -> str:
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
-    def _preprocess_hf_mm_data(
+    def _get_hf_mm_inputs(
         self,
-        mm_data: Mapping[str, object],
-        hf_processor_mm_kwargs: Mapping[str, object],
-    ) -> tuple[Mapping[str, object], Mapping[str, object]]:
-        mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
-        assert isinstance(audios, list)
+        mm_items: MultiModalDataItems,
+        hf_kwargs: Mapping[str, object],
+    ) -> HFMultiModalInputs:
+        hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
-        min_audio_len = self.info.get_min_audio_len()
-        processed_audios = [
-            np.pad(
-                audio,
-                (0, min_audio_len - audio.shape[-1]),
-                mode="constant",
-                constant_values=0,
-            )
-            if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
-            else audio
-            for audio in audios
-        ]
+        if audios := hf_inputs.hf_data.get("audio"):
+            assert isinstance(audios, list)
 
-        if processed_audios:
-            mm_data["audio"] = processed_audios
+            min_audio_len = self.info.get_min_audio_len()
+            hf_inputs.hf_data["audio"] = [
+                np.pad(
+                    audio,
+                    (0, min_audio_len - audio.shape[-1]),
+                    mode="constant",
+                    constant_values=0,
+                )
+                if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
+                else audio
+                for audio in audios
+            ]
 
-        return mm_data, hf_processor_mm_kwargs
+        return hf_inputs
 
     def _get_mm_fields_config(
         self,

@@ -39,7 +39,7 @@ logger = init_logger(__name__)
 
 
 class OffloadingConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
@@ -53,11 +53,14 @@ class OffloadingConnectorWorker:
         self.worker: OffloadingWorker | None = None
         # Non-writers still ack: pending_count waits for world_size per job.
         self._is_store_writer = (
-            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+            not self.spec.replicated_layout
+            or self.spec.config.canonical_layout
+            or self.spec.config.parallel.rank == 0
         )
 
-        # job_id -> req_id for in-flight loads.
-        self._load_jobs: dict[int, ReqId] = {}
+        # job_id -> req_id for in-flight loads (None for sync loads).
+        self._load_jobs: dict[int, ReqId | None] = {}
+        self._failed_recving: set[ReqId] = set()
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -139,8 +142,9 @@ class OffloadingConnectorWorker:
             ),
             None,
         )
-        if packed_layer_name is not None and len(selected_groups) == len(
-            kv_cache_config.kv_cache_groups
+        if (
+            packed_layer_name is not None
+            and kv_cache_config.hisparse_host_num_blocks is None
         ):
             (tensor,) = tensors_per_block[packed_layer_name]
             num_blocks = tensor.shape[0]
@@ -247,11 +251,24 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
+        sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
-            self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+            if entry.sync:
+                # Its request already runs this step: no finished_recving.
+                sync_job_ids.add(job_id)
+                self._load_jobs[job_id] = None
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec, expedited=True
+                )
+            else:
+                self._load_jobs[job_id] = entry.req_id
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec
+                )
             assert success
+        if sync_job_ids:
+            self.worker.wait(sync_job_ids)
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
@@ -268,22 +285,31 @@ class OffloadingConnectorWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """
-        Returns:
-            tuple of (finished_sending, finished_recving). Stores never
-            emit finished_sending — the scheduler tracks store completion
-            via kv_connector_worker_meta.completed_jobs and fences any
-            block reuse via jobs_to_flush. Loads still emit
-            finished_recving so the base scheduler can resume requests
-            blocked on remote KV (and free aborted-during-load reqs).
+        """Returns:
+        tuple of (finished_sending, finished_recving). Stores never
+        emit finished_sending — the scheduler tracks store completion
+        via kv_connector_worker_meta.completed_jobs and fences any
+        block reuse via jobs_to_flush. Loads still emit
+        finished_recving so the base scheduler can resume requests
+        blocked on remote KV (and free aborted-during-load reqs).
+
         """
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
             is_load = job_id in self._load_jobs
+            if not transfer_result.success:
+                self._connector_worker_meta.mark_completed(job_id, success=False)
+                req_id = self._load_jobs.pop(job_id, None)
+                if is_load and req_id is None:
+                    # Its request already ran this step on the unloaded KV,
+                    # which failed_recving cannot undo.
+                    raise RuntimeError(f"KV offload sync load job {job_id} failed")
+                if req_id is not None:
+                    self._failed_recving.add(req_id)
+                    finished_recving.add(req_id)
+                continue
             if (
                 transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
@@ -304,6 +330,11 @@ class OffloadingConnectorWorker:
 
         return set(), finished_recving
 
+    def take_failed_recving(self) -> set[ReqId]:
+        """Drain the requests whose load failed since the last call."""
+        failed_recving, self._failed_recving = self._failed_recving, set()
+        return failed_recving
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
         if not self._connector_worker_meta.completed_jobs:
@@ -315,6 +346,7 @@ class OffloadingConnectorWorker:
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
+        self._failed_recving.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         if self.worker is not None:
             self.worker.shutdown()

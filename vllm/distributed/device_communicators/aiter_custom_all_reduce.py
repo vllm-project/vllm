@@ -22,9 +22,7 @@ class AiterCustomAllreduce:
 
     @classmethod
     def effective_max_size(cls) -> int:
-        """
-        Max input byte size eligible for AITER custom allreduce.
-        """
+        """Max input byte size eligible for AITER custom allreduce."""
         return cls.MAX_SIZE // 2
 
     def __init__(
@@ -32,6 +30,8 @@ class AiterCustomAllreduce:
         group: ProcessGroup,
         device: int | str | torch.device,
         max_size: int | None = None,
+        *,
+        register_graph_buffers: bool = True,
     ):
         from aiter.dist.device_communicators.custom_all_reduce import (
             CustomAllreduce as _AiterCustomAllreduce,
@@ -40,7 +40,11 @@ class AiterCustomAllreduce:
         if max_size is None:
             max_size = self.MAX_SIZE
 
-        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size)
+        kwargs = {}
+        if not register_graph_buffers:
+            kwargs["enable_register_for_capturing"] = False
+        self._impl = _AiterCustomAllreduce(group, device, max_size=max_size, **kwargs)
+        self._register_graph_buffers = register_graph_buffers
 
     @property
     def aiter_ca(self):
@@ -49,6 +53,19 @@ class AiterCustomAllreduce:
     @property
     def disabled(self) -> bool:
         return self._impl.disabled
+
+    @property
+    def registers_graph_buffers(self) -> bool:
+        """Whether graph capture registers its inputs once expandable segments
+        are off, which AITER decides when capture begins from v0.1.26."""
+        from vllm.platforms.rocm import on_gfx1250
+
+        return (
+            self._register_graph_buffers
+            and not self.disabled
+            and not on_gfx1250()
+            and getattr(type(self._impl), "defers_capture_registration", False)
+        )
 
     def should_custom_ar(self, inp: torch.Tensor) -> bool:
         return self._impl.should_custom_ar(inp)

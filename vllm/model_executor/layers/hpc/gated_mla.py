@@ -107,6 +107,7 @@ def hpc_gated_mla_gemm(
 
     Returns:
         ``[m, n]`` bfloat16.
+
     """
     from hpc.gemm import gated_mla_gemm
 

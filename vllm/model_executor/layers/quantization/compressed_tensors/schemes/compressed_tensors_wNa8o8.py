@@ -31,6 +31,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import move_parameter, replace_parameter
 from vllm.scalar_type import scalar_types
 
 __all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
@@ -97,12 +98,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
-        # Set for kernels' weight prep; also covers ParallelLMHead, which does
-        # not set these in __init__.
         layer.output_partition_sizes = output_partition_sizes
         layer.params_dtype = params_dtype
-        if not hasattr(layer, "has_bias"):
-            layer.has_bias = False
 
         mp_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -215,22 +212,14 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         weight = layer.weight
         out_features, in_features = weight.shape
         packed = pack_to_int32(weight.data.contiguous(), self.num_bits)
-        delattr(layer, "weight")
+        # One param under both names; the packed data goes into the loaded storage.
+        move_parameter(layer, "weight", "weight_packed")
+        replace_parameter(layer, "weight_packed", packed.contiguous())
+        weight.packed_dim, weight.packed_factor = 1, self.pack_factor
 
         def _noop_loader(*_, **__):
             return None
 
-        layer.register_parameter(
-            "weight_packed",
-            PackedvLLMParameter(
-                data=packed.contiguous(),
-                input_dim=1,
-                output_dim=0,
-                packed_dim=1,
-                packed_factor=self.pack_factor,
-                weight_loader=_noop_loader,
-            ),
-        )
         layer.register_parameter(
             "weight_shape",
             BasevLLMParameter(
@@ -245,7 +234,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         if param is None:
             return None
         scale = param.data.clone()
-        delattr(layer, name)
         return None if float(scale.reshape(-1)[0]) == 0.0 else scale
 
     def apply_weights(

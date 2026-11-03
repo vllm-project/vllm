@@ -10,6 +10,7 @@ Example:
 
     .venv/bin/python benchmarks/kernels/benchmark_kimi_k3_attn_res.py \
       --output /tmp/attn_res.json
+
 """
 
 from __future__ import annotations
