@@ -226,6 +226,9 @@ def kernel_unified_attention(
     rswa_prefix_lens_ptr,
     R_SWA_WINDOW: tl.constexpr,  # int
     USE_R_SWA: tl.constexpr,  # bool
+    USE_SPAN_MASK: tl.constexpr,  # bool
+    MAX_SPAN_RANGES: tl.constexpr,  # int
+    span_ranges_ptr,  # [num_seqs, MAX_SPAN_RANGES, 3] int32, or None
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -537,6 +540,9 @@ def kernel_unified_attention(
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
             MM_PREFIX_CLAMP_SW,
+            USE_SPAN_MASK,
+            MAX_SPAN_RANGES,
+            span_ranges_ptr,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -873,6 +879,10 @@ def unified_attention(
     # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
     # Default False keeps the original behavior for every other model.
     mm_prefix_clamp_sliding_window: bool = False,
+    # DiffusionGemma canvas packing: [num_seqs, max_span_ranges, 3] int32
+    # (start, end, owner) ranges that AND-restrict the KV mask (see
+    # CommonAttentionMetadata.span_ranges). None disables.
+    span_ranges=None,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -885,6 +895,7 @@ def unified_attention(
         assert use_causal and not use_per_seq_causal, (
             "INT4_PER_TOKEN_HEAD only supports causal attention"
         )
+        assert span_ranges is None, "INT4_PER_TOKEN_HEAD does not support span_ranges"
         from vllm.v1.attention.ops.int4_per_token_head import (
             unified_attention_int4,
         )
@@ -944,6 +955,13 @@ def unified_attention(
             )
 
     use_rswa = rswa_window is not None and rswa_prefix_lens is not None
+
+    use_span_mask = span_ranges is not None
+    if use_span_mask:
+        assert span_ranges.ndim == 3 and span_ranges.shape[2] == 3, (
+            f"Unsupported span_ranges shape: {span_ranges.shape}"
+        )
+    max_span_ranges = span_ranges.shape[1] if use_span_mask else 0
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -1176,6 +1194,9 @@ def unified_attention(
         rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
         R_SWA_WINDOW=rswa_window or 0,
         USE_R_SWA=use_rswa,
+        USE_SPAN_MASK=use_span_mask,
+        MAX_SPAN_RANGES=max_span_ranges,
+        span_ranges_ptr=span_ranges,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
