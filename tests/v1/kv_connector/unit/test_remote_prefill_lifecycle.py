@@ -68,7 +68,7 @@ def test_inflight_kv_loads_start_while_batch_full():
     assert [r.status for r in remote] == [RequestStatus.WAITING_FOR_REMOTE_KVS] * 2 + [
         RequestStatus.WAITING
     ] * 2
-    assert list(scheduler.remote_kv_waiting) == remote[2:]
+    assert list(scheduler.async_kv_waiting) == remote[2:]
 
     # A finished load holds its blocks until its request runs.
     scheduler.update_from_output(
@@ -85,7 +85,7 @@ def test_inflight_kv_loads_start_while_batch_full():
     scheduler.schedule()
     assert scheduler.running == [remote[0]]
     assert remote[2].status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert list(scheduler.remote_kv_waiting) == remote[3:]
+    assert list(scheduler.async_kv_waiting) == remote[3:]
 
 
 def test_early_kv_load_does_not_overtake_finished_load():
@@ -124,7 +124,7 @@ def test_early_kv_load_does_not_overtake_finished_load():
 
 
 def test_inflight_kv_load_cap_does_not_block_local_requests():
-    """Remote-prefill requests past the cap don't hold back local ones."""
+    """Async-load requests past the cap don't hold back local ones."""
     scheduler, block_size = _remote_scheduler(
         max_num_seqs=2, max_num_inflight_kv_loads=1
     )
@@ -142,6 +142,35 @@ def test_inflight_kv_load_cap_does_not_block_local_requests():
     assert remote[0].status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert remote[1].status == RequestStatus.WAITING
     assert scheduler.running == [local]
+
+
+def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
+    """Only requests the connector's may_load_async flags start early loads."""
+    scheduler, block_size = _remote_scheduler(
+        max_num_seqs=1, max_num_inflight_kv_loads=2
+    )
+    early, late = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    monkeypatch.setattr(
+        scheduler.connector, "may_load_async", lambda request: request is early
+    )
+    local = create_request(block_size=block_size, num_tokens=block_size)
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for request in (early, late):
+        scheduler.add_request(request)
+    assert list(scheduler.async_kv_waiting) == [early]
+    assert list(scheduler.waiting) == [late]
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.schedule()
+    assert scheduler.running == [local]
+    assert early.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert late.status == RequestStatus.WAITING
 
 
 def test_basic_lifecycle():
