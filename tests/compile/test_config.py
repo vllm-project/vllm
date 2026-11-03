@@ -676,6 +676,25 @@ def test_full_decode_only_records_no_prefill_sizes(monkeypatch):
     assert compilation_config.max_cudagraph_capture_size == 2048
 
 
+@pytest.mark.parametrize("sm100", [True, False])
+def test_resolved_sizes_survive_a_drop_to_full_decode_only(monkeypatch, sm100):
+    """A worker without PIECEWISE capture drops FULL_AND_PIECEWISE to
+    FULL_DECODE_ONLY in place, and the engine core then resolves the config
+    again: the sizes recorded by the first pass must still be accepted."""
+    compilation_config = _resolve_capture_sizes(
+        monkeypatch, sm100=sm100, max_decode_cudagraph_capture_requests=256
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=1024,
+        num_speculative_tokens=7,
+        max_num_batched_tokens=16384,
+        compilation_config=compilation_config,
+    )
+    compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+    VllmConfig._set_cudagraph_sizes(config)
+    assert compilation_config.max_cudagraph_capture_size == 2048
+
+
 @pytest.mark.parametrize(("sm100", "budget"), [(True, 8192), (False, None)])
 def test_decode_graphs_have_a_default_token_budget_on_sm100(monkeypatch, sm100, budget):
     """On SM100, uniform decode graphs stop at 8192 tokens (512 requests at
