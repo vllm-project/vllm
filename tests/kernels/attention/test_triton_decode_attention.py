@@ -416,28 +416,67 @@ class _GroupedStage1Spy:
         return run
 
 
+def _make_q(layout, B, H_Q, D_QK, dtype):
+    """Q with a given memory layout; all variants hold the same values."""
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    if layout == "contiguous":
+        return q
+    if layout == "stride_last_not_1":
+        # (B, H_Q, D_QK) view with stride(-1) == H_Q
+        return q.transpose(1, 2).contiguous().transpose(1, 2)
+    if layout == "row_stride_unaligned":
+        # stride(1) = D_QK + 1 elements: not a multiple of 16 bytes
+        return torch.randn(B, H_Q, D_QK + 1, dtype=dtype, device=DEVICE_TYPE)[
+            ..., :D_QK
+        ]
+    if layout == "base_unaligned":
+        # base pointer one element (2 bytes) past a 16-byte boundary
+        buf = torch.randn(B * H_Q * D_QK + 8, dtype=dtype, device=DEVICE_TYPE)
+        return buf[1 : 1 + B * H_Q * D_QK].view(B, H_Q, D_QK)
+    raise AssertionError(layout)
+
+
 @pytest.mark.parametrize(
-    "H_Q,D_QK,D_V",
+    "H_Q,H_KV,D_QK,D_V,is_mla,layout,td_on_xpu",
     [
-        (32, 576, 512),  # two head blocks
-        (8, 576, 512),  # rows past q_head_num
-        (16, 288, 256),
+        # Tensor-descriptor Q load: 576-wide MLA only.
+        (32, 1, 576, 512, True, "contiguous", True),  # two head blocks
+        (8, 1, 576, 512, True, "contiguous", True),  # rows past q_head_num
+        # Everything else keeps the pointer load.
+        (16, 1, 288, 256, True, "contiguous", False),  # Lk outside the TD set
+        (32, 8, 576, 512, True, "contiguous", False),  # GQA, kv_group_num != H_Q
+        (32, 8, 576, 512, False, "contiguous", False),  # not MLA (grouped kernel)
+        (32, 1, 576, 512, True, "stride_last_not_1", False),
+        (32, 1, 576, 512, True, "row_stride_unaligned", False),
+        (32, 1, 576, 512, True, "base_unaligned", False),
     ],
 )
 @pytest.mark.parametrize("kv_dtype", [torch.bfloat16, torch.float8_e4m3fn])
-def test_decode_attention_mla_tensor_descriptor(monkeypatch, H_Q, D_QK, D_V, kv_dtype):
-    """VLLM_TRITON_USE_TD selects the Q tensor-descriptor load of the MLA
-    grouped kernel (unset = on for XPU only), and it gives the same bits as the
-    pointer load: only the Q load differs, the math is unchanged."""
+def test_decode_attention_mla_tensor_descriptor(
+    monkeypatch, H_Q, H_KV, D_QK, D_V, is_mla, layout, td_on_xpu, kv_dtype
+):
+    """The Q tensor-descriptor load of the grouped kernel is used only for the
+    576-wide MLA tile with a 16-byte-aligned unit-stride Q, on XPU, unless
+    VLLM_TRITON_USE_TD=0.  It gives the same bits as the pointer load: only
+    the Q load differs, the math is unchanged."""
+    if kv_dtype != torch.bfloat16 and not is_mla:
+        pytest.skip("fp8 KV is only wired for MLA here")
     torch.manual_seed(0)
     B, PAGE_SIZE, num_pages, seq_len, num_kv_splits = 3, 16, 1024, 1027, 8
     dtype = torch.bfloat16
-    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
-    k = torch.randn(num_pages, PAGE_SIZE, 1, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    q = _make_q(layout, B, H_Q, D_QK, dtype)
+    k = torch.randn(num_pages, PAGE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE)
     k_scale = v_scale = torch.tensor(1.0, device=DEVICE_TYPE)
     if kv_dtype != dtype:
         k, k_scale = _quantize_to_fp8(k)
         v_scale = k_scale
+    v = (
+        k[..., :D_V]
+        if is_mla
+        else torch.randn(
+            num_pages, PAGE_SIZE, H_KV, D_V, dtype=dtype, device=DEVICE_TYPE
+        )
+    )
     req_to_page = torch.randint(
         0, num_pages, (B, cdiv(seq_len, PAGE_SIZE)), device=DEVICE_TYPE
     )
@@ -456,10 +495,11 @@ def test_decode_attention_mla_tensor_descriptor(monkeypatch, H_Q, D_QK, D_V, kv_
             else:
                 m.setenv("VLLM_TRITON_USE_TD", td_env)
             m.setattr(tda, "_fwd_grouped_kernel_stage1", spy)
+            kwargs = dict(k_scale=k_scale, v_scale=v_scale, is_mla=is_mla)
             decode_attention_fwd(
                 q,
                 k,
-                k[..., :D_V],
+                v,
                 o,
                 lse,
                 req_to_page,
@@ -468,20 +508,19 @@ def test_decode_attention_mla_tensor_descriptor(monkeypatch, H_Q, D_QK, D_V, kv_
                 num_kv_splits,
                 1.0 / (D_QK**0.5),
                 PAGE_SIZE,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                is_mla=True,
+                **kwargs,
             )
         assert len(spy.launches) == 1
         use_td, ttir = spy.launches[0]
         assert ("tt.descriptor_load" in ttir) == use_td
         return use_td, o, lse
 
-    is_xpu = current_platform.is_xpu()
     td_off, *ref = run("0")
     assert not td_off
+    # "1" cannot enable a path the platform gate rejects, so it matches unset.
+    expected_td = td_on_xpu and current_platform.is_xpu()
     for td_env in ("1", None):
         use_td, *out = run(td_env)
-        assert use_td == is_xpu
+        assert use_td == expected_td
         for actual, expected in zip(out, ref):
             assert torch.equal(actual, expected)

@@ -554,12 +554,13 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    # 2D block reads for the Q tile on XPU, for the MLA tiles (one KV head).
+    # 2D block reads for the Q tile on XPU, for the 576-wide MLA tile (one KV
+    # head).  The 288-wide tile measured slower with TD, so it keeps pointers.
     q_elem = q.element_size()
     use_td = (
         current_platform.is_xpu()
         and is_mla
-        and Lk in (576, 288)
+        and Lk == 576
         and kv_group_num == head_num
         and use_tensor_descriptor()
         and q.stride(-1) == 1
