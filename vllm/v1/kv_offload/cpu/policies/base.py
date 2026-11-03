@@ -60,34 +60,42 @@ class CachePolicy(ABC):
         """Find chunk in data structures. Returns None if not present."""
 
     @abstractmethod
-    def insert(self, key: OffloadKey, chunk: ChunkStatus) -> None:
-        """Add a newly allocated chunk. For ARC: also removes from ghost lists."""
+    def insert(
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+    ) -> None:
+        """Add a newly allocated chunk with the storing request's context.
+
+        For ARC: also removes from ghost lists.
+        """
 
     @abstractmethod
     def remove(self, key: OffloadKey) -> None:
         """Remove a chunk (used to clean up after a failed store)."""
-
-    @abstractmethod
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        """Mark chunks as recently used.
-
-        Args:
-            keys: Chunks to mark as recently used.
-            req_context: Per-request context for the request touching these chunks.
-
-        """
 
     def on_store_miss(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
     ) -> None:
         """Observe store misses before their cache entries are inserted.
 
-        The default delegates to ``touch`` for compatibility with external
-        policies. Policies may override this hook when a miss has distinct
-        semantics, such as ARC adapting to a ghost-list hit.
+        Policies may override this hook when a miss has distinct semantics,
+        such as ARC adapting to a ghost-list hit.
         """
-        self.touch(keys, req_context)
+        return
 
+    def on_request_access(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
+        """Observe first accesses without allocating new chunks.
+
+        Keys first observed here may not yet be resident. This hook can
+        maintain prefix order during a request without committing the
+        frequency access handled by ``on_request_finished``.
+        """
+        return
+
+    @abstractmethod
     def on_request_finished(
         self,
         key_groups: Sequence[Sequence[OffloadKey]],
@@ -102,15 +110,7 @@ class CachePolicy(ABC):
         distinguish chunks only created by this request from ready chunks it
         actually reused, which matters for policies such as ARC where reuse
         changes frequency but insertion and pending observations do not.
-
-        The default forwards one touch per group, preserving compatibility
-        for experimental out-of-tree policies while moving those touches to
-        request finalization. Policies that distinguish insertion from reuse
-        can override this hook and inspect the access classifications.
         """
-        del insertion_only_keys, reused_keys
-        for keys in key_groups:
-            self.touch(keys, req_context)
 
     @abstractmethod
     def evict(
