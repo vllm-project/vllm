@@ -625,6 +625,18 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether ``get_num_new_matched_tokens`` may return
+        ``load_kv_async=True`` for this request. With --max-num-inflight-kv-loads,
+        such requests can start loading while the running batch is full.
+
+        Called whenever the request enters the waiting queues, so must be cheap.
+        A false positive holds back other async loads until a slot is free.
+        Defaults to the P/D ``do_remote_prefill`` flag.
+        """
+        params = request.kv_transfer_params
+        return bool(params and params.get("do_remote_prefill"))
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
