@@ -117,7 +117,7 @@ class Mailbox:
             cache_modifier=_SCOPE_CM[a.space],
         )
 
-    def poll(self, specs, batch=POLL_MAX):
+    def poll(self, specs, batch=POLL_MAX, mixed=False):
         """Batched poll of pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})],
         all of one space.
 
@@ -126,16 +126,18 @@ class Mailbox:
         if const_expr(len(specs) == 0):
             return []
         if const_expr(len(specs) > batch):
-            return self.poll(specs[:batch], batch) + self.poll(specs[batch:], batch)
+            return self.poll(specs[:batch], batch, mixed) + self.poll(
+                specs[batch:], batch, mixed
+            )
         spaces = {a.space for a, _, _ in specs}
-        assert len(spaces) == 1, f"one poll batch spans {spaces}"
-        cm = _SCOPE_CM[spaces.pop()]
+        assert mixed or len(spaces) == 1, f"one poll batch spans {spaces}"
+        cms = [_SCOPE_CM[a.space] for a, _, _ in specs]
         bases = [a.value for a, _, _ in specs]
         tag = self.tag
 
         def load_all():
             words = []
-            for b, (_, i, n) in zip(bases, specs):
+            for b, cm, (_, i, n) in zip(bases, cms, specs):
                 w = fx.Vector(
                     bo.buffer_load(
                         rsrc(b),

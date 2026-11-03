@@ -253,6 +253,11 @@ def slice_mix(c, task, t0, n):
 QUAD = 4  # columns a thread of ``stage_reduce_slice``
 
 
+def fused_mixes(words):
+    f = [w.bitcast(fx.Float32) for w in words]
+    return [f[8 + 4 * h : 12 + 4 * h] for h in range(HC)], f[4:8], f[0:4]
+
+
 @traced
 def stage_reduce_slice(c, task, reduce=True):
     """``stage_reduce`` then ``stage_slice`` (fold), the same values (tuned
@@ -265,6 +270,7 @@ def stage_reduce_slice(c, task, reduce=True):
     c0 = task * COLS
     n = s * COLS // QUAD
     assert n <= THREADS
+    fused = c.get("fused")
     fs = []
     for i in range_constexpr(-(-MIX * KT // THREADS)):
         e = fx.min(tid + THREADS * i, MIX * KT - 1)
@@ -274,21 +280,33 @@ def stage_reduce_slice(c, task, reduce=True):
     t = idx // (COLS // QUAD)
     col = c0 + QUAD * (idx % (COLS // QUAD))
     rw = [ld_vec(a["res_in"], ((t * HC + h) * HIDDEN + col) // 2, 2) for h in range(HC)]
-    cmv = [ld_vec(a["comb_in"], (t * HC + h) * HC, 4, True) for h in range(HC)]
-    postv = ld_vec(a["post_in"], t * HC, 4, True)
-    prev = ld_vec(a["pre_in"], t * HC, 4, True)
-    if const_expr(reduce):
+    if const_expr(fused is not None):
+        mspecs = [(fused["mix"], t * MIX + 2 * k, 2) for k in range(MIX // 2)]
+        nred = c["d"].tp
+        rspecs = [
+            (fused["red"], attn_region_pair(src, t, s, col), 2) for src in range(nred)
+        ]
         if tid < n:
-            own = preg(c["sym"], 0, "attn")
-            ws = [
-                (own, attn_region_pair(src, t, s, col), 2) for src in range(c["d"].tp)
-            ]
-            reduce_slice_quad(c, task, t, col, c["poll"](ws), rw, cmv, postv, prev)
+            got = fused["poll"](rspecs + mspecs, nred + MIX // 2, True)
+            mixes = fused_mixes([w for p in got[nred:] for w in p])
+            reduce_slice_quad(c, task, t, col, got[:nred], rw, *mixes, out=fused["out"])
     else:
-        # K1: the owed post's sublayer output is the caller's ``pend`` row
-        pw = ld_vec(a["pend"], (t * HIDDEN + col) // 2, 2)
-        if tid < n:
-            reduce_slice_quad(c, task, t, col, None, rw, cmv, postv, prev, pw)
+        cmv = [ld_vec(a["comb_in"], (t * HC + h) * HC, 4, True) for h in range(HC)]
+        postv = ld_vec(a["post_in"], t * HC, 4, True)
+        prev = ld_vec(a["pre_in"], t * HC, 4, True)
+        if const_expr(reduce):
+            if tid < n:
+                own = preg(c["sym"], 0, "attn")
+                ws = [
+                    (own, attn_region_pair(src, t, s, col), 2)
+                    for src in range(c["d"].tp)
+                ]
+                reduce_slice_quad(c, task, t, col, c["poll"](ws), rw, cmv, postv, prev)
+        else:
+            # K1: the owed post's sublayer output is the caller's ``pend`` row
+            pw = ld_vec(a["pend"], (t * HIDDEN + col) // 2, 2)
+            if tid < n:
+                reduce_slice_quad(c, task, t, col, None, rw, cmv, postv, prev, pw)
     # the fn weights as the original's two bf16 MFMAs take them: hi = bf16(fn),
     # lo = bf16(fn - hi), their sum exact in fp32
     for i in range_constexpr(len(fs)):
@@ -300,7 +318,7 @@ def stage_reduce_slice(c, task, reduce=True):
 
 
 @traced
-def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
+def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None, out=None):
     """A thread's (token t, columns col .. col + 3) of ``stage_reduce_slice``
     (``ws``: the TP partials' words; None: ``pw``, the pend row's)."""
     rl, a = c["rl"], c["args"]
@@ -314,6 +332,13 @@ def reduce_slice_quad(c, task, t, col, ws, rw, cmv, postv, prev, pw=None):
                 lo, hi = bf2_f32(ws[src][p])
                 acc0, acc1 = acc0 + lo, acc1 + hi
             pend += [bf16_round(acc0), bf16_round(acc1)]
+    if const_expr(out is not None):
+        w = [
+            bf16_pair(pend[2 * m], pend[2 * m + 1]).bitcast(fx.Int32) for m in range(2)
+        ]
+        bo.buffer_store(
+            fx.Vector.from_elements(w, fx.Int32), rsrc(out), (t * HIDDEN + col) // 2
+        )
     cc = col - task * COLS
     r = [[x for q in range(2) for x in bf2_f32(fx.Int32(rw[h][q]))] for h in range(HC)]
     rows = []
@@ -432,6 +457,7 @@ def stage_gate(c, t):
     red = c["red"]
     a = c["args"]
     groups = SLICES // GATE_BLOCK  # 20
+    fmix = c.get("fmix")
     if tid < groups * PART:
         g = tid // PART
         j = tid % PART
@@ -458,14 +484,26 @@ def stage_gate(c, t):
         # aiter's mhc_fused_post_pre_delayed_rmsnorm reduce: one rstd =
         # rsq(fma(sum, 1/K, eps)), then each gate fma(mix rstd, scale, base)
         v = mix * hw_rsq(fma(sq, fx.Float32(1.0 / K_MIX), fx.Float32(EPS)))
-        if lane < HC:
-            pre = sigmoid(fma(v, sc[0], base))
-            bo.buffer_store(pre + fx.Float32(HC_EPS), rsrc(a["pre_out"]), t * HC + lane)
-        if (lane >= HC) & (lane < 2 * HC):
-            post = sigmoid(fma(v, sc[1], base))
-            bo.buffer_store(
-                post * fx.Float32(POST_MULT), rsrc(a["post_out"]), t * HC + lane - HC
-            )
+        if const_expr(fmix is not None):
+            pre_v = sigmoid(fma(v, sc[0], base)) + fx.Float32(HC_EPS)
+            post_v = sigmoid(fma(v, sc[1], base)) * fx.Float32(POST_MULT)
+            if lane < HC:
+                bo.buffer_store(pre_v, rsrc(a["pre_out"]), t * HC + lane)
+            if (lane >= HC) & (lane < 2 * HC):
+                bo.buffer_store(post_v, rsrc(a["post_out"]), t * HC + lane - HC)
+        else:
+            if lane < HC:
+                pre = sigmoid(fma(v, sc[0], base))
+                bo.buffer_store(
+                    pre + fx.Float32(HC_EPS), rsrc(a["pre_out"]), t * HC + lane
+                )
+            if (lane >= HC) & (lane < 2 * HC):
+                post = sigmoid(fma(v, sc[1], base))
+                bo.buffer_store(
+                    post * fx.Float32(POST_MULT),
+                    rsrc(a["post_out"]),
+                    t * HC + lane - HC,
+                )
         cv = fma(v, sc[2], base)
         row = [_row(cv, lane, q) for q in range(4)]
         # Triton's exp: exp2 of (x - max) log2(e)
@@ -487,6 +525,10 @@ def stage_gate(c, t):
             )
         if (lane >= 2 * HC) & (lane < MIX):
             bo.buffer_store(cv, rsrc(a["comb_out"]), t * HC * HC + lane - 2 * HC)
+        if const_expr(fmix is not None):
+            val = (lane < HC).select(pre_v, (lane < 2 * HC).select(post_v, cv))
+            if lane < MIX:
+                c["put"](fmix, t * MIX + lane, val)
     gpu.barrier()
 
 

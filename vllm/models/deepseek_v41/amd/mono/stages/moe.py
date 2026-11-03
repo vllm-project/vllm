@@ -2611,8 +2611,9 @@ def run_moe(c, key, bid, tls, tl0):
     else:
         stage_down(c, [down_task], dsh)
     stamp(timeline, tls, tid, tl0 + 6)
-    for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
-        stage_reduce(c, task)
+    if const_expr(not c.get("skip_reduce", False)):
+        for task in range(first_task(bid, RED0), RED_TASKS, BLOCKS):
+            stage_reduce(c, task)
     stamp(timeline, tls, tid, tl0 + 7)
 
 

@@ -72,7 +72,11 @@ from vllm.models.deepseek_v41.amd.mhc import (
     mhc_pre_delayed_overlap,
     supports_mhc_overlap,
 )
-from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
+from vllm.models.deepseek_v41.amd.mono_decode import (
+    MonoDecodeLayer,
+    link_layers,
+)
+from vllm.models.deepseek_v41.amd.mono_decode import flush as mono_flush
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
@@ -683,6 +687,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.mhc_post = MHCPostOp()
+        self._mono_link_key: tuple[int, ...] | None = None
 
         spec_config = vllm_config.speculative_config
         if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
@@ -696,6 +701,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _link_mono(self) -> None:
+        key = tuple(self.aux_hidden_state_layers)
+        if key != self._mono_link_key:
+            self._mono_link_key = key
+            link_layers(
+                list(islice(self.layers, self.start_layer, self.end_layer)), key
+            )
 
     def make_empty_intermediate_tensors(
         self,
@@ -821,6 +834,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if not get_pp_group().is_first_rank:
             assert intermediate_tensors is not None
             pre_mix = intermediate_tensors["pre_mix"]
+        self._link_mono()
         (
             hidden_states,
             residual,
@@ -847,6 +861,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # ran_layers, so that flag alone must not post again on the full batch.
         collapsed = False
         if self.decoder_replay_layers is not None:
+            if self.decoder_replay_layers.uses_replay_batch():
+                mono_flush()
             hidden_states, pre_mix, *late_aux = self.decoder_replay_layers(
                 hidden_states,
                 positions,
@@ -859,6 +875,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             aux_hidden_states.extend(late_aux)
             final_aux_recon = None
             collapsed = True
+        mono_flush()
         if ran_layers and not collapsed:
             if (
                 self.end_layer in self.aux_hidden_state_layers
@@ -938,6 +955,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.decoder_replay_layers is not None
                 and idx + 1 == self.decoder_replay_start
             ):
+                mono_flush()
                 aux_recon = self.mhc_post(hidden_states, residual, post_mix, res_mix)
                 aux_hidden_state = aux_recon.mean(dim=1)
                 if self.use_sequence_parallel:
@@ -974,6 +992,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # and sequence parallel is unsupported while replay is on.
         cut_aux: list[torch.Tensor] = []
         if self.decoder_replay_start in self.aux_hidden_state_layers:
+            mono_flush()
             cut_aux.append(
                 self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
             )
@@ -999,6 +1018,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             None,
             positions.shape[0],
         )
+        mono_flush()
         assert residual is not None and post_mix is not None
         assert res_mix is not None and pre_mix is not None
         if (
