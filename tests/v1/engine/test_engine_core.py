@@ -1003,3 +1003,17 @@ def test_resume_fails_pending_keep_pause():
     with pytest.raises(RuntimeError, match="Resumed before"):
         result.result(timeout=0)
     assert core._pending_keep_pause is None
+
+
+def test_keep_pause_without_clear_ignores_zero_token_batches():
+    """Async scheduling: retained exports keep zero-token connector batches in
+    the queue; they are not compute and must not delay the pause."""
+    core = _core_with_retained_exports()
+    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=0), None)])
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert result is None
+
+    core = _core_with_retained_exports()
+    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=8), None)])
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert isinstance(result, Future) and not result.done()

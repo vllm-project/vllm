@@ -2451,9 +2451,16 @@ class EngineCoreProc(EngineCore):
         """has_work() minus finished requests whose blocks are only retained
         for a remote KV reader (delay-freed exports). A cache-preserving keep
         pause keeps that KV regardless, so it need not wait for the reader."""
+        # With async scheduling the batch queue holds the zero-token
+        # connector-only batches that retained exports keep producing; only a
+        # batch that scheduled tokens is compute.
+        pending_compute = self.batch_queue is not None and any(
+            scheduler_output.total_num_scheduled_tokens > 0
+            for _, scheduler_output, *_ in self.batch_queue
+        )
         return (
             self.engines_running
-            or bool(self.batch_queue)
+            or pending_compute
             or self.scheduler.has_unfinished_requests()
             or bool(self.scheduler.finished_req_ids)
         )
