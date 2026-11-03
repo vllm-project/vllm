@@ -31,7 +31,8 @@ ARG TRITON_INSTALL_FROM_SOURCE_REVISION=
 # DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
 # This version is used for CUDA 12+ builds to keep the DeepEP build and
 # runtime NCCL versions compatible.
-ARG NCCL_VERSION=2.30.7
+# DeepEPv2 GDA over EFA requires NCCL 2.31.x or later.
+ARG NCCL_VERSION=2.31.2
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -91,11 +92,6 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
-
-# Flag builds NIXL, including its NIXL EP extension for the installed PyTorch,
-# from source and installs it in place of the nixl packages from the KV-connector
-# requirements
-ARG BUILD_NIXL=false
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
@@ -252,8 +248,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
+        # Keep the CUDA-specific PyTorch index first. Using it as an extra
+        # index with unsafe-best-match can select a higher, incompatible
+        # torch build from the base image (for example cu130 in a cu129 image).
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
@@ -371,7 +372,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         echo "Installing build requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 WORKDIR /workspace
@@ -560,24 +563,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         (cd "${TRITON_WORKSPACE}/dist" \
             && sha256sum build-state > wheel.sha256); \
     fi
-
-# Build NIXL and its NIXL EP extension against the PyTorch installed here when
-# requested. The wheels are installed by the final image, which has no compiler.
-ARG BUILD_NIXL
-COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
-RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
-    set -eux; \
-    NIXL_WORKSPACE=/tmp/nixl_workspace; \
-    mkdir -p "${NIXL_WORKSPACE}/dist"; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
-        dnf clean all; \
-        rm -rf /var/cache/dnf; \
-        NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
-        WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
-        MAX_JOBS="${max_jobs:-}" \
-            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
-    fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -731,7 +716,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         echo "Installing dev requirements..." \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/dev.txt \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 #################### DEV IMAGE ####################
@@ -940,7 +927,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --system \
             -r /tmp/requirements-cuda.txt \
-            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+            --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            --extra-index-url https://pypi.org/simple \
+            --index-strategy unsafe-first-match; \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
@@ -975,7 +964,7 @@ RUN set -eux; \
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer,
 # .openai_server_extras.gguf (NVFP4 GGUF checkpoints, e.g. RecursiveSI/flint-nvfp4-gguf)
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.17.1"
 ARG GGUF_VERSION=">=0.19.0"
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system accelerate 'modelscope<1.38' \
@@ -1016,7 +1005,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     else \
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Expose the Rust frontend bundled in the wheel on the container's PATH.
@@ -1139,7 +1130,9 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     else \
         echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match; \
     fi
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
@@ -1149,7 +1142,9 @@ COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-w
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
-        --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        --extra-index-url https://pypi.org/simple \
+        --index-strategy unsafe-first-match
 
 # See the matching comment in the vllm-base stage.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
@@ -1291,25 +1286,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && rm -f \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
-
-# Install source-built NIXL last, replacing the nixl packages installed above, so
-# the image has a NIXL EP build for its PyTorch version. There is no GPU driver
-# at build time, so check for the extension instead of importing it.
-ARG BUILD_NIXL
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
-    set -eu; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        ls /tmp/nixl-dist/*.whl; \
-        uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
-        uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
-        python3 -c "import glob, importlib.util as u, os, torch; \
-            spec = u.find_spec('nixl_ep_cu' + os.environ['CUDA_VERSION'].split('.')[0]); \
-            mm = ''.join(torch.__version__.split('.')[:2]); \
-            ext = glob.glob(os.path.join(spec.submodule_search_locations[0], 'nixl_ep_cpp_torch' + mm + '.*')) if spec else []; \
-            assert ext, 'NIXL EP has no build for torch ' + torch.__version__; \
-            print('NIXL EP extension:', ext[0])"; \
-    fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

@@ -84,6 +84,9 @@ class MockOffloadingWorker(OffloadingWorker):
         self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
+        # When set, loads submitted from now on complete as failed.
+        self.fail_loads = False
+        self._failing_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
         self.flushed_jobs: set[int] = set()
 
@@ -100,10 +103,16 @@ class MockOffloadingWorker(OffloadingWorker):
         return True
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        expedited: bool = False,
     ) -> bool:
         self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
+        if self.fail_loads:
+            self._failing_jobs.add(job_id)
         return True
 
     def complete_jobs(self, job_ids: set[int]) -> None:
@@ -113,7 +122,7 @@ class MockOffloadingWorker(OffloadingWorker):
                 self.completed_jobs.append(job_id)
                 result = TransferResult(
                     job_id=job_id,
-                    success=True,
+                    success=job_id not in self._failing_jobs,
                     transfer_size=None,
                     transfer_time=None,
                 )
@@ -187,10 +196,10 @@ class RequestRunner:
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
     ):
-        assert blocks_per_chunk == 1 or kv_cache_groups is None, (
-            "blocks_per_chunk > 1 requires all groups to have the same "
-            "block size, so kv_cache_groups must be None (use default group)"
-        )
+        assert blocks_per_chunk == 1 or all(
+            group.kv_cache_spec.block_size == block_size
+            for group in kv_cache_groups or ()
+        ), "blocks_per_chunk > 1 requires every group to use block_size"
 
         self.blocks_per_chunk: int = blocks_per_chunk
         self.block_size: int = block_size
@@ -531,7 +540,7 @@ class RequestRunner:
                 self.offloading_spec.complete_transfers()
 
             self.worker_connector.wait_for_save()
-            finished_sending, finished_recving = self.worker_connector.get_finished(
+            transfer_results = self.worker_connector.get_transfer_results(
                 scheduler_output.finished_req_ids
             )
             worker_meta = (
@@ -543,10 +552,11 @@ class RequestRunner:
 
             model_runner_output = create_model_runner_output(
                 reqs=self.scheduler.running,
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
+                finished_sending=transfer_results.finished_sending,
+                finished_recving=transfer_results.finished_recving,
                 token_id=token_id or 0,
                 kv_connector_worker_meta=worker_meta,
+                failed_recving=transfer_results.failed_recving,
             )
 
             prev_token_id = token_id
