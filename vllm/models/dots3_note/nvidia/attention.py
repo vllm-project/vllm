@@ -723,6 +723,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
         slot_mapping: torch.Tensor,
         kv_cache_dtype: str,
         k_scale: torch.Tensor,
+        skip_scale: bool = False,
     ) -> None:
         super().do_kv_cache_update(
             kv_c_normed,
@@ -731,6 +732,7 @@ class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
             slot_mapping,
             kv_cache_dtype,
             k_scale,
+            skip_scale=skip_scale,
         )
 
     def forward_mha(  # type: ignore[override]
