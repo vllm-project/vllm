@@ -723,7 +723,11 @@ class DerenderChatRequest(BaseModel):
     leading space on SentencePiece tokenizers. Falls back to
     `generate_response.prompt_token_ids`, then to unseeded decoding.
 
-    Only the last few IDs are read, so a suffix of the prompt is enough.
+    With a tool or reasoning parser configured, the parser also reads these
+    IDs when `generate_response.prompt_token_ids` is unset, so send the full
+    list: parsers look back to the last reasoning marker, which can be
+    anywhere in the prompt. Without a parser, only the last few IDs are
+    read, so a suffix is enough.
     """
 
     chat_request: ChatCompletionRequest | None = None
