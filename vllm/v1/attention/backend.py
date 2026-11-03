@@ -107,6 +107,11 @@ class AttentionBackend(ABC):
         return (not supported_head_sizes) or head_size in supported_head_sizes
 
     @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        """Whether the backend can serve a V head size that differs from K's."""
+        return head_size_v == head_size
+
+    @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
         return dtype in cls.supported_dtypes
 
@@ -468,11 +473,6 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
-    replayssm_decode_base_cpu: torch.Tensor | None = None
-    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
-    at the current decode run's last full-state write. write_pos counts from
-    here, so a preemption-resumed request re-anchors past the prompt boundary."""
-
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
@@ -555,7 +555,6 @@ class CommonAttentionMetadata:
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
-            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
