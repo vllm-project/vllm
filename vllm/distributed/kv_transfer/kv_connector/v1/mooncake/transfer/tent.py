@@ -50,10 +50,6 @@ SHUTDOWN_TIMEOUT_S = 5.0
 # and 0 waits forever.
 DEFAULT_TRANSFER_TIMEOUT_S = 60.0
 
-# How long a submission waits for the batches of a failed peer to finish before
-# it refuses to reuse that peer's segment.
-SEGMENT_REOPEN_TIMEOUT_S = 5.0
-
 # Reused `tent.Request` objects retained between submissions. A submission that
 # needs more builds them and lets them go, so one huge request does not pin
 # memory for the life of the worker.
@@ -680,25 +676,24 @@ class TentTransferBackend(TransferBackend):
         reported by another batch cannot retire this handle between the lookup
         and the submission that is about to write through it.
         """
-        deadline = time.monotonic() + SEGMENT_REOPEN_TIMEOUT_S
-        while True:
-            with self._segment_lock:
-                state = self._peers.setdefault(peer, _PeerSegment())
-                if not state.stale:
-                    if state.handle is None:
-                        state.handle = self._open_segment(peer)
-                    state.users += 1
-                    return state.handle
-                if not state.users:
-                    handle = self._reopen_segment(peer, state)
-                    state.users += 1
-                    return handle
-                users = state.users
-            if time.monotonic() > deadline:
-                raise _EngineFailure(
-                    f"the segment for {peer} is stale and {users} batches still use it."
-                )
-            time.sleep(POLL_INTERVAL_MAX_S)
+        with self._segment_lock:
+            state = self._peers.setdefault(peer, _PeerSegment())
+            if not state.stale:
+                if state.handle is None:
+                    state.handle = self._open_segment(peer)
+                state.users += 1
+                return state.handle
+            if not state.users:
+                handle = self._reopen_segment(peer, state)
+                state.users += 1
+                return handle
+            users = state.users
+        # Waiting here would hold the caller's lifecycle lock and stall
+        # submissions to other peers, so the request fails and the caller
+        # retries or recomputes.
+        raise _EngineFailure(
+            f"the segment for {peer} is stale and {users} batches still use it."
+        )
 
     def _open_segment(self, peer: str) -> int:
         """Opens a handle for a peer. The caller holds the segment lock."""

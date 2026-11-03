@@ -5,8 +5,6 @@ import enum
 import json
 import os
 import sys
-import threading
-import time
 import types
 from typing import Any
 
@@ -736,12 +734,7 @@ def test_a_transfer_the_engine_cannot_stop_is_reported_in_flight(monkeypatch):
         backend.shutdown()
 
 
-def test_a_new_submission_is_refused_while_the_peer_segment_is_stale(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SEGMENT_REOPEN_TIMEOUT_S",
-        0.05,
-    )
+def test_a_new_submission_is_refused_while_the_peer_segment_is_stale():
     _install_fake_tent()
     backend = _build()
     peer = "10.0.0.2:9100"
@@ -780,30 +773,22 @@ def test_a_stale_segment_closes_only_after_its_last_batch():
     assert reopened != handle
 
 
-def test_a_submission_waits_until_the_stale_segment_is_retired(monkeypatch):
-    monkeypatch.setattr(
-        "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."
-        "SEGMENT_REOPEN_TIMEOUT_S",
-        5.0,
-    )
+def test_a_submission_fails_instead_of_waiting_for_a_stale_segment():
+    """Waiting would hold the lifecycle lock and stall submissions to peers."""
     _install_fake_tent()
     backend = _build()
     peer = "10.0.0.2:9100"
     handle = backend._acquire_segment(peer)
     backend._forget_segment(peer)
 
-    handles: list[int] = []
-    opener = threading.Thread(
-        target=lambda: handles.append(backend._acquire_segment(peer))
-    )
-    opener.start()
-    time.sleep(0.05)
-    assert handles == []
+    events = backend.transfer(peer, TransferOp.WRITE, _ranges(1))
+    assert events[0].state is TransferState.FAILED
+    assert "stale" in (events[0].error or "")
 
     backend._release_segment_use(peer)
-    opener.join(timeout=5)
-    assert not opener.is_alive()
-    assert handles and handles[0] != handle
+    events = backend.transfer(peer, TransferOp.WRITE, _ranges(1))
+    assert events[0].state is TransferState.COMPLETED
+    assert ("close", handle) in backend._engine.calls
 
 
 def test_a_free_failure_is_retried_by_the_next_poll():

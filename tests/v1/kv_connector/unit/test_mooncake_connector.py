@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import errno
+import queue
 import socket
 import threading
 import time
@@ -1845,6 +1846,51 @@ def test_a_request_the_engine_could_not_stop_stays_reserved():
     assert worker.finished_recving_reqs == set()
 
 
+def test_an_unresolved_pull_masks_the_failures_of_the_other_peers():
+    """Every peer holds its own view of the metas; one refusal must win.
+
+    The blocks a peer could not confirm stopped must not be reported invalid,
+    because the scheduler would hand them out while the engine still writes.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.shutdown = MagicMock()
+    worker.finished_recving_reqs = set()
+    worker._unresolved_pull_reqs = set()
+    worker._invalid_block_ids = queue.Queue()
+    worker._failed_recv_reqs = queue.Queue()
+    worker._is_hma_required = False
+    worker.xfer_stats = MagicMock()
+    pull_meta = PullReqMeta(
+        d_req_id="d-req-1",
+        transfer_id="xfer-req-1",
+        local_block_ids=[[100]],
+        remote_engine_id="p-engine",
+        remote_bootstrap_addr="http://bootstrap:33333",
+        pull_tasks_count=2,
+    )
+    first_peer = {"d-req-1": pull_meta}
+    second_peer = dict(first_peer)
+
+    worker.process_pulling_result(
+        MooncakeXferResponse(
+            status=MooncakeXferResponseStatus.CONTINUE,
+            unresolved_reqs=["d-req-1"],
+        ),
+        first_peer,
+    )
+    worker._handle_failed_recv(
+        second_peer,
+        ["d-req-1"],
+        "peer finished without reporting a transfer result",
+    )
+
+    assert worker._invalid_block_ids.empty()
+    assert worker._failed_recv_reqs.empty()
+    assert pull_meta.failed is False
+    assert pull_meta.pull_tasks_count == 2
+    assert worker.finished_recving_reqs == set()
+
+
 def test_shutdown_is_quiet_when_the_constructor_did_not_finish():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
 
@@ -1861,6 +1907,17 @@ def test_shutdown_releases_what_a_failed_constructor_created():
 
     worker._sender_executor.shutdown.assert_called_once_with(wait=False)
     worker.bootstrap_server.shutdown.assert_called_once()
+    worker.transfer_backend.shutdown.assert_called_once()
+
+
+def test_del_runs_shutdown_for_a_backend_built_before_the_context():
+    """The backend exists before the context, so a failed constructor still
+    leaves teardown that has to run."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.transfer_backend = MagicMock()
+
+    worker.__del__()
+
     worker.transfer_backend.shutdown.assert_called_once()
 
 

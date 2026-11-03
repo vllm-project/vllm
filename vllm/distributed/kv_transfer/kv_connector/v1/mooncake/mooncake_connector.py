@@ -1622,11 +1622,10 @@ class MooncakeConnectorWorker:
             self.block_size = kernel_block_size
 
     def __del__(self):
-        # A worker that failed part way through __init__ never created the
-        # context; shutting down would raise while the interpreter is tearing
-        # the object down.
-        if getattr(self, "async_zmq_ctx", None) is not None:
-            self.shutdown()
+        # A constructor that raised part way through may not have created the
+        # context, but the transfer backend is built before it, so teardown
+        # still has to run; shutdown() stops at whatever is missing.
+        self.shutdown()
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
@@ -2927,6 +2926,17 @@ class MooncakeConnectorWorker:
         for req_id in req_ids:
             pull_meta = pull_metas.pop(req_id, None)
             if pull_meta is None:
+                continue
+            if req_id in self._unresolved_pull_reqs:
+                # Another peer could not confirm that its engine stopped
+                # writing these blocks. Reporting them as invalid would let the
+                # scheduler move the same blocks while that engine still writes
+                # them, so the request stays reserved on both sides.
+                logger.warning(
+                    "Ignoring a failure for %s: an earlier reply said its "
+                    "transfer could not be confirmed stopped.",
+                    req_id,
+                )
                 continue
             if pull_meta.failed:
                 self._complete_pull_task(pull_meta)
