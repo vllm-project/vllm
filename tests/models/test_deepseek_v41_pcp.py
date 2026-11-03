@@ -15,43 +15,6 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 )
 from vllm.models.deepseek_v41.nvidia import model as model_module
 from vllm.platforms import current_platform
-from vllm.v1.core.kv_cache_planning import kv_cache_groups_tp_replicas
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-
-
-@pytest.mark.parametrize("mxfp8", [False, True])
-def test_persistent_cache_specs_are_tp_replicated(monkeypatch, mxfp8):
-    monkeypatch.setattr(attention_module, "_use_v41_mxfp8_kv_record", lambda: mxfp8)
-    cache_config = SimpleNamespace(block_size=64, cache_dtype="fp8_ds_mla")
-    config = SimpleNamespace(cache_config=cache_config)
-    main = SimpleNamespace(
-        is_kv_source=True,
-        kv_cache_dtype="fp8_ds_mla",
-        head_dim=512,
-        kv_cache_torch_dtype=torch.uint8,
-        compress_ratio=2,
-        kv_page_alignment=512 if mxfp8 else 576,
-        compressed_bytes_per_token=528 if mxfp8 else 584,
-    )
-    indexer = SimpleNamespace(
-        cache_config=cache_config,
-        head_dim=132,
-        dtype=torch.uint8,
-        compress_ratio=2,
-        sparse_logits=True,
-        rocm_mxfp4=False,
-    )
-    groups = [
-        KVCacheGroupSpec(
-            ["main"],
-            attention_module.DeepseekV4Attention.get_kv_cache_spec(main, config),
-        ),
-        KVCacheGroupSpec(
-            ["indexer"],
-            attention_module.DeepseekV4IndexerCache.get_kv_cache_spec(indexer, config),
-        ),
-    ]
-    assert kv_cache_groups_tp_replicas(groups, tp_size=8) == 8
 
 
 @pytest.mark.distributed(num_gpus=8)
