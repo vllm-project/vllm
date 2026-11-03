@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
+from .rocm_device_memory import find_vram_used_file
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -1277,6 +1278,41 @@ class RocmPlatform(Platform):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats(device)
         return torch.cuda.max_memory_allocated(device)
+
+    # mem_info_vram_used per device_id, or None where there is none.
+    _vram_used_files: dict[int, str | None] = {}
+
+    @classmethod
+    def get_device_memory_used(cls, device_id: int = 0) -> int | None:
+        # amdgpu's exact VRAM count. hipMemGetInfo counts each allocation as
+        # at least 2 MB unless the GPU's memory is kept in system memory
+        # (kernel apu_prefer_gtt). Unpartitioned GPUs whose VRAM total
+        # matches HIP's only.
+        if device_id not in cls._vram_used_files:
+            props = torch.cuda.get_device_properties(device_id)
+            if props.is_integrated:
+                path, reason = None, "integrated GPU"
+            else:
+                path, reason = find_vram_used_file(
+                    str(props.uuid),
+                    (props.pci_domain_id, props.pci_bus_id, props.pci_device_id),
+                    torch.cuda.mem_get_info(device_id)[1],
+                )
+            if path is None:
+                logger.debug(
+                    "Using free device memory as HIP reports it, which counts "
+                    "each allocation as at least 2 MB: %s.",
+                    reason,
+                )
+            cls._vram_used_files[device_id] = path
+        path = cls._vram_used_files[device_id]
+        if path is None:
+            return None
+        try:
+            with open(path) as f:
+                return int(f.read())
+        except (OSError, ValueError):
+            return None
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:

@@ -523,10 +523,12 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         hash_block_size=16,
         cache_hit_alignment_tokens=16,
     )
+    baseline = object()
     worker = SimpleNamespace(
         cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
         vllm_config=SimpleNamespace(kv_transfer_config=None),
+        exact_memory_baseline=baseline,
         model_runner=runner,
         _maybe_get_memory_pool_context=lambda tag: nullcontext(),
         _v2_model_runner=lambda: runner,
@@ -535,6 +537,8 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)
     Worker.initialize_from_config(worker, kv_cache_config)
     assert runner.extensible_kv_cache.warmup_committable_blocks == 40
+    # The final sizing corrects free memory from the startup baseline.
+    assert runner.extensible_kv_cache.memory_baseline is baseline
     assert log == ["initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
 
@@ -667,6 +671,7 @@ def _weight_update_worker(
 
     kv_cache = SimpleNamespace(
         buffer=SimpleNamespace(physical_bytes=50 * GiB),
+        free_memory_correction=0,
         release_physical=lambda: log.append("release"),
         recommit=lambda: log.append("recommit"),
         torch_memory_limit=None,

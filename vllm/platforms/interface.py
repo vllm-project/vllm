@@ -1209,6 +1209,13 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_device_memory_used(cls, device_id: int = 0) -> int | None:
+        """Exact bytes in use on the whole visible device ``device_id``, by all
+        processes, or ``None`` when the platform does not count them.
+        """
+        return None
+
+    @classmethod
     def get_punica_wrapper(cls) -> str:
         """Return the punica wrapper for current platform."""
         raise NotImplementedError
