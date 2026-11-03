@@ -630,6 +630,79 @@ def precopy_mamba_align_fused_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["num_reqs"])
+def export_mamba_boundary_state_kernel(
+    boundary_positions_ptr,  # [num_reqs] batch order, 0 = none
+    num_accepted_tokens_ptr,  # [max_reqs] post-step, req-state order
+    num_computed_tokens_ptr,  # [max_reqs] post-step, req-state order
+    # Same flattened state-layout metadata as postprocess_mamba_fused_kernel
+    block_table_ptrs_ptr,
+    block_table_stride_req: tl.int64,
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    num_reqs,
+    BOUNDARY_SLOT: tl.constexpr,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+    TEMPORAL_TILES: tl.constexpr = 1,
+):
+    """Copy the state at each row's boundary position into its boundary slot.
+
+    For Mamba fixed state slots. A step leaves the state after each of its
+    last ``num_accepted`` tokens: the last one for a prefill or non-speculative
+    row, every accepted one for a speculative-decode row, selected like the
+    align copies by ``token_bias`` from slot 0. A boundary the step did not
+    reach is left for a later step.
+
+    Grid: (num_reqs, num_states [, TEMPORAL_TILES]).
+    """
+    batch_idx = tl.program_id(0)
+    state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
+    if batch_idx >= num_reqs:
+        return
+    position = tl.load(boundary_positions_ptr + batch_idx)
+    if position <= 0:
+        return
+    req_idx = tl.load(idx_mapping_ptr + batch_idx)
+    if req_idx < 0:
+        return
+    num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
+    num_computed = tl.load(num_computed_tokens_ptr + req_idx)
+    first_position = num_computed - num_accepted + 1
+    if position < first_position or position > num_computed:
+        return
+
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        0,
+        BOUNDARY_SLOT,
+        position - first_position,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        tile_idx,
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        TEMPORAL_TILES,
+    )
+
+
 @triton.jit
 def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -1297,6 +1370,52 @@ class MambaSpecDecodeGPUContext:
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             HAS_IDX_MAPPING=True,
             PRECOMPUTED_NEW_COMPUTED=True,
+            TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def run_boundary_export(
+        self,
+        num_reqs: int,
+        boundary_positions_gpu: torch.Tensor,
+        num_accepted_tokens_gpu: torch.Tensor,
+        new_num_computed_tokens_gpu: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        boundary_slot: int,
+    ) -> None:
+        """Fixed state slots: after the step, copy the state at each row's
+        boundary position, if the step reached it, into the boundary slot.
+
+        Args:
+            num_reqs: Number of active requests (batch order).
+            boundary_positions_gpu: [num_reqs] boundary position, 0 for none.
+            num_accepted_tokens_gpu: [max_reqs] post-step accepted counts.
+            new_num_computed_tokens_gpu: [max_reqs] post-step computed counts.
+            idx_mapping: [num_reqs] batch_idx -> req_state_idx.
+            boundary_slot: Block-table column of the boundary slot.
+
+        """
+        if num_reqs == 0 or not self.is_initialized:
+            return
+        grid = (num_reqs, self.num_states, _TEMPORAL_TILES)
+        export_mamba_boundary_state_kernel[grid](
+            boundary_positions_gpu,
+            num_accepted_tokens_gpu,
+            new_num_computed_tokens_gpu,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            idx_mapping,
+            num_reqs,
+            BOUNDARY_SLOT=boundary_slot,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             TEMPORAL_TILES=_TEMPORAL_TILES,
         )
 

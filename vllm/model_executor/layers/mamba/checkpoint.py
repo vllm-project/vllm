@@ -129,17 +129,21 @@ class MambaPrefillCheckpointBuilder:
         all_query_lens = m.query_start_loc_cpu.diff().tolist()
         query_lens = [all_query_lens[row] for row in request_rows]
         seq_lens = m.seq_lens_cpu_upper_bound.tolist()
-        block_size = self.kv_cache_spec.block_size
-        checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
-            [seq_lens[row] for row in request_rows],
-            query_lens,
-            hash_block_size=hash_block_size,
-            mamba_block_size=block_size,
-            checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
-            drop_eagle_block=self.drop_eagle_block,
-            cache_hit_alignment_tokens=cache_hit_alignment_tokens,
-            num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
-        )
+        if self.kv_cache_spec.fixed_state_slots:
+            checkpoint_offsets, checkpoint_cols = self.get_fixed_slot_checkpoints(
+                m, request_rows, query_lens, seq_lens
+            )
+        else:
+            checkpoint_offsets, checkpoint_cols = compute_mamba_prefill_checkpoints(
+                [seq_lens[row] for row in request_rows],
+                query_lens,
+                hash_block_size=hash_block_size,
+                mamba_block_size=self.kv_cache_spec.block_size,
+                checkpoint_alignment=self.kv_cache_spec.prefill_checkpoint_alignment,
+                drop_eagle_block=self.drop_eagle_block,
+                cache_hit_alignment_tokens=cache_hit_alignment_tokens,
+                num_hash_lookahead_tokens=self.vllm_config.num_hash_lookahead_tokens,
+            )
         if not any(checkpoint_offsets):
             return None
         checkpoint_offsets_tensor = async_tensor_h2d(
@@ -163,6 +167,29 @@ class MambaPrefillCheckpointBuilder:
             request_rows=request_rows_tensor,
             block_cols=checkpoint_cols_tensor,
         )
+
+    def get_fixed_slot_checkpoints(
+        self,
+        m: CommonAttentionMetadata,
+        request_rows: list[int],
+        query_lens: list[int],
+        seq_lens: list[int],
+    ) -> tuple[list[int], list[int]]:
+        """Checkpoints the scheduler planned into the fixed checkpoint slot."""
+        offsets = [0] * len(request_rows)
+        cols = [-1] * len(request_rows)
+        positions = m.mamba_checkpoint_positions
+        if positions is None:
+            return offsets, cols
+        for i, (row, query_len) in enumerate(zip(request_rows, query_lens)):
+            position = int(positions[row])
+            if position == 0:
+                continue
+            offset = position - (seq_lens[row] - query_len)
+            assert 0 < offset < query_len, (position, seq_lens[row], query_len)
+            offsets[i] = offset
+            cols[i] = self.kv_cache_spec.checkpoint_slot
+        return offsets, cols
 
 
 @dataclass(frozen=True)

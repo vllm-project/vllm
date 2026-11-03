@@ -308,6 +308,11 @@ class SchedulerOutput:
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
+    # Mamba fixed state slots: per request, the (checkpoint, boundary) token
+    # positions whose states this step exports into the checkpoint and
+    # boundary slots of its block-table row; 0 means none.
+    mamba_state_exports: dict[str, tuple[int, int]] | None = None
+
     # Scheduler-local; always None by the time this reaches a worker.
     kv_connector_block_state: KVConnectorBlockState | None = None
 

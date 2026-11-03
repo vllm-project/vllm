@@ -1059,10 +1059,19 @@ def _run_mamba_prefix_cache_mrv2(
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     envs.disable_envs_cache()
 
+    from vllm.model_executor.layers.mamba import abstract as mamba_abstract
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
+    from vllm.v1.worker.gpu.model_states import mamba_hybrid
     from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
         MambaHybridModelState,
     )
+
+    # The step tables below follow the positional block-table layout, which
+    # MRV2 keeps when fixed state slots are unsupported (e.g. KV connectors).
+    for module in (mamba_abstract, mamba_hybrid):
+        monkeypatch.setattr(
+            module, "use_mamba_fixed_state_slots", lambda vllm_config: False
+        )
     from vllm.v1.worker.gpu.sample.output import SamplerOutput as MRV2SamplerOutput
 
     events: list[int] = []
@@ -1098,6 +1107,7 @@ def _run_mamba_prefix_cache_mrv2(
         block_tables: tuple[torch.Tensor, ...],
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
+        scheduler_output: SchedulerOutput,
     ) -> None:
         captured["block_tables"] = block_tables
         captured["kv_cache_config"] = kv_cache_config
@@ -1111,7 +1121,12 @@ def _run_mamba_prefix_cache_mrv2(
                     (temporal, bt, temporal_block(temporal, bt, expected[0]).clone())
                 )
         ret = original_preprocess_state(
-            self, input_batch, block_tables, kv_cache_config, num_computed_tokens
+            self,
+            input_batch,
+            block_tables,
+            kv_cache_config,
+            num_computed_tokens,
+            scheduler_output,
         )
         if cur_step_action is not None:
             # Reading the GPU-side copy state back to assert on it is a

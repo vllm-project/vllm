@@ -88,11 +88,34 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.cache_config.use_replayssm
                 else vllm_config.num_speculative_tokens
             ),
+            fixed_state_slots=use_mamba_fixed_state_slots(vllm_config),
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)
+
+
+def use_mamba_fixed_state_slots(vllm_config: VllmConfig) -> bool:
+    """Whether "align" prefix caching keeps Mamba state in fixed slots.
+
+    Only Model Runner V2 implements the layout, for generative models. KV
+    connectors, pipeline and context parallelism, and ReplaySSM/RecoverSSM
+    still use one block-table column per Mamba block.
+    """
+    cache_config = vllm_config.cache_config
+    parallel_config = vllm_config.parallel_config
+    return (
+        cache_config.mamba_cache_mode == "align"
+        and vllm_config.use_v2_model_runner
+        and vllm_config.model_config.runner_type == "generate"
+        and vllm_config.kv_transfer_config is None
+        and parallel_config.pipeline_parallel_size == 1
+        and parallel_config.decode_context_parallel_size == 1
+        and parallel_config.prefill_context_parallel_size == 1
+        and not cache_config.use_replayssm
+        and not cache_config.use_kda_recoverssm
+    )
 
 
 def get_mamba_prefill_checkpoint_alignment(vllm_config: VllmConfig) -> int | None:

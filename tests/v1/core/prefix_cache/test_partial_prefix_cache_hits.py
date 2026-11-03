@@ -104,6 +104,7 @@ def make_full_mamba_manager(
     num_speculative_blocks: int = 0,
     num_prefill_checkpoint_blocks: int = 0,
     num_hash_lookahead_tokens: int = 0,
+    fixed_state_slots: bool = False,
 ):
     mamba_group = KVCacheGroupSpec(
         ["mamba"],
@@ -117,6 +118,7 @@ def make_full_mamba_manager(
             prefill_checkpoint_alignment=(
                 16 if num_prefill_checkpoint_blocks > 0 else None
             ),
+            fixed_state_slots=fixed_state_slots,
         ),
     )
     kv_cache_config = KVCacheConfig(
@@ -197,6 +199,7 @@ def test_dcp_fine_hit_retention_uses_hash_alignment(
         mamba_shared_prefix_checkpoint=False,
         mamba_has_prefill_checkpoint_blocks=bool(checkpoint_blocks),
         mamba_prefill_checkpoint_alignment=16,
+        mamba_fixed_state_slots=False,
     )
     producer = make_request(
         "producer", list(range(prompt_tokens)), hash_block_size, sha256
@@ -2881,3 +2884,174 @@ def test_checkpoint_reservation_matches_worker(
         request.num_computed_tokens = end
         manager.new_step_starts()
         start = end
+
+
+def _run_fixed_slot_step(
+    manager,
+    request,
+    num_new_tokens: int,
+    states: dict[int, int],
+    *,
+    num_accepted: int | None = None,
+    hit=None,
+) -> tuple[int, int]:
+    """Schedule one step of ``request`` over Mamba fixed state slots and apply
+    the worker's state moves to ``states`` (block id -> number of tokens its
+    state covers). ``num_accepted`` makes it a speculative-decode step that
+    keeps that many of its ``num_new_tokens`` tokens."""
+    manager.new_step_starts()
+    if hit is None:
+        assert manager.allocate_slots(request, num_new_tokens) is not None
+    else:
+        computed_blocks, num_computed = hit
+        assert (
+            manager.allocate_slots(
+                request, num_new_tokens, num_computed, computed_blocks
+            )
+            is not None
+        )
+        request.num_computed_tokens = num_computed
+    spec = manager.coordinator.single_type_managers[1].kv_cache_spec
+    row = [block.block_id for block in manager.get_blocks(request.request_id).blocks[1]]
+    assert len(row) == spec.boundary_slot + 1
+    copies, retained = manager.take_kv_cache_block_copies()
+    for copy in copies:
+        states[copy.dst_block_id] = states[copy.src_block_id]
+    manager.block_pool.free_blocks(retained)
+    checkpoint, boundary = manager.take_mamba_state_exports().get(
+        request.request_id, (0, 0)
+    )
+
+    start = request.num_computed_tokens
+    if checkpoint:
+        assert start < checkpoint < start + num_new_tokens
+        states[row[spec.checkpoint_slot]] = checkpoint
+    num_kept = num_new_tokens if num_accepted is None else num_accepted
+    end = start + num_kept
+    # A prefill or plain decode row leaves its final state; a speculative
+    # decode row leaves the state after each accepted token.
+    first_state = start + 1 if num_accepted is not None else end
+    if boundary and first_state <= boundary <= end:
+        states[row[spec.boundary_slot]] = boundary
+    if num_accepted is not None:
+        request.append_output_token_ids(list(range(5000 + start, 5000 + end)))
+        request.num_computed_tokens = end
+        manager.cache_blocks(request, end)
+    else:
+        request.num_computed_tokens = end
+    return checkpoint, boundary
+
+
+def _assert_cached_mamba_states(manager, states: dict[int, int]) -> None:
+    """Every cached Mamba block holds the state its prefix-cache key claims."""
+    for block in manager.block_pool.blocks:
+        if block.block_hash is None or get_group_id(block.block_hash) != 1:
+            continue
+        assert states.get(block.block_id) == block.block_hash_num_tokens, (
+            block.block_id,
+            states.get(block.block_id),
+            block.block_hash_num_tokens,
+        )
+
+
+@pytest.mark.parametrize(
+    ("first_prompt", "second_prompt", "hit", "checkpoint"),
+    [
+        # No hit, prompt within one Mamba block.
+        (None, 50, 0, 48),
+        # Hit inside block 1, the append crosses into block 2.
+        (100, 160, 96, 144),
+        # Hit inside block 1, the append stays in it.
+        (100, 120, 96, 112),
+        # Block-aligned hit on a block another request owns.
+        (130, 168, 128, 160),
+    ],
+)
+def test_fixed_state_slots_export_checkpoint_within_two_mamba_blocks(
+    first_prompt, second_prompt, hit, checkpoint
+):
+    """A prefill spanning fewer than two Mamba blocks has no free block-table
+    column for its checkpoint, so positional "align" splits the chunk there.
+    Fixed state slots export it in the same chunk, into a block of its own."""
+    hash_block_size, mamba_block_size = 16, 64
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=64,
+        num_prefill_checkpoint_blocks=1,
+        fixed_state_slots=True,
+    )
+    manager.coordinator.retention_interval = 0
+    states: dict[int, int] = {}
+    if first_prompt is not None:
+        first = make_request(
+            "first", list(range(first_prompt)), hash_block_size, sha256
+        )
+        _run_fixed_slot_step(manager, first, first_prompt, states)
+        manager.free(first)
+
+    second = make_request("second", list(range(second_prompt)), hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(second)
+    assert num_computed == hit
+    exports = _run_fixed_slot_step(
+        manager,
+        second,
+        second_prompt - hit,
+        states,
+        hit=(computed_blocks, num_computed) if hit else None,
+    )
+    assert exports[0] == checkpoint
+    _assert_cached_mamba_states(manager, states)
+
+    manager.free(second)
+    replay = make_request(
+        "replay", list(range(second_prompt + 32)), hash_block_size, sha256
+    )
+    _, num_computed, _ = manager.get_computed_blocks(replay)
+    assert num_computed == checkpoint
+
+
+def test_fixed_state_slots_spec_decode_boundary_waits_for_acceptance():
+    """A decode step only leaves the states of the tokens it accepts. A
+    boundary its drafts did not reach stays armed for a later step, and is
+    cached only once a step has written it."""
+    hash_block_size, mamba_block_size = 16, 64
+    manager = make_full_mamba_manager(
+        dcp_world_size=1,
+        hash_block_size=hash_block_size,
+        full_block_size=hash_block_size,
+        mamba_block_size=mamba_block_size,
+        num_blocks=64,
+        num_speculative_blocks=3,
+        fixed_state_slots=True,
+    )
+    manager.coordinator.retention_interval = None
+    states: dict[int, int] = {}
+    request = make_request("req", list(range(61)), hash_block_size, sha256)
+    _run_fixed_slot_step(manager, request, 61, states)
+    request.append_output_token_ids([4999])
+
+    # Positions 62..64 are drafts; only one token is accepted.
+    assert _run_fixed_slot_step(manager, request, 4, states, num_accepted=1) == (
+        0,
+        64,
+    )
+    _assert_cached_mamba_states(manager, states)
+    _, num_computed, _ = manager.get_computed_blocks(
+        make_request("probe", list(range(61)) + [4999] + [0] * 8, 16, sha256)
+    )
+    assert num_computed < 64
+
+    # The next window reaches 64 with its second token.
+    assert _run_fixed_slot_step(manager, request, 4, states, num_accepted=4) == (
+        0,
+        64,
+    )
+    _assert_cached_mamba_states(manager, states)
+    probe_tokens = list(request.all_token_ids[:64]) + [0] * 8
+    _, num_computed, _ = manager.get_computed_blocks(
+        make_request("probe2", probe_tokens, hash_block_size, sha256)
+    )
+    assert num_computed == 64

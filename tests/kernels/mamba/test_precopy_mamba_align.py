@@ -301,6 +301,77 @@ def test_v2_postprocess_indexes_block_tables_by_req_slot(conv_state_dim_first):
         torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
 
 
+@_parametrize("conv_state_dim_first", [False, True])
+@_cuda_required
+def test_boundary_export_copies_only_reached_positions(conv_state_dim_first):
+    """Fixed state slots: the step's state at the boundary position goes to the
+    boundary slot, taken from the accepted-token slot like the align copies;
+    a boundary the step did not reach is left alone."""
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    num_reqs = 4
+    boundary_slot = 4
+    num_blocks = num_reqs * MAX_COLS + 1
+    bt = torch.arange(1, num_blocks, dtype=torch.int32, device=device).view(
+        num_reqs, MAX_COLS
+    )
+    # slot 0: prefill ending on the boundary; slot 1: speculative decode that
+    # reaches it with its second token; slot 2: one that stops short of it;
+    # slot 3: no boundary.
+    num_accepted = torch.tensor([1, 3, 1, 1], dtype=torch.int32, device=device)
+    new_num_computed = torch.tensor([64, 65, 62, 64], dtype=torch.int32, device=device)
+    slot_positions = torch.tensor([64, 64, 64, 0], dtype=torch.int32)
+    ref_src = torch.tensor([0, 0, -1, -1], dtype=torch.int32)
+    ref_dst = torch.full((num_reqs,), boundary_slot, dtype=torch.int32)
+    ref_bias = torch.tensor([0, 1, 0, 0], dtype=torch.int32)
+
+    convs, ssms = _build_state(num_blocks, device, conv_state_dim_first)
+    conv_ref, ssm_ref = _reference(
+        convs,
+        ssms,
+        bt.cpu(),
+        ref_src,
+        ref_dst,
+        ref_bias,
+        num_reqs,
+        conv_state_dim_first,
+    )
+    base, blk_stride, elem, inner, width, group, drc, drs = _build_meta(
+        convs, ssms, device, conv_state_dim_first
+    )
+    bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
+    idx_mapping = torch.tensor([2, 0, 3, 1], dtype=torch.int32, device=device)
+    boundary_positions = slot_positions[idx_mapping.cpu()].to(device)
+    worker_mamba_utils.export_mamba_boundary_state_kernel[
+        (num_reqs, NUM_LAYERS * 2, 1)
+    ](
+        boundary_positions,
+        num_accepted,
+        new_num_computed,
+        bt_ptrs,
+        bt.stride(0),
+        base,
+        blk_stride,
+        elem,
+        inner,
+        width,
+        group,
+        drc,
+        drs,
+        idx_mapping,
+        num_reqs,
+        BOUNDARY_SLOT=boundary_slot,
+        COPY_BLOCK_SIZE=1024,
+        CONV_STATE_DIM_FIRST=conv_state_dim_first,
+        TEMPORAL_TILES=1,
+    )
+    torch.accelerator.synchronize()
+
+    for layer in range(NUM_LAYERS):
+        torch.testing.assert_close(convs[layer], conv_ref[layer], rtol=0, atol=0)
+        torch.testing.assert_close(ssms[layer], ssm_ref[layer], rtol=0, atol=0)
+
+
 def test_ds_conv_copy_spec_reproduces_multi_accept_assert(monkeypatch):
     monkeypatch.setattr(
         layer_mamba_utils,

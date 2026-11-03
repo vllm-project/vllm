@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    MambaFixedSlotManager,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
@@ -173,6 +174,11 @@ class KVCacheCoordinator(ABC):
                 needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
+        )
+        self.mamba_fixed_slot_managers = tuple(
+            manager
+            for manager in self.single_type_managers
+            if isinstance(manager, MambaFixedSlotManager) and manager.enable_caching
         )
         # Match Mamba checkpoints to Eagle's attention replay boundary.
         if use_eagle:
@@ -354,6 +360,45 @@ class KVCacheCoordinator(ABC):
         # Only cache tokens with finalized KV. The last num_reprefillable_tokens
         # tokens can be re-prefilled during multi-module MTP.
         return max(0, num_computed_tokens - self.num_reprefillable_tokens)
+
+    def plan_state_exports(
+        self, request: Request, num_computed_tokens: int, num_tokens: int
+    ) -> None:
+        """Plan the states the step computing tokens
+        ``[num_computed_tokens, num_tokens)`` exports for prefix caching."""
+        if not self.mamba_fixed_slot_managers:
+            return
+        boundaries = replay_boundaries(
+            request.num_prompt_tokens,
+            self.scheduler_block_size,
+            use_eagle=bool(self.drop_eagle_group_ids),
+        )
+        for manager in self.mamba_fixed_slot_managers:
+            manager.plan_state_exports(
+                request,
+                num_computed_tokens,
+                num_tokens,
+                retention_interval=self.retention_interval,
+                replay_boundaries=boundaries,
+            )
+
+    def take_mamba_state_exports(self) -> dict[str, tuple[int, int]]:
+        """Drain this step's Mamba fixed-slot export positions.
+
+        Groups plan the same boundary; a group without prefill checkpoints
+        plans no checkpoint, and its layers export none.
+        """
+        exports: dict[str, tuple[int, int]] = {}
+        for manager in self.mamba_fixed_slot_managers:
+            group_exports = manager.take_state_exports()
+            for req_id, (checkpoint, boundary) in group_exports.items():
+                prev_checkpoint, prev_boundary = exports.get(req_id, (0, boundary))
+                assert boundary == prev_boundary
+                assert (
+                    0 in (checkpoint, prev_checkpoint) or checkpoint == prev_checkpoint
+                )
+                exports[req_id] = (max(checkpoint, prev_checkpoint), boundary)
+        return exports
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request.
