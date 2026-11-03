@@ -107,9 +107,12 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     use_load_plan: bool = False
-    """Dense backend only: write received tensors through a load plan
-    (`plan_loads`) instead of `load_weights` where the plan allows. Requires
-    `VLLM_RELOAD_MODE=direct`."""
+    """Dense backend only: write received tensors of the target model through a
+    load plan (`plan_loads`), built at init from `metadata`, instead of
+    `load_weights` where the plan allows. Requires `VLLM_RELOAD_MODE=direct`."""
+    metadata: list[tuple[str, str, list[int]]] | None = None
+    """(name, dtype name, shape) of every tensor the trainer sends; required
+    with `use_load_plan`."""
 
     def __post_init__(self) -> None:
         _ = self.nccl_unique_id_bytes
@@ -127,13 +130,9 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
 def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     """Serialize a worker init info for `init_weight_transfer_engine`, dropping
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
-    only the mode actually in use, and an unset `use_load_plan` so older
-    servers still accept it. Shared by the dense and sparse trainer engines so
-    the two cannot drift."""
-    payload = {k: v for k, v in asdict(init_info).items() if v is not None}
-    if not payload["use_load_plan"]:
-        del payload["use_load_plan"]
-    return payload
+    only the mode actually in use. Shared by the dense and sparse trainer
+    engines so the two cannot drift."""
+    return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
 def build_worker_init_payload(
@@ -142,6 +141,8 @@ def build_worker_init_payload(
     packed: bool = False,
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    use_load_plan: bool = False,
+    metadata: list[tuple[str, str, list[int]]] | None = None,
 ) -> dict:
     # Workers sit at rank_offset 1, after the single trainer sender rank 0.
     worker_init_info = NCCLWeightTransferInitInfo(
@@ -152,6 +153,8 @@ def build_worker_init_payload(
         packed=packed,
         packed_buffer_size_bytes=packed_buffer_size_bytes,
         packed_num_buffers=packed_num_buffers,
+        use_load_plan=use_load_plan,
+        metadata=metadata,
     )
     return worker_init_payload(worker_init_info)
 

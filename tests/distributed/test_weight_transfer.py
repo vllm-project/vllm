@@ -306,20 +306,86 @@ class TestNCCLEngineParsing:
         with pytest.raises(ValueError, match="VLLM_RELOAD_MODE=direct"):
             self._make_engine().init_transfer_engine(init_info)
 
+    def test_use_load_plan_requires_metadata(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+        init_info = NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1",
+            master_port=12345,
+            rank_offset=1,
+            world_size=2,
+            use_load_plan=True,
+        )
+        with pytest.raises(ValueError, match="metadata"):
+            self._make_engine().init_transfer_engine(init_info)
 
-@pytest.mark.parametrize("use_load_plan", [False, True])
-def test_nccl_trainer_sends_use_load_plan_only_when_set(use_load_plan):
-    """Older servers reject unknown init fields, so the default is not sent."""
-    init_info = NCCLTrainerInitInfo(
-        master_address="127.0.0.1",
-        master_port=29500,
-        world_size=3,
-        rank=0,
-        use_load_plan=use_load_plan,
+
+def test_nccl_trainer_sends_metadata_with_use_load_plan(monkeypatch):
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: object()
     )
-    payload = NCCLTrainerWeightTransferEngine._build_worker_init_payload(init_info)
-    assert ("use_load_plan" in payload) is use_load_plan
-    assert NCCLWeightTransferInitInfo(**payload).use_load_plan is use_load_plan
+    client = RecordingClient()
+    NCCLTrainerWeightTransferEngine.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=0,
+            use_load_plan=True,
+        ),
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+    )
+    assert client.last_init_info is not None
+    init_info = NCCLWeightTransferInitInfo(**client.last_init_info)
+    assert init_info.use_load_plan
+    assert init_info.metadata == [("w", "float32", [4])]
+
+
+def test_sparse_nccl_refuses_use_load_plan():
+    engine = SparseNCCLWeightTransferEngine(
+        WeightTransferConfig(backend="sparse_nccl"),
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
+    )
+    init_info = NCCLWeightTransferInitInfo(
+        master_address="127.0.0.1",
+        master_port=12345,
+        rank_offset=1,
+        world_size=2,
+        use_load_plan=True,
+    )
+    with pytest.raises(ValueError, match="dense NCCL backend"):
+        engine.init_transfer_engine(init_info)
+
+
+def test_nccl_update_must_match_the_load_plan():
+    from vllm.distributed.weight_transfer.nccl_engine import _check_planned
+    from vllm.model_executor.model_loader.reload.plan import Entry, LoadPlan
+
+    entries = {n: Entry(n, (4,), torch.float32, None, ()) for n in ("w", "v")}
+    plan = LoadPlan(entries=entries, dests={})
+    # one broadcaster's subset
+    _check_planned(
+        plan,
+        NCCLWeightTransferUpdateInfo(
+            names=["w"], dtype_names=["float32"], shapes=[[4]]
+        ),
+    )
+    for name, dtype_name, shape in (
+        ("x", "float32", [4]),
+        ("w", "bfloat16", [4]),
+        ("w", "float32", [8]),
+    ):
+        with pytest.raises(ValueError, match="re-init the engine"):
+            _check_planned(
+                plan,
+                NCCLWeightTransferUpdateInfo(
+                    names=[name], dtype_names=[dtype_name], shapes=[shape]
+                ),
+            )
 
 
 # --- Unit Tests: Engine Registry ---
@@ -1965,6 +2031,7 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
         "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
+        "use_load_plan": False,
     }
 
 
@@ -2447,6 +2514,7 @@ def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
         "packed": False,
         "packed_buffer_size_bytes": DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         "packed_num_buffers": DEFAULT_PACKED_NUM_BUFFERS,
+        "use_load_plan": False,
     }
 
 
