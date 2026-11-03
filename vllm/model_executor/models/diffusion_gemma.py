@@ -49,6 +49,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultimodalEmbedder,
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
+    _tower_lora_enabled,
 )
 from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -190,6 +191,7 @@ class DiffusionGemmaForConditionalGeneration(
         text_config.attention_k_eq_v = True
 
         # ---- Vision tower ----
+        self._tower_lora = _tower_lora_enabled(vllm_config)
         vision_config = getattr(config, "vision_config", None)
         self.vision_tower: Gemma4VisionModel | None
         self.embed_vision: Gemma4MultimodalEmbedder | None
@@ -282,6 +284,7 @@ class DiffusionGemmaForConditionalGeneration(
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
+    _encode_vision = Gemma4ForConditionalGeneration._encode_vision
     _pack_vision = Gemma4ForConditionalGeneration._pack_vision
     _embed_vision = Gemma4ForConditionalGeneration._embed_vision
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
