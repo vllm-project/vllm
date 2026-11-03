@@ -210,8 +210,8 @@ class DeepseekV32Attention(MLAAttention):
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
             attn_backend=attn_backend,
-            # MTP draft steps reuse top-k rows by token slot, which ShardQ's
-            # compact per-rank rows would break.
+            # MTP draft steps reuse each token slot's top-k, which ShardQ's
+            # compact per-rank layout would break.
             shardq_eligible=not is_mtp_layer,
         )
 
@@ -597,7 +597,7 @@ class DeepseekV32Attention(MLAAttention):
             decode_q, mqa_q_arg = shard_q(mqa_q_arg, shardq)
             decode_out = None
             if decode_q.shape[0]:
-                # Decode rows attend head-sharded.
+                # Decode tokens attend head-sharded.
                 decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
                     decode_q, kv_cache, attn_metadata, self
                 )

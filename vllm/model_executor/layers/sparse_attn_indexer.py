@@ -739,7 +739,7 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        # Under ShardQ the chunks number this rank's rows compactly.
+        # Under ShardQ the chunks index the shardq_gather_indices tokens.
         prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
         if (indices := prefill_metadata.shardq_gather_indices) is not None:
             assert candidate_blocks is None

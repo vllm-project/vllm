@@ -48,7 +48,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.shardq import shardq_shard
+from vllm.v1.attention.ops.shardq import build_shardq_split
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
@@ -442,7 +442,7 @@ class BuildPrefillChunkMetadataKernel(
         dcp_interleave: int
         block_size: int
         compress_ratio: int
-        has_row_context_lens: bool
+        has_positions: bool
         input_variant: TritonPointerInputVariant
 
     @staticmethod
@@ -455,9 +455,9 @@ class BuildPrefillChunkMetadataKernel(
         # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
         # aliases cu_compressed_seq_lens_ptr otherwise.
         row_start_cu_compressed_seq_lens_ptr,
-        # Each query row's causal context length, when a request's rows in
+        # Each query token's position, when a request's tokens in
         # query_start_loc are not its contiguous last ones (ShardQ).
-        row_context_lens_ptr,
+        positions_ptr,
         # Outputs
         token_to_seq_ptr,
         cu_compressed_seq_len_ks_ptr,
@@ -502,8 +502,8 @@ class BuildPrefillChunkMetadataKernel(
 
             # cu_seq_len_ke: row start + per-token context length. Under DCP the
             # global per-token length is sharded across ranks.
-            if row_context_lens_ptr is not None:
-                global_ctx = tl.load(row_context_lens_ptr + abs_pos, mask=mask)
+            if positions_ptr is not None:
+                global_ctx = tl.load(positions_ptr + abs_pos, mask=mask) + 1
             else:
                 global_ctx = start_pos + 1 + offset
             len_per_token = global_ctx // COMPRESS_RATIO
@@ -538,7 +538,7 @@ class BuildPrefillChunkMetadataKernel(
         DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
-        HAS_ROW_CONTEXT_LENS: bool,
+        HAS_POSITIONS: bool,
         input_variant: TritonPointerInputVariant,
     ) -> CompileKey:
         return self.CompileKey(
@@ -549,7 +549,7 @@ class BuildPrefillChunkMetadataKernel(
             dcp_interleave=triton_scalar_specialization_rep(DCP_INTERLEAVE),
             block_size=BLOCK_SIZE,
             compress_ratio=COMPRESS_RATIO,
-            has_row_context_lens=HAS_ROW_CONTEXT_LENS,
+            has_positions=HAS_POSITIONS,
             input_variant=input_variant,
         )
 
@@ -596,8 +596,8 @@ class BuildPrefillChunkMetadataKernel(
             or [dcp_interleave],
             BLOCK_SIZE=self.BLOCK_SIZE,
             COMPRESS_RATIO=list(compress_ratios),
-            # ShardQ passes row context lengths.
-            HAS_ROW_CONTEXT_LENS=(
+            # ShardQ passes the query tokens' positions.
+            HAS_POSITIONS=(
                 [False, True]
                 if vllm_config.attention_config.sparse_mla_shard_q
                 else [False]
@@ -646,7 +646,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_INTERLEAVE=compile_key.dcp_interleave,
             num_reqs=1,
             COMPRESS_RATIO=compile_key.compress_ratio,
-            row_context_lens=int32_ptr if compile_key.has_row_context_lens else None,
+            positions=int32_ptr if compile_key.has_positions else None,
         )
 
     @kernel_launcher
@@ -667,7 +667,7 @@ class BuildPrefillChunkMetadataKernel(
         *,
         num_reqs: int,
         COMPRESS_RATIO: int,
-        row_context_lens: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> LaunchSpec:
         return (num_reqs,), dict(
             BLOCK_SIZE=self.BLOCK_SIZE,
@@ -679,8 +679,9 @@ class BuildPrefillChunkMetadataKernel(
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
     max_prefill_seq_len: int = -1
-    # Under ShardQ, the token scored by each chunk row: the chunks hold only
-    # this TP rank's rows, numbered as their top-k is written.
+    # Under ShardQ, the chunks cover the decode tokens and this TP rank's
+    # tokens, gathered compactly in the order their top-k is written: the
+    # indices of those tokens.
     shardq_gather_indices: torch.Tensor | None = None
 
 
@@ -1544,29 +1545,40 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
-            row_context_lens = shardq_gather_indices = None
+            positions = shardq_gather_indices = None
             if self.use_shardq and (
-                shards := shardq_shard(common_attn_metadata, self.vllm_config)
+                split := build_shardq_split(common_attn_metadata, self.vllm_config)
             ):
-                # Rows this builder counts as decodes stay in place there.
-                assert num_decode_tokens <= shards.num_decode_tokens
-                # Every rank scores every decode row in place, then its own rows
-                # compactly, in the order the token-sharded attention reads them.
-                n = shards.num_decode_tokens
-                num_rows = n + len(shards.local_ids)
-                rows = self.shardq_gather_indices.cpu[:num_rows]
-                np.concatenate((np.arange(n), shards.local_ids + n), out=rows.numpy())
-                shardq_gather_indices = self.shardq_gather_indices.copy_to_gpu(num_rows)
-                # Chunk only these rows, each with its causal context length,
-                # and renumber the requests' rows (the decodes' stay put).
-                req = torch.searchsorted(
+                # Tokens this builder counts as decodes stay in place there.
+                assert num_decode_tokens <= split.num_decode_tokens
+                # Every rank scores every decode token in place, then its own
+                # tokens compactly, in the order the token-sharded attention
+                # reads them.
+                shardq_decode_tokens = split.num_decode_tokens
+                num_indices = shardq_decode_tokens + len(split.local_token_ids)
+                indices_cpu = self.shardq_gather_indices.cpu[:num_indices]
+                np.concatenate(
+                    (
+                        np.arange(shardq_decode_tokens),
+                        split.local_token_ids + shardq_decode_tokens,
+                    ),
+                    out=indices_cpu.numpy(),
+                )
+                shardq_gather_indices = self.shardq_gather_indices.copy_to_gpu(
+                    num_indices
+                )
+                # Chunk only these tokens, each at its position, and renumber
+                # the requests' query ranges (the decodes' stay put).
+                token_to_req = torch.searchsorted(
                     query_start_loc[1 : num_reqs + 1], shardq_gather_indices, right=True
                 )
-                row_context_lens = (
-                    shardq_gather_indices + 1 + seq_lens[req] - query_start_loc[req + 1]
+                positions = (
+                    shardq_gather_indices
+                    + seq_lens[token_to_req]
+                    - query_start_loc[token_to_req + 1]
                 )
                 query_start_loc_cpu = torch.searchsorted(
-                    rows,
+                    indices_cpu,
                     query_start_loc_cpu[: num_reqs + 1],
                     out_int32=True,
                     out=self.shardq_query_start_loc.cpu[: num_reqs + 1],
@@ -1644,7 +1656,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     dcp_world_size=self.dcp_world_size,
                     cp_kv_cache_interleave_size=self.compressed_cp_interleave_size,
                     pcp_plan=pcp_plan,
-                    row_context_lens=row_context_lens,
+                    positions=positions,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -1926,7 +1938,7 @@ def build_prefill_chunk_metadata(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     pcp_plan: PCPGlobalChunkPlan | None = None,
-    row_context_lens: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     if pcp_plan is not None:
         total_seq_lens = pcp_plan.total
@@ -1973,8 +1985,8 @@ def build_prefill_chunk_metadata(
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]
     )
-    if row_context_lens is not None:
-        row_context_lens = row_context_lens[query_start_loc_cpu[start_idx] :]
+    if positions is not None:
+        positions = positions[query_start_loc_cpu[start_idx] :]
 
     total_query_len = int(
         (query_start_loc_cpu[end_idx] - query_start_loc_cpu[start_idx]).item()
@@ -2017,7 +2029,7 @@ def build_prefill_chunk_metadata(
         cp_kv_cache_interleave_size,
         num_reqs=num_reqs,
         COMPRESS_RATIO=compress_ratio,
-        row_context_lens=row_context_lens,
+        positions=positions,
     )
 
     pcp_deinterleave_idx = pcp_plan.deinterleave_idx if pcp_plan is not None else None

@@ -22,8 +22,8 @@ from vllm.v1.attention.ops import shardq
 from vllm.v1.attention.ops.shardq import (
     ShardQMetadata,
     allocate_shardq_buffers,
+    build_shardq_split,
     shard_q,
-    shardq_shard,
     unshard_out,
     zigzag_split,
 )
@@ -33,13 +33,13 @@ from vllm.v1.attention.ops.shardq import (
 @pytest.mark.parametrize("lens", [[4096], [65, 300, 7000], [1000, 64, 64, 129]])
 def test_zigzag_split_partitions_tokens(world, lens):
     qsl = np.r_[0, np.cumsum(lens)]
-    token_ids, counts = zigzag_split(np.array(lens), world)
-    per_rank = np.split(token_ids, np.cumsum(counts)[:-1])
+    token_ids, num_tokens_per_rank = zigzag_split(np.array(lens), world)
+    per_rank = np.split(token_ids, np.cumsum(num_tokens_per_rank)[:-1])
     merged = np.sort(np.concatenate(per_rank))
     np.testing.assert_array_equal(merged, np.arange(qsl[-1]))
     for idx in per_rank:
         assert np.all(np.diff(idx) > 0)
-    # Each rank takes one early and one late piece of every request, so its
+    # Each rank takes one early and one late chunk of every request, so its
     # summed causal positions stay within a couple of tokens per request of
     # the mean.
     positions = [
@@ -50,7 +50,7 @@ def test_zigzag_split_partitions_tokens(world, lens):
 
 
 @pytest.mark.parametrize("num_spec", [0, 2])
-def test_shardq_shard_after_indexer_decodes(monkeypatch, num_spec):
+def test_build_shardq_split_after_indexer_decodes(monkeypatch, num_spec):
     """The MLA and indexer builders derive the same split from the batch:
     requests of at most 1 + num_spec tokens stay head-sharded, and the tokens
     after them are split once they reach sparse_mla_shard_q_min_tokens and a
@@ -73,15 +73,15 @@ def test_shardq_shard_after_indexer_decodes(monkeypatch, num_spec):
         attention_config=attention_config,
         model_config=SimpleNamespace(hf_text_config=hf_config),
     )
-    tokens = shardq_shard(metadata, vllm_config)
-    assert tokens is not None
-    assert tokens.num_decode_tokens == 3 * (1 + num_spec)
-    assert tokens.counts.sum() == 9100
+    split = build_shardq_split(metadata, vllm_config)
+    assert split is not None
+    assert split.num_decode_tokens == 3 * (1 + num_spec)
+    assert split.num_tokens_per_rank.sum() == 9100
     hf_config.index_topk = 5300
-    assert shardq_shard(metadata, vllm_config) is None
+    assert build_shardq_split(metadata, vllm_config) is None
     hf_config.index_topk = 5299
     attention_config.sparse_mla_shard_q_min_tokens = 9101
-    assert shardq_shard(metadata, vllm_config) is None
+    assert build_shardq_split(metadata, vllm_config) is None
     # Five tokens split into eight chunks, three of them empty, leaving rank 2
     # without tokens.
     attention_config.sparse_mla_shard_q_min_tokens = 1
@@ -90,7 +90,7 @@ def test_shardq_shard_after_indexer_decodes(monkeypatch, num_spec):
         block_size=16,
         device=torch.device("cpu"),
     )
-    assert shardq_shard(short, vllm_config) is None
+    assert build_shardq_split(short, vllm_config) is None
 
 
 def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
@@ -115,12 +115,14 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
             )
         all_heads = world * heads
         full = torch.randn(num_tokens, all_heads, dim, device="cuda").to(q_dtype)
-        token_ids, counts = zigzag_split(np.array(lens), world)
+        token_ids, num_tokens_per_rank = zigzag_split(np.array(lens), world)
         shardq = ShardQMetadata(
             num_decode_tokens=num_decode_tokens,
-            counts=counts.tolist(),
+            num_tokens_per_rank=num_tokens_per_rank.tolist(),
             token_ids=torch.from_numpy(token_ids).cuda(),
-            offsets=torch.from_numpy(np.r_[0, np.cumsum(counts)]).cuda(),
+            rank_offsets=torch.from_numpy(
+                np.r_[0, np.cumsum(num_tokens_per_rank)]
+            ).cuda(),
         )
         local_heads = full[:, rank * heads : (rank + 1) * heads].contiguous()
         for _ in range(2):  # The second pass reuses the symmetric buffers.
@@ -131,7 +133,7 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
                 decode_q.view(torch.uint8),
                 local_heads[:num_decode_tokens].view(torch.uint8),
             )
-            expected = full[num_decode_tokens:][shardq.local_idx]
+            expected = full[num_decode_tokens:][shardq.local_token_ids]
             assert torch.equal(sharded.view(torch.uint8), expected.view(torch.uint8))
             # Attention outputs are a head-padded slice; unshard reads its
             # strides.
@@ -149,7 +151,7 @@ def _round_trip(rank, world, port, use_sm, q_dtype, num_decode_tokens):
 @pytest.mark.parametrize("num_decode_tokens", [0, 33])
 def test_shard_q_round_trip(use_sm, q_dtype, num_decode_tokens):
     """The exchanges move each rank's tokens to it with all heads and back,
-    through symmetric memory or NCCL, leaving the decode rows head-sharded."""
+    through symmetric memory or NCCL, leaving the decode tokens head-sharded."""
     world = 2
     if torch.accelerator.device_count() < world:
         pytest.skip(f"needs {world} GPUs")

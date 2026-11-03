@@ -51,7 +51,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.attention.ops.shardq import ShardQMetadata, shardq_shard
+from vllm.v1.attention.ops.shardq import ShardQMetadata, build_shardq_split
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
@@ -167,7 +167,7 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     cp_kv_cache_interleave_size: int = 1
     # Set on token-sharded TP prefill steps (see vllm.v1.attention.ops.shardq).
     shardq: ShardQMetadata | None = None
-    # Top-k buffer row of the first query row.
+    # Index of the first query token's top-k in the top-k buffer.
     topk_start: int = 0
 
 
@@ -182,15 +182,17 @@ def build_shardq_metadata(
 ) -> ShardQMetadata | None:
     """This step's ShardQ, with ``metadata`` narrowed to this rank's tokens,
     or None."""
-    shards = shardq_shard(common_attn_metadata, vllm_config)
-    if shards is None:
+    split = build_shardq_split(common_attn_metadata, vllm_config)
+    if split is None:
         return None
-    num_decode_tokens = shards.num_decode_tokens
+    num_decode_tokens = split.num_decode_tokens
     shardq = ShardQMetadata(
         num_decode_tokens=num_decode_tokens,
-        counts=shards.counts.tolist(),
-        token_ids=async_tensor_h2d(shards.token_ids, device=device),
-        offsets=async_tensor_h2d(np.r_[0, np.cumsum(shards.counts)], device=device),
+        num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+        token_ids=async_tensor_h2d(split.token_ids, device=device),
+        rank_offsets=async_tensor_h2d(
+            np.r_[0, np.cumsum(split.num_tokens_per_rank)], device=device
+        ),
     )
     # The indexer wrote these tokens' top-k compactly after the decodes.
     shardq.attn_metadata = replace(
@@ -198,7 +200,7 @@ def build_shardq_metadata(
         num_decodes=0,
         num_decode_tokens=0,
         req_id_per_token=metadata.req_id_per_token[
-            shardq.local_idx + num_decode_tokens
+            shardq.local_token_ids + num_decode_tokens
         ],
         topk_start=num_decode_tokens,
     )
@@ -833,8 +835,8 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                     NUM_TOPK_TOKENS=topk.shape[1],
                     return_valid_counts=True,
                 )
-            # A mixed ShardQ step's decode rows take the index group's
-            # conversion, so its split rows convert here.
+            # A mixed ShardQ step's decode tokens take the index group's
+            # conversion, so its token-sharded ones convert here.
             elif topk_start or (
                 self.group_conversion_decode_only
                 and not (

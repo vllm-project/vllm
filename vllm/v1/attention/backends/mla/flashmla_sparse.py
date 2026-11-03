@@ -705,8 +705,8 @@ class FlashMLASparseMetadataBuilder(
                     common_attn_metadata, metadata
                 )
         if metadata.shardq is not None:
-            # ShardQ's rows run in their own mixed-batch kernel call, with all
-            # heads, so they need their own lazily initialized scheduler.
+            # ShardQ's tokens run in their own mixed-batch kernel call, with
+            # all heads, so they need their own lazily initialized scheduler.
             shardq_metadata = metadata.shardq.attn_metadata
             assert isinstance(shardq_metadata, FlashMLASparseMetadata)
             shardq_metadata.fp8_use_mixed_batch = True

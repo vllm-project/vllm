@@ -1157,7 +1157,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 decode_q, mqa_q = shard_q(mqa_q, shardq)
                 decode_out = None
                 if decode_q.shape[0]:
-                    # Decode rows attend head-sharded.
+                    # Decode tokens attend head-sharded.
                     decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
                         decode_q, kv_cache, attn_metadata, self
                     )
@@ -1252,7 +1252,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
         if self.hisparse_cache is not None:
             return False
-        # ShardQ steps' top-k rows are compact and run through forward_mqa.
+        # ShardQ steps' top-k are compact per rank and run through forward_mqa.
         if getattr(attn_metadata, "shardq", None) is not None:
             return False
         prefill = attn_metadata.prefill

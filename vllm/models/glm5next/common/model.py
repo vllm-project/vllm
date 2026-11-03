@@ -411,8 +411,8 @@ class Glm5NextDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_use_nope,
-                # MTP draft steps reuse top-k rows by token slot, which
-                # ShardQ's compact per-rank rows would break.
+                # MTP draft steps reuse each token slot's top-k, which
+                # ShardQ's compact per-rank layout would break.
                 shardq_eligible=not is_mtp_layer,
             )
 

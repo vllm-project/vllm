@@ -310,7 +310,7 @@ def sparse_attn_indexer_kpool(
             _pos = positions[num_decode_tokens:num_tokens].to(torch.int32)
             _buf = topk_indices_buffer[num_decode_tokens:num_tokens]
             _fill_causal_indices(_buf, _pos)
-        # Under ShardQ the chunks number this rank's rows compactly.
+        # Under ShardQ the chunks index the shardq_gather_indices tokens.
         prefill_q, prefill_q_scale = q_quant, q_scale
         prefill_weights, prefill_positions = weights, positions
         if (indices := prefill_metadata.shardq_gather_indices) is not None:
