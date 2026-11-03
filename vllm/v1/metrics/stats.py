@@ -231,6 +231,10 @@ class SchedulerStats:
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
+    # Requests affected by KV connector load failures since the previous
+    # SchedulerStats.
+    num_kv_load_failed_reqs: int = 0
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
