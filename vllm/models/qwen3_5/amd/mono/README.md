@@ -151,17 +151,22 @@ stock modules scored 0.1818 on the same eval.
 
 TP1, one MI350P, vLLM v0.32.0 with AITER main and this decode, MTP off
 in both arms, same image; the arms differ only in
-`VLLM_ROCM_MONO_DECODE=1`. Row caps 8 unless stated, 8k input / 1k
-output, as above.
+`VLLM_ROCM_MONO_DECODE=1`. 8k input / 1k output, as above.
 
 | Concurrency | Output tok/s, non-mono → mono | Median TPOT (ms) |
 | --- | --- | --- |
-| 1 | 104.6 → 117.5 (+12.4%) | 9.21 → 8.15 (+11.5%) |
-| 2 | 196.7 → 212.5 (+8.0%) | 9.81 → 9.06 (+7.6%) |
-| 4 | 341.9 → 366.5 (+7.2%) | 11.05 → 10.31 (+6.7%) |
-| 8 | 570.6 → 567.1 (−0.6%) | 13.27 → 13.35 (−0.6%) |
-| 4, default caps | 341.9 → 365.8 (+7.0%) | 11.05 → 10.32 (+6.6%) |
-| 8, default caps | 570.6 → 578.0 (+1.3%) | 13.27 → 13.10 (+1.3%) |
+| 1 | 104.6 → 124.6 (+19.1%) | 9.21 → 7.67 (+16.7%) |
+| 2 | 196.4 → 225.5 (+14.8%) | 9.83 → 8.52 (+13.3%) |
+| 4 | 344.3 → 385.6 (+12.0%) | 11.05 → 9.84 (+11.0%) |
+| 8 | 571.8 → 574.6 (+0.5%) | 13.19 → 13.19 (+0.0%) |
+
+Default row caps (4); caps 8 give the same up to 4 requests and 579.1
+(+1.3%) at 8.
+
+With MTP-3 (mono is then K2 only), one request: 221.9 → 238.5 and
+221.0 → 226.2 output tok/s on two prompt seeds (+4.9% together); two
+requests and more: within ±1% (a verify step of two requests is 8 rows,
+above the cap).
 
 At 8 rows K1 and K2 take about as long as the MI350P stock MXFP4 GEMMs
 they replace, so keep the default TP1 caps (4) on MI350P.
@@ -181,6 +186,9 @@ The model card setting is `lm_eval` `local-completions`, 5-shot, all
 1319 questions, sampled (thinking: temperature 1.0, max_gen_toks 3072;
 non-thinking: the card's `gsm8k_nothink` task). The paired differences
 over the three seeds are −0.18 ± 0.36 and −0.45 ± 0.45 points.
+With MTP-3, one request at a time (where K2 runs), one seed per arm:
+thinking 0.9265 → 0.9303 (paired +0.38 ± 0.69 points), non-thinking
+0.8961 → 0.8908 (−0.53 ± 0.76).
 
 ## Tests
 
