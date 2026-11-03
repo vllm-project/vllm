@@ -116,12 +116,8 @@ MAX_FUSED_GDN_MTP_TOKENS = 8
 # stream. On GB300, across Qwen3.5/3.8 shapes, quant formats and TP 1-8, the first
 # regression was at 272 tokens (27B BF16 TP8).
 _BA_PROJ_OVERLAP_MAX_TOKENS = 256
-# FlashInfer's GDN prefill picks its chunk-parallel (CP) route whenever the
-# batch has few sequences relative to the SM count, regardless of their length.
-# CP splits a long sequence across the GPU but has a fixed cost of ~175 us per
-# call on GB300, while the regular route costs ~30 us per 1k tokens. Below
-# this many prefill tokens the regular route is faster at every TP size
-# measured (Qwen3.5 head counts, TP 2-8), so CP is only allowed above it.
+# FlashInfer's chunk-parallel (CP) route has a fixed ~175 us cost per call.
+# Up to ~4k tokens the regular route is 1.4-5.7x faster per call.
 _FI_GDN_PREFILL_CP_MIN_TOKENS = 8192
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
