@@ -132,7 +132,9 @@ class BlockTable:
         # request metadata (e.g. kv_len / slot-mapping positions) instead of
         # num_blocks_per_row, so stale ids beyond the live region can still
         # be dereferenced after the blocks have been freed and reallocated.
-        self.block_table.np[row_idx, self.num_blocks_per_row[row_idx]:prev_num_blocks] = 0
+        self.block_table.np[
+            row_idx, self.num_blocks_per_row[row_idx] : prev_num_blocks
+        ] = 0
 
     def clear_row(self, row_idx: int) -> None:
         num_blocks = self.num_blocks_per_row[row_idx]
