@@ -141,6 +141,13 @@ _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
 # The processor fills max_soft_tokens up to rounding: an image or frame has
 # at least half of them, so at least this many with the smallest setting.
 _MIN_SOFT_TOKENS = _SUPPORTED_SOFT_TOKENS[0] // 2
+# Soft tokens per eager vision tower call; bounds the tower's peak activations.
+_MAX_SOFT_TOKENS_PER_CALL = 4 * _SUPPORTED_SOFT_TOKENS[-1]
+
+
+def _tower_lora_enabled(vllm_config: VllmConfig) -> bool:
+    lora_config = vllm_config.lora_config
+    return lora_config is not None and lora_config.enable_tower_connector_lora
 
 
 def _get_max_soft_tokens(
@@ -1123,6 +1130,7 @@ class Gemma4ForConditionalGeneration(
             multimodal_config is not None
             and getattr(multimodal_config, "mm_encoder_tp_mode", None) == "data"
         )
+        self._tower_lora = _tower_lora_enabled(vllm_config)
 
         # Apply the dimension check independently because the vision and audio
         # towers do not necessarily have the same hidden and intermediate sizes.
@@ -1462,6 +1470,36 @@ class Gemma4ForConditionalGeneration(
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         return pixel_values, metadata, [n // pooling_k2 for n in num_patches]
 
+    def _encode_vision(
+        self,
+        pixel_values: torch.Tensor | Sequence[torch.Tensor],
+        pixel_position_ids: torch.Tensor | Sequence[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Encode images or video frames in packed calls of at most
+        `_MAX_SOFT_TOKENS_PER_CALL` soft tokens.
+
+        Returns the soft tokens of all items and the number of each.
+        """
+        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        num_tokens = [n // pooling_k2 for n in _num_valid_patches(pixel_position_ids)]
+        # Tower LoRA maps adapters over the whole encoder batch: one call.
+        max_tokens = sum(num_tokens) if self._tower_lora else _MAX_SOFT_TOKENS_PER_CALL
+        bounds = [0]
+        total = 0
+        for i, n in enumerate(num_tokens):
+            if total and total + n > max_tokens:
+                bounds.append(i)
+                total = 0
+            total += n
+        bounds.append(len(num_tokens))
+        embeds = []
+        for start, end in zip(bounds[:-1], bounds[1:]):
+            packed, metadata, _ = self._pack_vision(
+                pixel_values[start:end], pixel_position_ids[start:end]
+            )
+            embeds.append(self._embed_vision(packed, metadata))
+        return torch.cat(embeds), num_tokens
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
@@ -1487,10 +1525,10 @@ class Gemma4ForConditionalGeneration(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
-        pixel_values, metadata, num_tokens = self._pack_vision(
+        embeds, num_tokens = self._encode_vision(
             image_input["pixel_values"], image_input["pixel_position_ids"]
         )
-        return list(self._embed_vision(pixel_values, metadata).split(num_tokens))
+        return list(embeds.split(num_tokens))
 
     def _process_video_input(
         self,
@@ -1519,11 +1557,10 @@ class Gemma4ForConditionalGeneration(
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
         """Returns one tensor per video with the soft tokens of its frames."""
-        pixel_values, metadata, num_tokens = self._pack_vision(
+        embeds, num_tokens = self._encode_vision(
             video_input["pixel_values_videos"],
             video_input["pixel_position_ids_videos"],
         )
-        embeds = self._embed_vision(pixel_values, metadata)
         frame_counts = video_input["video_frame_counts"]
         if isinstance(frame_counts, torch.Tensor):
             frame_counts = frame_counts.tolist()
@@ -1804,8 +1841,7 @@ class Gemma4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        pixel_values, metadata, _ = self._pack_vision(*self._get_vision_rows(mm_kwargs))
-        return self._embed_vision(pixel_values, metadata)
+        return self._encode_vision(*self._get_vision_rows(mm_kwargs))[0]
 
     def embed_input_ids(
         self,
