@@ -19,6 +19,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 
@@ -62,6 +63,14 @@ def batch_sharded_sampling_enabled(
         vllm_config.parallel_config.enable_batch_sharded_sampling
         and hasattr(target_model, "compute_logits_local")
     )
+
+
+def get_tp_pynccl_comm() -> "PyNcclCommunicator | None":
+    """The TP group's PyNCCL communicator, or None if it is unavailable."""
+    pynccl_comm = getattr(get_tp_group().device_communicator, "pynccl_comm", None)
+    if pynccl_comm is None or pynccl_comm.disabled:
+        return None
+    return pynccl_comm
 
 
 @triton.jit
@@ -374,25 +383,39 @@ class BatchSharder:
         return local_batch, sorted_logits_indices, local_grammar_output, metadata
 
 
-def all_to_all_logits(
-    logits_shard: torch.Tensor,
-    metadata: BatchShardMetadata,
+def all_to_all_vocab_shards(
+    logits_shard: torch.Tensor, send_splits: list[int], num_local_rows: int
 ) -> torch.Tensor:
-    recv = logits_shard.new_empty(
-        metadata.tp_size * metadata.num_local_logits, logits_shard.shape[-1]
-    )
-    torch.distributed.all_to_all_single(
-        recv,
-        logits_shard.contiguous(),
-        output_split_sizes=[metadata.num_local_logits] * metadata.tp_size,
-        input_split_sizes=metadata.num_logits_per_rank,
-        group=get_tp_group().device_group,
-    )
+    """Exchange vocab-shard logits so each rank gets full-vocab logits for its
+    own rows. `send_splits[r]` rows of `logits_shard` go to rank r.
+
+    Returns:
+        [num_local_rows, tp_size * shard_width] logits of this rank's rows.
+
+    """
+    tp_size = len(send_splits)
+    recv = logits_shard.new_empty(tp_size * num_local_rows, logits_shard.shape[-1])
+    recv_splits = [num_local_rows] * tp_size
+    pynccl_comm = get_tp_pynccl_comm()
+    if pynccl_comm is not None:
+        # The TP collectives' communicator: a c10d all-to-all would make NCCL
+        # allocate a second set of point-to-point buffers.
+        pynccl_comm.all_to_all_single(
+            recv, logits_shard.contiguous(), recv_splits, send_splits
+        )
+    else:
+        torch.distributed.all_to_all_single(
+            recv,
+            logits_shard.contiguous(),
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+            group=get_tp_group().device_group,
+        )
     shard_width = recv.shape[-1]
     return (
-        recv.view(metadata.tp_size, metadata.num_local_logits, shard_width)
+        recv.view(tp_size, num_local_rows, shard_width)
         .permute(1, 0, 2)
-        .reshape(metadata.num_local_logits, metadata.tp_size * shard_width)
+        .reshape(num_local_rows, tp_size * shard_width)
     )
 
 

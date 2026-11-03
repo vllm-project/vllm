@@ -44,6 +44,8 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from .dflash2_ops import candidate_edges
 
@@ -386,12 +388,10 @@ class DFlash2BeamModel(nn.Module):
         norm. Must run after the weights are loaded, since it copies them.
         """
         attns = [layer.self_attn for layer in self.layers]
-        self._context_kv_weight = torch.cat(
-            [attn.qkv_proj.weight[attn.q_size :] for attn in attns]
-        )
-        self._context_k_norm_weight = torch.stack(
-            [attn.k_norm.weight for attn in attns]
-        ).contiguous()
+        kv = torch.cat([attn.qkv_proj.weight[attn.q_size :] for attn in attns])
+        refill_derived(self, "_context_kv_weight", kv)
+        k_norm = torch.stack([attn.k_norm.weight for attn in attns])
+        refill_derived(self, "_context_k_norm_weight", k_norm.contiguous())
 
     def precompute_and_store_context_kv(
         self,
@@ -540,6 +540,9 @@ class DFlash2BeamModel(nn.Module):
 
 
 class DFlash2BeamForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DFlash2SpeculatorConfig
+
     # The checkpoint ships neither, so the speculator always aliases the target's.
     has_own_embed_tokens = False
     has_own_lm_head = False
@@ -618,6 +621,8 @@ class DFlash2BeamForCausalLM(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded = {f"model.{name}" for name in self.model.load_weights(weights)}
-        self.model.build_context_kv_weights()
         # Aliased to the target's after loading.
         return loaded | {"model.embed_tokens.weight", "lm_head.weight"}
+
+    def process_weights_after_loading(self) -> None:
+        self.model.build_context_kv_weights()
