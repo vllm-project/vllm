@@ -369,7 +369,16 @@ class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
-        return [64 if current_platform.is_device_capability_family(90) else 128]
+        # SM120 (RTX PRO 6000 Blackwell): the arch-12 fp4/fp8 indexer kernels
+        # support the same 64-page layout as Hopper; 128 pages is SM100-only.
+        return [
+            64
+            if (
+                current_platform.is_device_capability_family(90)
+                or current_platform.is_device_capability_family(120)
+            )
+            else 128
+        ]
 
 
 @dataclass(frozen=True)
