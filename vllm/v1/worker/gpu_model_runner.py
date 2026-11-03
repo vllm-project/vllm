@@ -6212,6 +6212,10 @@ class GPUModelRunner(
                     layer.impl._k_scale_cache = None
                 if hasattr(layer.impl, "_v_scale_cache"):
                     layer.impl._v_scale_cache = None
+                # Clean up cached K/V cache views (issue #64572); they hold a
+                # reference to the detached profiling kv_cache tensor.
+                if hasattr(layer.impl, "_kv_view_cache"):
+                    layer.impl._kv_view_cache = None
 
         gc.collect()
         torch.accelerator.empty_cache()
