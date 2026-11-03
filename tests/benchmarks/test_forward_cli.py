@@ -32,8 +32,9 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
     not current_platform.is_device_capability_family(100),
     reason="Native Muse TRTLLM validation requires Blackwell.",
 )
-def test_bench_forward_muse_balanced_routing(tmp_path):
-    """Muse's native router supports finite, reproducible balanced graph replay."""
+@pytest.mark.parametrize("routing", ["balanced", "zipf"])
+def test_bench_forward_muse_synthetic_routing(tmp_path, routing):
+    """Muse's native router supports finite, reproducible synthetic graph replay."""
     config = dict(
         architectures=["MuseSpark1xForCausalLM"],
         model_type="muse_spark_text",
@@ -86,7 +87,7 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
         "--moe-backend",
         "flashinfer_trtllm",
         "--routing",
-        "balanced",
+        routing,
         "--max-model-len",
         "64",
         "--max-num-seqs",
@@ -119,8 +120,40 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
     assert len(rows) == 2
     for row in rows:
         (rank,) = row["ranks"]
+        assert rank["routing"] == routing
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["graph_vs_eager"]["relative_rms"] == 0
+
+
+@pytest.mark.parametrize("keyword", [False, True])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+def test_synthetic_expert_ids_preserve_inactive_slots(keyword, dtype):
+    """Replacing routes must not reactivate padding or partially masked rows."""
+    from vllm.forward_context import ForwardContext, override_forward_context
+
+    fixture = torch.from_numpy(zipf_topk_ids(4, 8, 2, np.random.default_rng(0)))
+    expected = fixture.to(dtype).clone()
+    ids = torch.tensor([[1, 2], [-1, -1], [3, -1], [-1, 4]], dtype=dtype)
+    weights = torch.tensor([[0.6, 0.4], [0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+    hook = RoutingFixture._substitute_ids(fixture, 1, [0], 0)
+    context = ForwardContext(no_compile_layers={}, attn_metadata={}, slot_mapping={})
+    with override_forward_context(context):
+        args = (weights,) if keyword else (weights, ids)
+        kwargs = {"topk_ids": ids} if keyword else {}
+        replaced_args, replaced_kwargs = hook(torch.nn.Identity(), args, kwargs)
+        routed = replaced_kwargs["topk_ids"] if keyword else replaced_args[1]
+        assert routed.dtype == dtype
+        assert torch.equal(routed[ids == -1], ids[ids == -1])
+        assert torch.equal(routed[ids >= 0], expected[ids >= 0])
+        assert replaced_args[0] is weights
+
+        # A later replay can activate rows without inheriting an earlier mask.
+        active_ids = torch.zeros_like(ids)
+        args = (weights,) if keyword else (weights, active_ids)
+        kwargs = {"topk_ids": active_ids} if keyword else {}
+        replaced_args, replaced_kwargs = hook(torch.nn.Identity(), args, kwargs)
+        routed = replaced_kwargs["topk_ids"] if keyword else replaced_args[1]
+        assert torch.equal(routed, expected)
 
 
 def test_balanced_routing_restores_expert_bias(dist_init):
