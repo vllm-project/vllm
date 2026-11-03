@@ -189,6 +189,7 @@ vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
 ```
 
 With CPU weight offloading (`--cpu-offload-gb`), `nvfp4_per_token` stages the full-precision experts on the CPU and moves them to the GPU one expert at a time to quantize them. The quantized experts stay on the GPU.
+Muse Spark cannot re-quantize the experts that are NVFP4 in the checkpoint: a target that matches them raises an error.
 
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.

@@ -812,6 +812,15 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
         if isinstance(quant_config, ModelOptNvFp4Config) and not (
             quant_config.is_layer_excluded(prefix)
         ):
+            online_config = quant_config.online_quantization_config
+            if online_config is not None and online_config.resolve_quant_method_cls(
+                type(self), prefix
+            ):
+                raise NotImplementedError(
+                    f"MuseSpark cannot re-quantize the checkpoint's NVFP4 experts "
+                    f"({prefix}); online quantization targets may only match "
+                    "the BF16 experts."
+                )
             return MuseSparkModelOptNvFp4FusedMoE(quant_config, moe_config)
         # MuseSpark NVFP4 keeps layers 0 and 61 in BF16; online quantization
         # targets may still quantize them.

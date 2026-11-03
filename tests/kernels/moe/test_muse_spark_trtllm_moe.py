@@ -454,6 +454,16 @@ def test_muse_spark_rejects_unsupported_online_moe(dist_init, workspace_init):
         build_moe(MuseSpark1xRMSNorm, _bf16_checkpoint(), quant_config)
 
 
+def test_muse_spark_rejects_online_target_on_nvfp4_experts(dist_init, workspace_init):
+    """A target on checkpoint-NVFP4 experts must not be silently ignored."""
+    quant_config = nvfp4_quant_config()
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
+    )
+    with pytest.raises(NotImplementedError, match="re-quantize"):
+        build_moe(MuseSpark1xRMSNorm, _nvfp4_checkpoint(), quant_config)
+
+
 @torch.inference_mode()
 def test_muse_spark_bf16_moe_kernel_router_matches_reference(dist_init, workspace_init):
     """The fused router must select on biased scores but weight by unbiased ones."""
