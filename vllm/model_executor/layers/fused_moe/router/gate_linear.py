@@ -15,6 +15,7 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -424,7 +425,12 @@ class _GateLinearMethod(UnquantizedLinearMethod):
                 bf16x3_router_gemm_rocm,
             )
 
-            layer._bf16x3_weight = bf16x3_router_gemm_rocm.split_bf16x3(layer.weight)
+            # refilled in place: a reload reruns this, and captured graphs read it
+            refill_derived(
+                layer,
+                "_bf16x3_weight",
+                bf16x3_router_gemm_rocm.split_bf16x3(layer.weight),
+            )
         except ValueError as exc:
             layer.allow_rocm_bf16x3_router_gemm = False
             logger.warning_once(
