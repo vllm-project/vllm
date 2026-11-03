@@ -18,6 +18,12 @@ You can pass prompt embeddings from Hugging Face Transformers models to the  `'p
 
 [examples/features/prompt_embed/prompt_embed_offline.py](../../examples/features/prompt_embed/prompt_embed_offline.py)
 
+### Prefix caching
+
+Prompt embeddings support [automatic prefix caching](automatic_prefix_caching.md). Enable both with `LLM(enable_prompt_embeds=True, enable_prefix_caching=True)` or `vllm serve --enable-prompt-embeds --enable-prefix-caching`.
+
+For mixed token-ID and embedding inputs, cache identity includes `prompt_is_token_ids`, which selects the source of each embedding row, as well as the token IDs and supplied embeddings. Changing the mask prevents reuse of the affected cache block and subsequent blocks, even if the token IDs and embedding tensor are unchanged. Earlier unchanged prefix blocks and repeated identical requests can still reuse cached KV.
+
 ## Online Serving
 
 Our OpenAI-compatible server accepts prompt embeddings inputs via both the [Completions API](https://platform.openai.com/docs/api-reference/completions) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat). Both are enabled by the `--enable-prompt-embeds` flag in `vllm serve`.
