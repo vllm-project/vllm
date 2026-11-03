@@ -3,7 +3,7 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -286,6 +286,18 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             fa_version=fa_version,
             _when=self._is_valid_warmup_shape_probe,
         )
+
+    def compile_many(self, compile_keys: Iterable[CompileKey]) -> None:
+        # The compile-only forward entry returns before FA4's transitive
+        # split-KV combine; compile it from the same key set, whether the
+        # keys come from the registry warmup or a per-layer sweep.
+        from vllm.model_executor.warmup.fa4_combine_warmup import (
+            warm_split_kv_combine,
+        )
+
+        keys = list(compile_keys)
+        warm_split_kv_combine(keys)
+        super().compile_many(keys)
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None

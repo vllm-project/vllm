@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU tests for the FA4 MLA prefill warmup's split-KV combine coverage."""
+"""CPU tests for the FA4 MLA prefill warmup."""
 
 import math
 import sys
@@ -11,7 +11,15 @@ import pytest
 import torch
 from torch._subclasses.fake_tensor import FakeTensor
 
-from vllm.model_executor.warmup import fa4_mla_prefill_warmup
+from vllm.model_executor.layers.attention.mla_attention import MLAAttention
+from vllm.model_executor.warmup import fa4_combine_warmup, fa4_mla_prefill_warmup
+
+
+def _fake_layer_config(num_heads: Any, mla_dims: Any, window_size: Any) -> Any:
+    # Stand-in for the CUDA-only FA4MLALayerConfig dataclass.
+    return SimpleNamespace(
+        num_heads=num_heads, mla_dims=mla_dims, window_size=window_size
+    )
 
 
 @pytest.mark.skip_global_cleanup
@@ -60,7 +68,9 @@ def test_split_kv_combine_warmup_matches_runtime_compile_keys(
         SimpleNamespace(_flash_attn_fwd_combine=_flash_attn_fwd_combine),
     )
     monkeypatch.setattr(
-        fa4_mla_prefill_warmup, "current_platform", SimpleNamespace(device_type="cpu")
+        fa4_combine_warmup,
+        "current_platform",
+        SimpleNamespace(device_type="cpu"),
     )
     keys: list[Any] = [
         SimpleNamespace(
@@ -72,7 +82,7 @@ def test_split_kv_combine_warmup_matches_runtime_compile_keys(
         for num_heads, num_splits in ((16, 0), (32, 0), (64, 1))
     ]
 
-    fa4_mla_prefill_warmup._warm_split_kv_combine(keys)
+    fa4_combine_warmup.warm_split_kv_combine(keys)
 
     # _flash_attn_fwd's split-KV combine call: varlen, scheduler-metadata
     # num_splits_dynamic_ptr, no seqused / virtual_batch_idx / semaphore /
@@ -99,3 +109,75 @@ def test_split_kv_combine_warmup_matches_runtime_compile_keys(
         ),
         key=str,
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_prefill_warmup_collects_distinct_layer_configs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sweep must feed one config per distinct (heads, dims, window)
+    FA4 layer across the target and draft models, and skip non-FA4 layers.
+    """
+
+    def _layer(
+        num_heads: int,
+        window: int | None,
+        fa_version: int | None,
+    ) -> Any:
+        layer: Any = object.__new__(MLAAttention)
+        layer.num_heads = num_heads
+        layer.qk_nope_head_dim = 128
+        layer.qk_rope_head_dim = 64
+        layer.v_head_dim = 128
+        layer.q_lora_rank = 1536
+        layer.kv_lora_rank = 512
+        layer.sliding_window = window
+        layer.prefill_backend = SimpleNamespace(vllm_flash_attn_version=fa_version)
+        return layer
+
+    full_attn = _layer(32, None, 4)
+    swa_attn = _layer(32, 1024, 4)
+    # Same config as full_attn: must dedupe to one entry.
+    duplicate = _layer(32, None, 4)
+    drafter = _layer(8, None, 4)
+    non_fa4 = _layer(32, None, 3)
+
+    recorded: dict[str, Any] = {}
+
+    class _FakeKernel:
+        def get_warmup_keys(self, vllm_config: Any, configs: Any) -> Any:
+            recorded["configs"] = configs
+            return ["key-0", "key-1"]
+
+        def compile_many(self, keys: Any) -> None:
+            recorded["keys"] = keys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.v1.attention.backends.mla.prefill.flash_attn",
+        SimpleNamespace(
+            FA4MLALayerConfig=_fake_layer_config,
+            _FA4_MLA_PREFILL_KERNEL=_FakeKernel(),
+        ),
+    )
+    target = SimpleNamespace(modules=lambda: [full_attn, swa_attn, duplicate, non_fa4])
+    draft = SimpleNamespace(modules=lambda: [drafter])
+    monkeypatch.setattr(
+        fa4_mla_prefill_warmup,
+        "target_and_draft_models",
+        lambda worker: [target, draft],
+    )
+    worker: Any = SimpleNamespace(
+        model_runner=SimpleNamespace(is_pooling_model=False),
+        vllm_config=SimpleNamespace(),
+    )
+
+    fa4_mla_prefill_warmup.fa4_mla_prefill_warmup(worker)
+
+    configs = recorded["configs"]
+    assert [(c.num_heads, c.window_size) for c in configs] == [
+        (32, None),
+        (32, (1023, 0)),
+        (8, None),
+    ]
+    assert recorded["keys"] == ["key-0", "key-1"]
