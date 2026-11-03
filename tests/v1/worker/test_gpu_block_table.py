@@ -258,6 +258,30 @@ def test_v1_block_table_move_row_clears_vacated_row():
     assert (block_table.block_table.np[1] == 0).all()
 
 
+def test_v1_block_table_move_row_self_move_is_noop():
+    """A self-move must be a no-op. condense() only calls move_row with
+    src != tgt (it breaks when empty_index >= last_req_index), but the
+    vacated-row clear would zero the row if a future caller passed
+    src == tgt."""
+    from vllm.v1.worker.block_table import BlockTable
+
+    block_table = BlockTable(
+        block_size=16,
+        max_num_reqs=4,
+        max_num_blocks_per_req=8,
+        max_num_batched_tokens=64,
+        pin_memory=False,
+        device=torch.device("cuda"),
+        cp_kv_cache_interleave_size=1,
+    )
+    block_table.add_row([1, 2, 3], row_idx=0)
+
+    block_table.move_row(0, 0)
+
+    assert block_table.num_blocks_per_row[0] == 3
+    assert block_table.block_table.np[0, :3].tolist() == [1, 2, 3]
+
+
 def test_v1_block_table_move_row_clears_target_row_tail():
     """A move onto a shorter target row must also clear the target row's
     tail. Readers index rows by request metadata (e.g. kv_len /
