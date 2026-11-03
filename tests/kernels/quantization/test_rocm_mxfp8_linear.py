@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``), plus
-``AiterMxfp8LinearKernel`` on the same reference test for its tuned shapes.
+``AiterTritonMxfp8LinearKernel`` on the same reference test for its tuned shapes.
 
 DeepSeek V4.1 routes every attention linear through this kernel. It used to
 carry two BF16-dequantize workarounds on ROCm (one for all ``.attn.`` linears,
@@ -118,13 +118,15 @@ def _kernel_cls(backend: str, n: int, k: int) -> type:
         return RocmDotScaledMxfp8LinearKernel
 
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-    from vllm.model_executor.kernels.linear.mxfp8.aiter import AiterMxfp8LinearKernel
+    from vllm.model_executor.kernels.linear.mxfp8.aiter import (
+        AiterTritonMxfp8LinearKernel,
+    )
 
     if not is_aiter_found_and_supported():
         pytest.skip("AITER is not available")
     if not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(n, k):
         pytest.skip(f"AITER has no tuned MXFP8 config for N={n}, K={k}")
-    return AiterMxfp8LinearKernel
+    return AiterTritonMxfp8LinearKernel
 
 
 @pytest.fixture
@@ -217,11 +219,11 @@ def test_aiter_mxfp8_linear_forced_untuned_shape(monkeypatch, n, k, num_tokens):
     assert not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(n, k)
     monkeypatch.setattr(aiter, "_aiter_backend_forced", lambda: True)
     config = Mxfp8LinearLayerConfig(weight_shape=(n, k))
-    assert aiter.AiterMxfp8LinearKernel.can_implement(config) == (True, None)
+    assert aiter.AiterTritonMxfp8LinearKernel.can_implement(config) == (True, None)
 
     torch.manual_seed(num_tokens)
     layer = _make_layer(n, k, "cuda")
-    kernel = aiter.AiterMxfp8LinearKernel(config)
+    kernel = aiter.AiterTritonMxfp8LinearKernel(config)
     kernel.process_weights_after_loading(layer)
     x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
     out = kernel.apply_weights(layer, x)

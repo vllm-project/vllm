@@ -929,7 +929,7 @@ def _rocm_aiter_w8a8_gemm_fake(
     return Y
 
 
-def _rocm_aiter_mxfp8_gemm_dynamic_quant_impl(
+def _rocm_aiter_triton_mxfp8_gemm_dynamic_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -954,7 +954,7 @@ def _rocm_aiter_mxfp8_gemm_dynamic_quant_impl(
     )
 
 
-def _rocm_aiter_mxfp8_gemm_dynamic_quant_fake(
+def _rocm_aiter_triton_mxfp8_gemm_dynamic_quant_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
@@ -3176,10 +3176,10 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_mxfp8_gemm_dynamic_quant",
-                op_func=_rocm_aiter_mxfp8_gemm_dynamic_quant_impl,
+                op_name="rocm_aiter_triton_mxfp8_gemm_dynamic_quant",
+                op_func=_rocm_aiter_triton_mxfp8_gemm_dynamic_quant_impl,
                 mutates_args=[],
-                fake_impl=_rocm_aiter_mxfp8_gemm_dynamic_quant_fake,
+                fake_impl=_rocm_aiter_triton_mxfp8_gemm_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -3511,13 +3511,13 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
-    def mxfp8_gemm_dynamic_quant(
+    def triton_mxfp8_gemm_dynamic_quant(
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         out_dtype: torch.dtype,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_mxfp8_gemm_dynamic_quant(
+        return torch.ops.vllm.rocm_aiter_triton_mxfp8_gemm_dynamic_quant(
             x, weight, weight_scale, out_dtype
         )
 

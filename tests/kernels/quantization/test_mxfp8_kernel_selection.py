@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.model_executor.kernels.linear import (
-    AiterMxfp8LinearKernel,
+    AiterTritonMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
@@ -152,7 +152,9 @@ def _patch_rocm_platform(linear_backend: str = "auto"):
             "vllm.model_executor.kernels.linear._get_linear_backend",
             return_value=linear_backend,
         ),
-        patch.object(AiterMxfp8LinearKernel, "is_supported", return_value=(True, None)),
+        patch.object(
+            AiterTritonMxfp8LinearKernel, "is_supported", return_value=(True, None)
+        ),
         patch.object(
             RocmDotScaledMxfp8LinearKernel, "is_supported", return_value=(True, None)
         ),
@@ -169,7 +171,7 @@ def _patch_rocm_platform(linear_backend: str = "auto"):
 @pytest.mark.parametrize(
     ("weight_shape", "expected_kernel_cls"),
     [
-        (_AITER_TUNED_SHAPE, AiterMxfp8LinearKernel),
+        (_AITER_TUNED_SHAPE, AiterTritonMxfp8LinearKernel),
         ((1056, 4128), RocmDotScaledMxfp8LinearKernel),
     ],
 )
@@ -189,7 +191,7 @@ def test_init_mxfp8_linear_kernel_rocm_forced_aiter(weight_shape):
     with _patch_rocm_platform(linear_backend="aiter"):
         kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
 
-    assert isinstance(kernel, AiterMxfp8LinearKernel)
+    assert isinstance(kernel, AiterTritonMxfp8LinearKernel)
 
 
 @pytest.mark.parametrize(
@@ -201,7 +203,7 @@ def test_aiter_mxfp8_rejects_unaligned_k_and_bmm(weight_shape, bmm_batch_size):
         weight_shape=weight_shape, bmm_batch_size=bmm_batch_size
     )
     with _patch_rocm_platform():
-        can_implement, reason = AiterMxfp8LinearKernel.can_implement(config)
+        can_implement, reason = AiterTritonMxfp8LinearKernel.can_implement(config)
     assert not can_implement
     assert reason
 
@@ -216,6 +218,6 @@ def test_aiter_mxfp8_not_supported_when_batch_invariant():
         p.is_rocm.return_value = True
         p.supports_mx.return_value = True
         envs.VLLM_BATCH_INVARIANT = True
-        is_supported, reason = AiterMxfp8LinearKernel.is_supported()
+        is_supported, reason = AiterTritonMxfp8LinearKernel.is_supported()
     assert not is_supported
     assert reason is not None and "batch invariant" in reason

@@ -25,8 +25,8 @@ def _aiter_backend_forced() -> bool:
     return _get_linear_backend(quantization="mxfp8") == "aiter"
 
 
-class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
-    """AITER-based MXFP8 GEMM on ROCm."""
+class AiterTritonMxfp8LinearKernel(Mxfp8LinearKernel):
+    """AITER Triton MXFP8 GEMM on ROCm."""
 
     supports_pre_processed_weights = True
 
@@ -87,7 +87,7 @@ class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
             )
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
-        out = rocm_aiter_ops.mxfp8_gemm_dynamic_quant(
+        out = rocm_aiter_ops.triton_mxfp8_gemm_dynamic_quant(
             x2d, layer.weight, layer.weight_scale, x.dtype
         )
         out = out.reshape(out_shape)
