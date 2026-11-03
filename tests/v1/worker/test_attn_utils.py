@@ -28,6 +28,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, Mult
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
+from vllm.v1.hisparse.runtime import _has_hisparse_ops
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseResidentSpec,
@@ -488,6 +489,7 @@ class _FakeSharedHostRegion:
         self.cleanup_calls += 1
 
 
+@pytest.mark.skipif(not _has_hisparse_ops(), reason="HiSparse CUDA ops not compiled")
 def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache():
     """The real KV cache must reuse the profiling host pool, not pin it again."""
     from vllm.config import DeviceConfig, VllmConfig
@@ -533,7 +535,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache():
     finally:
         torch.accelerator.synchronize()
         cache.unbind_cache()
-        release_pinned_state([], pool.pinned, pool.shared_region)
+        release_pinned_state([runtime], pool.pinned, pool.shared_region)
         hisparse_runtime_module.drop_hisparse_host_pool(config)
 
 

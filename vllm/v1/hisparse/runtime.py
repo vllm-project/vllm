@@ -467,11 +467,7 @@ def release_pinned_state(
             )
 
     for runtime in runtimes:
-        runtime.cache_ops = None
-        runtime.host_pool = None
-        del runtime._host_cache
-        del runtime.registered_host_pool
-        del runtime.hot_backing
+        runtime.unbind_cache()
     if shared_host_region is not None:
         shared_host_region.cleanup()
 
