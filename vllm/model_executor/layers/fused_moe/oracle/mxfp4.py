@@ -213,6 +213,7 @@ def _gfx1250_mx_scale_kwidth(
         return 8
     return 4
 
+
 B12X_BACKENDS = (
     Mxfp4MoeBackend.B12X_MXFP4_MXFP8,
     Mxfp4MoeBackend.B12X_MXFP4_BF16,

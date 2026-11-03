@@ -472,8 +472,8 @@ class AiterW4A4Experts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # MoRI quantizes to MXFP4 for dispatch; otherwise quantize in apply().
-        return not self.moe_config.use_mori_kernels
+        # MoRI EPv1 quantizes to MXFP4 for dispatch; otherwise quantize in apply().
+        return not self.moe_config.use_mori_epv1_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -504,10 +504,11 @@ class AiterW4A4Experts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        # Only wired for MoRI; other all-to-alls are untested here, and
-        # without one the monolithic expert is used.
+        # Only wired for MoRI EPv1; other all2all backends (incl. EPv2) are
+        # untested here, and without one the monolithic expert is used.
         return (
-            moe_parallel_config.use_mori_kernels and not moe_parallel_config.enable_eplb
+            moe_parallel_config.use_mori_epv1_kernels
+            and not moe_parallel_config.enable_eplb
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
