@@ -5866,7 +5866,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py
 
-
 - label: ":amd: (MI355) UMBP Connector TP2 Integration"
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
