@@ -180,6 +180,18 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             raise self.engine_client.dead_error
         self.engine_client.check_admission(n)
 
+    def _check_max_num_seqs(self, n: int | None) -> ErrorResponse | None:
+        if n is None:
+            return None
+        max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
+        if n > max_num_seqs:
+            return self.create_error_response(
+                f"n must be at most the server's max_num_seqs "
+                f"({max_num_seqs}), got {n}.",
+                param="n",
+            )
+        return None
+
     def create_streaming_error_response(
         self,
         message: str | Exception,

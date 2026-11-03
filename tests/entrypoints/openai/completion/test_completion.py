@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 import regex as re
 from openai import BadRequestError
+from pydantic import ValidationError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
@@ -43,6 +44,21 @@ def server(default_server_args):
 async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
+
+
+@pytest.mark.parametrize("n_value", [0, 129])
+def test_completion_request_n_parameter_outside_openai_limits(n_value: int):
+    with pytest.raises(ValidationError):
+        CompletionRequest(model="test-model", prompt="hello", n=n_value)
+
+
+def test_completion_request_null_n_uses_default():
+    request = CompletionRequest(model="test-model", prompt="hello", n=None)
+    sampling_params = request.to_sampling_params(
+        max_tokens=1,
+        default_sampling_params={},
+    )
+    assert sampling_params.n == 1
 
 
 @pytest.mark.asyncio
