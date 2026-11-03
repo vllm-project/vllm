@@ -4,13 +4,19 @@
 """Tests that FusedRMSNormGated decomposes correctly under torch.compile,
 matching the eager triton kernel output."""
 
+import subprocess
+import sys
+
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
     FusedRMSNormGated,
 )
 from vllm.utils.torch_utils import set_random_seed
+
+DEVICE = "xpu:0" if current_platform.is_xpu() else "cuda:0"
 
 DTYPES = [torch.bfloat16]
 HIDDEN_SIZES = [128, 512]
@@ -18,6 +24,27 @@ NUM_TOKENS = [64, 128]
 ACTIVATIONS = ["swish", "sigmoid"]
 ELEMENTWISE_AFFINE = [True, False]
 SEEDS = [0]
+
+
+@pytest.mark.parametrize("first", ["kda", "fused_norm_gate"])
+def test_norm_gate_import_order(first):
+    second = "fused_norm_gate" if first == "kda" else "kda"
+    code = """
+import importlib
+import sys
+from vllm.model_executor.custom_op import op_registry
+
+prefix = "vllm.third_party.flash_linear_attention.ops."
+first, second = [importlib.import_module(prefix + name) for name in sys.argv[1:]]
+assert first.FusedRMSNormGated is second.FusedRMSNormGated
+assert op_registry["fused_rms_norm_gated"] is first.FusedRMSNormGated
+"""
+    subprocess.run(
+        [sys.executable, "-c", code, first, second],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -39,7 +66,7 @@ def test_compiled_vs_eager(
     """forward_native decomposition matches forward_cuda triton kernel."""
     torch._dynamo.reset()
     set_random_seed(seed)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
 
     module = FusedRMSNormGated(
         hidden_size,
@@ -88,7 +115,7 @@ def test_compiled_vs_eager_multidim(
     """forward_native decomposition handles multi-dimensional inputs."""
     torch._dynamo.reset()
     set_random_seed(seed)
-    device = torch.device("cuda:0")
+    device = torch.device(DEVICE)
     head_dim = shape[-1]
 
     module = FusedRMSNormGated(

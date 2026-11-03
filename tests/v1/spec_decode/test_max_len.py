@@ -37,6 +37,39 @@ def test_ngram_max_len(num_speculative_tokens: int, vllm_runner):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_ngram_gpu_max_len(
+    method: str,
+    num_speculative_tokens: int,
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """V2 n-gram decoding stops at max_model_len."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        "facebook/opt-125m",
+        trust_remote_code=False,
+        max_model_len=100,
+        enable_chunked_prefill=None,
+        enforce_eager=True,  # For faster initialization.
+        speculative_config={
+            "method": method,
+            "prompt_lookup_max": 5,
+            "prompt_lookup_min": 3,
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        assert runner.llm.llm_engine.vllm_config.use_v2_model_runner
+        sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
+        outputs = runner.llm.generate(_PROMPTS, sampling_params)
+        for output in outputs:
+            assert output.prompt_token_ids is not None
+            assert (
+                len(output.prompt_token_ids) + len(output.outputs[0].token_ids) == 100
+            )
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 def test_eagle_max_len(
     monkeypatch: pytest.MonkeyPatch,

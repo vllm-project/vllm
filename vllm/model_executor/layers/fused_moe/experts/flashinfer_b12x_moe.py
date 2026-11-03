@@ -45,6 +45,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     _ACTIVATION_MAP: dict[MoEActivation, str] = {
         MoEActivation.SILU: "silu",
+        MoEActivation.GELU_TANH: "gelu_tanh",
         MoEActivation.RELU2_NO_MUL: "relu2",
     }
 
@@ -188,7 +189,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.RELU2_NO_MUL,
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

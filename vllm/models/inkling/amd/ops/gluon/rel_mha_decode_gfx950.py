@@ -501,21 +501,6 @@ class AttentionProgram:
         cdna4.buffer_store(part_o, self.mid_o_ptr, mid_o_offsets, mask=valid[:, None])
         cdna4.buffer_store(part_lse, self.mid_lse_ptr, mid_lse_offsets, mask=valid)
 
-    @gluon.jit
-    def store_output(self, acc, l_i):
-        cfg = self.cfg
-        offs_m = gl.arange(0, cfg.BLOCK_M, layout=gl.SliceLayout(1, cfg.store_layout))
-        offs_d = gl.arange(0, cfg.HEAD_DIM, layout=gl.SliceLayout(0, cfg.store_layout))
-        q_heads = self.kv_head * cfg.GROUP_SIZE + self.group_start + offs_m
-        valid = (self.group_start + offs_m) < cfg.GROUP_SIZE
-        acc = gl.convert_layout(acc, cfg.store_layout)
-        l_i = gl.convert_layout(l_i, gl.SliceLayout(1, cfg.store_layout))
-        output = acc * (1.0 / l_i)[:, None]
-        output = output.to(self.mid_o_ptr.dtype.element_ty)
-        offsets = (self.q_index * cfg.NUM_Q_HEADS + q_heads[:, None]) * cfg.HEAD_DIM
-        offsets += offs_d[None, :]
-        cdna4.buffer_store(output, self.mid_o_ptr, offsets, mask=valid[:, None])
-
 
 # ===-----------------------------------------------------------------------===#
 # Entry Point
@@ -623,104 +608,6 @@ def _rel_mha_decode_fp16(
         acc = program.compute_pv(p, v, acc)
 
     program.store_split(acc, l_i, m_i)
-
-
-@gluon.jit
-def _rel_mha_decode_sliding_fp16(
-    q_ptr,
-    rel_logits_ptr,
-    k_cache_ptr,
-    v_cache_ptr,
-    page_table_ptr,
-    cache_seqlens_ptr,
-    out_ptr,
-    Q_STRIDE_B: gl.constexpr,
-    Q_STRIDE_H: gl.constexpr,
-    Q_STRIDE_D: gl.constexpr,
-    K_STRIDE_B: gl.constexpr,
-    K_STRIDE_P: gl.constexpr,
-    K_STRIDE_H: gl.constexpr,
-    K_STRIDE_D: gl.constexpr,
-    V_STRIDE_B: gl.constexpr,
-    V_STRIDE_P: gl.constexpr,
-    V_STRIDE_H: gl.constexpr,
-    V_STRIDE_D: gl.constexpr,
-    SM_SCALE: gl.constexpr,
-    PAGE_TABLE_STRIDE: gl.constexpr,
-    PAGE_SIZE: gl.constexpr,
-    MAX_SEQLEN_Q: gl.constexpr,
-    NUM_Q_HEADS: gl.constexpr,
-    NUM_KV_HEADS: gl.constexpr,
-    HEAD_DIM: gl.constexpr,
-    BLOCK_M: gl.constexpr,
-    BLOCK_N: gl.constexpr,
-    IS_SLIDING: gl.constexpr,
-    WINDOW_LEFT: gl.constexpr,
-    REL_STRIDE_T: gl.constexpr,
-    REL_STRIDE_H: gl.constexpr,
-    REL_STRIDE_E: gl.constexpr,
-    REL_EXTENT: gl.constexpr,
-    REL_BIAS_QK_SCALE: gl.constexpr,
-    IS_FP8: gl.constexpr,
-):
-    cfg = AttentionConfig(
-        SM_SCALE,
-        PAGE_TABLE_STRIDE,
-        PAGE_SIZE,
-        1,
-        MAX_SEQLEN_Q,
-        NUM_Q_HEADS,
-        NUM_KV_HEADS,
-        HEAD_DIM,
-        BLOCK_M,
-        BLOCK_N,
-        IS_SLIDING,
-        WINDOW_LEFT,
-        REL_EXTENT,
-        REL_BIAS_QK_SCALE,
-        IS_FP8,
-        InputStrides(Q_STRIDE_B, Q_STRIDE_H, Q_STRIDE_D),
-        InputStrides(REL_STRIDE_T, REL_STRIDE_H, REL_STRIDE_E),
-        PagedKVStrides(K_STRIDE_B, K_STRIDE_P, K_STRIDE_H, K_STRIDE_D),
-        PagedKVStrides(V_STRIDE_B, V_STRIDE_P, V_STRIDE_H, V_STRIDE_D),
-    )
-    program = AttentionProgram.create(
-        cfg,
-        q_ptr,
-        rel_logits_ptr,
-        k_cache_ptr,
-        v_cache_ptr,
-        page_table_ptr,
-        cache_seqlens_ptr,
-        out_ptr,
-        out_ptr,
-    )
-    k_smem = gl.allocate_shared_memory(
-        k_cache_ptr.dtype.element_ty, [cfg.BLOCK_N, cfg.HEAD_DIM], cfg.k_smem_layout
-    )
-    v_smem = gl.allocate_shared_memory(
-        v_cache_ptr.dtype.element_ty, [cfg.BLOCK_N, cfg.HEAD_DIM], cfg.v_smem_layout
-    )
-
-    q = program.load_q()
-    m_i, l_i, acc = program.init_state()
-
-    for start_n in range(program.split_start, program.split_end, cfg.BLOCK_N):
-        physical_page = program.load_page(start_n)
-        program.issue_load_k(physical_page, k_smem)
-        program.issue_load_v(physical_page, v_smem)
-        async_copy.wait_group(1)
-        k = program.shared_load_k(k_smem)
-        qk = program.compute_qk(q, k)
-        qk = program.apply_rel_bias(qk, start_n)
-        qk = program.apply_kv_mask(qk, start_n)
-        p, m_i, l_i, acc = program.softmax(qk, m_i, l_i, acc)
-
-        async_copy.wait_group(0)
-        v = program.shared_load_v(v_smem)
-        acc = program.compute_pv(p, v, acc)
-
-    program.store_output(acc, l_i)
 
 
 @gluon.jit

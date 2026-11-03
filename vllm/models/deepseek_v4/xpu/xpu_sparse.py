@@ -19,8 +19,8 @@ from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
+    DeepseekV4SparseMLABackend,
 )
 from vllm.models.deepseek_v4.xpu.xpu_sparse_decode_fp8 import (
     xpu_sparse_decode_fp8,
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
 
 
-class DeepseekV4XPUSparseBackend(DeepseekV4FlashMLABackend):
+class DeepseekV4XPUSparseBackend(DeepseekV4SparseMLABackend):
     @staticmethod
     def get_name() -> str:
         return "XPU_V4_MLA_SPARSE"

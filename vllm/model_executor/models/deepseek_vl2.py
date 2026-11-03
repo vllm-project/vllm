@@ -4,9 +4,11 @@
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py
 """Inference-only Deepseek-VL2 model compatible with HuggingFace weights."""
 
+import functools
 import math
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias
+from collections.abc import Hashable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -15,12 +17,13 @@ from einops import rearrange, repeat
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalHashes
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.transformers.utils import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -35,7 +38,7 @@ from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalProcessingInfo,
+    MultiModalProcessingResult,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
@@ -51,7 +54,12 @@ from vllm.transformers_utils.configs.deepseek_vl2 import (
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -64,13 +72,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekVL2ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - p: Number of patches
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - p: Number of patches
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -79,11 +86,10 @@ class DeepseekVL2ImagePixelInputs(TensorSchema):
 
 
 class DeepseekVL2VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"]
@@ -214,20 +220,16 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         max_image_size = self.info.get_image_size_with_most_features()
-
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=max_image_size.width,
                 height=max_image_size.height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
@@ -235,29 +237,23 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
 class DeepseekVL2MultiModalProcessor(
     BaseMultiModalProcessor[DeepseekVL2ProcessingInfo]
 ):
-    def _call_hf_processor(
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
+    def _postprocess_hf_mm_data(
         self,
-        prompt: str,
         mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
+        hf_processor_mm_kwargs: Mapping[str, object],
+        processed_data: BatchFeature,
     ) -> BatchFeature:
         if not mm_data:
-            tokenizer = self.info.get_tokenizer()
-            return tokenizer(prompt, add_special_tokens=True, return_tensors="pt")
+            return processed_data
 
-        processed_outputs = super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+        processed_data["num_patches"] = (
+            processed_data["images_spatial_crop"].prod(-1) + 1
         )
 
-        processed_outputs["num_patches"] = (
-            processed_outputs["images_spatial_crop"].prod(-1) + 1
-        )
-
-        return processed_outputs
+        return processed_data
 
     def _get_mm_fields_config(
         self,
@@ -268,7 +264,9 @@ class DeepseekVL2MultiModalProcessor(
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             image_embeds=MultiModalFieldConfig.batched("image"),
         )
 
@@ -291,6 +289,7 @@ class DeepseekVL2MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -308,11 +307,26 @@ class DeepseekVL2MultiModalProcessor(
             )
         ]
 
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        images = inputs.mm_data_items.get("image")
+        if isinstance(images, ImageProcessorItems):
+            # process_one disables cropping when there are more than two images.
+            cropping = len(images) <= 2
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["image"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm, mm_hash=mm_hash, cropping=cropping
+                )
+                for mm_hash in hashes["image"]
+            ]
+        return hashes
+
     def _cached_apply_hf_processor(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+    ) -> MultiModalProcessingResult:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -328,7 +342,9 @@ class DeepseekVL2MultiModalProcessor(
     info=DeepseekVL2ProcessingInfo,
     dummy_inputs=DeepseekVL2DummyInputsBuilder,
 )
-class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class DeepseekVLV2ForCausalLM(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "language.": "language_model.",
@@ -349,6 +365,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
 
         self.vision_config = config.vision_config
@@ -406,7 +423,9 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return parent, names[-1]
 
     # patch for timm ViT instance to support tensor parallel
-    def patch_vit_for_tp(self, vit: torch.nn.Module, quant_config: QuantizationConfig):
+    def patch_vit_for_tp(
+        self, vit: torch.nn.Module, quant_config: QuantizationConfig | None
+    ):
         try:
             import timm
         except ImportError as e:
@@ -440,7 +459,13 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         except ImportError as e:
             raise ImportError("Please install timm") from e
 
-        with set_default_torch_dtype(torch.float16):
+        # Skipped towers are built under a meta default device, but timm's
+        # constructor calls .item(), which meta tensors do not support.
+        on_meta = torch.get_default_device().type == "meta"
+        with (
+            set_default_torch_dtype(torch.float16),
+            torch.device("cpu") if on_meta else nullcontext(),
+        ):
             model = timm.create_model(
                 "vit_so400m_patch14_siglip_384.webli",
                 pretrained=False,
@@ -448,6 +473,8 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 dynamic_img_size=True,
                 dynamic_img_pad=True,
             )
+        if on_meta:
+            model = model.to("meta")
 
         if get_tensor_model_parallel_world_size() > 1:
             model = self.patch_vit_for_tp(model, quant_config)
@@ -589,6 +616,186 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self._pixel_values_to_embedding(
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop
         )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    @functools.cached_property
+    def _proj_hw(self) -> tuple[int, int]:
+        """Return (h, w) of the projector output per tile."""
+        h = w = math.ceil(
+            (self.vision_config.image_size // self.vision_config.patch_size)
+            / self.projector_config.downsample_ratio
+        )
+        return h, w
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.projector_config.n_embed,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self, vllm_config: "VllmConfig"
+    ) -> tuple[int, int]:
+        h, w = self._proj_hw
+        # Smallest valid image: 1 global + 1×1 local tile → 2 tiles total.
+        min_budget = h * (w + 1) * 2 + 1
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return min_budget, max_budget
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        h, w = self._proj_hw
+        specs = []
+        for row in mm_kwargs["images_spatial_crop"].tolist():
+            tw, th = int(row[0]), int(row[1])
+            if tw == 0 or th == 0:
+                break
+            n_tiles = 1 + tw * th
+            output_tokens = h * (w + 1) + th * h * (tw * w + 1) + 1
+            specs.append(
+                EncoderItemSpec(input_size=n_tiles, output_tokens=output_tokens)
+            )
+        return specs
+
+    def select_encoder_cudagraph_items(
+        self, mm_kwargs: dict[str, Any], indices: list[int]
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        images_spatial_crop = mm_kwargs["images_spatial_crop"]
+
+        if not indices:
+            return {
+                "pixel_values": pixel_values[:0],
+                "images_spatial_crop": images_spatial_crop[:0],
+            }
+
+        # Build per-image tile counts (1 global + tw*th local).
+        tiles_per_image = []
+        for row in images_spatial_crop.tolist():
+            tw, th = int(row[0]), int(row[1])
+            if tw == 0 or th == 0:
+                break
+            tiles_per_image.append(1 + tw * th)
+
+        cum_tiles = [0]
+        for t in tiles_per_image:
+            cum_tiles.append(cum_tiles[-1] + t)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_tiles[i] : cum_tiles[i + 1]] for i in indices]
+        )
+        return {
+            "pixel_values": selected_pv,
+            "images_spatial_crop": images_spatial_crop[list(indices)],
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
+
+        h, w = self._proj_hw
+        # Each tile contributes at least h*w output tokens (before newlines).
+        # Using h*w (not h*(w+1)) guarantees we never under-allocate.
+        max_tiles = (token_budget + h * w - 1) // (h * w)
+        dummy_pixel_values = torch.randn(
+            max_tiles,
+            3,
+            self.vision_config.image_size,
+            self.vision_config.image_size,
+            device=device,
+            dtype=dtype,
+        )
+        return EncoderCudaGraphCaptureInputs(
+            values={"pixel_values": dummy_pixel_values}
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
+
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]}
+        )
+
+    def encoder_cudagraph_forward(
+        self, values: dict[str, torch.Tensor], path: str = "default"
+    ) -> torch.Tensor:
+        pixel_values = values["pixel_values"]
+        features = self.vision.forward_features(pixel_values)
+        return self.projector(features)
+
+    def postprocess_encoder_output(
+        self,
+        outputs: dict[str, torch.Tensor],
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        """Assemble per-image embeddings from raw per-tile projector output.
+
+        ``outputs["default"]`` has shape ``[N_tiles_captured, hw, n_embed]``.
+        This method re-applies newlines and the view-separator that the
+        eager ``_pixel_values_to_embedding`` path inserts in-line.
+        """
+        assert batch_mm_kwargs is not None
+        output = outputs["default"]
+        images_spatial_crop = batch_mm_kwargs["images_spatial_crop"]
+        _, hw, n_dim = output.shape
+        h = w = int(hw**0.5)
+
+        tile_offset = 0
+        for rank, img_idx in enumerate(indices):
+            tw, th = (
+                int(images_spatial_crop[rank][0]),
+                int(images_spatial_crop[rank][1]),
+            )
+            n_tiles = 1 + tw * th
+            tiles = output[tile_offset : tile_offset + n_tiles]
+            tile_offset += n_tiles
+
+            # Global tile: add one newline per row.
+            global_f = tiles[0].view(h, w, n_dim)
+            newline_g = self.image_newline.view(1, 1, n_dim).expand(h, 1, n_dim)
+            global_f = torch.cat([global_f, newline_g], dim=1).view(-1, n_dim)
+
+            # Local tiles: rearrange grid, then add one newline per row.
+            local_f = tiles[1:].view(th, tw, h, w, n_dim)
+            local_f = local_f.permute(0, 2, 1, 3, 4).reshape(th * h, tw * w, n_dim)
+            newline_l = self.image_newline.view(1, 1, n_dim).expand(th * h, 1, n_dim)
+            local_f = torch.cat([local_f, newline_l], dim=1).view(-1, n_dim)
+
+            if self.global_view_pos == "head":
+                emb = torch.cat([global_f, self.view_seperator[None], local_f])
+            else:
+                emb = torch.cat([local_f, self.view_seperator[None], global_f])
+
+            if isinstance(dest, dict):
+                dest[img_idx] = emb.clone() if clone else emb
+            else:
+                dest[rank] = emb.clone() if clone else emb
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

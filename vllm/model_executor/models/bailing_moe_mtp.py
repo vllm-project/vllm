@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Bailing MoE v2.5 MTP model."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers.configuration_utils import PretrainedConfig
+from transformers.configuration_utils import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -36,7 +36,7 @@ from vllm.sequence import IntermediateTensors
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
-def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
+def _get_draft_hf_config(vllm_config: VllmConfig) -> PreTrainedConfig:
     speculative_config = vllm_config.speculative_config
     if speculative_config is not None:
         draft_model_config = speculative_config.draft_model_config
@@ -48,7 +48,7 @@ def _get_draft_hf_config(vllm_config: VllmConfig) -> PretrainedConfig:
 class BailingMTPSharedHead(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:
@@ -268,14 +268,17 @@ class BailingMoeV25MTPModel(nn.Module):
             loaded_weight: torch.Tensor,
             shard_id=None,
         ) -> bool:
-            name = maybe_remap_kv_scale_name(name, params_dict)
-            if name is None:
+            remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+            if remapped_name is None:
                 return False
+            name = remapped_name
             if name not in params_dict or is_pp_missing_parameter(name, self):
                 return False
 
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader: Callable[..., None] = getattr(
+                param, "weight_loader", default_weight_loader
+            )
             if shard_id is None:
                 weight_loader(param, loaded_weight)
             elif isinstance(shard_id, int):
@@ -351,14 +354,14 @@ class BailingMoeV25MTPModel(nn.Module):
 
             if "mlp.experts" in name:
                 for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
+                    param_name, weight_name, expert_id, expert_shard_id = mapping
                     if weight_name not in name:
                         continue
                     mapped_name = name.replace(weight_name, param_name)
                     if load_param(
                         mapped_name,
                         loaded_weight,
-                        (expert_id, shard_id),
+                        (expert_id, expert_shard_id),
                     ):
                         loaded = True
                         break

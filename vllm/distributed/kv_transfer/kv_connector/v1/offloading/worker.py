@@ -5,21 +5,25 @@ from dataclasses import replace
 
 import torch
 
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
+    get_offloading_group_ids,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    group_kernel_blocks,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
@@ -35,23 +39,28 @@ logger = init_logger(__name__)
 
 
 class OffloadingConnectorWorker:
-    """Implementation of Worker side methods"""
+    """Implementation of Worker side methods."""
 
     def __init__(
         self,
         spec: OffloadingSpec,
+        vllm_config: "VllmConfig",
         kv_cache_config: KVCacheConfig,
     ):
         self.spec = spec
+        self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
         # Non-writers still ack: pending_count waits for world_size per job.
         self._is_store_writer = (
-            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+            not self.spec.replicated_layout
+            or self.spec.config.canonical_layout
+            or self.spec.config.parallel.rank == 0
         )
 
-        # job_id -> req_id for in-flight loads.
-        self._load_jobs: dict[int, ReqId] = {}
+        # job_id -> req_id for in-flight loads (None for sync loads).
+        self._load_jobs: dict[int, ReqId | None] = {}
+        self._failed_recving: set[ReqId] = set()
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -62,17 +71,13 @@ class OffloadingConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
-        num_blocks = kv_cache_config.num_blocks
-
-        # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
-        # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
-        # General (non-packed) layouts size the tensor at page_size_bytes per
-        # manager block, so page_size_bytes is the correct offloading stride.
-        layer_is_packed: dict[str, bool] = {
-            ln: is_kv_cache_tensor_packed(kv_tensor)
-            for kv_tensor in kv_cache_config.kv_cache_tensors
-            for ln in kv_tensor.shared_by
-        }
+        selected_group_ids = get_offloading_group_ids(kv_cache_config)
+        selected_groups = tuple(
+            kv_cache_config.kv_cache_groups[group_id] for group_id in selected_group_ids
+        )
+        mappings = derive_canonical_mappings(
+            self.vllm_config, kv_cache_config, kv_caches
+        )
 
         # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
@@ -80,7 +85,9 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for kv_cache_group in selected_groups:
+            assert not kv_cache_group.host_resident
+            num_blocks = kv_cache_config.num_blocks
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -91,63 +98,56 @@ class OffloadingConnectorWorker:
                 layer_kv_cache_spec = per_layer_specs.get(
                     layer_name, group_kv_cache_spec
                 )
-                if isinstance(layer_kv_cache_spec, AttentionSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert isinstance(layer_kv_cache, torch.Tensor)
+                ref = group_kernel_blocks(kv_caches[layer_name], num_blocks)
+                page = layer_kv_cache_spec.page_size_bytes
+                elem_size = ref.element_size()
+                byte_offset = ref.storage_offset() * elem_size
+                # Packed layouts (e.g. DSv4) interleave layers per block, so the
+                # attention tensor's stride(0) (the manager-block stride) exceeds
+                # page_size_bytes; other layouts have stride(0) == page_size_bytes.
+                block_stride_bytes = (
+                    ref.stride(0) * elem_size
+                    if isinstance(layer_kv_cache_spec, AttentionSpec)
+                    else page
+                )
+                tensors_per_block[layer_name] = (
+                    torch.tensor([], dtype=torch.int8, device=ref.device).set_(
+                        ref.untyped_storage(),
+                        byte_offset,
+                        (num_blocks, page),
+                        (block_stride_bytes, 1),
+                    ),
+                )
+                page_size_bytes[layer_name] = page
 
-                    page = layer_kv_cache_spec.page_size_bytes
-                    elem_size = layer_kv_cache.element_size()
-                    byte_offset = layer_kv_cache.storage_offset() * elem_size
-                    block_stride_bytes = (
-                        layer_kv_cache.stride(0) * elem_size
-                        if layer_is_packed[layer_name]
-                        else page
-                    )
-                    raw = torch.empty(
-                        0,
-                        dtype=torch.int8,
-                        device=layer_kv_cache.device,
-                    ).set_(layer_kv_cache.untyped_storage())
-                    tensors_per_block[layer_name] = (
-                        torch.as_strided(
-                            raw,
-                            (num_blocks, page),
-                            (block_stride_bytes, 1),
-                            byte_offset,
-                        ),
-                    )
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                if isinstance(layer_kv_cache_spec, AttentionSpec):
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.unpadded_page_size_bytes
                     )
-
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
-                    layer_kv_cache = kv_caches[layer_name]
-                    assert layer_kv_cache.dtype == torch.int8
-                    tensors_per_block[layer_name] = (
-                        layer_kv_cache.view(
-                            num_blocks, layer_kv_cache_spec.page_size_bytes
-                        ),
-                    )
-
-                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = replace(
                         layer_kv_cache_spec, page_size_padded=None
                     ).page_size_bytes
-
                 else:
                     raise NotImplementedError
 
-        packed_kv_cache_tensor = next(
+        # Packed layouts (e.g. DSv4) interleave all layers within each manager
+        # block: a layer view's block stride exceeds its page size. Offload the
+        # whole packed block as a single transfer region.
+        packed_layer_name = next(
             (
-                t
-                for t in kv_cache_config.kv_cache_tensors
-                if is_kv_cache_tensor_packed(t) and t.shared_by
+                layer_name
+                for layer_name, (tensor,) in tensors_per_block.items()
+                if tensor.stride(0) != tensor.shape[1]
             ),
             None,
         )
-        if packed_kv_cache_tensor is not None:
-            (tensor,) = tensors_per_block[packed_kv_cache_tensor.shared_by[0]]
+        if (
+            packed_layer_name is not None
+            and kv_cache_config.hisparse_host_num_blocks is None
+        ):
+            (tensor,) = tensors_per_block[packed_layer_name]
+            num_blocks = tensor.shape[0]
             block_stride = tensor.stride(0)
             packed_tensor = tensor.as_strided(
                 (num_blocks, block_stride),
@@ -157,39 +157,23 @@ class OffloadingConnectorWorker:
             self._init_worker(
                 CanonicalKVCaches(
                     [CanonicalKVCacheTensor(packed_tensor, block_stride)],
-                    [
-                        [CanonicalKVCacheRef(0, block_stride)]
-                        for _ in kv_cache_config.kv_cache_groups
-                    ],
+                    [[CanonicalKVCacheRef(0, block_stride)] for _ in selected_groups],
                 )
             )
             return
 
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # Filter to layers that were actually processed above.
-            # Packed KV allocation emits KVCacheTensor entries for
-            # every (tuple_idx, page_size) slot; slots where no group has a
-            # layer at that index produce an empty shared_by (reserved memory
-            # with no corresponding model layer).
-            tensor_layer_names = [
-                n for n in kv_cache_tensor.shared_by if n in tensors_per_block
-            ]
-            if not tensor_layer_names:
-                continue
+        # Layers that alias the same bytes (cache groups overlay each other) share
+        # one transfer region: exactly the views with equal address and strides.
+        aliased_layers: dict[tuple[int, tuple[int, ...]], list[str]] = defaultdict(list)
+        for layer_name, layer_tensors in tensors_per_block.items():
+            view = layer_tensors[0]
+            aliased_layers[(view.data_ptr(), view.stride())].append(layer_name)
 
-            # verify all layers in the group reference the exact same tensors
+        for tensor_layer_names in aliased_layers.values():
             assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
-            assert (
-                len({tensors_per_block[n][0].data_ptr() for n in tensor_layer_names})
-                == 1
-            )
-            assert (
-                len({tensors_per_block[n][0].stride() for n in tensor_layer_names}) == 1
-            )
 
-            # pick the first layer to represent the group
             first_layer_name = tensor_layer_names[0]
             for tensor in tensors_per_block[first_layer_name]:
                 block_tensors.append(
@@ -201,15 +185,26 @@ class OffloadingConnectorWorker:
 
                 curr_tensor_idx = len(block_tensors) - 1
                 for layer_name in tensor_layer_names:
+                    mapping = (
+                        mappings.get(layer_name)
+                        if len(tensors_per_block[first_layer_name]) == 1
+                        else None
+                    )
+                    assert (
+                        mapping is None
+                        or mapping.local_page_size_bytes
+                        == unpadded_page_size_bytes[layer_name]
+                    )
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            mapping=mapping,
                         )
                     )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for kv_cache_group in kv_cache_config.kv_cache_groups:
+        for kv_cache_group in selected_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in kv_cache_group.layer_names:
                 group_refs += block_data_refs[layer_name]
@@ -218,53 +213,6 @@ class OffloadingConnectorWorker:
         canonical_kv_caches = CanonicalKVCaches(
             tensors=block_tensors,
             group_data_refs=group_data_refs,
-        )
-
-        self._init_worker(canonical_kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        # verify that num_blocks is at physical position 0 in the cross-layers
-        # tensor layout.
-        test_shape = attn_backend.get_kv_cache_shape(
-            num_blocks=1234, block_size=16, num_kv_heads=1, head_size=256
-        )
-        num_blocks_logical_dim = test_shape.index(1234) + 1
-        physical_to_logical = attn_backend.get_kv_cache_stride_order(
-            include_num_layers_dimension=True
-        )
-        num_blocks_physical_dim = physical_to_logical.index(num_blocks_logical_dim)
-        assert num_blocks_physical_dim == 0
-
-        kv_cache_groups = self.kv_cache_config.kv_cache_groups
-        assert len(kv_cache_groups) == 1
-        kv_cache_spec = kv_cache_groups[0].kv_cache_spec
-        num_layers = len(kv_cache_groups[0].layer_names)
-        page_size_bytes = kv_cache_spec.page_size_bytes * num_layers
-
-        assert kv_cache.storage_offset() == 0
-        storage = kv_cache.untyped_storage()
-        assert len(storage) % page_size_bytes == 0
-        num_blocks = len(storage) // page_size_bytes
-        tensor = (
-            torch.tensor(
-                [],
-                dtype=torch.int8,
-                device=kv_cache.device,
-            )
-            .set_(storage)
-            .view(num_blocks, page_size_bytes)
-        )
-        kv_cache_tensor = CanonicalKVCacheTensor(
-            tensor=tensor, page_size_bytes=page_size_bytes
-        )
-        # in cross layers layout, there's currently only a single group
-        kv_cache_data_ref = CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=page_size_bytes
-        )
-        canonical_kv_caches = CanonicalKVCaches(
-            tensors=[kv_cache_tensor], group_data_refs=[[kv_cache_data_ref]]
         )
 
         self._init_worker(canonical_kv_caches)
@@ -303,11 +251,24 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
+        sync_job_ids: set[int] = set()
         for job_id, entry in metadata.load_jobs.items():
-            self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
-            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
+            if entry.sync:
+                # Its request already runs this step: no finished_recving.
+                sync_job_ids.add(job_id)
+                self._load_jobs[job_id] = None
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec, expedited=True
+                )
+            else:
+                self._load_jobs[job_id] = entry.req_id
+                success = self.worker.submit_load(
+                    job_id, entry.src_spec, entry.dst_spec
+                )
             assert success
+        if sync_job_ids:
+            self.worker.wait(sync_job_ids)
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
@@ -324,22 +285,31 @@ class OffloadingConnectorWorker:
             )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """
-        Returns:
-            tuple of (finished_sending, finished_recving). Stores never
-            emit finished_sending — the scheduler tracks store completion
-            via kv_connector_worker_meta.completed_jobs and fences any
-            block reuse via jobs_to_flush. Loads still emit
-            finished_recving so the base scheduler can resume requests
-            blocked on remote KV (and free aborted-during-load reqs).
+        """Returns:
+        tuple of (finished_sending, finished_recving). Stores never
+        emit finished_sending — the scheduler tracks store completion
+        via kv_connector_worker_meta.completed_jobs and fences any
+        block reuse via jobs_to_flush. Loads still emit
+        finished_recving so the base scheduler can resume requests
+        blocked on remote KV (and free aborted-during-load reqs).
+
         """
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
             is_load = job_id in self._load_jobs
+            if not transfer_result.success:
+                self._connector_worker_meta.mark_completed(job_id, success=False)
+                req_id = self._load_jobs.pop(job_id, None)
+                if is_load and req_id is None:
+                    # Its request already ran this step on the unloaded KV,
+                    # which failed_recving cannot undo.
+                    raise RuntimeError(f"KV offload sync load job {job_id} failed")
+                if req_id is not None:
+                    self._failed_recving.add(req_id)
+                    finished_recving.add(req_id)
+                continue
             if (
                 transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
@@ -360,6 +330,11 @@ class OffloadingConnectorWorker:
 
         return set(), finished_recving
 
+    def take_failed_recving(self) -> set[ReqId]:
+        """Drain the requests whose load failed since the last call."""
+        failed_recving, self._failed_recving = self._failed_recving, set()
+        return failed_recving
+
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
         if not self._connector_worker_meta.completed_jobs:
@@ -371,6 +346,7 @@ class OffloadingConnectorWorker:
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
+        self._failed_recving.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         if self.worker is not None:
             self.worker.shutdown()

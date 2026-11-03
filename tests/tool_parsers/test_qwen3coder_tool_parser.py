@@ -9,17 +9,18 @@ import pytest
 from openai.types.responses.function_tool import FunctionTool
 from xgrammar import StructuralTag
 
+from tests.tool_parsers.utils import ToolState, ToolStateWithHeader
+from vllm.entrypoints.generate.base.protocol import (
+    DeltaMessage,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedFunction,
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-    FunctionCall,
-    ToolCall,
 )
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -225,7 +226,7 @@ def test_extract_tool_calls_no_tools(qwen3_tool_parser):
     model_output = "This is a test response without any tool calls"
     extracted_tool_calls = qwen3_tool_parser.extract_tool_calls(
         model_output, request=None
-    )  # type: ignore[arg-type]
+    )
     assert not extracted_tool_calls.tools_called
     assert extracted_tool_calls.tool_calls == []
     assert extracted_tool_calls.content == model_output
@@ -423,7 +424,7 @@ def test_extract_tool_calls(
 def test_extract_tool_calls_fallback_no_tags(
     qwen3_tool_parser,
 ):
-    """Test fallback parsing when XML tags are missing"""
+    """Test fallback parsing when XML tags are missing."""
     model_output = """<function=get_current_weather>
 <parameter=city>
 Dallas
@@ -444,7 +445,7 @@ TX
 
 
 def test_extract_tool_calls_type_conversion(qwen3_tokenizer):
-    """Test parameter type conversion based on tool schema"""
+    """Test parameter type conversion based on tool schema."""
     tools = [
         ChatCompletionToolsParam(
             type="function",
@@ -653,7 +654,7 @@ true
     parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
-    tool_states = {}
+    tool_states: dict[int, ToolState] = {}
     for delta_message in stream_delta_message_generator(
         parser, qwen3_tokenizer, model_output, request
     ):
@@ -862,11 +863,11 @@ def test_extract_tool_calls_streaming(
     expected_tool_calls,
     expected_content,
 ):
-    """Test incremental streaming behavior including typed parameters"""
+    """Test incremental streaming behavior including typed parameters."""
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}  # Track state per tool index
+    tool_states: dict[int, ToolStateWithHeader] = {}  # Track state per tool index
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request
@@ -932,7 +933,7 @@ def test_extract_tool_calls_streaming(
 def test_extract_tool_calls_missing_closing_parameter_tag(
     qwen3_tool_parser,
 ):
-    """Test handling of missing closing </parameter> tag"""
+    """Test handling of missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -974,7 +975,7 @@ fahrenheit
 def test_extract_tool_calls_streaming_missing_closing_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing closing </parameter> tag"""
+    """Test streaming with missing closing </parameter> tag."""
     # Using get_current_weather from sample_tools but with malformed XML
     model_output = """Let me check the weather for you:
 <tool_call>
@@ -993,7 +994,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request
@@ -1046,7 +1047,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer):
-    """Test that streaming is truly incremental"""
+    """Test that streaming is truly incremental."""
     model_output = """I'll check the weather.<tool_call>
 <function=get_current_weather>
 <parameter=city>
@@ -1078,6 +1079,7 @@ TX
     for chunk in chunks:
         if chunk.tool_calls and chunk.tool_calls[0].id:
             header_found = True
+            assert chunk.tool_calls[0].function is not None
             assert chunk.tool_calls[0].function.name == "get_current_weather"
             assert chunk.tool_calls[0].type == "function"
             break
@@ -1106,7 +1108,7 @@ TX
 def test_extract_tool_calls_streaming_missing_opening_tag(
     qwen3_tool_parser, qwen3_tokenizer
 ):
-    """Test streaming with missing opening <tool_call> tag
+    """Test streaming with missing opening <tool_call> tag.
 
     This tests that the streaming parser correctly handles
     tool calls that start directly with <function=...>
@@ -1129,7 +1131,7 @@ fahrenheit
     request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
-    tool_states = {}
+    tool_states: dict[int, ToolStateWithHeader] = {}
 
     for delta_message in stream_delta_message_generator(
         qwen3_tool_parser, qwen3_tokenizer, model_output, request

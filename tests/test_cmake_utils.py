@@ -1,8 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import shutil
 import subprocess
+import sys
 from pathlib import Path
+
+
+def _get_cmake_bin() -> str:
+    cmake = shutil.which("cmake")
+    if cmake:
+        return cmake
+    venv_cmake = Path(sys.executable).parent / "cmake"
+    if venv_cmake.is_file():
+        return str(venv_cmake)
+    return "cmake"
 
 
 def test_exact_family_arch_precedes_generic_family_fallback(tmp_path: Path):
@@ -20,13 +33,13 @@ endif()
 """
     )
 
-    subprocess.run(["cmake", "-P", script], check=True)
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
 
 
 def test_extract_archs_prefers_sass_target_over_corrupted_virtual_arch(
     tmp_path: Path,
 ):
-    """torch's autodetection can emit a bogus arch=compute_* half (e.g.
+    """Torch's autodetection can emit a bogus arch=compute_* half (e.g.
     capability 12.1 corrupted to arch=compute_20,code=sm_121); the SASS
     target must win, while PTX-only entries keep the virtual arch."""
     repo_root = Path(__file__).parents[1]
@@ -45,4 +58,58 @@ endif()
 """
     )
 
-    subprocess.run(["cmake", "-P", script], check=True)
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_clear_cuda_gencode_flags(tmp_path: Path):
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_clear_flags.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+set(CMAKE_CUDA_FLAGS "-Wall -gencode arch=compute_80,code=sm_80")
+clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
+if(NOT "${{CMAKE_CUDA_FLAGS}}" STREQUAL "-Wall ")
+  message(FATAL_ERROR "Expected '-Wall ', got '${{CMAKE_CUDA_FLAGS}}'")
+endif()
+if(NOT "${{CUDA_ARCH_FLAGS}}" STREQUAL "-gencode arch=compute_80,code=sm_80")
+  message(FATAL_ERROR "Expected '-gencode arch=compute_80,code=sm_80', "
+    "got '${{CUDA_ARCH_FLAGS}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+def test_hipify_records_original_sources_and_headers_without_modifying_them(tmp_path):
+    project = tmp_path / "source"
+    output = tmp_path / "build" / "csrc"
+    project.mkdir()
+    source = project / "probe.cu"
+    header = project / "cuda_shared.h"
+    source.write_text('#include "cuda_shared.h"\n__global__ void probe() {}\n')
+    header.write_text("#include <cuda_runtime.h>\n")
+    original = {path.name: path.read_bytes() for path in project.iterdir()}
+    script = Path(__file__).parents[1] / "cmake" / "hipify.py"
+    subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "-p",
+            str(project),
+            "-o",
+            str(output),
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert {path.name: path.read_bytes() for path in project.iterdir()} == original
+    provenance = json.loads((output / "hipify-source-map.json").read_text())
+    assert provenance[str(output / "probe.hip")] == str(source)
+    assert provenance[str(output / "cuda_shared.h")] == str(header)
+    assert provenance[str(output / "hip_shared.h")] == str(header)
+    assert '#include "hip_shared.h"' in (output / "probe.hip").read_text()

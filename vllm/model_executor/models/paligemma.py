@@ -8,12 +8,13 @@ from torch import nn
 from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -56,12 +57,11 @@ logger = init_logger(__name__)
 
 
 class PaliGemmaImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -69,11 +69,10 @@ class PaliGemmaImagePixelInputs(TensorSchema):
 
 
 class PaliGemmaImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - ifs: Image feature size
-        - hs: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - ifs: Image feature size
+    - hs: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -131,46 +130,23 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
         max_image_size = vision_config.image_size
 
-        num_images = mm_counts.get("image", 0)
-
-        image_overrides = mm_options.get("image")
-
         return {
             "image": self._get_dummy_images(
                 width=max_image_size,
                 height=max_image_size,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             )
         }
 
 
 class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingInfo]):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        if not mm_data:
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
-
-        return super()._call_hf_processor(
-            prompt=prompt,
-            mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -200,6 +176,7 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 image_size = images.get_image_size(item_idx)
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=image_size.width,
@@ -216,11 +193,13 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         # Paligemma 1 and 2 have different tokenizer.add_bos_token
         # Insert <image>*n + <bos> after <bos> for Paligemma 1
         # Insert <image>*n + <bos> for Paligemma 2
+        add_bos_token = getattr(tokenizer, "add_bos_token", None)
+        assert isinstance(add_bos_token, bool)
         return [
             PromptInsertion(
                 modality="image",
                 target=PromptIndexTargets.prefix(
-                    [bos_token_id] if tokenizer.add_bos_token else []
+                    [bos_token_id] if add_bos_token else []
                 ),
                 insertion=get_insertion,
             )
@@ -235,8 +214,9 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()
-        newline_prompt = "\n"
-        newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
+        vocab = tokenizer.get_vocab()
+        newline_token_id = vocab["\n"]
+
         # Force to add newline at the end of prompt for paligemma's format
         # This step can NOT be replacemented by current PromptUpdate methods
         if len(prompt_token_ids) and prompt_token_ids[-1] != newline_token_id:
@@ -275,6 +255,8 @@ class PaliGemmaForConditionalGeneration(
             "lm_head.": "language_model.lm_head.",
         }
     )
+
+    supports_tower_connector_lora = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -378,8 +360,6 @@ class PaliGemmaForConditionalGeneration(
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-        vision_embeddings = vision_embeddings * (self.config.hidden_size**-0.5)
         return vision_embeddings
 
     def forward(
@@ -416,8 +396,12 @@ class PaliGemmaForConditionalGeneration(
             tower_model="vision_tower",
         )
 
-    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
-        return num_image_tokens
-
-    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
-        return num_vision_tokens
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
+        return num_mm_embeds, num_mm_embeds

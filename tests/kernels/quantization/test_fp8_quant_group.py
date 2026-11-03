@@ -5,7 +5,10 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+    _FP8_MIN_SCALING_FACTOR,
+    QuantFP8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.utils.torch_utils import set_random_seed
 
@@ -73,6 +76,21 @@ def test_quantfp8_group_functionality(
     if is_divisible:
         x_quant_cuda, scales_cuda = quant_op.forward_cuda(x.clone())
         assert x_quant_cuda.shape == x.shape
+
+        if scales_cuda.dtype == torch.int32:
+            # DeepGEMM UE8M0 fast path (group_size == 128 on Blackwell with
+            # the UE8M0 oracle): scales are packed 4-per-int32 in a
+            # TMA-aligned layout. Unpack and compare against native.
+            assert use_ue8m0 and group_size == 128
+            packed_groups = (expected_num_groups + 3) // 4
+            assert scales_cuda.shape == (batch_size, packed_groups)
+            unpacked = (
+                scales_cuda.contiguous()
+                .view(torch.uint8)
+                .reshape(batch_size, -1)[:, :expected_num_groups]
+            )
+            scales_cuda = torch.pow(2.0, unpacked.float() - 127)
+
         assert scales_cuda.shape == (batch_size, expected_num_groups)
 
         # Verify CUDA/native consistency
@@ -171,3 +189,22 @@ def test_quantfp8_group_edge_cases(default_vllm_config, seed: int) -> None:
     assert x_quant_large.shape == x_large.shape
     # FP8 max is typically 448 or 224, so scales should be > 1
     assert (scales_large > 1.0).all(), "Large values should have scales > 1"
+
+    # Test UE8M0 clamping still returns a correctly rounded value
+    quant_op_ue8m0 = QuantFP8(
+        static=False,
+        group_shape=group_shape,
+        column_major_scales=False,
+        use_ue8m0=True,
+    )
+    x_quant_zero_ue8m0, scales_zero_ue8m0 = quant_op_ue8m0.forward_native(
+        x_zero.clone()
+    )
+    assert x_quant_zero_ue8m0.shape == x_zero.shape
+    # 0x807FFFFF selects only the sign and mantissa bits.
+    assert ((scales_zero_ue8m0.view(torch.int32) & 0x807FFFFF) == 0).all(), (
+        "Clamped scales did not have zero sign and mantissa bits."
+    )
+    assert (scales_zero_ue8m0 >= _FP8_MIN_SCALING_FACTOR).all(), (
+        "Clamped scales were not larger than or equal to _FP8_MIN_SCALING_FACTOR."
+    )

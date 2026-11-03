@@ -49,7 +49,10 @@ class MLAPrefillBackend(ABC):
         raise NotImplementedError
 
     @classmethod
-    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(
+        cls,
+        device_capability: "DeviceCapability | None",
+    ) -> bool:
         return True
 
     @classmethod
@@ -74,29 +77,35 @@ class MLAPrefillBackend(ABC):
         return False
 
     def supports_out(self) -> bool:
-        """Whether `run_prefill_new_tokens` honors a caller-provided `out`
-        tensor of shape `[num_tokens, num_heads, v_head_dim]`, writing the
-        final result into it in place.
+        """Whether `run_prefill_new_tokens` and `run_prefill_context_chunk` honor
+        a caller-provided `out` tensor of shape
+        `[num_tokens, num_heads, v_head_dim]`, writing the result into it in place
+        and returning it.
 
         When True, callers may pass `out` and skip the post-hoc
-        slice/flatten/copy. False for backends that ignore `out` or emit a
-        padded (`qk_head_dim`) output. Overridden by backends that support it.
+        slice/flatten/copy -- and, for context chunks, size the accumulating
+        partial before running any chunk. False for backends that ignore `out` or
+        emit a padded (`qk_head_dim`) output. Overridden by backends that support
+        it.
         """
         return False
 
     @classmethod
     def validate_configuration(
         cls,
-        device_capability: "DeviceCapability",
+        device_capability: "DeviceCapability | None",
         selector_config: "MLAPrefillSelectorConfig",
     ) -> list[str]:
         invalid_reasons: list[str] = []
 
         if not cls.supports_compute_capability(device_capability):
-            invalid_reasons.append(
-                f"compute capability {device_capability.major}."
-                f"{device_capability.minor} not supported"
-            )
+            if device_capability is None:
+                invalid_reasons.append("device capability not available")
+            else:
+                invalid_reasons.append(
+                    f"compute capability {device_capability.major}."
+                    f"{device_capability.minor} not supported"
+                )
 
         if not cls.supports_dtype(selector_config.dtype):
             invalid_reasons.append(f"dtype {selector_config.dtype} not supported")
@@ -175,9 +184,10 @@ class MLAPrefillBackend(ABC):
     @abstractmethod
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

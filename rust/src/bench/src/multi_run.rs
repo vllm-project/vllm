@@ -7,6 +7,7 @@ use crate::error::Result;
 /// Key metrics extracted from a single run's JSON result.
 struct RunMetrics {
     request_throughput: f64,
+    input_sequence_throughput: Option<f64>,
     output_throughput: f64,
     total_token_throughput: f64,
     mean_ttft_ms: f64,
@@ -38,6 +39,7 @@ impl RunMetrics {
     fn from_json(json: &serde_json::Value) -> Self {
         Self {
             request_throughput: get(json, "request_throughput"),
+            input_sequence_throughput: get_opt(json, "input_sequence_throughput"),
             output_throughput: get(json, "output_throughput"),
             total_token_throughput: get(json, "total_token_throughput"),
             mean_ttft_ms: get(json, "mean_ttft_ms"),
@@ -69,6 +71,10 @@ impl RunMetrics {
 
 fn get(json: &serde_json::Value, key: &str) -> f64 {
     json.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+}
+
+fn get_opt(json: &serde_json::Value, key: &str) -> Option<f64> {
+    json.get(key).and_then(|v| v.as_f64())
 }
 
 fn get_ss_opt(json: &serde_json::Value, key: &str) -> Option<f64> {
@@ -119,8 +125,15 @@ fn print_multi_run_summary(runs: &[RunMetrics]) {
     let n = runs.len();
 
     // Collect each metric into a series, compute stats
-    let stats = vec![
-        compute_stats("Request throughput (req/s)", runs, |r| r.request_throughput),
+    let mut stats = vec![compute_stats("Request throughput (req/s)", runs, |r| {
+        r.request_throughput
+    })];
+    if runs.iter().all(|r| r.input_sequence_throughput.is_some()) {
+        stats.push(compute_stats("Input throughput (inputs/s)", runs, |r| {
+            r.input_sequence_throughput.unwrap_or_default()
+        }));
+    }
+    stats.extend([
         compute_stats("Output throughput (tok/s)", runs, |r| r.output_throughput),
         compute_stats("Total token throughput (tok/s)", runs, |r| {
             r.total_token_throughput
@@ -138,7 +151,7 @@ fn print_multi_run_summary(runs: &[RunMetrics]) {
         compute_stats("Completed requests", runs, |r| r.completed),
         compute_stats("Failed requests", runs, |r| r.failed),
         compute_stats("Duration (s)", runs, |r| r.duration),
-    ];
+    ]);
 
     println!("{:=^80}", format!(" Multi-Run Summary ({n} runs) "));
     println!(
@@ -307,6 +320,7 @@ mod tests {
     fn mk_run(ss: Option<f64>) -> RunMetrics {
         RunMetrics {
             request_throughput: 0.0,
+            input_sequence_throughput: None,
             output_throughput: 0.0,
             total_token_throughput: 0.0,
             mean_ttft_ms: 0.0,
