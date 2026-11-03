@@ -846,10 +846,7 @@ class MessageQueue:
         """Wait for the current block to be readable by this reader."""
 
         def check_readable():
-            memory_fence()
-            read_flag = metadata_buffer[self.local_reader_rank + 1]
-            written_flag = metadata_buffer[0]
-            return not (not written_flag or read_flag)
+            return self._is_readable(metadata_buffer)
 
         if SPINLOOP_EXT_ENABLED and not check_readable():
             spinloop(
@@ -877,6 +874,25 @@ class MessageQueue:
         if read_timeout.should_warn():
             logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
         return False
+
+    def _is_readable(self, metadata_buffer) -> bool:
+        """Whether the current block is written and not yet read by this reader."""
+        memory_fence()
+        read_flag = metadata_buffer[self.local_reader_rank + 1]
+        written_flag = metadata_buffer[0]
+        return bool(written_flag) and not read_flag
+
+    def readable(self) -> bool:
+        """Non-blocking check for whether a message is ready to be dequeued.
+        Raises RuntimeError if the queue has been shut down."""
+        if self.shutting_down:
+            raise RuntimeError("cancelled")
+        if self._is_local_reader:
+            with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                return self._is_readable(metadata_buffer)
+        if self._is_remote_reader:
+            return bool(self.remote_socket.poll(timeout=0))
+        raise RuntimeError("Only readers can check readability")
 
     @contextmanager
     def acquire_read(
