@@ -24,7 +24,7 @@ transformers==5.23.0
 
 # --- Audio Processing ---
 av
-librosa
+librosa >= 0.10 # old versions are sdists that don't build on Python >= 3.12
 audioread
 soxr
 pooch

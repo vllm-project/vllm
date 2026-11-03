@@ -23,7 +23,7 @@
 # =============================================================================
 
 ARG CUDA_VERSION=13.2.1
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ARG UBUNTU_VERSION=24.04
 ARG INSTALL_RUBIN_PRERELEASE=false
 ARG TRITON_INSTALL_FROM_SOURCE_REPO=
@@ -771,7 +771,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /vllm-workspace
 
 
-# Python version string for paths (e.g., "312" for 3.12)
+# Python version string for paths (e.g., "314" for 3.14)
 RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
     echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
 
