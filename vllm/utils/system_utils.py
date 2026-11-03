@@ -172,9 +172,10 @@ def _release_libgomp_threads() -> None:
     """Join libgomp's idle worker threads so a forked child can use OpenMP.
 
     libgomp has no fork handler: once this process has run a parallel region
-    (e.g. any multi-threaded torch CPU op), a forked child deadlocks in its
-    own first parallel region. Pausing the runtime (OpenMP 5.0) joins the
-    workers; this process recreates them on its next parallel region.
+    (e.g. any multi-threaded torch CPU op), a forked child hangs or crashes in
+    libgomp, including in this function. So this runs in the parent before every
+    fork. Pausing the runtime (OpenMP 5.0) joins the workers; this process
+    recreates them on its next parallel region.
     """
     try:
         paths = find_loaded_libraries("libgomp")
@@ -183,6 +184,10 @@ def _release_libgomp_threads() -> None:
     for path in paths:
         with contextlib.suppress(OSError, AttributeError):
             ctypes.CDLL(path).omp_pause_resource_all(_OMP_PAUSE_HARD)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(before=_release_libgomp_threads)
 
 
 def get_mp_context():
@@ -197,10 +202,7 @@ def get_mp_context():
     # consistent values. Must run after _maybe_force_spawn and regardless
     # of whether spawn was already set.
     _sync_visible_devices_env_vars()
-    mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
-    if mp_method == "fork":
-        _release_libgomp_threads()
-    return multiprocessing.get_context(mp_method)
+    return multiprocessing.get_context(envs.VLLM_WORKER_MULTIPROC_METHOD)
 
 
 def set_process_title(
