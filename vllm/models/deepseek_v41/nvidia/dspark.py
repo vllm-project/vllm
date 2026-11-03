@@ -30,12 +30,18 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    ReplicatedLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_dspark import (
@@ -48,6 +54,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
+from vllm.models.deepseek_v4.nvidia.dspark import _duplicate_context_wkv_weights
 
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from .model import (
@@ -59,6 +66,7 @@ from .model import (
     maybe_init_gemm_rs,
     prepare_mega_gate_routing_metadata,
 )
+from .ops.fused_markov import FusedMarkovSampler
 from .specialized_decode import decode_backend, register_draft
 
 if TYPE_CHECKING:
@@ -135,6 +143,15 @@ class DSparkDeepseekV4Model(nn.Module):
                 for i in range(self.num_dspark_layers)
             ]
         )
+        self.context_wkv_proj = MergedColumnParallelLinear(
+            config.hidden_size,
+            [config.head_dim] * self.num_dspark_layers,
+            bias=False,
+            return_bias=False,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "context_wkv_proj"),
+            disable_tp=True,
+        )
 
         # Heads: final norm, and the Markov + confidence heads.
         # Loaded from the "final" MTP layer weights (mtp.*) in the target
@@ -187,15 +204,16 @@ class DSparkDeepseekV4Model(nn.Module):
         place draft layers in different groups). ``None`` (or a ``None`` entry)
         runs the projection to reserve workspace but writes nothing (profiling).
         """
-        for i, layer in enumerate(self.layers):
+        all_kv = self.context_wkv_proj(main_x).view(
+            main_x.shape[0], self.num_dspark_layers, self.config.head_dim
+        )
+        for i, (layer, kv) in enumerate(
+            zip(self.layers, all_kv.unbind(1), strict=True)
+        ):
             slot_mapping = (
                 None if context_slot_mappings is None else context_slot_mappings[i]
             )
             attn = layer.attn
-            # Optimized DSV4 MLA path: wkv part of the fused wq_a|wkv projection
-            # (q_lora part discarded), then RoPE/quant/insert via the fused op.
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            kv = qr_kv[..., attn.q_lora_rank :]
             kv = attn.kv_norm(kv)
             if slot_mapping is None:
                 continue
@@ -315,6 +333,25 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # additional_config={"dspark_fused_markov": true} replaces the speculator's loop
+        # when it would sample a full draft-logits cache with plain Gumbel noise.
+        spec_config = vllm_config.speculative_config
+        extra = vllm_config.additional_config
+        if (
+            isinstance(extra, dict)
+            and extra.get("dspark_fused_markov", False)
+            and spec_config.draft_sample_method == "probabilistic"
+            and not spec_config.enable_adaptive_verification
+            and not vllm_config.model_config.use_fp64_gumbel
+            and getattr(vllm_config, "watermark_config", None) is None
+            and not vllm_config.parallel_config.enable_batch_sharded_sampling
+        ):
+            self.sample_sequential = FusedMarkovSampler(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.config.vocab_size,
+                self.config.dspark_markov_rank,
+                self.draft_model_config.dtype,
+            )
         # decode_backend=latency_specialized: a decode executor over self.model, built
         # by the target model's state on the target's executor. The speculator
         # reads the Markov sampling hooks before that, so they test the request.
@@ -377,8 +414,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         return self.compute_logits(hidden_states)
 
     def compute_draft_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """This rank's vocabulary columns of ``compute_draft_logits``, without
-        the tensor-parallel all-gather."""
+        """This TP rank's vocab shard of compute_draft_logits, not gathered."""
         return self.logits_processor(
             self.lm_head, self.model.norm(hidden_states), skip_gather=True
         )
@@ -486,6 +522,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         loaded_params: set[str] = set()
         loaded_confidence_head = False
 
+        weights = _duplicate_context_wkv_weights(weights, len(self.model.layers))
         for name, loaded_weight in weights:
             mapped = self._remap_dspark_name(name)
             if mapped is None:
@@ -515,6 +552,12 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 loaded_weight = DeepseekV4Model._pad_shared_expert_weight(
                     self.quant_config, name, loaded_weight
                 )
+
+            if name.startswith("model.context_wkv_proj."):
+                param = params_dict[name]
+                param.weight_loader(param, loaded_weight, loaded_weight.shard_id)
+                loaded_params.add(name)
+                continue
 
             # E8M0 expert scales: keep raw exponent bytes.
             if ".experts." in name:
@@ -563,7 +606,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        if self.model.confidence_head is not None and not loaded_confidence_head:
+        if (
+            self.model.confidence_head is not None
+            and not loaded_confidence_head
+            and is_mtp_completeness_check_enabled()
+        ):
             self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
@@ -573,6 +620,8 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         Returns None for non-mtp weights (owned by the target model).
         """
+        if name.startswith("context_wkv_proj."):
+            return f"model.{name}"
         m = re.match(r"mtp\.(\d+)\.(.*)", name)
         if m is None:
             return None

@@ -39,12 +39,10 @@ def decide_step(
         return StepDecision(False, "not a decode step")
     if metadata.num_prefills != 0 or metadata.num_prefill_tokens != 0:
         return StepDecision(False, "mixed prefill/decode step")
-    if metadata.decode.decode_query_len != 1:
-        return StepDecision(False, "speculative verification is unsupported")
+    # the launch is per row: an EAGLE3 verify step's decode_query_len rows of
+    # a request are rows like any other
     if not 0 < metadata.num_decode_tokens <= rows:
         return StepDecision(False, "decode token count exceeds physical rows")
-    if metadata.num_decodes != metadata.num_decode_tokens:
-        return StepDecision(False, "plain decode requires one token per request")
     if (
         metadata.decode.seq_lens.numel() < metadata.num_decodes
         or metadata.decode.block_table.shape[0] < metadata.num_decodes
