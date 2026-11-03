@@ -98,7 +98,9 @@ def _prefers_one_sided_all2all(config: "ParallelConfig") -> bool:
     # The one-sided manager is not wired for elastic EP's stateless groups.
     if not config.enable_expert_parallel or config.enable_elastic_ep:
         return False
-    if config.data_parallel_size >= 8 and _is_gb200_or_gb300():
+    # GB200/GB300 carry NVLink between hosts over MNNVL, so the EP group may
+    # span nodes and any data-parallel size is served.
+    if _is_gb200_or_gb300():
         return True
     # HGX has no NVLink between hosts, so the EP group must be one host's
     # 8 GPUs, placed by vLLM's own launcher. An API-server-only process has no

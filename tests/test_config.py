@@ -2025,36 +2025,35 @@ def test_one_sided_all2all_default_skips_elastic_ep(monkeypatch, cpu_arch):
         _clear_platform_probes()
 
 
-@pytest.mark.parametrize(
-    ("data_parallel_size", "expected"),
-    [
-        (8, "flashinfer_nvlink_one_sided"),
-        (16, "flashinfer_nvlink_one_sided"),
-        (4, "allgather_reducescatter"),
-        (2, "allgather_reducescatter"),
-        (1, "allgather_reducescatter"),
-    ],
-)
-def test_one_sided_all2all_default_requires_eight_data_parallel_ranks(
-    one_sided_capable_host, data_parallel_size, expected
+@pytest.mark.parametrize("data_parallel_size", [1, 2, 4, 8, 16])
+def test_one_sided_all2all_default_covers_every_gb_topology(
+    one_sided_capable_host, data_parallel_size
 ):
-    """Below DP 8 one-sided loses on large prefill chunks, so the default must
-    stay on allgather_reducescatter there."""
+    """MNNVL carries NVLink between GB200/GB300 hosts, so the EP group may span
+    nodes and no data-parallel size has to fall back."""
     config = _parallel_config(
         enable_expert_parallel=True, data_parallel_size=data_parallel_size
     )
-    assert config.all2all_backend == expected
-
-
-def test_explicit_all2all_backend_survives_a_small_deployment(one_sided_capable_host):
-    """The DP threshold is a default-picking heuristic, not a constraint:
-    asking for one-sided explicitly must still get it."""
-    config = _parallel_config(
-        all2all_backend="flashinfer_nvlink_one_sided",
-        enable_expert_parallel=True,
-        data_parallel_size=2,
-    )
     assert config.all2all_backend == "flashinfer_nvlink_one_sided"
+
+
+def test_explicit_all2all_backend_survives_an_unmeasured_host(monkeypatch):
+    """Platform detection picks the default, it does not constrain the choice:
+    asking for one-sided explicitly must still get it off GB200/GB300."""
+    _pretend_cuda_host(monkeypatch, CpuArchEnum.X86, (9, 0))
+    monkeypatch.setattr(
+        "vllm.utils.flashinfer.has_flashinfer_nvlink_one_sided", lambda: True
+    )
+    _clear_platform_probes()
+    try:
+        config = _parallel_config(
+            all2all_backend="flashinfer_nvlink_one_sided",
+            enable_expert_parallel=True,
+            data_parallel_size=2,
+        )
+        assert config.all2all_backend == "flashinfer_nvlink_one_sided"
+    finally:
+        _clear_platform_probes()
 
 
 def test_one_sided_all2all_default_requires_expert_parallel(one_sided_capable_host):
