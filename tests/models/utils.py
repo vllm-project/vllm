@@ -414,6 +414,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
@@ -581,6 +584,9 @@ def dummy_hf_overrides(
             }
         )
 
+        if model_arch == "Step5ForConditionalGeneration":
+            vision_config.update({"layers": 1})
+
         # Keep per-layer metadata consistent with the reduced layer count.
         if layer_types := getattr(vision_config, "layer_types", None):
             vision_config.update({"layer_types": layer_types[:1]})
@@ -609,17 +615,3 @@ def dummy_hf_overrides(
         )
 
     return hf_config
-
-
-def check_transformers_version(
-    model: str,
-    min_transformers_version: str | None = None,
-    max_transformers_version: str | None = None,
-):
-    from .registry import _HfExamplesInfo
-
-    return _HfExamplesInfo(
-        model,
-        min_transformers_version=min_transformers_version,
-        max_transformers_version=max_transformers_version,
-    ).check_transformers_version(on_fail="skip")

@@ -64,6 +64,8 @@ pub struct SamplingHints {
     pub default_top_k: Option<u32>,
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
+    pub default_presence_penalty: Option<f32>,
+    pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
 }
 

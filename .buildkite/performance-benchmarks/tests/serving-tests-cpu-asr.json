@@ -4,9 +4,6 @@
       "inf"
     ],
     "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
-    "server_environment_variables": {
-      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120
-    },
     "server_parameters": {
       "dtype": "bfloat16",
       "model": "openai/whisper-large-v3-turbo"
