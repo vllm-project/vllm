@@ -760,6 +760,9 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._pause_mode = "abort"
+    core._pause_clear_cache = True
+    core._pending_keep_pause = None
     return core
 
 
@@ -939,3 +942,64 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+# ---- Glue (B1): keep pause that preserves KV ------------------------------
+
+
+def _core_with_retained_exports() -> EngineCoreProc:
+    """has_work() is true only because finished requests' blocks are retained
+    for a remote KV reader; compute is idle and outputs are flushed."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.has_requests.return_value = True
+    core.scheduler.has_unfinished_requests.return_value = False
+    core.scheduler.finished_req_ids = set()
+    return core
+
+
+def test_keep_pause_without_clear_ignores_retained_exports():
+    core = _core_with_retained_exports()
+    order: list[str] = []
+    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+    core._reset_caches = lambda: order.append("reset_caches")
+
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert result is None
+    assert order == ["synchronize_device"]
+    assert core._idle_state_callbacks == []
+
+
+def test_keep_pause_with_clear_still_waits_for_retained_exports():
+    core = _core_with_retained_exports()
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=True)
+    assert isinstance(result, Future) and not result.done()
+    assert len(core._idle_state_callbacks) == 1
+
+
+def test_keep_pause_without_clear_finishes_after_outputs_flush():
+    core = _core_with_retained_exports()
+    core.scheduler.finished_req_ids = {"r1"}  # flushed to workers by the next step
+    order: list[str] = []
+    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert isinstance(result, Future) and not result.done()
+    assert order == []
+    core.scheduler.finished_req_ids = set()
+    core._maybe_finish_keep_pause()  # called after every step
+    assert result.result(timeout=0) is None
+    assert order == ["synchronize_device"]
+
+
+def test_resume_fails_pending_keep_pause():
+    core = _core_with_retained_exports()
+    core.scheduler.finished_req_ids = {"r1"}
+    core._checkpoint_state = MagicMock(is_restored=True)
+    core._kv_cache_reclaimable = False
+    core.reject_new_requests = True
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert isinstance(result, Future) and not result.done()
+    EngineCoreProc.resume_scheduler(core)
+    with pytest.raises(RuntimeError, match="Resumed before"):
+        result.result(timeout=0)
+    assert core._pending_keep_pause is None
