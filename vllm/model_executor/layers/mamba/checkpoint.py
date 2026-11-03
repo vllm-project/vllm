@@ -193,6 +193,14 @@ class MambaPrefillCheckpointExporter:
         state_len = (
             self.state_len if self.state_len is not None else conv_state.shape[-1]
         )
+        # The block is cached as a checkpoint, so it needs its whole conv window.
+        assert checkpoint.offsets is None or all(
+            offset == 0 or offset >= state_len for offset in checkpoint.offsets
+        )
+        assert (
+            recurrent_rows is None
+            or recurrent_rows.numel() == checkpoint.checkpoint_offsets.numel()
+        )
         width = raw_qkv.shape[-1]
         has_recurrent = recurrent_checkpoint is not None
         if recurrent_checkpoint is None:
