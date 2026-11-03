@@ -84,4 +84,8 @@ class TransferEngineBackend(TransferBackend):
         return [TransferEvent(state=state, error=error) for _ in ranges]
 
     def shutdown(self) -> None:
-        """The Transfer Engine exposes no teardown entry point."""
+        """Does nothing: the Transfer Engine exposes no teardown entry point.
+
+        The interface keeps the method so a caller stops either backend the same
+        way.
+        """

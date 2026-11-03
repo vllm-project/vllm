@@ -2250,7 +2250,7 @@ class MooncakeConnectorWorker:
         dst_ptrs: list[int],
         lengths: list[int],
     ) -> str | None:
-        """Moves one request and returns why it failed, or None on success."""
+        """Moves one submission and returns why it failed, or None on success."""
         ranges = [
             RangeRequest(local_addr=src, remote_addr=dst, length=length)
             for src, dst, length in zip(src_ptrs, dst_ptrs, lengths, strict=True)
