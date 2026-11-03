@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.watermarking import GumbelWatermarker
 from vllm.v1.watermarking.spec_decode import watermarked_rejection_sample
@@ -18,6 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     gather_draft_sampled,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
+    _div_rn_by_scalar,
     rejection_sample,
 )
 
@@ -1142,6 +1144,10 @@ def test_verify_rejects_unproposed_drafts():
         ),
         use_fp64_gumbel=False,
         trace_replay_state=None,
+        logprobs_mode="raw_logprobs",
+        return_sampling_mask=False,
+        needs_only_temperature_scaling=lambda _: False,
+        needs_only_temperature_and_top_p=lambda _: False,
     )
     rejection_sampler.num_speculative_steps = K
     rejection_sampler.synthetic_conditional_rates = None
@@ -1787,3 +1793,164 @@ def test_sharded_draft_logits_cache_writes(num_shards: int):
         is_real = owned < max_num_reqs - 1
         expected = cache[slots[owned].long()] * is_real.view(-1, 1, 1)
         assert torch.equal(local_cache, expected)
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature", [(1, 0.0), (3, 0.73), (1, 1.0)]
+)
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_raw_target_logits_matches_pre_scaled_target_logits(
+    num_speculative_steps: int,
+    temperature: float,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    """target_logits_pre_scaled=False (raw target_logits, divided by
+    temperature inside the kernels) must reproduce
+    target_logits_pre_scaled=True (the historical default: target_logits
+    already divided by temperature by the caller) bit-for-bit, given the
+    same seed. This is the behavior the fused rejection-sampling path
+    (vLLM issue #61024 / SIG Spec Decode Q4 roadmap) relies on to skip
+    apply_sampling_params's temperature step and its FP32 logits copy.
+    """
+    torch.manual_seed(7)
+    device = "cuda"
+    vocab_size = 256
+    num_trials = 64
+
+    target_logits_1d = torch.randn(vocab_size, device=device, dtype=torch.float32)
+    draft_logits_1d = torch.randn(vocab_size, device=device, dtype=torch.float32)
+
+    scaled_target_logits_1d = target_logits_1d.clone()
+    if temperature > 0:
+        scaled_target_logits_1d /= temperature
+
+    inputs = _build_rejection_sample_inputs(
+        scaled_target_logits_1d,
+        draft_logits_1d,
+        num_speculative_steps,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    expected_sampled, expected_num_sampled = _rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+    )
+
+    raw_inputs = dict(inputs)
+    raw_inputs["target_logits"] = (
+        target_logits_1d.unsqueeze(0).expand_as(inputs["target_logits"]).contiguous()
+    )
+    actual_sampled, actual_num_sampled = _rejection_sample(
+        **raw_inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_block_verification=use_block_verification,
+        target_logits_pre_scaled=False,
+    )
+
+    torch.testing.assert_close(actual_num_sampled, expected_num_sampled, rtol=0, atol=0)
+    # Only the first num_sampled[req] entries of each row are written; the
+    # rest is leftover torch.empty content and may legitimately differ.
+    for req in range(num_trials):
+        n = int(expected_num_sampled[req])
+        torch.testing.assert_close(
+            actual_sampled[req, :n], expected_sampled[req, :n], rtol=0, atol=0
+        )
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature", [(1, 0.0), (3, 0.73), (1, 1.0)]
+)
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_topp_thresh_on_load_matches_pre_masked_target_logits(
+    num_speculative_steps: int,
+    temperature: float,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    """Raw bf16 target logits with per-row top-p cutoffs, masked and divided by
+    the temperature as the kernels load them, must sample exactly what the
+    caller-side path samples from logits masked at the same cutoffs and divided
+    by the temperature (IEEE x / T) up front."""
+    torch.manual_seed(11)
+    device = "cuda"
+    vocab_size = 3 * 8192 + 17
+    num_trials = 64
+    K = num_speculative_steps
+
+    raw_1d = (torch.randn(vocab_size, device=device) * 3).to(torch.bfloat16)
+    draft_logits_1d = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        raw_1d.float(),
+        draft_logits_1d,
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    raw = raw_1d.unsqueeze(0).expand(num_trials * (K + 1), -1).contiguous()
+    # Per-row cutoffs from the top 0.1% up to the top 50% of the row; greedy
+    # rows are never masked.
+    q = torch.linspace(0.5, 0.999, raw.shape[0], device=device)
+    thresh = torch.quantile(raw_1d.float(), q).to(raw.dtype).float()
+    if temperature == 0.0:
+        thresh.fill_(float("-inf"))
+
+    masked = torch.where(raw.float() >= thresh[:, None], raw.float(), float("-inf"))
+    pre_scaled = masked / temperature if temperature > 0 else masked
+    expected_sampled, expected_num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=pre_scaled),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+    )
+    sampled, num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+        target_logits_pre_scaled=False,
+        target_topp_thresh=thresh,
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
+
+
+@triton.jit
+def _div_rn_by_scalar_probe_kernel(x_ptr, temp_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    out = _div_rn_by_scalar(
+        tl.load(x_ptr + offsets, mask=mask), tl.load(temp_ptr + tl.program_id(1))
+    )
+    tl.store(out_ptr + tl.program_id(1) * n + offsets, out, mask=mask)
+
+
+def test_div_rn_by_scalar_matches_ieee_division():
+    """On-load scaling must round x / T exactly as topp_cutoffs_lse and torch do,
+    or the kernels' log-probabilities drift from the cutoff kernel's log-sum-exp.
+    Every bf16 logit pattern of magnitude >= 2^-100, including signed zeros and
+    infinities, over temperatures that stress the reciprocal."""
+    x = torch.arange(-32768, 32768, dtype=torch.int32).to(torch.int16)
+    x = x.view(torch.bfloat16).float().cuda()
+    x = x[~x.isnan() & ((x.abs() >= 2.0**-100) | (x == 0))]
+    temps = torch.tensor(
+        [0.05, 0.3, 0.6, 0.7, 0.73, 0.95, 1.3, 2.0, 1 - 2**-24, 1 + 2**-23, 2 - 2**-23],
+        device="cuda",
+    )
+    temps = torch.cat([temps, torch.rand(53, device="cuda") * 3 + 1e-3])
+    out = torch.empty(len(temps), len(x), device="cuda")
+
+    _div_rn_by_scalar_probe_kernel[(triton.cdiv(len(x), 1024), len(temps))](
+        x, temps, out, len(x), BLOCK=1024
+    )
+
+    expected = x.unsqueeze(0) / temps.unsqueeze(1)
+    assert torch.equal(out.view(torch.int32), expected.view(torch.int32))

@@ -38,6 +38,13 @@ class SamplingStates:
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(NO_LOGPROBS)
 
+        # Whether min_p/top_k/top_p restricts this request's distribution.
+        # Unlike temperature, these have no on-load kernel equivalent, so a
+        # caller that wants to skip materializing processed_logits checks
+        # this (gated on non-greedy, since greedy ignores all three) before
+        # letting rejection_sample() scale by temperature on load instead.
+        self.needs_restriction = np.zeros(max_num_reqs, dtype=bool)
+
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         temperature = sampling_params.temperature
         top_k = sampling_params.top_k
@@ -64,12 +71,9 @@ class SamplingStates:
             num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
 
-        return temperature != 0.0 and (
-            temperature != 1.0
-            or min_p != 0.0
-            or top_k != self.vocab_size
-            or top_p != 1.0
-        )
+        needs_restriction = min_p != 0.0 or top_k != self.vocab_size or top_p != 1.0
+        self.needs_restriction[req_idx] = needs_restriction
+        return temperature != 0.0 and (temperature != 1.0 or needs_restriction)
 
     def apply_staged_writes(self) -> None:
         self.temperature.copy_to_uva()
