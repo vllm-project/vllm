@@ -248,10 +248,11 @@ class HiSparseConnectorWorker:
             )
         except Exception:
             release_pinned_state(
-                [cache.runtime for cache in cache_handles],
                 pinned_host_pools,
                 shared_host_region,
             )
+            for cache in cache_handles:
+                cache.unbind_cache()
             drop_hisparse_host_pool(self.vllm_config)
             raise
 
@@ -969,9 +970,10 @@ class HiSparseConnectorWorker:
         if self.dma_stream is not None:
             self.dma_stream.synchronize()
         release_pinned_state(
-            [cache.runtime for cache in self.cache_handles],
             self.pinned_host_pools,
             self.shared_host_region,
         )
+        for cache in self.cache_handles:
+            cache.unbind_cache()
         drop_hisparse_host_pool(self.vllm_config)
         self._initialized = False
