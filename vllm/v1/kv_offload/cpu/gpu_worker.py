@@ -353,10 +353,11 @@ class SingleDirectionOffloadingHandler:
             else:
                 assert cpu_page_size == gpu_page_size * blocks_per_chunk
 
-        self.src_tensors: list[torch.Tensor] = (
+        # Give each handler its own reference containers without copying tensors.
+        self.src_tensors: list[torch.Tensor] = list(
             gpu_tensors if gpu_to_cpu else cpu_tensors
         )
-        self.dst_tensors: list[torch.Tensor] = (
+        self.dst_tensors: list[torch.Tensor] = list(
             cpu_tensors if gpu_to_cpu else gpu_tensors
         )
         self.gpu_to_cpu: bool = gpu_to_cpu
