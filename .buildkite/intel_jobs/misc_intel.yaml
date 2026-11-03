@@ -230,6 +230,26 @@ steps:
       PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
       PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
 
+- label: ":intel: (BMG) EPD Correctness (4 GPUs)"
+  key: epd-correctness-4-gpus
+  timeout_in_minutes: 60
+  device: intel_gpu_k8s
+  num_devices: 4
+  resource_claim_template: b70-4
+  working_dir: "/workspace/vllm/"
+  env:
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/distributed/ec_transfer/
+    - vllm/distributed/kv_transfer/
+    - vllm/v1/worker/ec_connector_model_runner_mixin.py
+    - vllm/platforms/xpu.py
+    - examples/disaggregated/disaggregated_encoder/
+    - tests/v1/ec_connector/integration/
+  commands:
+      - cd tests
+      - USE_TWO_IMAGE_PROMPT=0 DEVICE_PLATFORM=xpu GPU_MEMORY_UTILIZATION=0.8 bash v1/ec_connector/integration/run_epd_correctness_test.sh
+
 - label: ":intel: (BMG) Regression"
   key: regression
   timeout_in_minutes: 50
