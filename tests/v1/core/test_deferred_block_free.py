@@ -547,6 +547,55 @@ def test_cow_retentions_deferred_until_copy_step_processed():
     assert [r.req_id for r in out2.scheduled_new_reqs] == ["late"]
 
 
+def test_cow_blocks_stats_per_step_delta():
+    """The scheduler reports the number of KV block copies issued by
+    copy-on-write as a per-step delta, not a cumulative total.
+
+    A step that issues one CoW copy surfaces num_cow_blocks == 1; the next
+    step (no copy) must surface 0. The Prometheus logger accumulates the
+    per-step delta into a monotonic counter, so the stat itself stays a
+    step-local count.
+    """
+    scheduler = _create_deferring_scheduler()
+    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
+    pool = scheduler.kv_cache_manager.block_pool
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+        max_tokens=5,
+        stop_token_ids=[STOP_TOKEN_ID],
+    )[0]
+    scheduler.add_request(request)
+
+    # No CoW yet: a step with no copy surfaces 0.
+    scheduler.schedule()
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_cow_blocks == 0
+
+    # Simulate a partial-hit CoW performed while scheduling a step: the copy
+    # is queued and the step must report it.
+    src_block, dst_block = pool.get_new_blocks(2)
+    block_copy = KVCacheBlockCopy(
+        src_block_id=src_block.block_id, dst_block_id=dst_block.block_id
+    )
+    manager._pending_cow_copies.append((src_block, dst_block))
+    out0 = scheduler.schedule()
+    assert out0.kv_cache_block_copies == [block_copy]
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_cow_blocks == 1
+
+    # The next step has no copy: the stat must fall back to 0 (per-step
+    # delta, not cumulative).
+    out1 = scheduler.schedule()
+    assert not out1.kv_cache_block_copies
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_cow_blocks == 0
+
+
 def _setup_async_load(defer_async_loads: bool):
     """Schedule a running request's prefill and one in-flight decode, then
     admit a request whose KV an async connector load fills.

@@ -408,6 +408,9 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_skipped_waiting_reqs += (
                 last_scheduler_stats.num_skipped_waiting_reqs
             )
+            self.last_scheduler_stats.num_cow_blocks += (
+                last_scheduler_stats.num_cow_blocks
+            )
             engine_kv_fetch = last_scheduler_stats.num_kv_fetch_reqs_by_stage
             total_kv_fetch = self.last_scheduler_stats.num_kv_fetch_reqs_by_stage
             for stage, num_reqs in engine_kv_fetch.items():
@@ -742,6 +745,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_num_preempted_reqs = create_metric_per_engine(
             counter_num_preempted_reqs, per_engine_labelvalues
+        )
+
+        counter_num_cow_blocks = self._counter_cls(
+            name="vllm:num_cow_blocks",
+            documentation=(
+                "Cumulative number of KV cache block copies (copy-on-write) "
+                "from the engine."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_num_cow_blocks = create_metric_per_engine(
+            counter_num_cow_blocks, per_engine_labelvalues
         )
 
         counter_prompt_tokens = self._counter_cls(
@@ -1169,6 +1184,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
+            )
+
+            self.counter_num_cow_blocks[engine_idx].inc(
+                scheduler_stats.num_cow_blocks
             )
 
             labelvalues = self.per_engine_labelvalues[engine_idx]
