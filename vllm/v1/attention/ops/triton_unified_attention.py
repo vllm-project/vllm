@@ -1372,7 +1372,7 @@ def unified_attention(
     if use_td and q.device not in _TD_ALLOCATOR_DEVICES:
         # The hoisted 3D descriptor requires a PyTorch-backed scratch
         # allocator to be registered (Triton raises "no allocator was
-        # set" otherwise on sm_100/sm_120). Same pattern as fused_moe /
+        # set" otherwise on CUDA TD paths). Same pattern as fused_moe /
         # GDN / LoRA's TD paths; cached per device like the newer
         # triton_scaled_mm TD path, since this call site is per-forward-pass.
         set_triton_allocator(q.device)
