@@ -182,15 +182,49 @@ def nccl_symm_mem_allgather_worker(local_rank: int, world_size: int):
             pytest.skip("NCCL symmetric memory is disabled.")
 
         per_rank_size = test_size_elements // world_size
-        input_tensor = torch.randint(
-            1, 23, (per_rank_size,), dtype=dtype, device=device
+        first_input = torch.randint(1, 23, (per_rank_size,), dtype=dtype, device=device)
+        second_input = torch.randint(
+            24, 47, (per_rank_size,), dtype=dtype, device=device
         )
-        output = cuda_communicator.all_gatherv(input_tensor, dim=0)
+        first_input_clone = first_input.clone()
+        second_input_clone = second_input.clone()
+
+        # Retain the first result while the second public entry point reuses
+        # the same scratch key.
+        first_output = cuda_communicator.all_gather(first_input, dim=0)
+        second_output = cuda_communicator.all_gatherv(
+            second_input, dim=0, sizes=[per_rank_size] * world_size
+        )
 
         group = get_tp_group().device_group
-        expected = torch.empty(test_size_elements, dtype=dtype, device=device)
-        dist.all_gather_into_tensor(expected, input_tensor, group=group)
-        torch.testing.assert_close(output, expected, atol=0.0, rtol=0.0)
+        first_expected = torch.empty(test_size_elements, dtype=dtype, device=device)
+        second_expected = torch.empty(test_size_elements, dtype=dtype, device=device)
+        dist.all_gather_into_tensor(first_expected, first_input_clone, group=group)
+        dist.all_gather_into_tensor(second_expected, second_input_clone, group=group)
+
+        assert first_output.data_ptr() != second_output.data_ptr()
+        torch.testing.assert_close(first_output, first_expected, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(second_output, second_expected, atol=0.0, rtol=0.0)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_first = cuda_communicator.all_gather(first_input, dim=0)
+            graph_second = cuda_communicator.all_gatherv(
+                second_input, dim=0, sizes=[per_rank_size] * world_size
+            )
+
+        assert graph_first.data_ptr() != graph_second.data_ptr()
+        for iteration in range(2):
+            first_input.fill_(local_rank + 1 + 10 * iteration)
+            second_input.fill_(local_rank + 11 + 10 * iteration)
+            dist.all_gather_into_tensor(first_expected, first_input, group=group)
+            dist.all_gather_into_tensor(second_expected, second_input, group=group)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
+            torch.testing.assert_close(
+                graph_second, second_expected, atol=0.0, rtol=0.0
+            )
 
 
 @pytest.mark.skipif(
@@ -245,29 +279,51 @@ def nccl_symm_mem_reduce_scatter_worker(local_rank: int, world_size: int):
             pytest.skip("NCCL symmetric memory is disabled.")
 
         per_rank_size = test_size_elements // world_size
-        ordinary_input = torch.randint(
+        first_input = torch.randint(
             1, 23, (test_size_elements,), dtype=dtype, device=device
         )
-        ordinary_clone = ordinary_input.clone()
-        ordinary_output = cuda_communicator.reduce_scatter(ordinary_input, dim=0)
+        second_input = torch.randint(
+            1, 23, (test_size_elements,), dtype=dtype, device=device
+        )
+        first_input_clone = first_input.clone()
+        second_input_clone = second_input.clone()
+
+        # Retain the first result while the second public entry point reuses
+        # the same scratch key.
+        first_output = cuda_communicator.reduce_scatter(first_input, dim=0)
+        second_output = cuda_communicator.reduce_scatterv(
+            second_input, dim=0, sizes=[per_rank_size] * world_size
+        )
 
         group = get_tp_group().device_group
-        ordinary_expected = torch.empty(per_rank_size, dtype=dtype, device=device)
-        dist.reduce_scatter_tensor(ordinary_expected, ordinary_clone, group=group)
-        torch.testing.assert_close(
-            ordinary_output, ordinary_expected, atol=2.5, rtol=0.1
-        )
-        assert is_symmetric_memory_tensor(ordinary_output)
+        first_expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        second_expected = torch.empty(per_rank_size, dtype=dtype, device=device)
+        dist.reduce_scatter_tensor(first_expected, first_input_clone, group=group)
+        dist.reduce_scatter_tensor(second_expected, second_input_clone, group=group)
 
-        # Both calls reuse rs_out; validate the first result before overwriting it.
-        for sizes in (None, [per_rank_size] * world_size):
-            ordinary_v_output = cuda_communicator.reduce_scatterv(
-                ordinary_input, dim=0, sizes=sizes
+        assert first_output.data_ptr() != second_output.data_ptr()
+        torch.testing.assert_close(first_output, first_expected, atol=2.5, rtol=0.1)
+        torch.testing.assert_close(second_output, second_expected, atol=2.5, rtol=0.1)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_first = cuda_communicator.reduce_scatter(first_input, dim=0)
+            graph_second = cuda_communicator.reduce_scatterv(
+                second_input, dim=0, sizes=[per_rank_size] * world_size
             )
+
+        assert graph_first.data_ptr() != graph_second.data_ptr()
+        for iteration in range(2):
+            first_input.fill_(local_rank + 1 + 10 * iteration)
+            second_input.fill_(local_rank + 11 + 10 * iteration)
+            dist.reduce_scatter_tensor(first_expected, first_input, group=group)
+            dist.reduce_scatter_tensor(second_expected, second_input, group=group)
+            graph.replay()
+            torch.accelerator.synchronize()
+            torch.testing.assert_close(graph_first, first_expected, atol=0.0, rtol=0.0)
             torch.testing.assert_close(
-                ordinary_v_output, ordinary_expected, atol=2.5, rtol=0.1
+                graph_second, second_expected, atol=0.0, rtol=0.0
             )
-            assert is_symmetric_memory_tensor(ordinary_v_output)
 
         pynccl_comm = cuda_communicator.pynccl_comm
         assert pynccl_comm is not None

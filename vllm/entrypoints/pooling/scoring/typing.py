@@ -5,7 +5,7 @@ from typing import Required, TypeAlias
 
 from typing_extensions import TypedDict
 
-from vllm.entrypoints.chat_utils import (
+from vllm.renderers.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,

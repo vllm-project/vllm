@@ -253,6 +253,7 @@ def _prefill_metadata(
                 cu_seq_lens=torch.zeros(1, dtype=torch.int32, device=DEVICE),
                 token_to_seq=torch.zeros(1, dtype=torch.int32, device=DEVICE),
                 total_seq_lens=1,
+                max_seqlen_k=int(ends.max()),
                 token_start=t0,
                 token_end=t1,
                 num_reqs=req_hi - req_lo,

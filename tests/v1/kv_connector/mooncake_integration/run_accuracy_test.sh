@@ -59,6 +59,12 @@ GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
 BLOCK_SIZE=${BLOCK_SIZE:-128}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Set to 1 to put every instance to sleep and wake it up before the eval.
+SLEEP_WAKE=${SLEEP_WAKE:-0}
+if [[ "$SLEEP_WAKE" == "1" ]]; then
+  export VLLM_SERVER_DEV_MODE=1
+  VLLM_SERVE_EXTRA_ARGS="${VLLM_SERVE_EXTRA_ARGS:+${VLLM_SERVE_EXTRA_ARGS},}--enable-sleep-mode"
+fi
 
 # Resolve the repository root from the script location instead of `.git`.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -226,9 +232,17 @@ run_tests_for_model() {
   # Wait for the proxy to start
   sleep 5
 
+  SLEEP_WAKE_URLS=""
+  if [[ "$SLEEP_WAKE" == "1" ]]; then
+    for PORT in "${PREFILL_PORTS[@]}" "${DECODE_PORTS[@]}"; do
+      SLEEP_WAKE_URLS="${SLEEP_WAKE_URLS:+${SLEEP_WAKE_URLS},}http://localhost:${PORT}"
+    done
+  fi
+
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name PROXY_PORT=$PROXY_PORT python3 -m pytest -s -x \
+  TEST_MODEL=$model_name PROXY_PORT=$PROXY_PORT SLEEP_WAKE_URLS=$SLEEP_WAKE_URLS \
+    python3 -m pytest -s -x \
     "${GIT_ROOT}/tests/v1/kv_connector/mooncake_integration/test_accuracy.py"
 
   # Clean up before running next model

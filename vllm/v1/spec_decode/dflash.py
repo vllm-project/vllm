@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
 from typing import Any
 
 import torch
 from typing_extensions import override
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, replace
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
