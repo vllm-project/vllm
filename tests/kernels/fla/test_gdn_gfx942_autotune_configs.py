@@ -11,6 +11,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops import chunk_delta_h, chunk_o
 from vllm.third_party.flash_linear_attention.ops.chunk import chunk_gated_delta_rule
+from vllm.triton_utils import triton
 
 B, T, HG, H, K, V = 1, 1024, 2, 4, 128, 128
 
@@ -48,12 +49,6 @@ def _added(kernel):
     return [c for c in _autotuner(kernel).configs if "matrix_instr_nonkdim" in c.kwargs]
 
 
-def _stock(kernel):
-    return [
-        c for c in _autotuner(kernel).configs if "matrix_instr_nonkdim" not in c.kwargs
-    ]
-
-
 def _inputs(device):
     torch.manual_seed(0)
     dtype = torch.bfloat16
@@ -76,6 +71,8 @@ def _inputs(device):
 
 _KERNEL_O = "chunk_fwd_kernel_o"
 _KERNEL_H = "chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
+_STOCK_O = triton.Config({"BK": 32, "BV": 32}, num_warps=4, num_stages=2)
+_STOCK_H = triton.Config({"BV": 32}, num_warps=4, num_stages=2)
 
 
 def _kernels():
@@ -102,8 +99,7 @@ def _pinned(inputs, o_config, h_config):
 @pytest.fixture(scope="module")
 def stock_reference():
     inputs = _inputs("cuda")
-    kernel_o, kernel_h = _kernels()
-    out, state = _pinned(inputs, _stock(kernel_o)[0], _stock(kernel_h)[0])
+    out, state = _pinned(inputs, _STOCK_O, _STOCK_H)
     return inputs, out, state
 
 
@@ -122,11 +118,10 @@ def _added_cases():
 )
 def test_added_config_matches_the_stock_result(kernel_name, config, stock_reference):
     inputs, ref_out, ref_state = stock_reference
-    kernel_o, kernel_h = _kernels()
     if kernel_name == _KERNEL_O:
-        out, state = _pinned(inputs, config, _stock(kernel_h)[0])
+        out, state = _pinned(inputs, config, _STOCK_H)
     else:
-        out, state = _pinned(inputs, _stock(kernel_o)[0], config)
+        out, state = _pinned(inputs, _STOCK_O, config)
 
     assert torch.equal(ref_state, state), f"final state changed under {config}"
     assert torch.equal(ref_out, out), f"output changed under {config}"
