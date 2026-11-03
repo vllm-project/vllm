@@ -2243,3 +2243,29 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     )
     assert config.num_blocks == scheduler_config.num_blocks == 997
     assert vllm_config.cache_config.num_gpu_blocks == 997
+
+
+def test_finalize_extensible_kv_cache_refits_auto_max_model_len():
+    """With `--max-model-len auto`, the context length fitted to the reserved
+    capacity is fitted again to the count measured after warmup, instead of
+    failing startup."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    model_config = ModelConfig(max_model_len=spec.block_size * 16)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 32
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=9)]
+    kv_cache_planning.finalize_extensible_kv_cache(
+        vllm_config, [config], scheduler_config, measured
+    )
+    # 8 usable blocks besides the null block.
+    assert vllm_config.model_config.max_model_len == spec.block_size * 8
+    assert config.num_blocks == 9

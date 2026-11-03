@@ -1795,6 +1795,25 @@ def finalize_extensible_kv_cache(
     )
     num_blocks = min(block_counts, default=scheduler_kv_cache_config.num_blocks)
     num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
+    if vllm_config.model_config.original_max_model_len == -1:
+        # The context length was fitted to the reserved capacity, before CUDA
+        # graphs and warmup took their share; fit it again to the measured one.
+        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
+
+        builder = get_kv_cache_config_builder(vllm_config)
+        groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
+        _auto_fit_max_model_len(
+            builder,
+            vllm_config,
+            groups_per_worker,
+            [
+                (num_blocks - 1)
+                * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+                if groups
+                else 0
+                for groups in groups_per_worker
+            ],
+        )
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
     )
