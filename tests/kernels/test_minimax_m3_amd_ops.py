@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (  # noqa:
 )
 from vllm.models.minimax_m3.amd.model import (  # noqa: E402
     MiniMAXGemmaRMSNorm,
+    MiniMaxM3MLP,
     MiniMaxM3SparseAttention,
     _build_rotary_emb,
     _can_fuse_input_norm_mxfp8,
@@ -56,6 +57,7 @@ from vllm.models.minimax_m3.amd.model import (  # noqa: E402
 from vllm.models.minimax_m3.amd.ops import (  # noqa: E402
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
+    gemma_fused_add_rmsnorm_mxfp8_and_bf16,
     gemma_rmsnorm,
     swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
@@ -211,6 +213,146 @@ def test_gemma_fused_add_rmsnorm_mxfp8_bitwise_eq_unfused(n, dtype):
     assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
     assert torch.equal(got_scale, ref_scale)
     assert torch.equal(got_res, ref_res)
+
+
+@pytest.mark.parametrize("n", [2048, 6144])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@torch.inference_mode()
+def test_gemma_fused_add_rmsnorm_mxfp8_and_bf16_bitwise_eq_unfused(n, dtype):
+    """The variant that also stores the normed rows matches the unfused norm
+    (bf16 output) and norm + ``mxfp8_e4m3_quantize`` (values, scales)."""
+    x, res, w = _mxfp8_edge_case_inputs(n, dtype)
+    m = x.shape[0]
+
+    got_q, got_scale, got_normed, got_res = gemma_fused_add_rmsnorm_mxfp8_and_bf16(
+        x, res, w, EPS
+    )
+    normed, ref_res = gemma_fused_add_rmsnorm(x, res, w, EPS)
+    ref_q, ref_scale = mxfp8_e4m3_quantize(normed)
+
+    assert got_normed.shape == x.shape and got_normed.dtype == dtype
+    assert torch.equal(got_normed, normed)
+    assert torch.equal(got_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(got_scale, ref_scale)
+    assert torch.equal(got_res, ref_res)
+    assert got_q.shape == (m, n)
+
+
+@pytest.mark.parametrize("return_normed", [True, False])
+@pytest.mark.parametrize("tp_size", [1, 4])
+@torch.inference_mode()
+def test_allreduce_gemma_rms_norm_mxfp8(monkeypatch, tp_size, return_normed):
+    """The fused post-attention norm equals all-reduce + norm + quant, and
+    defers (None) to a fused all-reduce + norm kernel when one applies."""
+    from vllm.model_executor.layers import fused_allreduce_gemma_rms_norm as far
+
+    reduced_inputs = []
+
+    def _fake_all_reduce(t):
+        reduced_inputs.append(t)
+        return t * 2  # distinguishable from the un-reduced partial
+
+    monkeypatch.setattr(far, "get_tensor_model_parallel_world_size", lambda: tp_size)
+    monkeypatch.setattr(far, "tensor_model_parallel_all_reduce", _fake_all_reduce)
+    monkeypatch.setattr(far, "_can_use_flashinfer", lambda *a: (False, 0))
+    monkeypatch.setattr(far, "_can_use_aiter_fused_ar_rms", lambda *a: False)
+
+    n, m = 6144, 37
+    torch.manual_seed(0)
+    x = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, n, device=DEVICE, dtype=torch.bfloat16)
+    norm = MiniMAXGemmaRMSNorm(n, eps=EPS).to(DEVICE, torch.bfloat16)
+    norm.weight.data.normal_(0, 0.1)
+
+    got = far.allreduce_gemma_rms_norm_mxfp8(x, res, norm, return_normed)
+    assert got is not None
+    x_q, x_scale, normed, res_out = got
+    reduced = x * 2 if tp_size > 1 else x
+    assert len(reduced_inputs) == (1 if tp_size > 1 else 0)
+    ref_normed, ref_res = gemma_fused_add_rmsnorm(reduced, res, norm.weight, EPS)
+    ref_q, ref_scale = mxfp8_e4m3_quantize(ref_normed)
+    assert torch.equal(x_q.view(torch.uint8), ref_q.view(torch.uint8))
+    assert torch.equal(x_scale, ref_scale)
+    assert torch.equal(res_out, ref_res)
+    if return_normed:
+        assert normed is not None and torch.equal(normed, ref_normed)
+    else:
+        assert normed is None
+
+    # A fused all-reduce + norm kernel (no quant epilogue) keeps priority.
+    if tp_size > 1:
+        monkeypatch.setattr(far, "_can_use_aiter_fused_ar_rms", lambda *a: True)
+        assert far.allreduce_gemma_rms_norm_mxfp8(x, res, norm, return_normed) is None
+
+
+@requires_gfx950
+@torch.inference_mode()
+def test_shared_expert_gate_up_on_post_norm_quant(dist_init):
+    """gate_up_proj on the post-attention norm's MXFP8 output equals the
+    unfused norm -> linear (shared expert gate_up shape, TP4)."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    n, k, m = 1536, 6144, 32
+    layer, scheme = _quark_mxfp8_linear(n, k)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    x = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    res = torch.randn(m, k, device=DEVICE, dtype=torch.bfloat16)
+    w = torch.randn(k, device=DEVICE, dtype=torch.bfloat16) * 0.1
+    x_q, x_scale, normed, _ = gemma_fused_add_rmsnorm_mxfp8_and_bf16(x, res, w, EPS)
+    qa = QuantizedActivation(x_q, x_scale, x.dtype, x.shape, kMxfp8Dynamic)
+    assert torch.equal(
+        scheme.apply_weights(layer, qa), scheme.apply_weights(layer, normed)
+    )
+
+
+@torch.inference_mode()
+def test_mlp_prequant_handoff():
+    """``set_prequant`` replaces gate_up_proj's input only when the shared
+    expert is called with the very tensor that was quantized, and only once."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    seen = []
+
+    def _gate_up(x):
+        seen.append(x)
+        return torch.zeros(4, 16, device=DEVICE, dtype=torch.bfloat16), None
+
+    mlp.gate_up_proj = _gate_up
+    mlp.down_proj = lambda x: (x, None)
+    mlp.swiglu_alpha, mlp.swiglu_beta, mlp.swiglu_limit = 1.702, 1.0, 7.0
+
+    x = torch.randn(4, 8, device=DEVICE, dtype=torch.bfloat16)
+    qa = QuantizedActivation(
+        x.to(torch.float8_e4m3fn),
+        torch.zeros(4, 1, device=DEVICE, dtype=torch.uint8),
+        x.dtype,
+        x.shape,
+        kMxfp8Dynamic,
+    )
+    mlp.set_prequant(x, qa)
+    mlp(x)
+    assert seen[-1] is qa
+    mlp(x)  # consumed by the first forward
+    assert seen[-1] is x
+    mlp.set_prequant(x, qa)
+    other = x.clone()  # a different tensor than the one that was quantized
+    mlp(other)
+    assert seen[-1] is other
+    mlp(qa)  # a quantized input passes through untouched
+    assert seen[-1] is qa
 
 
 # --------------------------------------------------------------------------- #

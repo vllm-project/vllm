@@ -188,3 +188,43 @@ def fused_allreduce_gemma_rms_norm(
     # Fallback: explicit all-reduce + GemmaRMSNorm (matches the unfused model).
     reduced = tensor_model_parallel_all_reduce(hidden_states)
     return norm(reduced, residual)
+
+
+def allreduce_gemma_rms_norm_mxfp8(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    norm: GemmaRMSNorm,
+    return_normed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor] | None:
+    """All-reduce + residual add + GemmaRMSNorm with MXFP8-quantized output.
+
+    ``fused_allreduce_gemma_rms_norm`` followed by an MXFP8 activation quant,
+    with the quant as an epilogue of the Triton norm instead of its own launch.
+    The fused all-reduce + norm kernels have no quantized output, so this only
+    covers the plain collective + Triton norm; when one of them would run it
+    returns ``None`` and the caller keeps the unfused path.
+
+    Returns ``(x_q, x_scale, normed, residual_out)``: float8_e4m3fn values
+    ``[M, N]``, row-major E8M0 scales ``[M, N // 32]``, the bf16 normed rows
+    (only if ``return_normed``, else ``None``) and the new residual.
+    """
+    from vllm.models.minimax_m3.amd.ops import (
+        gemma_fused_add_rmsnorm_mxfp8,
+        gemma_fused_add_rmsnorm_mxfp8_and_bf16,
+    )
+
+    tp_size = get_tensor_model_parallel_world_size()
+    if tp_size > 1:
+        if _can_use_flashinfer(hidden_states, tp_size)[0]:
+            return None
+        if _can_use_aiter_fused_ar_rms(hidden_states):
+            return None
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+    if return_normed:
+        return gemma_fused_add_rmsnorm_mxfp8_and_bf16(
+            hidden_states, residual, norm.weight, norm.variance_epsilon
+        )
+    x_q, x_scale, res_out = gemma_fused_add_rmsnorm_mxfp8(
+        hidden_states, residual, norm.weight, norm.variance_epsilon
+    )
+    return x_q, x_scale, None, res_out

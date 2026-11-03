@@ -43,6 +43,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
+    allreduce_gemma_rms_norm_mxfp8,
     fused_allreduce_gemma_rms_norm,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -334,8 +335,27 @@ class MiniMaxM3MLP(nn.Module):
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_beta = config.swiglu_beta
         self.swiglu_limit = config.swiglu_limit
+        # (source tensor, its MXFP8 quantization) handed over by the decoder
+        # layer's post-attention norm; consumed by the next forward.
+        self._prequant: tuple[torch.Tensor, QuantizedActivation] | None = None
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def set_prequant(self, src: torch.Tensor, qa: QuantizedActivation) -> None:
+        """Hand over ``src`` already quantized, for the next forward only.
+
+        The MoE runner calls the shared expert with the layer's own input
+        tensor, so ``src`` is checked against it and ignored if it differs.
+        """
+        self._prequant = (src, qa)
+
+    def forward(self, x: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        pre, self._prequant = self._prequant, None
+        if (
+            pre is not None
+            and isinstance(x, torch.Tensor)
+            and pre[0].data_ptr() == x.data_ptr()
+            and pre[0].shape == x.shape
+        ):
+            x = pre[1]
         gate_up, _ = self.gate_up_proj(x)
         x = swiglu_oai_split(
             gate_up,
@@ -511,9 +531,18 @@ class MiniMaxM3MoE(nn.Module):
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight.to(torch.float32))
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        shared_prequant: QuantizedActivation | None = None,
+    ) -> torch.Tensor:
+        """``shared_prequant``: ``hidden_states`` already MXFP8-quantized, for
+        the shared expert's gate_up_proj (the routed path needs the bf16 rows)."""
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        if shared_prequant is not None:
+            assert self.shared_experts is not None
+            self.shared_experts.set_prequant(hidden_states, shared_prequant)
 
         # router_logits: (num_tokens, n_experts); GateLinear casts to fp32.
         router_logits, _ = self.gate(hidden_states)
@@ -1559,6 +1588,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.fuse_input_norm_mxfp8 = _can_fuse_input_norm_mxfp8(self.self_attn.qkv_proj)
         if self.fuse_input_norm_mxfp8:
             logger.info_once("Fusing input_layernorm with qkv_proj's MXFP8 input quant")
+        # The FFN's first projection: the dense MLP's, or the MoE shared
+        # expert's (the routed experts take bf16).
+        ffn_mlp = (
+            self.block_sparse_moe.shared_experts if self.is_moe_layer else self.mlp
+        )
+        self.fuse_post_norm_mxfp8 = ffn_mlp is not None and _can_fuse_input_norm_mxfp8(
+            ffn_mlp.gate_up_proj
+        )
+        if self.fuse_post_norm_mxfp8:
+            logger.info_once(
+                "Fusing post_attention_layernorm with the FFN gate_up_proj's "
+                "MXFP8 input quant"
+            )
 
     def forward(
         self,
@@ -1588,10 +1630,29 @@ class MiniMaxM3DecoderLayer(nn.Module):
             hidden_states=attn_input,
         )
 
+        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
+        if self.fuse_post_norm_mxfp8:
+            # None when a fused all-reduce + norm kernel applies (no quant
+            # epilogue there): that path keeps the linear's own quant.
+            fused = allreduce_gemma_rms_norm_mxfp8(
+                hidden_states,
+                residual,
+                self.post_attention_layernorm,
+                # MoE: the router and routed experts need the bf16 normed rows.
+                return_normed=self.is_moe_layer,
+            )
+            if fused is not None:
+                x_q, x_scale, normed, residual = fused
+                qa = QuantizedActivation(
+                    x_q, x_scale, hidden_states.dtype, x_q.shape, kMxfp8Dynamic
+                )
+                if self.is_moe_layer:
+                    assert normed is not None
+                    return ffn(normed, shared_prequant=qa), residual
+                return ffn(qa), residual
         hidden_states, residual = fused_allreduce_gemma_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
-        ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
 
