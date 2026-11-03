@@ -47,6 +47,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.platforms import current_platform
+from vllm.utils import is_moe_layer
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
@@ -54,6 +55,13 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def reserve_moe_workspaces(model: torch.nn.Module) -> None:
+    """Reserve shared MoE scratch after loading weights and before graph capture."""
+    for module in model.modules():
+        if is_moe_layer(module) and hasattr(module, "maybe_reserve_moe_workspace"):
+            module.maybe_reserve_moe_workspace()
 
 
 def register_layer_for_moe_forward_op(

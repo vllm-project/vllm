@@ -60,6 +60,9 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    reserve_moe_workspaces,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -109,7 +112,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
-from vllm.utils import is_moe_layer, length_from_prompt_token_ids_or_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
@@ -4953,12 +4956,6 @@ class GPUModelRunner(
 
         return draft_token_ids
 
-    def _reserve_moe_workspaces(self, model: nn.Module) -> None:
-        """Pre-size the shared MoE workspace to its worst case before lock."""
-        for module in model.modules():
-            if is_moe_layer(module) and hasattr(module, "maybe_reserve_moe_workspace"):
-                module.maybe_reserve_moe_workspace()
-
     @instrument(span_name="Loading (GPU)")
     def load_model(
         self,
@@ -5087,11 +5084,11 @@ class GPUModelRunner(
             time_after_load - time_before_load,
         )
         if not load_dummy_weights:
-            self._reserve_moe_workspaces(self.model)
+            reserve_moe_workspaces(self.model)
             if (drafter := getattr(self, "drafter", None)) and (
                 drafter_model := getattr(drafter, "model", None)
             ):
-                self._reserve_moe_workspaces(drafter_model)
+                reserve_moe_workspaces(drafter_model)
         mm_config = self.model_config.multimodal_config
         self.is_multimodal_pruning_enabled = (
             supports_multimodal_pruning(self.get_model())
