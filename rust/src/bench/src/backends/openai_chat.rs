@@ -6,7 +6,10 @@ use std::time::Instant;
 use futures::StreamExt;
 
 use super::streaming::StreamedResponseHandler;
-use super::{ChatChunk, RequestFuncInput, RequestFuncOutput, build_headers, update_server_metrics};
+use super::{
+    ChatChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
+    update_server_metrics,
+};
 use crate::error::Result;
 
 /// Backend for OpenAI Chat Completions API (/v1/chat/completions).
@@ -129,9 +132,7 @@ impl OpenAIChatBackend {
                         output.success = true;
                     } else {
                         output.success = false;
-                        output.error = "Never received a valid chunk to calculate TTFT. \
-                                        This response will be marked as failed!"
-                            .to_string();
+                        output.error = NO_VALID_CHUNK_ERROR.to_string();
                     }
                     output.generated_text = generated_text;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
@@ -624,7 +625,7 @@ mod tests {
     #[tokio::test]
     async fn test_tokenless_stream_is_failed() {
         let input = RequestFuncInput {
-            api_url: spawn_sse_server(0, std::time::Duration::ZERO),
+            api_url: spawn_sse_server(0, std::time::Duration::ZERO, None),
             model: "test-model".to_string(),
             output_len: 3,
             ..Default::default()
@@ -633,11 +634,16 @@ mod tests {
         let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
 
         assert!(!output.success);
-        assert!(
-            output.error.contains("Never received a valid chunk"),
-            "{}",
-            output.error
-        );
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
+    }
+
+    /// What vLLM actually streams when it generates nothing: the opening role
+    /// chunk, then usage. The role chunk carries no token, so this must fail too.
+    #[tokio::test]
+    async fn test_role_only_stream_is_failed() {
+        let output = run_chat(&[ROLE, USAGE]).await;
+        assert!(!output.success);
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.
