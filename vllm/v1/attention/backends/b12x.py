@@ -428,7 +428,9 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
         max_num_seqs = int(scheduler_config.max_num_seqs)
         max_model_len = int(model_config.max_model_len)
         self._max_num_seqs = max_num_seqs
-        block_size = int(cache_config.block_size) if cache_config.block_size else None
+        # Read through vllm_config: #62265 drops the cache_config local above.
+        configured_block_size = vllm_config.cache_config.block_size
+        block_size = int(configured_block_size) if configured_block_size else None
         max_page_table_widths = {
             page_size: _max_page_table_width(
                 max_model_len,
