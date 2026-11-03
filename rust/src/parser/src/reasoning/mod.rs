@@ -26,6 +26,7 @@ mod glm45;
 mod glm47;
 mod hy;
 mod kimi;
+mod kimi_k2;
 mod minimax_m2;
 mod minimax_m3;
 mod qwen3;
@@ -49,6 +50,7 @@ pub use self::glm45::Glm45ReasoningParser;
 pub use self::glm47::Glm47ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
+pub use self::kimi_k2::KimiK2ReasoningParser;
 pub use self::minimax_m2::MiniMaxM2ReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
@@ -62,10 +64,6 @@ pub type Step3ReasoningParser = DeepSeekR1ReasoningParser;
 
 /// DeepSeek V4.1 uses bare `<think>...</think>` delimiters.
 pub type DeepSeekV41ReasoningParser = DeepSeekV3ReasoningParser;
-/// Kimi K2 currently shares the DeepSeek V3 reasoning parser.
-// TODO: kimi k2 may implicitly end reasoning by starting a tool call section
-// using <|tool_calls_section_begin|>, we should support that.
-pub type KimiK2ReasoningParser = DeepSeekV3ReasoningParser;
 /// MiMo V2 uses bare `<think>...</think>` delimiters.
 pub type MiMoReasoningParser = DeepSeekV3ReasoningParser;
 

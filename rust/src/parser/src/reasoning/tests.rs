@@ -9,9 +9,9 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, T
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, DelimitedReasoningParser, DelimitedReasoningParserBuilder,
-    Glm45ReasoningParser, Glm47ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
-    MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result,
-    SeedOssReasoningParser, Step3p5ReasoningParser,
+    Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
+    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+    ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -28,6 +28,7 @@ pub(crate) const SEED_THINK_END_ID: u32 = 266;
 pub(crate) const TOOL_CALL_ID: u32 = 267;
 pub(crate) const MINIMAX_TOOL_CALL_ID: u32 = 268;
 pub(crate) const DSML_ID: u32 = 269;
+pub(crate) const TOOL_CALLS_SECTION_BEGIN_ID: u32 = 270;
 
 pub(crate) fn fake_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -45,6 +46,7 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("<tool_call>", TOOL_CALL_ID)
         .with_regular_token("<minimax:tool_call>", MINIMAX_TOOL_CALL_ID)
         .with_regular_token("｜DSML｜", DSML_ID)
+        .with_regular_token("<|tool_calls_section_begin|>", TOOL_CALLS_SECTION_BEGIN_ID)
 }
 
 /// Decode `chunks` with [`fake_tokenizer`] as the frontend streams them:
@@ -193,8 +195,8 @@ type FamilyCase = (
     &'static str,
 );
 
-/// The reasoning families built on [`DelimitedReasoningParser`]. Kimi K2 and
-/// MiMo alias the DeepSeek V3 parser.
+/// The reasoning families built on [`DelimitedReasoningParser`]. MiMo aliases
+/// the DeepSeek V3 parser.
 fn delimited_families() -> Vec<FamilyCase> {
     vec![
         (
@@ -236,6 +238,12 @@ fn delimited_families() -> Vec<FamilyCase> {
         (
             "minimax_m2",
             MiniMaxM2ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "kimi_k2",
+            KimiK2ReasoningParser::create,
             THINK_START_ID,
             "</think>",
         ),
@@ -345,6 +353,11 @@ fn implicit_end_families() -> Vec<ImplicitEndCase> {
             "deepseek_v4",
             DeepSeekV4ReasoningParser::create,
             "<｜DSML｜tool_calls>",
+        ),
+        (
+            "kimi_k2",
+            KimiK2ReasoningParser::create,
+            "<|tool_calls_section_begin|>",
         ),
     ]
 }
