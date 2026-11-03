@@ -673,6 +673,20 @@ class TestDetokenizeDelta:
     def test_decode_params_default_without_request(self, tokenizer):
         assert _decode_params(tokenizer, None) == (True, True)
 
+    @pytest.mark.parametrize(("skip", "expected"), [(None, True), (False, False)])
+    def test_decode_params_mistral_parser_follows_request(
+        self, tekken_tokenizer, skip, expected
+    ):
+        """MistralTokenizer keeps parser markers when skipping, so like serving,
+        the parser path keeps the request's skip_special_tokens."""
+        request = CompletionRequest(
+            model=MODEL_NAME, prompt="x", skip_special_tokens=skip
+        )
+        skip_special, _ = _decode_params(
+            tekken_tokenizer, request, preserve_special=True
+        )
+        assert skip_special is expected
+
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
         token_ids = tokenizer.encode("parallel streams")[:8]
