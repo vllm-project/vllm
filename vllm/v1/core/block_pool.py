@@ -725,20 +725,15 @@ class BlockPool:
         if self._reuse_watchers:
             self._notify_reuse(ret)
 
-        # In order to only iterate the list once, we duplicated code a bit
-        if self.enable_caching:
-            for block in ret:
+        enable_caching = self.enable_caching
+        metrics_collector = self.metrics_collector
+        for block in ret:
+            if enable_caching:
                 self._maybe_evict_cached_block(block)
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
-        else:
-            for block in ret:
-                assert block.ref_cnt == 0
-                block.ref_cnt += 1
-                if self.metrics_collector:
-                    self.metrics_collector.on_block_allocated(block)
+            assert block.ref_cnt == 0
+            block.ref_cnt += 1
+            if metrics_collector:
+                metrics_collector.on_block_allocated(block)
         return ret
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
