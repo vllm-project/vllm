@@ -1100,6 +1100,7 @@ def safetensors_weights_iterator(
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
     *,
+    is_unused_weight: Callable[[str], bool] | None = None,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -1132,7 +1133,7 @@ def safetensors_weights_iterator(
     )
 
     should_prefetch = safetensors_load_strategy == "prefetch"
-    if safetensors_load_strategy is None:
+    if safetensors_load_strategy is None and is_unused_weight is None:
         if is_net_fs and fits_in_ram:
             should_prefetch = True
         elif is_net_fs and not fits_in_ram:
@@ -1190,7 +1191,9 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
+                if not should_skip_weight(name, local_expert_ids) and not (
+                    is_unused_weight and is_unused_weight(name)
+                ):
                     yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
@@ -1207,7 +1210,9 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip_weight(name, local_expert_ids) or (
+                        is_unused_weight and is_unused_weight(name)
+                    ):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -1225,7 +1230,9 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if should_skip_weight(name, local_expert_ids) or (
+                        is_unused_weight and is_unused_weight(name)
+                    ):
                         continue
                     param = f.get_tensor(name)
                     yield name, param
@@ -1235,10 +1242,19 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    *,
+    is_unused_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
+        if is_unused_weight is not None:
+            with safe_open(st_file, framework="pt", device="cpu") as f:
+                return {
+                    name: f.get_tensor(name)
+                    for name in f.keys()  # noqa: SIM118
+                    if not is_unused_weight(name)
+                }
         result = load_file(st_file, device="cpu")
         return result
 

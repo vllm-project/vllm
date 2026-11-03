@@ -324,3 +324,10 @@ class DeepseekV41ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights

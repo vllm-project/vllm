@@ -11,11 +11,57 @@ import torch
 from safetensors.torch import save_file
 
 from vllm.config.load import LoadConfig
+from vllm.config.model import ModelConfig
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_safetensors_files_by_weight_name,
 )
+
+
+@pytest.mark.parametrize("remote", [False, True])
+def test_mixed_shard_filter_is_opt_in(tmp_path, remote):
+    """The default path loads both tensors; remote mode excludes only its table."""
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": "llama",
+                "architectures": ["LlamaForCausalLM"],
+                "hidden_size": 8,
+                "intermediate_size": 16,
+                "num_hidden_layers": 1,
+                "num_attention_heads": 1,
+                "num_key_value_heads": 1,
+                "vocab_size": 32,
+                "max_position_embeddings": 64,
+            }
+        )
+    )
+    save_file(
+        {"table": torch.ones(8), "projection": torch.zeros(4)},
+        str(tmp_path / "model.safetensors"),
+    )
+
+    class TinyModel(torch.nn.Module):
+        @property
+        def filter_unused_checkpoint_weights(self):
+            return remote
+
+        def is_unused_checkpoint_weight(self, name):
+            return name == "table"
+
+    model_config = ModelConfig(
+        model=str(tmp_path), skip_tokenizer_init=True, max_model_len=32, dtype="float32"
+    )
+    loader = DefaultModelLoader(
+        LoadConfig(
+            load_format="safetensors",
+            safetensors_load_strategy="lazy",
+            use_tqdm_on_load=False,
+        )
+    )
+    names = {name for name, _ in loader.get_all_weights(model_config, TinyModel())}
+    assert names == ({"projection"} if remote else {"table", "projection"})
 
 
 def test_filter_duplicate_safetensors_files_missing_weight():
@@ -137,6 +183,107 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
         ["model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"],
         sorted(f.name for f in mtp_checkpoint.glob("*.safetensors")),
     ]
+
+
+@pytest.mark.parametrize("multithread", [False, True])
+def test_loader_filters_external_weights_in_mixed_shard(
+    tmp_path, multithread, monkeypatch
+):
+    """External tables must not be materialized even in a mixed shard."""
+    save_file(
+        {"model.weight": torch.tensor([2]), "external.weight": torch.tensor([3])},
+        tmp_path / "model.safetensors",
+    )
+    from vllm.model_executor.model_loader import weight_utils
+
+    original_open = weight_utils.safe_open
+    materialized = []
+
+    class TrackingOpen:
+        def __init__(self, *args, **kwargs):
+            self.file = original_open(*args, **kwargs)
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def keys(self):
+            return self.file.keys()
+
+        def get_tensor(self, name):
+            materialized.append(name)
+            return self.file.get_tensor(name)
+
+    monkeypatch.setattr(weight_utils, "safe_open", TrackingOpen)
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("external.")
+
+    config = LoadConfig(
+        safetensors_load_strategy="lazy",
+        model_loader_extra_config={"enable_multithread_load": multithread},
+    )
+    loader = DefaultModelLoader(config)
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    weights = dict(loader.get_all_weights(model_config, Model()))
+    assert list(weights) == ["model.weight"]
+    assert materialized == ["model.weight"]
+    assert torch.equal(weights["model.weight"], torch.tensor([2]))
+
+
+@pytest.mark.parametrize("strategy", ["eager", "prefetch", "torchao"])
+def test_external_weight_filter_rejects_nonlazy_loading(tmp_path, strategy):
+    save_file({"model.weight": torch.tensor([2])}, tmp_path / "model.safetensors")
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("external.")
+
+    loader = DefaultModelLoader(LoadConfig(safetensors_load_strategy=strategy))
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    with pytest.raises(ValueError, match="requires lazy safetensors"):
+        list(loader.get_all_weights(model_config, Model()))
+
+
+def test_external_weight_filter_handles_secondary_prefix_and_existing_rule(tmp_path):
+    save_file({"main.weight": torch.tensor([1])}, tmp_path / "model.safetensors")
+    secondary = tmp_path / "secondary"
+    secondary.mkdir()
+    save_file(
+        {
+            "external.weight": torch.tensor([2]),
+            "existing.weight": torch.tensor([3]),
+            "keep.weight": torch.tensor([4]),
+        },
+        secondary / "model.safetensors",
+    )
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+        secondary_weights = [
+            DefaultModelLoader.Source(
+                str(secondary),
+                revision=None,
+                prefix="secondary.",
+                is_unused_weight=lambda name: name.startswith("existing."),
+            )
+        ]
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("secondary.external.")
+
+    loader = DefaultModelLoader(LoadConfig(safetensors_load_strategy="lazy"))
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    weights = dict(loader.get_all_weights(model_config, Model()))
+    assert set(weights) == {"main.weight", "secondary.keep.weight"}
 
 
 def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
