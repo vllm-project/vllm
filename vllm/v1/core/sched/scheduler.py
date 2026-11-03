@@ -758,9 +758,32 @@ class Scheduler(SchedulerInterface):
                 long_prefill_token_threshold, input_budget // num_eligible_reqs
             )
 
+        # A running chunked prefill spends the whole step budget every step, so the
+        # waiting loop is skipped until it ends. Reserve min(uncached tokens, one
+        # share) per request the loop can admit, so cached-KV requests can be
+        # admitted mid-prefill. Nothing is reserved when the loop cannot admit
+        # (active-request cap reached, or queued requests are paused).
+        reserved_budget = 0
+        num_active_reqs = len(self.running) + self.num_waiting_for_streaming_input
+        # Under PAUSED_NEW only KV-holding requests drain; queued ones stay put.
+        reservation_queues = (
+            (self.waiting, self.kv_holding_waiting)
+            if self._pause_state == PauseState.UNPAUSED
+            else (self.kv_holding_waiting,)
+        )
+        num_reservable_reqs = sum(len(queue) for queue in reservation_queues)
+        if num_reservable_reqs > 0 and num_active_reqs < self.max_num_active_reqs:
+            fair_share = input_budget // (num_running + num_reservable_reqs)
+            for request in itertools.chain(*reservation_queues):
+                remaining = max(
+                    0, request.num_tokens_with_spec - request.num_computed_tokens
+                )
+                reserved_budget += min(remaining, fair_share)
+            reserved_budget = min(reserved_budget, token_budget)
+
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while req_index < len(self.running) and token_budget > reserved_budget:
             request = self.running[req_index]
             if input_budget <= draft_slots:
                 break
@@ -812,7 +835,9 @@ class Scheduler(SchedulerInterface):
             if 0 < long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = long_prefill_token_threshold
             num_new_tokens = min(
-                num_new_tokens, token_budget, input_budget - draft_slots
+                num_new_tokens,
+                token_budget - reserved_budget,
+                input_budget - draft_slots,
             )
 
             # Make sure the input position does not exceed the max model len.
