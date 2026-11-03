@@ -1607,10 +1607,18 @@ class MoRIIOConnectorScheduler:
         # Producer: must keep the mapping until we get notification that blocks can
         #   be freed, which may be several scheduler steps later.
         if not self.is_producer:
+            transfer_id = params.get("transfer_id") if params else None
+            owner = (
+                self.transfer_id_to_request_id.get(transfer_id)
+                if transfer_id is not None
+                else None
+            )
+            if owner != request_id and owner in self._write_recvs_in_flight:
+                # Rejection cleanup must not unmap or release an active receive.
+                return False, None
             if request_id in self._write_recvs_in_flight:
                 self._finished_write_recvs_in_flight.add(request_id)
             else:
-                transfer_id = params.get("transfer_id") if params else None
                 self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
             "MoriioConnector request_finished, request_status=%s, "

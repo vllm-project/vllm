@@ -118,11 +118,18 @@ def _step(scheduler, worker):
 
 @pytest.mark.cpu_test
 @pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize("completion_before_abort", [False, True])
-def test_write_consumer_abort_while_waiting(monkeypatch, completion_before_abort):
+@pytest.mark.parametrize(
+    ("completion_before_abort", "rejection_notice"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_write_consumer_abort_while_waiting(
+    monkeypatch, completion_before_abort, rejection_notice
+):
     scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
     connector = scheduler.connector.connector_scheduler
     monkeypatch.setattr(connector, "send_notify_block", lambda **kw: None)
+    release = MagicMock()
+    monkeypatch.setattr(connector, "_send_transfer_release", release)
     pool = scheduler.kv_cache_manager.block_pool
     free_before = pool.get_num_free_blocks()
     transfer_id = "xfer-abort"
@@ -148,12 +155,53 @@ def test_write_consumer_abort_while_waiting(monkeypatch, completion_before_abort
         assert connector.transfer_id_to_request_id == {transfer_id: request_id}
         assert connector.request_id_to_transfer_id == {request_id: transfer_id}
 
+        if rejection_notice:
+            # Non-streaming rejection cleanup submits a new request with the
+            # original frontend params, before the late WRITE completes.
+            rejected = create_request(num_tokens=1, do_remote_prefill=True)
+            _setup_kv_transfer_request(rejected, fake_transfer_id=transfer_id)
+            assert rejected.request_id != request_id
+            scheduler.add_request(rejected)
+            scheduler.finish_requests(
+                rejected.request_id, RequestStatus.FINISHED_ABORTED
+            )
+            release.assert_not_called()
+            assert rejected.request_id not in scheduler.requests
+            assert connector.transfer_id_to_request_id == {transfer_id: request_id}
+            assert connector.request_id_to_transfer_id == {request_id: transfer_id}
+            assert pool.get_num_free_blocks() == held_free
+
     wrapper.write_done.add(transfer_id)
     _step(scheduler, worker)
     if completion_before_abort:
         scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
 
     assert request_id not in scheduler.requests
+    assert not connector.transfer_id_to_request_id
+    assert not connector.request_id_to_transfer_id
+    assert not connector._write_recvs_in_flight
+    assert not connector._finished_write_recvs_in_flight
+    assert not worker._unmatched_write_completions
+    assert pool.get_num_free_blocks() == free_before
+
+
+@pytest.mark.cpu_test
+@pytest.mark.skip_global_cleanup
+def test_write_consumer_rejection_without_receive_releases_prefill(monkeypatch):
+    scheduler = create_scheduler(create_moriio_config(role="kv_consumer"))
+    connector = scheduler.connector.connector_scheduler
+    release = MagicMock()
+    monkeypatch.setattr(connector, "_send_transfer_release", release)
+    pool = scheduler.kv_cache_manager.block_pool
+    free_before = pool.get_num_free_blocks()
+    request = create_request(num_tokens=1, do_remote_prefill=True)
+    _setup_kv_transfer_request(request, fake_transfer_id="xfer-rejected")
+
+    scheduler.add_request(request)
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    release.assert_called_once_with("xfer-rejected", "127.0.0.1", 4789)
+    assert request.request_id not in scheduler.requests
     assert not connector.transfer_id_to_request_id
     assert not connector.request_id_to_transfer_id
     assert not connector._write_recvs_in_flight
