@@ -487,6 +487,16 @@ class Worker(WorkerBase):
             )
         if not self.use_v2_model_runner:
             raise ValueError("kv_cache_host_pinned requires the V2 model runner.")
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_buffer_device == "cpu"
+        ):
+            # The KV cache is already in host memory: a host staging buffer
+            # would only add a copy, and the deferred block release needs CUDA.
+            raise ValueError(
+                "kv_cache_host_pinned is not supported with kv_buffer_device='cpu'."
+            )
         if self.vllm_config.attention_config.hisparse_config is not None:
             raise ValueError("kv_cache_host_pinned is not supported with HiSparse.")
 

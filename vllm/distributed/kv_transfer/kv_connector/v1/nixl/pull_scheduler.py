@@ -230,13 +230,19 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             return False, None
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
-            if self.vllm_config.cache_config.kv_cache_host_pinned and any(
-                len(group) > 0 for group in block_ids
+            if (
+                self.vllm_config.cache_config.kv_cache_host_pinned
+                and not self.use_host_buffer
+                and request.status
+                in (
+                    RequestStatus.FINISHED_LENGTH_CAPPED,
+                    RequestStatus.FINISHED_STOPPED,
+                )
+                and any(len(group) > 0 for group in block_ids)
             ):
-                # With a host-pinned KV cache the next pull lands in these
-                # blocks by RDMA, possibly while the GPU work of the step that
-                # finished this request (e.g. the MTP drafter) is still in
-                # flight. Let the worker release them once that work is done.
+                # The next pull may RDMA into these blocks while this step's GPU
+                # work (e.g. the MTP drafter) still writes them. Aborted requests
+                # keep the upstream path: one still receiving is freed on recv.
                 self._reqs_to_release.append(request.request_id)
                 return True, None
             return False, None
