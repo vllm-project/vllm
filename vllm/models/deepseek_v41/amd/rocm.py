@@ -1179,7 +1179,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         fuse_inv_rope = not on_gfx1250()
         assert output_mxfp8 is None or fuse_inv_rope, (
-            "the MXFP8 decode output requires the fused inverse RoPE"
+            "MXFP8 decode output needs the fused inverse RoPE; only gfx950 "
+            "allocates it (see _alloc_attn_out)"
         )
         return rocm_sparse_attn_decode(
             q=q,
