@@ -233,6 +233,27 @@ class SparseIndexerTopk(torch.nn.Module):
             )
         return self._backend
 
+    def takes_bf16_logits(
+        self, logits: torch.Tensor, topk_tokens: int, num_rows: int
+    ) -> bool:
+        """Whether this decode call can consume BF16 without a full FP32 copy."""
+        if logits.dtype != torch.bfloat16:
+            return False
+        if self._backend == "deep_select":
+            return (
+                self._has_deep_select
+                and _HAS_DEEP_SELECT_C
+                and is_deep_select_supported(logits, topk_tokens)
+            )
+        return (
+            self._backend in ("auto", "persistent")
+            and self._is_cuda
+            and current_platform.is_device_capability_family(100)
+            and logits.stride(1) == 1
+            and topk_tokens in (512, 1024, 2048)
+            and self.resolve_backend(logits, topk_tokens, num_rows) == "persistent"
+        )
+
     def _resolve_auto(
         self, logits: torch.Tensor, topk_tokens: int, num_rows: int
     ) -> str:

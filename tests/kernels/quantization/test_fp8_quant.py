@@ -139,6 +139,16 @@ def test_dynamic_per_tensor_fp8_quant_strided_input(
     assert torch.equal(ref_out.view(torch.uint8), ops_out.view(torch.uint8))
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_dynamic_per_tensor_fp8_quant_all_zero(dtype: torch.dtype) -> None:
+    """An all-zero input has a zero scale, which must not turn into NaN."""
+    x = torch.zeros(7, 1024, dtype=dtype, device="cuda")
+    out, scale = ops.scaled_fp8_quant(x)
+    assert torch.count_nonzero(out.view(torch.uint8)) == 0
+    assert torch.count_nonzero(out.float() * scale) == 0
+
+
 # Regression test for a case with large activations where an int32 index cannot
 # represent the number of elements.
 @torch.inference_mode()

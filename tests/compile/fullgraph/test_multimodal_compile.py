@@ -5,6 +5,7 @@ from functools import partial
 import pytest
 
 from tests.models.utils import dummy_hf_overrides
+from tests.utils import create_new_process_for_each_test
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
@@ -17,7 +18,6 @@ def test_compile():
     assert not vllm_config.compilation_config.compile_mm_encoder
 
 
-@pytest.mark.forked
 @pytest.mark.core_model
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
@@ -52,6 +52,7 @@ def test_compile():
         pytest.param(True, 3, id="enabled"),
     ],
 )
+@create_new_process_for_each_test("spawn")
 def test_pixtral_compilation(
     vllm_runner,
     monkeypatch,
@@ -90,11 +91,10 @@ def test_pixtral_compilation(
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
 )
+@create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
@@ -126,11 +126,10 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Skip if not CUDA or ROCm"
 )
+@create_new_process_for_each_test("spawn")
 def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are not compiled when the
     config is passed off
@@ -153,8 +152,6 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.forked
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 @pytest.mark.parametrize(
     ("compile_mm_encoder", "expected_models"),
@@ -165,6 +162,7 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
         pytest.param(True, 29, id="enabled"),
     ],
 )
+@create_new_process_for_each_test("spawn")
 def test_paddleocr_vl_compilation(
     vllm_runner, monkeypatch, compile_mm_encoder: bool, expected_models: int
 ):
@@ -189,10 +187,9 @@ def test_paddleocr_vl_compilation(
         pass
 
 
-# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 # Requires Cuda and 8 gpus as well
-@pytest.mark.forked
 @pytest.mark.skip(reason="Skipping due to CI resource constraints")
+@create_new_process_for_each_test("spawn")
 def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
     """Test that Mllama4 vision submodules are compiled.
 
