@@ -6484,16 +6484,11 @@ transformers==5.22.0 \
     #   peft
     #   sentence-transformers
     #   xgrammar
-triton==3.9.0 \
-    --hash=sha256:1622118a038b0c6e16fa4a0305da62c8b3c15904ee1cc4d4e65846a25969e41e \
-    --hash=sha256:5542f4328472fd827dbb1ec43873364c2894682cc3f5d1c74a643762900e243e \
-    --hash=sha256:5e52ab4e2f1d64f0ac494c9aa723697b793f81a91c4cae4c36608ca0bc4267bf \
-    --hash=sha256:8d0b97b333d919e86d06a6b3c8656c27eecaf14f74c1eb64d210234603268ba2 \
-    --hash=sha256:990d43d967bbcc90f973fc17ad9cd7352e67940f41b31d94afd53b9867a3c1a1 \
-    --hash=sha256:bac2ed42a2b7aa232aeec57c2f7b0d88b61a74a29b3bf358f4cec6b20be356f6 \
-    --hash=sha256:eab30be40d412e947f3b74b20f50e4f8e07dd11439e7ddc6bd6184cabda2be79 \
-    --hash=sha256:feaaec13578ca84301d561d034cb08b3ae293d7f0b7ab6b8ddbb2d6796363716
-    # via xgrammar
+triton==3.9.0+xpu \
+    --hash=sha256:52ac246a9ba8ec94efbbd632e95df9016c97e527ed5a260b37daa4285f9611f0
+    # via
+    #   -c requirements/xpu.txt
+    #   xgrammar
 triton-xpu==3.9.0 \
     --hash=sha256:0a82fb54b0e899de3908e63521bd4beb9f8237a78e541739e0aa955d7e4b9aa6 \
     --hash=sha256:204a01753ee75353d2f8890174af7308fa8c24b2c28538026bf734b986d59a67 \
@@ -6509,7 +6504,9 @@ triton-xpu==3.9.0 \
     --hash=sha256:e9e47ea67b8c52aeb56607c5c46e92c5754523733de991e67021e7b338b71642 \
     --hash=sha256:ebe19bc34c347975930de62e1bff89ceab5896addd8770d43e7313e195c80f8f \
     --hash=sha256:f32fa285d8b225d4973e2c30640ade280f148450e498458769f6b274961f1978
-    # via torch
+    # via
+    #   torch
+    #   triton
 truststore==0.10.4 \
     --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
     --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
