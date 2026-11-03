@@ -268,16 +268,14 @@ if current_platform.is_rocm():
 
 # gfx950 tiles for 16 < M <= 256 (decode batches carrying draft tokens, small
 # prefill chunks) with local N > 1280: (BLOCK_M, BLOCK_N, preferred BLOCK_K,
-# num_warps, num_stages) per M bucket and local-N bucket (<= 1536, <= 1792, <= 2560,
-# <= 3072, <= 6144, wider), for K >= 1024. Graph-tuned on MiniMax-M3.1-Flash
-# TP2/TP4 linears on MI355X. The 1792-wide bucket also covers V4.1 wqa/wkv
-# (N=1792, K=5120), where a narrow N tile avoids a regression at M=64.
+# num_warps, num_stages) per M bucket and local-N bucket (<= 1536, <= 2560,
+# <= 3072, <= 6144, wider), for K >= 1024. Tuned for MiniMax-M3.1-Flash
+# TP2/TP4 linears on MI355X.
 _GFX950_MID_M_BUCKETS = (32, 48, 64, 96, 128, 192, 256)
-_GFX950_MID_N_BUCKETS = (1536, 1792, 2560, 3072, 6144)
+_GFX950_MID_N_BUCKETS = (1536, 2560, 3072, 6144)
 _GFX950_MID_M_TILES = {
     32: (
         (16, 16, 1024, 2, 3),
-        (32, 16, 1024, 2, 3),
         (32, 16, 1024, 2, 3),
         (32, 16, 1024, 2, 3),
         (32, 32, 512, 2, 3),
@@ -285,9 +283,7 @@ _GFX950_MID_M_TILES = {
     ),
     48: (
         (32, 16, 1024, 2, 3),
-        (32, 16, 1024, 2, 2),
-        # M3.1 TP4 qkv (N=2560, K=6144) and V4.1 wo_a (2048, 4096)
-        # retain the narrow tile through M=48.
+        # M3.1 TP4 qkv (N=2560, K=6144) retains the narrow tile at M=48.
         (16, 16, 1024, 2, 2),
         (32, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
@@ -295,7 +291,6 @@ _GFX950_MID_M_TILES = {
     ),
     64: (
         (32, 16, 1024, 2, 3),
-        (32, 16, 1024, 2, 2),
         (32, 32, 512, 2, 3),
         (32, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
@@ -305,13 +300,11 @@ _GFX950_MID_M_TILES = {
         (32, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
-        (64, 32, 512, 2, 3),
         (64, 64, 512, 4, 2),
         (64, 64, 256, 4, 2),
     ),
     128: (
         (32, 32, 512, 2, 3),
-        (64, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
         (64, 32, 512, 2, 3),
         (64, 64, 512, 4, 2),
@@ -321,13 +314,11 @@ _GFX950_MID_M_TILES = {
         (64, 32, 512, 2, 3),
         (64, 64, 512, 4, 2),
         (64, 64, 512, 4, 2),
-        (64, 64, 512, 4, 2),
         (64, 64, 256, 4, 2),
         (64, 64, 256, 4, 2),
     ),
     256: (
         (64, 32, 512, 2, 3),
-        (64, 64, 512, 4, 2),
         (64, 64, 512, 4, 2),
         (64, 64, 512, 4, 2),
         (64, 64, 256, 4, 2),
@@ -383,7 +374,13 @@ def _select_cfg(M, N, K):
             return 16, 16, 1024, 2, 3
         if K == 768 and N == 6144:
             return 16, 16, 256, 2, 3
-    if _ON_GFX950 and 16 < M <= 256 and N > 1280:
+    # M3.1 TP2 qkv regresses with the M192 tile; use the fallback below.
+    if (
+        _ON_GFX950
+        and 16 < M <= 256
+        and N > 1280
+        and not (128 < M <= 192 and N == 4992 and K == 6144)
+    ):
         return _gfx950_mid_m_cfg(M, N, K)
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The

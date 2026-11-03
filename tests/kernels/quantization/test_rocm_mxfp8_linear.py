@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Native CDNA4 MXFP8 linear (``RocmDotScaledMxfp8LinearKernel``).
 
-DeepSeek V4.1 routes every attention linear through this kernel. It used to
-carry two BF16-dequantize workarounds on ROCm (one for all ``.attn.`` linears,
-one for the row-parallel ``wo_b``, whose comment blamed NaNs at small token
-counts). These tests pin the two properties those workarounds stood in for --
-finite output and MXFP8-level accuracy -- across the V4.1 attention shapes at
-TP=4 and the small token counts decode actually runs.
+The per-row-scale tests use synthetic weights with MiniMax-M3.1 and DeepSeek
+V4.1 matrix shapes to check finite output and MXFP8-level accuracy. V4.1's
+checkpoint has repeated 32-row scales and normally dispatches to the separate
+block-scaled GEMM; its synthetic per-row cases do not represent serving.
 
 They also cover the tiny-M fused quant+GEMM fastpath of
 ``rocm_mxfp8_block32_gemm_quant`` (at M <= 8 the activation quant runs inside
