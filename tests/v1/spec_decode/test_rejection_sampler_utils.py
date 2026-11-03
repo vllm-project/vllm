@@ -105,10 +105,9 @@ def _build_rejection_sample_inputs(
         K + 1
     )
     pos = torch.arange(num_logits, dtype=torch.int32, device=device)
-    idx_mapping = torch.arange(num_trials, dtype=torch.int32, device=device)
-    expanded_idx_mapping = torch.arange(
-        num_trials, dtype=torch.int32, device=device
-    ).repeat_interleave(K + 1)
+    # int64 index mappings, as the model runner builds them.
+    idx_mapping = torch.arange(num_trials, dtype=torch.int64, device=device)
+    expanded_idx_mapping = idx_mapping.repeat_interleave(K + 1)
     expanded_local_pos = torch.arange(K + 1, dtype=torch.int32, device=device).repeat(
         num_trials
     )
@@ -1512,7 +1511,7 @@ def test_adaptive_draft_lengths_match_and_bonus_oracle(
     cu_num_logits = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
     cu_num_logits[1:] = num_logits_per_req.cumsum(0)
     num_logits = int(cu_num_logits[-1])
-    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
     expanded_idx_mapping = idx_mapping.repeat_interleave(num_logits_per_req)
     expanded_local_pos = (
         torch.arange(num_logits, dtype=torch.int32, device=device)
