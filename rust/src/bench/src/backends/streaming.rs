@@ -4,7 +4,8 @@
 /// SSE streaming response handler.
 ///
 /// Accumulates incoming byte chunks and extracts complete SSE messages.
-/// Mirrors Python's `StreamedResponseHandler` from endpoint_request_func.py:22-60.
+/// Derived from Python's `StreamedResponseHandler` in endpoint_request_func.py,
+/// but not identical: CR and CRLF line endings are normalized to LF here.
 pub struct StreamedResponseHandler {
     buffer: Vec<u8>,
     previous_was_cr: bool,

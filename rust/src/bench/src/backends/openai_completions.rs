@@ -99,18 +99,14 @@ impl OpenAICompletionsBackend {
 
                         let messages = handler.add_chunk(&chunk_bytes);
                         for message in messages {
-                            // Handle multi-field SSE events (e.g., Dynamo sends
-                            // "event: message\ndata: {...}"). Extract the data: line.
-                            let raw = if message.contains('\n') {
-                                match message.lines().find(|l| l.starts_with("data: ")) {
-                                    Some(l) => l,
-                                    None => continue,
-                                }
-                            } else {
-                                message.as_str()
+                            // Take the data: line of each event, which may carry other
+                            // fields (Dynamo sends "event: message\ndata: {...}").
+                            // Comments and other events without data are skipped.
+                            let Some(chunk) =
+                                message.lines().find_map(|l| l.strip_prefix("data: "))
+                            else {
+                                continue;
                             };
-
-                            let chunk = raw.strip_prefix("data: ").unwrap_or(raw);
 
                             if chunk == "[DONE]" {
                                 continue;
