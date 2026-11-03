@@ -9,6 +9,8 @@ import torch
 from transformers import AutoModel
 from transformers.models.gemma4 import Gemma4VisionConfig
 
+from vllm.compilation.counter import compilation_counter
+from vllm.config.compilation import CompilationMode
 from vllm.model_executor.layers.attention import mm_encoder_attention
 from vllm.model_executor.models import gemma4_vision
 from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
@@ -73,13 +75,24 @@ def _image(columns: int, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_clipped_linears", [False, True])
+@pytest.mark.parametrize("compile_mm_encoder", [False, True])
 @torch.inference_mode()
 def test_packed_tower_matches_transformers(
-    default_vllm_config, dist_init, monkeypatch, backend, use_clipped_linears
+    default_vllm_config,
+    dist_init,
+    disable_vllm_compile_cache,
+    monkeypatch,
+    backend,
+    use_clipped_linears,
+    compile_mm_encoder,
 ):
     # Triton attention uses TF32 for fp32 by default.
     monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
     torch.manual_seed(0)
+    if compile_mm_encoder:
+        compilation_config = default_vllm_config.compilation_config
+        compilation_config.mode = CompilationMode.VLLM_COMPILE
+        compilation_config.compile_mm_encoder = True
     config = _config(use_clipped_linears)
     hf_tower = _hf_tower(config).cuda()
     images = [_image(*grid) for grid in GRIDS]
@@ -89,6 +102,10 @@ def test_packed_tower_matches_transformers(
     ]
 
     with (
+        # One compiled module per encoder layer.
+        compilation_counter.expect(
+            num_models_seen=config.num_hidden_layers if compile_mm_encoder else 0
+        ),
         patch.object(gemma4_vision, "get_vit_attn_backend", lambda **_: backend),
         patch.object(mm_encoder_attention, "get_vit_attn_backend", lambda **_: backend),
         torch.device("cuda"),
