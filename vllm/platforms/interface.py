@@ -1116,12 +1116,17 @@ class Platform:
         ) is not None and attn_block_size % unit != 0:
             step = lcm(kernel_block_alignment_size, backend_block_alignment, unit)
             rounded = step * cdiv(attn_block_size, step)
-            logger.info(
-                "Rounding attention block size %d up to %d tokens so it is "
-                "divisible by prefix_match_unit=%d.",
+            growth = rounded / attn_block_size - 1
+            log = logger.warning if growth > 0.1 else logger.info
+            log(
+                "Rounding attention block size %d up to %d tokens (+%.0f%% "
+                "mamba page padding) so it is divisible by "
+                "prefix_match_unit=%d. A unit that divides %d avoids it.",
                 attn_block_size,
                 rounded,
+                100 * growth,
                 unit,
+                attn_block_size,
             )
             attn_block_size = rounded
 
