@@ -301,6 +301,57 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
     )
 
 
+@pytest.mark.parametrize("batch_size", DECODE_BATCH_SIZES)
+@torch.inference_mode()
+def test_decode_update_matches_spec_update_on_one_token_rows(batch_size: int) -> None:
+    """Plain decode and spec verification of a one-token row must agree exactly,
+    or greedy speculative decoding cannot reproduce greedy plain decoding."""
+    num_heads, head_dims = (2, 4), (32, 32)
+    q, k, v, a, b, A_log, dt_bias = gdn_inputs(
+        num_tokens=batch_size, num_heads=num_heads, head_dims=head_dims
+    )
+    state_indices = torch.arange(batch_size, dtype=torch.int32)
+    cu_seqlens = torch.arange(batch_size + 1, dtype=torch.int32)
+    state = tensor_cache(
+        batch_size * num_heads[1] * head_dims[0] * head_dims[1], torch.float32
+    ).view(batch_size, num_heads[1], *head_dims)
+    common = dict(
+        A_log=A_log,
+        dt_bias=dt_bias,
+        a=a,
+        b=b,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=True,
+    )
+
+    decode_state = state.clone()
+    decode_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
+        q=q,
+        k=k,
+        v=v,
+        initial_state_source=decode_state,
+        initial_state_indices=state_indices,
+        **common,
+    )
+    spec_state = state.clone()
+    # The spec kernel takes token-major q/k/v without the leading batch dim.
+    spec_out = ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+        q=q.squeeze(0),
+        k=k.squeeze(0),
+        v=v.squeeze(0),
+        initial_state_source=spec_state,
+        spec_state_indices=state_indices.unsqueeze(1),
+        num_accepted_tokens=torch.ones(batch_size, dtype=torch.int32),
+        **common,
+    )
+
+    torch.testing.assert_close(
+        decode_out.reshape(spec_out.shape), spec_out, atol=0, rtol=0
+    )
+    # The kernels sum the state update in different orders: float32 rounding only.
+    torch.testing.assert_close(decode_state, spec_state, atol=1e-6, rtol=1e-5)
+
+
 # prefill path
 @pytest.mark.parametrize("seq_lens", PREFILL_SEQ_LENS)
 @pytest.mark.parametrize("num_heads,head_dims,state_dtype", PREFILL_DTYPE_CASES)

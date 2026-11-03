@@ -1726,7 +1726,7 @@ void fused_sigmoid_gating_delta_rule_update_kernel_impl(
       int64_t v_offset = si * v_strideS + bi * v_strideB + ni * v_strideH;
       int64_t o_offset = ((bi * seq_len + si) * v_num_heads + ni) * v_head_dim;
       // See: https://github.com/sgl-project/sglang/pull/26634
-      float beta_val = 1 / (1 + std::exp(-b_ptr[bi * v_num_heads + ni]));
+      float beta_val = 1.f / (1.f + std::exp(-(float)b_ptr[bi * v_num_heads + ni]));
       fVec beta_vec = fVec(beta_val);
       int64_t dvi = 0;
       for (; dvi <= v_head_dim - VecSize; dvi += VecSize) {
