@@ -49,6 +49,10 @@ else:
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
     )
+from vllm.models.minimax_m3.common.varlen_decode import (
+    VarlenDecodeBuilderMixin,
+    build_decode_query_layout,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -58,7 +62,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
-    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -66,7 +69,6 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
-    KVCacheSpec,
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
@@ -256,7 +258,9 @@ class MiniMaxM3SparseMetadata(AttentionMetadata):
     page16_slot_mapping: torch.Tensor | None = None
 
 
-class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMetadata]):
+class MiniMaxM3SparseMetadataBuilder(
+    VarlenDecodeBuilderMixin, AttentionMetadataBuilder[MiniMaxM3SparseMetadata]
+):
     # Full cudagraphs for uniform decode batches, incl. spec-decode verify
     # batches with >1 query token/request.
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -269,30 +273,6 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
         return (
             current_platform.is_rocm() and not _minimax_m3_aiter_sparse_pa_requested()
         )
-
-    @classmethod
-    def _use_varlen_decode(cls, vllm_config: VllmConfig) -> bool:
-        spec_config = vllm_config.speculative_config
-        return (
-            cls.supports_varlen_decode()
-            and spec_config is not None
-            and spec_config.enable_adaptive_verification
-        )
-
-    @classmethod
-    def get_varlen_cudagraph_max_query_len(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> int | None:
-        # Varlen decode replays decode-only batches of 1 to 1 + K tokens per
-        # request; mixed prefill+decode batches never replay FULL graphs.
-        if not cls._use_varlen_decode(vllm_config) or (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
-            != AttentionCGSupport.UNIFORM_BATCH
-        ):
-            return None
-        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -399,23 +379,14 @@ class MiniMaxM3SparseMetadataBuilder(AttentionMetadataBuilder[MiniMaxM3SparseMet
 
         decode_metadata: MiniMaxM3SparseDecodeMetadata | None = None
         if num_decodes > 0:
-            decode_qsl = None
-            token_to_req = None
-            decode_query_len = 0
-            if self.varlen_decode:
-                decode_qsl = query_start_loc[: num_decodes + 1]
-                token_to_req = common_attn_metadata.token_to_req_indices(
-                    self.token_to_req_buffer
-                )[:num_decode_tokens]
-            else:
-                qsl_cpu = common_attn_metadata.query_start_loc_cpu
-                query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
-                decode_query_len = int(query_lens_cpu[0].item())
-                assert decode_query_len > 0
-                assert torch.all(
-                    (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
-                )
-                assert num_decode_tokens == num_decodes * decode_query_len
+            decode_query_len, decode_qsl, token_to_req = build_decode_query_layout(
+                common_attn_metadata,
+                query_start_loc,
+                num_decodes,
+                num_decode_tokens,
+                self.token_to_req_buffer,
+                self.varlen_decode,
+            )
             decode_metadata = MiniMaxM3SparseDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],

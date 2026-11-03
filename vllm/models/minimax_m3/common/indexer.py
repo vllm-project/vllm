@@ -42,6 +42,10 @@ else:
         minimax_m3_index_topk,
     )
 
+from vllm.models.minimax_m3.common.varlen_decode import (
+    VarlenDecodeBuilderMixin,
+    build_decode_query_layout,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -49,7 +53,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
-    max_decode_query_len,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
@@ -221,7 +224,7 @@ class MiniMaxM3IndexerMetadata(AttentionMetadata):
 
 
 class MiniMaxM3IndexerMetadataBuilder(
-    AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
+    VarlenDecodeBuilderMixin, AttentionMetadataBuilder[MiniMaxM3IndexerMetadata]
 ):
     """Abstract base: shared setup only. The Triton and MSA builders are
     parallel subclasses that each own their full ``build`` (no shared code)."""
@@ -231,35 +234,6 @@ class MiniMaxM3IndexerMetadataBuilder(
     # Raised to 1 + num_speculative_tokens by _init_reorder_batch_threshold when
     # spec decode is on; matches the main builder so the splits agree.
     reorder_batch_threshold: int = 1
-
-    @classmethod
-    def supports_varlen_decode(cls) -> bool:
-        # Subclasses whose build() handles ragged decode query lengths opt in.
-        return False
-
-    @classmethod
-    def _use_varlen_decode(cls, vllm_config: VllmConfig) -> bool:
-        spec_config = vllm_config.speculative_config
-        return (
-            cls.supports_varlen_decode()
-            and spec_config is not None
-            and spec_config.enable_adaptive_verification
-        )
-
-    @classmethod
-    def get_varlen_cudagraph_max_query_len(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: KVCacheSpec,
-    ) -> int | None:
-        # Varlen decode replays decode-only batches of 1 to 1 + K tokens per
-        # request; mixed prefill+decode batches never replay FULL graphs.
-        if not cls._use_varlen_decode(vllm_config) or (
-            cls.get_cudagraph_support(vllm_config, kv_cache_spec)
-            != AttentionCGSupport.UNIFORM_BATCH
-        ):
-            return None
-        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
@@ -355,23 +329,14 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         decode_metadata: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
-            decode_qsl = None
-            token_to_req = None
-            decode_query_len = 0
-            if self.varlen_decode:
-                decode_qsl = query_start_loc[: num_decodes + 1]
-                token_to_req = common_attn_metadata.token_to_req_indices(
-                    self.token_to_req_buffer
-                )[:num_decode_tokens]
-            else:
-                qsl_cpu = common_attn_metadata.query_start_loc_cpu
-                query_lens_cpu = qsl_cpu[1 : num_decodes + 1] - qsl_cpu[:num_decodes]
-                decode_query_len = int(query_lens_cpu[0].item())
-                assert decode_query_len > 0
-                assert torch.all(
-                    (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
-                )
-                assert num_decode_tokens == num_decodes * decode_query_len
+            decode_query_len, decode_qsl, token_to_req = build_decode_query_layout(
+                common_attn_metadata,
+                query_start_loc,
+                num_decodes,
+                num_decode_tokens,
+                self.token_to_req_buffer,
+                self.varlen_decode,
+            )
             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
                 seq_lens=seq_lens[:num_decodes],
                 block_table=block_table[:num_decodes],

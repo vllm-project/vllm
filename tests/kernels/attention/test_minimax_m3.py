@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+import sys
 from functools import partial
 
 import pytest
@@ -3360,11 +3361,38 @@ def test_decode_sparse_attention_correctness(
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+# Per-rank head counts of MiniMax-M3 (64 query / 4 KV heads) at TP1-TP8.
+@pytest.mark.parametrize(
+    ("num_q_heads", "num_kv_heads"),
+    [(64, 4), (32, 2), (16, 1), (8, 1)],
+    ids=["tp1", "tp2", "tp4", "tp8"],
+)
+# Adaptive verification gives each request 1 to 1 + K query tokens (K = 7).
+@pytest.mark.parametrize(
+    ("seq_lens_list", "q_lens_list"),
+    [
+        ((130, 257, 384), (1, 4, 2)),
+        ((1, 129, 1025, 4096), (1, 8, 3, 1)),
+        (
+            tuple(128 + 61 * i for i in range(17)),
+            tuple(1 + i % 8 for i in range(17)),
+        ),
+    ],
+    ids=["3-reqs", "4-reqs-long", "17-reqs"],
+)
 def test_decode_sparse_attention_varlen_with_padded_rows(
     kv_layout: KVCacheLayout,
+    num_q_heads: int,
+    num_kv_heads: int,
+    seq_lens_list: tuple[int, ...],
+    q_lens_list: tuple[int, ...],
+    monkeypatch: pytest.MonkeyPatch,
 ):
+    # The shared decode helpers read the module-level head counts.
+    module = sys.modules[__name__]
+    monkeypatch.setattr(module, "NUM_Q_HEADS", num_q_heads)
+    monkeypatch.setattr(module, "NUM_KV_HEADS", num_kv_heads)
     torch.manual_seed(0)
-    seq_lens_list, q_lens_list = (130, 257, 384), (1, 4, 2)
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, q_lens_list, num_padded_reqs=2
     )
@@ -3401,6 +3429,9 @@ def test_decode_sparse_attention_varlen_with_padded_rows(
     )
     torch.accelerator.synchronize()
 
+    # Same bounds as the uniform decode parity tests. The kernel writes bf16
+    # outputs; 1.7e-2 is about one bf16 ULP for magnitudes in [2, 4), and the
+    # mean bound catches systematic errors that stay under one ULP.
     error = (actual[:num_active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2

@@ -56,7 +56,9 @@ def test_varlen_builders_pass_adaptive_gate(builder):
     )
     assert (
         get_varlen_cudagraph_unsupported_backend(
-            [[group]], config, max_query_len=1 + NUM_SPEC_TOKENS
+            [[group]],  # type: ignore[list-item]
+            config,
+            max_query_len=1 + NUM_SPEC_TOKENS,
         )
         is None
     )
@@ -67,5 +69,14 @@ def test_varlen_builders_pass_adaptive_gate(builder):
 def test_aiter_msa_indexer_builder_does_not_claim_varlen():
     indexer_msa = pytest.importorskip("vllm.models.minimax_m3.amd.indexer_msa")
     builder = indexer_msa.MiniMaxM3IndexerMSAMetadataBuilder
+    assert not builder.supports_varlen_decode()
+    assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(True), None) is None
+
+
+def test_rocm_nvfp4_sparse_builder_does_not_claim_varlen():
+    sparse_nvfp4 = pytest.importorskip(
+        "vllm.models.minimax_m3.amd.sparse_attention_nvfp4"
+    )
+    builder = sparse_nvfp4.MiniMaxM3SparseRocmNvfp4MetadataBuilder
     assert not builder.supports_varlen_decode()
     assert builder.get_varlen_cudagraph_max_query_len(_vllm_config(True), None) is None
