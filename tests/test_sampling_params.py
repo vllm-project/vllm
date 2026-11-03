@@ -280,3 +280,30 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [["a", 5], [None], [1.5]],
+)
+def test_stop_with_a_non_string_is_rejected(stop: list):
+    with pytest.raises(VLLMValidationError, match="stop must contain only strings"):
+        SamplingParams(stop=stop)
+
+
+def test_stop_with_an_unsupported_type_is_rejected():
+    with pytest.raises(VLLMValidationError, match="stop must be a string or a list"):
+        SamplingParams(stop=5)
+
+
+def test_a_stop_tuple_is_still_accepted():
+    assert SamplingParams(stop=("a", "b")).stop == ["a", "b"]
+
+
+def test_a_bad_word_that_is_not_a_string_is_rejected():
+    with pytest.raises(VLLMValidationError, match="bad_words must contain only strings"):
+        SamplingParams(bad_words=["ok", 7])
+
+
+def test_a_single_bad_word_string_is_not_split_into_characters():
+    assert SamplingParams(bad_words="foo").bad_words == ["foo"]
