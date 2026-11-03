@@ -616,7 +616,8 @@ class OffloadingConnectorScheduler:
         )
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats = OffloadingConnectorStats()
-        self.use_lookahead_block_hashes = vllm_config.num_hash_lookahead_tokens > 0
+        self.num_hash_lookahead_tokens = vllm_config.num_hash_lookahead_tokens
+        self.use_lookahead_block_hashes = self.num_hash_lookahead_tokens > 0
 
         # The static config facts ride on the first stats payload of this
         # process. A Prometheus child holds the values it received, so one
@@ -2014,7 +2015,9 @@ class OffloadingConnectorScheduler:
 
             reachable_boundaries: tuple[int, ...] = ()
             if self.config.retention_interval is not None:
-                reachable_boundaries = (req.num_prompt_tokens - 1,)
+                reachable_boundaries = (
+                    req.num_prompt_tokens - max(1, self.num_hash_lookahead_tokens),
+                )
                 if req.shared_prefix_boundary:
                     reachable_boundaries += (req.shared_prefix_boundary,)
 

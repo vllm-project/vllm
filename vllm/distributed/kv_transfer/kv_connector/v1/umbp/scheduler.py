@@ -1143,7 +1143,10 @@ class UMBPStoreConnectorScheduler:
             ()
             if num_prompt_tokens is None
             else replay_boundaries(
-                num_prompt_tokens, self.block_size, use_eagle=self.use_eagle
+                num_prompt_tokens,
+                self.block_size,
+                use_eagle=self.use_eagle,
+                num_hash_lookahead_tokens=self.num_hash_lookahead_tokens,
             )
         )
         mask = manager_cls.reachable_block_mask(

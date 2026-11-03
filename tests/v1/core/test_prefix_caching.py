@@ -4428,6 +4428,54 @@ def test_eagle_identical_prompt_hit(
     assert num_tokens == expected_blocks * block_size
 
 
+@pytest.mark.parametrize("lookahead", [1, 3])
+def test_sparse_retention_keeps_the_lookahead_replay_boundary(lookahead: int):
+    """A resend reaches only the blocks whose lookahead tokens are known."""
+    block_size, num_tokens = 16, 66
+    manager = make_kv_cache_manager(
+        make_kv_cache_config_hybrid_model(block_size, 64, 2),
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=block_size,
+        num_hash_lookahead_tokens=lookahead,
+        retention_interval=0,
+    )
+    token_ids = list(range(num_tokens))
+    prime = make_request(
+        "prime", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    assert manager.allocate_slots(prime, num_tokens) is not None
+    manager.free(prime)
+
+    resend = make_request(
+        "resend", token_ids, block_size, sha256, num_hash_lookahead_tokens=lookahead
+    )
+    _, num_computed_tokens, _ = manager.get_computed_blocks(resend)
+    # With three lookahead tokens, the block ending at 64 has no hash.
+    assert num_computed_tokens == (64 if lookahead == 1 else 48)
+
+
+def test_multi_module_mtp_caches_draft_kv_after_reprefill():
+    """Re-prefill rewrites the drafter's KV; target and recurrent state are final."""
+    kv_cache_config = make_kv_cache_config_hybrid_model(16, 64, 2, "mamba")
+    kv_cache_config.kv_cache_groups[0].is_eagle_group = True
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=1024,
+        enable_caching=True,
+        hash_block_size=16,
+        num_prefill_lookahead=3,
+        num_hash_lookahead_tokens=3,
+    )
+    coordinator = manager.coordinator
+    # The draft group caches 33 - 2 = 31 finalized tokens, aligned to 16.
+    assert [coordinator.get_num_cacheable_tokens(33, g) for g in range(3)] == [
+        16,
+        32,
+        32,
+    ]
+
+
 @pytest.mark.parametrize("lookahead", [1, 2])
 def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     block_size = 2
