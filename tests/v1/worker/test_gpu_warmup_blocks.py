@@ -571,4 +571,3 @@ def test_warmup_kernels_exercises_greedy_with_and_without_penalties():
 
     assert (0.0, 1.0) in seen_greedy_modes
     assert (0.0, 1.1) in seen_greedy_modes
-
