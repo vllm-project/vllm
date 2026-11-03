@@ -954,17 +954,16 @@ def test_device_fault_does_not_fail_the_next_kernel_launch(
     gpu_tensor = torch.zeros(
         (num_blocks, page_size_bytes), dtype=torch.int8, device=DEVICES[0]
     )
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(tensor=gpu_tensor, page_size_bytes=page_size_bytes)
+        ],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+        ],
+    )
     worker = CPUOffloadingWorker(
-        kv_caches=CanonicalKVCaches(
-            tensors=[
-                CanonicalKVCacheTensor(
-                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
-                )
-            ],
-            group_data_refs=[
-                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
-            ],
-        ),
+        kv_caches=kv_caches,
         blocks_per_chunk=1,
         num_cpu_chunks=num_blocks,
     )
@@ -984,12 +983,13 @@ def test_device_fault_does_not_fail_the_next_kernel_launch(
     gpu_spec = GPULoadStoreSpec(
         list(range(num_blocks)), group_sizes=(num_blocks,), block_indices=(0,)
     )
+    device_ptrs = resolve_device_pointers(gpu_spec, kv_caches)
     cpu_spec = CPULoadStoreSpec(list(range(num_blocks)))
     try:
         if gpu_to_cpu:
-            assert worker.submit_store(1, gpu_spec, cpu_spec)
+            assert worker.submit_store(1, device_ptrs, cpu_spec)
         else:
-            assert worker.submit_load(1, cpu_spec, gpu_spec)
+            assert worker.submit_load(1, cpu_spec, device_ptrs)
         if not faulted:
             pytest.skip("this runtime accepts zero-size copies")
 
