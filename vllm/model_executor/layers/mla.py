@@ -8,7 +8,10 @@ import torch
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.indexer_capture import IndexerCaptureSource
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.platforms import current_platform
@@ -246,14 +249,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer, IndexerCaptureSource):
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-            capture = self.indexer_capture
-            if capture is not None:
-                assert self.topk_indices_buffer is not None
-                capture.capture(
-                    self.topk_indices_buffer[
-                        : len(hidden_states), : capture.rows.shape[1]
-                    ]
-                )
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(hidden_states)
+            )
 
         if self.is_sparse:
             self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]

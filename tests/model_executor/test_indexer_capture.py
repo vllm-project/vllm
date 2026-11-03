@@ -258,3 +258,28 @@ def test_bind_rolls_back_sinks_installed_before_a_failure(capture_config):
 
     assert first.indexer_capture is None
     assert rejecting.indexer_capture is None
+
+
+def test_capture_helper_writes_at_the_dbo_ubatch_offset(monkeypatch):
+    import vllm.model_executor.layers.indexer_capture as indexer_capture
+
+    rows = torch.zeros((8, 2), dtype=torch.int32)
+    sink = IndexerCaptureSink(rows)
+    indices = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    monkeypatch.setattr(indexer_capture, "dbo_current_ubatch_token_offset", lambda: 5)
+
+    capture_indexer_topk(sink, indices, 3)
+
+    assert rows[5:8].tolist() == indices.tolist()
+    assert not rows[:5].any() and not rows[8:].any()
+
+
+def test_capture_helper_rejects_a_ubatch_offset_beyond_capacity(monkeypatch):
+    import vllm.model_executor.layers.indexer_capture as indexer_capture
+
+    sink = IndexerCaptureSink(torch.zeros((4, 2), dtype=torch.int32))
+    indices = torch.ones((2, 2), dtype=torch.int32)
+    monkeypatch.setattr(indexer_capture, "dbo_current_ubatch_token_offset", lambda: 3)
+
+    with pytest.raises(ValueError, match="exceeds capture token capacity"):
+        capture_indexer_topk(sink, indices, 2)

@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
@@ -37,7 +39,12 @@ def capture_indexer_topk(
     if sink is None:
         return
     assert topk_indices_buffer is not None
-    sink.capture(topk_indices_buffer[:num_tokens, : sink.rows.shape[1]])
+    # DBO ubatches share the parent batch's capture rows, so each ubatch writes
+    # at its own offset instead of overwriting row 0.
+    sink.capture(
+        topk_indices_buffer[:num_tokens, : sink.rows.shape[1]],
+        token_start=dbo_current_ubatch_token_offset(),
+    )
 
 
 class IndexerCaptureSource:
