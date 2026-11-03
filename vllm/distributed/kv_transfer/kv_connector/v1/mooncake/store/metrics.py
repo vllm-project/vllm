@@ -294,14 +294,11 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
                         url,
                     )
                     warned = True
-                self._set_usage(snapshot)
+                # One store backs every engine, so every engine label gets it.
+                for name, value in master_usage_fractions(snapshot).items():
+                    for labelvalues in self.per_engine_labelvalues.values():
+                        self._usage_gauges[name].labels(*labelvalues).set(value)
             time.sleep(1.0)
-
-    def _set_usage(self, snapshot: dict[str, int]) -> None:
-        # One store backs every engine, so each engine label gets the same value.
-        for name, value in master_usage_fractions(snapshot).items():
-            for labelvalues in self.per_engine_labelvalues.values():
-                self._usage_gauges[name].labels(*labelvalues).set(value)
 
     def _get_metrics(
         self,

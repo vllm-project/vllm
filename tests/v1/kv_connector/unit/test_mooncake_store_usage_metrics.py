@@ -5,7 +5,6 @@
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from types import SimpleNamespace
 
 import pytest
 from prometheus_client import REGISTRY, Counter, Gauge, Histogram
@@ -20,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
     poll_master_metrics,
 )
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
+
+from .utils import create_vllm_config
 
 TEST_MODEL = "test-model"
 GiB = 1 << 30
@@ -52,9 +53,13 @@ def _sample(series: str, extra: dict[str, str] | None = None) -> float | None:
 
 
 def _build_prom(extra_config: dict | None = None, num_engines: int = 1):
-    kv_transfer_config = SimpleNamespace(kv_connector_extra_config=extra_config or {})
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config=extra_config,
+    )
     return mooncake_store_connector.MooncakeStoreConnector.build_prom_metrics(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_transfer_config),  # type: ignore[arg-type]
+        vllm_config=vllm_config,
         metric_types={Gauge: Gauge, Counter: Counter, Histogram: Histogram},
         labelnames=["model_name", "engine"],
         per_engine_labelvalues={i: [TEST_MODEL, str(i)] for i in range(num_engines)},
@@ -66,24 +71,42 @@ def _observe(stats: MooncakeStoreConnectorStats) -> None:
 
 
 @pytest.fixture
-def master_url():
-    """A fake Mooncake master serving MASTER_METRICS_TEXT on /metrics."""
+def serve_master():
+    """Starts fake Mooncake masters serving the given /metrics text."""
+    servers = []
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            body = MASTER_METRICS_TEXT.encode()
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+    def serve(text: str) -> str:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = text.encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
 
-        def log_message(self, *args):
-            pass
+            def log_message(self, *args):
+                pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}/metrics"
-    server.shutdown()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_port}/metrics"
+
+    yield serve
+    for server in servers:
+        server.shutdown()
+
+
+@pytest.fixture
+def master_url(serve_master):
+    return serve_master(MASTER_METRICS_TEXT)
+
+
+def _wait_for_sample(series: str, extra: dict[str, str] | None = None) -> None:
+    deadline = time.monotonic() + 5
+    while _sample(series, extra) is None:
+        assert time.monotonic() < deadline, f"{series} was never set"
+        time.sleep(0.05)
 
 
 def test_parse_master_metrics_picks_memory_gauges():
@@ -156,10 +179,7 @@ def test_prom_usage_gauges_track_master_without_engine_steps(master_url):
     # Nothing is observed: the gauges must not depend on engine steps, which
     # stop while the engine is idle.
     _build_prom({"mooncake_master_metrics_url": master_url}, num_engines=2)
-    deadline = time.monotonic() + 5
-    while _sample("vllm:mooncake_store_cache_usage_perc", {"engine": "1"}) is None:
-        assert time.monotonic() < deadline, "poller never set the gauges"
-        time.sleep(0.05)
+    _wait_for_sample("vllm:mooncake_store_cache_usage_perc", {"engine": "1"})
 
     for engine in ("0", "1"):
         labels = {"engine": engine}
@@ -169,8 +189,13 @@ def test_prom_usage_gauges_track_master_without_engine_steps(master_url):
         assert _sample("vllm:mooncake_store_cache_occupancy_perc", labels) == 0.5
 
 
-def test_prom_skips_usage_gauges_without_master_inputs():
-    _build_prom()._set_usage({"capacity_bytes": 4 * GiB, "allocated_bytes": GiB})
+def test_prom_skips_usage_gauges_without_master_inputs(serve_master):
+    # A master without the unevictable-memory gauges.
+    url = serve_master(
+        "master_total_capacity_bytes 4294967296\nmaster_allocated_bytes 1073741824\n"
+    )
+    _build_prom({"mooncake_master_metrics_url": url})
+    _wait_for_sample("vllm:mooncake_store_cache_occupancy_perc")
 
     assert _sample("vllm:mooncake_store_cache_occupancy_perc") == 0.25
     assert _sample("vllm:mooncake_store_cache_usage_perc") is None
