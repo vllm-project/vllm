@@ -6,6 +6,8 @@
 
 use tracing::{debug, info};
 
+use crate::config::OutputLogConfig;
+
 /// Which part of a response one output log line covers.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum LoggedOutput {
@@ -17,24 +19,38 @@ pub(crate) enum LoggedOutput {
     StreamComplete,
 }
 
-/// Log one generated output like Python's `RequestLogger.log_outputs`: the
-/// output text and finish reason at INFO, the output token IDs at DEBUG. The
-/// request ID comes from the enclosing request span.
-pub(crate) fn log_output(
-    kind: LoggedOutput,
-    output: &str,
-    token_ids: Option<&[u32]>,
-    finish_reason: Option<&str>,
-) {
-    let stream = match kind {
-        LoggedOutput::Response => None,
-        LoggedOutput::StreamDelta => Some("delta"),
-        LoggedOutput::StreamComplete => Some("complete"),
-    };
-    if let Some(token_ids) = token_ids {
-        debug!(stream, ?token_ids, "generated response details");
+impl OutputLogConfig {
+    /// Log one generated output like Python's `RequestLogger.log_outputs`: the
+    /// output text and finish reason at INFO, the output token IDs at DEBUG.
+    /// The request ID comes from the enclosing request span. With
+    /// `max_log_len`, only that many leading characters and token IDs are
+    /// logged.
+    pub(crate) fn log(
+        self,
+        kind: LoggedOutput,
+        output: &str,
+        token_ids: Option<&[u32]>,
+        finish_reason: Option<&str>,
+    ) {
+        let stream = match kind {
+            LoggedOutput::Response => None,
+            LoggedOutput::StreamDelta => Some("delta"),
+            LoggedOutput::StreamComplete => Some("complete"),
+        };
+        if let Some(token_ids) = token_ids {
+            let token_ids = match self.max_log_len {
+                Some(max_log_len) => &token_ids[..token_ids.len().min(max_log_len)],
+                None => token_ids,
+            };
+            debug!(stream, ?token_ids, "generated response details");
+        }
+        let output =
+            match self.max_log_len.and_then(|max_log_len| output.char_indices().nth(max_log_len)) {
+                Some((end, _)) => &output[..end],
+                None => output,
+            };
+        info!(stream, ?output, finish_reason, "generated response");
     }
-    info!(stream, ?output, finish_reason, "generated response");
 }
 
 /// Describe a chat output for the log the way Python does: the content, or

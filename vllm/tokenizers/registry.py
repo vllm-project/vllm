@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from copy import copy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -52,6 +53,7 @@ _VLLM_TOKENIZERS = {
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
     "deepseek_v41": ("deepseek_v41", "DeepseekV41Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "glm5_next": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
@@ -270,6 +272,10 @@ def get_tokenizer(
         tokenizer_cls_ = TokenizersBackend
 
     if config is not None and tokenizer_cls_ is CachedHfTokenizer:
+        if not envs.VLLM_USE_MODELSCOPE and str(tokenizer_name) != requested_name:
+            # AutoTokenizer selects some tokenizer classes by Hub ID
+            config = copy(config)
+            config._name_or_path = requested_name
         # AutoTokenizer otherwise reloads config.json internally. Reuse the
         # config that get_config just loaded successfully so a concurrent Hub
         # cache refresh cannot invalidate the file between the two reads.
