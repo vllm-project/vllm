@@ -61,6 +61,7 @@ from vllm.tokenizers.detokenizer_utils import (
     get_leading_space_marker,
 )
 from vllm.utils.async_utils import make_async
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.engine.detokenizer import check_stop_strings, uses_fast_detokenizer
 
 logger = init_logger(__name__)
@@ -572,7 +573,10 @@ class OnlineDerenderer:
         vocab_size = len(tokenizer)
         prev_token_ids = state.prev_token_ids
         prev_tokens = [
-            token or "" for token in tokenizer.convert_ids_to_tokens(prev_token_ids)
+            token or ""
+            for token in tokenizer.convert_ids_to_tokens(
+                prev_token_ids, skip_special_tokens=skip_special_tokens
+            )
         ]
         prefix_offset = state.prefix_offset
         read_offset = state.read_offset
@@ -788,8 +792,8 @@ class OnlineDerenderer:
         `state.output_chunk_lens`, so the rebuilt parser state matches
         standard serving, which calls `parse_delta` once per engine step.
         Text comes from a fresh incremental detokenizer with special tokens
-        preserved (``skip_special_tokens=False``), seeded from the prompt
-        tail on every call since replay starts from scratch.
+        preserved (see ``_decode_params``), seeded from the prompt tail on
+        every call since replay starts from scratch.
 
         Logprobs need no replay: a generate chunk's ``logprobs`` cover exactly
         that chunk's tokens, so they are resolved once and attached to
@@ -1235,12 +1239,13 @@ def _decode_params(
         tokenizer: Picks the engine's fast or slow detokenizer rules.
         request: The original request, if the caller supplied one.
         preserve_special: Keep special tokens so a parser can see markers.
-            The serving side does this via `adjust_request`.
+            The serving side does this via `adjust_request`, except for
+            `MistralTokenizer`, which keeps the parser's markers when skipping.
 
     """
     skip_special = (
         False
-        if preserve_special
+        if preserve_special and not is_mistral_tokenizer(tokenizer)
         else (request is None or request.skip_special_tokens is not False)
     )
     spaces_between = (

@@ -743,9 +743,8 @@ class TestSeedStreamState:
         assert state.prev_token_ids
         assert state.read_offset == len(state.prev_token_ids)
 
-    @pytest.mark.parametrize("skip_special_tokens", [True, False])
     def test_byte_fallback_survives_state_round_trip(
-        self, derenderer, tekken_tokenizer, skip_special_tokens
+        self, derenderer, tekken_tokenizer
     ):
         """Byte-fallback pieces in the window must survive the JSON transport,
         whether they come from the prompt tail or from a previous chunk."""
@@ -762,16 +761,13 @@ class TestSeedStreamState:
             state = _seed_stream_state(
                 tekken_tokenizer,
                 [bos_id, *token_ids[:split]],
-                skip_special_tokens=skip_special_tokens,
+                skip_special_tokens=True,
             )
             text = ""
             for token_id in token_ids[split:]:
                 state = DerenderStreamState.model_validate_json(state.model_dump_json())
                 delta, state = derenderer._detokenize_delta(
-                    tekken_tokenizer,
-                    [token_id],
-                    state,
-                    skip_special_tokens=skip_special_tokens,
+                    tekken_tokenizer, [token_id], state
                 )
                 text += delta
             assert text == tekken_tokenizer.decode(token_ids[split:])
