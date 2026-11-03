@@ -17,7 +17,8 @@
 //   warp 2: TMEM allocator
 //   warp 3: TMA producer for the xn tile (HC x 128 x BC)
 //   warps 4..: epilogue warpgroups of one 16-column chunk each, storing the
-//              output through shared memory with one TMA store per warp.
+//              output through shared memory with one TMA store per
+//              warpgroup.
 
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
@@ -86,8 +87,9 @@ struct Config {
     alignas(1024) cutlass::bfloat16_t a[kStages][BLOCK_M * BLOCK_K];
     alignas(1024) cutlass::bfloat16_t b[kStages][kBRows * BLOCK_K];
     alignas(1024) cutlass::bfloat16_t x[kXStages][HC * BLOCK_M * BC];
-    // Output staging, one 32-row x kChunk-column buffer per epilogue warp.
-    alignas(1024) cutlass::bfloat16_t o[kEpiWarpGroups * 4][32 * kChunk];
+    // Output staging, double-buffered: one BLOCK_M x kChunk block per
+    // epilogue warpgroup.
+    alignas(1024) cutlass::bfloat16_t o[2][kEpiWarpGroups][BLOCK_M * kChunk];
     Barrier full[kStages], empty[kStages];
     Barrier x_full[kXStages], x_empty[kXStages];
     Barrier tmem_full[kAccStages], tmem_empty[kAccStages];
@@ -128,6 +130,11 @@ __device__ __forceinline__ void tcgen05_before_thread_sync() {
 // Orders this thread's shared memory accesses before later TMA accesses.
 __device__ __forceinline__ void fence_proxy_async_smem() {
   asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+}
+
+// Barrier over the 128 threads of one warpgroup; id 0 is __syncthreads.
+__device__ __forceinline__ void warpgroup_bar_sync(uint32_t id) {
+  asm volatile("bar.sync %0, 128;" ::"r"(id) : "memory");
 }
 
 __device__ __forceinline__ uint4 ld_shared_v4(uint32_t addr) {
@@ -328,9 +335,9 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
     // Each warpgroup mixes one kChunk-column chunk of every tile, one row per
     // thread. A warp may only access its own 32-lane quarter of TMEM.
     const uint32_t quarter = warp % 4;
-    const uint32_t j = (warp - kEpiWarp0) / 4 * kChunk;
+    const uint32_t wg = (warp - kEpiWarp0) / 4, j = wg * kChunk;
     const uint32_t row = quarter * 32 + lane;
-    const uint32_t o_smem = cute::cast_smem_ptr_to_uint(sm.o[warp - kEpiWarp0]);
+    const bool store_thread = quarter == 0 && lane == 0;
     uint32_t iter = 0;
     for (uint32_t t = first_tile; t < num_tiles; t += tile_step, ++iter) {
       const uint32_t acc = iter % kAccStages, xs = iter % kXStages;
@@ -389,23 +396,27 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
                                       o[2 * i + 1] * (1.0f / HC));
       }
 
-      // Stage the warp's 32 x kChunk output block and store it with TMA,
-      // which clips rows past M. Rows are 32 bytes, swizzled like
-      // CU_TENSOR_MAP_SWIZZLE_32B to avoid bank conflicts.
+      // Stage the warpgroup's BLOCK_M x kChunk output block and store it with
+      // one TMA store, which clips rows past M; one store per warpgroup
+      // instead of per warp measured up to 1% faster. Rows are 32 bytes,
+      // swizzled like CU_TENSOR_MAP_SWIZZLE_32B to avoid bank conflicts.
       static_assert(kChunk * 2 == 32);
-      if (lane == 0) {
-        asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
-      }
-      __syncwarp();
+      auto* staged = sm.o[iter & 1][wg];
+      const uint32_t o_smem =
+          cute::cast_smem_ptr_to_uint(staged + row * kChunk);
   #pragma unroll
       for (uint32_t k = 0; k < kChunk / 8; ++k) {
-        st_shared_v4(o_smem + lane * 32 + (k ^ ((lane >> 2) & 1)) * 16, y[k]);
+        st_shared_v4(o_smem + (k ^ ((lane >> 2) & 1)) * 16, y[k]);
       }
       fence_proxy_async_smem();
-      __syncwarp();
-      if (lane == 0) {
-        cute::SM90_TMA_STORE_2D::copy(&tm_out, sm.o[warp - kEpiWarp0],
-                                      c0 + int32_t(j), m0 + quarter * 32);
+      // The store thread waits for its earlier stores to finish reading before
+      // the barrier, so the buffer written on the next tile is free.
+      if (store_thread) {
+        asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
+      }
+      warpgroup_bar_sync(1 + wg);
+      if (store_thread) {
+        cute::SM90_TMA_STORE_2D::copy(&tm_out, staged, c0 + int32_t(j), m0);
         asm volatile("cp.async.bulk.commit_group;" ::: "memory");
       }
       // Releasing the accumulator before the math above measured 2-4% slower.
@@ -417,7 +428,7 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
         sm.tmem_empty[acc].arrive();
       }
     }
-    if (lane == 0) asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
+    if (store_thread) asm volatile("cp.async.bulk.wait_group 0;" ::: "memory");
   }
   // Neither CTA of a pair frees TMEM while the pair may still use it.
   tcgen05_before_thread_sync();
@@ -477,7 +488,7 @@ void launch(const torch::stable::Tensor& out,
   const CUtensorMap tm_xn = make_tensor_map(
       xn.data_ptr(), M, HC * H, xn.stride(0), Cfg::BC, BLOCK_M, Cfg::kXSwizzle);
   const CUtensorMap tm_out =
-      make_tensor_map(out.data_ptr(), M, H, out.stride(0), kChunk, 32,
+      make_tensor_map(out.data_ptr(), M, H, out.stride(0), kChunk, BLOCK_M,
                       CU_TENSOR_MAP_SWIZZLE_32B);
 
   auto* kernel = hc_up_gate_mix_kernel<Cfg>;
