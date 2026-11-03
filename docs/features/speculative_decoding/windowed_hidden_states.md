@@ -126,8 +126,12 @@ the sampler turns the final hidden rows into logits:
 `vocab_size` (logit columns kept), `logit_scale`, `soft_cap`, and
 `tie_word_embeddings` (whether the output head shares the input embedding).
 The logits are `soft_cap(h @ W_head.T)[:, :vocab_size] * logit_scale`, with
-soft-capping skipped when `soft_cap` is `None`. Models that override
-`compute_logits` beyond `LogitsProcessor` are not covered by this contract.
+soft-capping skipped when `soft_cap` is `None`.
+The contract is emitted only for the verified, unquantized Qwen3 implementation
+of `compute_logits` with a standard `LogitsProcessor`. It also identifies
+`lm_head_weight` (`lm_head.weight`, or `model.embed_tokens.weight` when tied).
+Other model implementations can still return hidden tensors, but their contract
+is `None`; teacher payload scoring requires a supported reconstruction contract.
 Reconstruction is numerically equivalent but not guaranteed bitwise identical,
 because the trainer may accumulate in a different precision.
 

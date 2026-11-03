@@ -590,14 +590,24 @@ def _logits_contract(
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
     processor = getattr(model, "logits_processor", None)
-    if not isinstance(processor, LogitsProcessor):
+    compute_logits = getattr(model, "compute_logits", None)
+    if (
+        type(processor) is not LogitsProcessor
+        or getattr(compute_logits, "__module__", None)
+        != "vllm.model_executor.models.qwen3"
+        or getattr(compute_logits, "__qualname__", None)
+        != "Qwen3ForCausalLM.compute_logits"
+        or config.model_config.quantization is not None
+    ):
         return None
     hf_config = config.model_config.hf_text_config
+    tied = bool(getattr(hf_config, "tie_word_embeddings", False))
     return {
+        "lm_head_weight": "model.embed_tokens.weight" if tied else "lm_head.weight",
         "vocab_size": int(processor.org_vocab_size),
         "logit_scale": float(processor.scale),
         "soft_cap": None if processor.soft_cap is None else float(processor.soft_cap),
-        "tie_word_embeddings": bool(getattr(hf_config, "tie_word_embeddings", False)),
+        "tie_word_embeddings": tied,
     }
 
 

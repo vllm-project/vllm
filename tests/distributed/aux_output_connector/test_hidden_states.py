@@ -287,3 +287,58 @@ def test_aux_outputs_keep_settled_fields_across_merges():
     assert AuxOutputs(hidden_capture_skip_reason="x").combine(first) == AuxOutputs(
         hidden_capture_skip_reason="x"
     )
+
+
+@pytest.mark.parametrize("quantized", [False, True])
+def test_logits_contract_excludes_custom_transforms(quantized, default_vllm_config):
+    from types import SimpleNamespace
+
+    from vllm.distributed.aux_output_connector.hidden_states import _logits_contract
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+
+    class CustomModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits_processor = LogitsProcessor(8)
+
+        def compute_logits(self, hidden):
+            return hidden + 1
+
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            quantization="fp8" if quantized else None,
+            hf_text_config=SimpleNamespace(tie_word_embeddings=False),
+        )
+    )
+    assert _logits_contract(CustomModel(), config) is None
+
+
+@pytest.mark.parametrize(
+    "tied,quantization", [(False, None), (True, None), (False, "fp8")]
+)
+def test_qwen3_contract_identifies_checkpoint_head(
+    tied, quantization, default_vllm_config
+):
+    from types import SimpleNamespace
+
+    from vllm.distributed.aux_output_connector.hidden_states import _logits_contract
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+
+    model = Qwen3ForCausalLM.__new__(Qwen3ForCausalLM)
+    torch.nn.Module.__init__(model)
+    model.logits_processor = LogitsProcessor(8)
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            quantization=quantization,
+            hf_text_config=SimpleNamespace(tie_word_embeddings=tied),
+        )
+    )
+    contract = _logits_contract(model, config)
+    if quantization:
+        assert contract is None
+    else:
+        assert contract["lm_head_weight"] == (
+            "model.embed_tokens.weight" if tied else "lm_head.weight"
+        )
+        assert contract["tie_word_embeddings"] == tied
