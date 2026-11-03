@@ -918,6 +918,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
         "LGAI-EXAONE/EXAONE-4.5-33B",
     ),
+    "FireRedAsrAedLForConditionalGeneration": _HfExamplesInfo(
+        "Leebin/FireRedASR-AED-L-vllm",
+    ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
         trust_remote_code=True,
