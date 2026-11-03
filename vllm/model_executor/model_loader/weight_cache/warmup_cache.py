@@ -60,13 +60,21 @@ class FlashInferWarmupCache(WarmupCache):
     kind = "flashinfer_autotune"
 
     def __init__(self, store_names: Iterable[str] = ()) -> None:
-        # Disk is first: installs and publishes must land on it for the engine.
-        self.store_sources: list[ArtifactStore] = [
-            DiskArtifactStore(self.kind, flashinfer_autotune_root())
-        ]
-        # A misspelled store name or a failed build is a startup error.
-        for name in store_names:
-            self.store_sources.append(STORE_BACKENDS[name]())
+        self._store_names = tuple(store_names)
+        self._store_sources: list[ArtifactStore] | None = None
+
+    @property
+    def store_sources(self) -> list[ArtifactStore]:
+        # Lazily built: resolving the disk root needs flashinfer, which ROCm
+        # daemons never have; construction must stay flashinfer-free.
+        if self._store_sources is None:
+            self._store_sources = [
+                DiskArtifactStore(self.kind, flashinfer_autotune_root())
+            ]
+            # A misspelled store name or a failed build is a startup error.
+            for name in self._store_names:
+                self._store_sources.append(STORE_BACKENDS[name]())
+        return self._store_sources
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
         vllm_config = daemon.vllm_config

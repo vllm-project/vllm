@@ -290,6 +290,21 @@ QWEN_MTP_CASE = ModelCase(
 )
 
 
+# FP8 per-tensor dense linears go through FlashInfer's autotuned bmm_fp8,
+# which has multiple backends on SM90 (cublas, cudnn). The model uses
+# vllm-native fp8 quantization: the preload daemon rejects compressed-tensors
+# weights (they do not support pre-processed weights).
+FP8_CASE = ModelCase(
+    model="nm-testing/Qwen2-0.5B-Instruct-FP8",
+    prompts=["The capital of France is"],
+    llm_kwargs=dict(
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=1024,
+    ),
+)
+
+
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
     prompts=["The capital of France is"],
@@ -435,7 +450,7 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.parametrize("case", [DSV2_EP_CASE, K3_CASE], ids=["dsv2-ep", "kimi-k3"])
+@pytest.mark.parametrize("case", [FP8_CASE, K3_CASE], ids=["fp8", "kimi-k3"])
 def test_mooncake_warmup_cache_store_e2e(vllm_runner, case, tmp_path, monkeypatch):
     """Autotune tables published to a Mooncake store let a fresh daemon
     generation skip tuning with no source daemon online."""
