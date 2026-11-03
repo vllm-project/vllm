@@ -75,12 +75,19 @@ from vllm import LLM
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 ```
 
+## Sparse indexer decode logits
+
+On SM100, the sparse indexer computes decode logits in chunks of query rows whose
+BF16 logits fit `VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB` (default `2048`; `0`
+disables chunking). Batches that fit are not split. A larger budget launches fewer
+chunks in eager and piecewise steps; a smaller one reserves less memory.
+
 ## Adjust cache size
 
 If you run out of CPU RAM, try the following options:
 
 - (Multi-modal models only) you can set the size of multi-modal cache by setting `mm_processor_cache_gb` engine argument (default 4 GiB).
-- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable (default 4 GiB).
+- (CPU backend only) you can set the size of KV cache using `VLLM_CPU_KVCACHE_SPACE` environment variable, in GiB (default 0, meaning vLLM doesn't override the KV cache size through this variable).
 
 ## Multi-modal input limits
 

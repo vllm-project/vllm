@@ -8,7 +8,6 @@ from vllm import _custom_ops as ops
 from vllm import envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
@@ -17,7 +16,10 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
     rocm_aiter_grouped_topk,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -36,9 +38,11 @@ def fused_grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
+    kernel_padding = is_padding if current_platform.is_cuda() else None
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
         topk_values, topk_indices = ops.grouped_topk(
@@ -50,6 +54,7 @@ def fused_grouped_topk(
             routed_scaling_factor,
             e_score_correction_bias,
             1,  # scoring_func=1 for sigmoid
+            kernel_padding,
         )
     elif scoring_func == "softmax":
         # Apply softmax in Python, then use fused kernel
@@ -64,9 +69,15 @@ def fused_grouped_topk(
             routed_scaling_factor,
             e_score_correction_bias,
             0,  # scoring_func=0 (no activation, scores already computed)
+            kernel_padding,
         )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    # XPU's external operator retains its original ABI and post-routing mask.
+    if is_padding is not None and not current_platform.is_cuda():
+        topk_values = topk_values.masked_fill(is_padding.unsqueeze(1), 0)
+        topk_indices = topk_indices.masked_fill(is_padding.unsqueeze(1), -1)
 
     # Fused kernel outputs float32 values and int32 indices directly
     return topk_values, topk_indices
@@ -88,6 +99,7 @@ def grouped_topk(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if (
         envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK
@@ -106,6 +118,7 @@ def grouped_topk(
             topk_group=topk_group,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
+            is_padding=is_padding,
         )
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
@@ -159,6 +172,9 @@ def grouped_topk(
 
     if routed_scaling_factor != 1.0:
         topk_weights = topk_weights * routed_scaling_factor
+    if is_padding is not None:
+        topk_weights = topk_weights.masked_fill(is_padding.unsqueeze(1), 0)
+        topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
@@ -283,7 +299,6 @@ class GroupedTopKRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=self.num_expert_group,
             has_e_score_bias=self.e_score_correction_bias is not None,
-            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(
@@ -326,6 +341,10 @@ class GroupedTopKRouter(BaseRouter):
                 )
             return topk_weights, topk_ids
 
+        is_padding = (
+            get_moe_padding_mask(router_logits.shape[0]) if self.skip_padding else None
+        )
+
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
             if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
@@ -335,7 +354,7 @@ class GroupedTopKRouter(BaseRouter):
                 num_fused_shared_experts=self.num_fused_shared_experts,
             )
         else:
-            grouped_topk_impl = grouped_topk
+            grouped_topk_impl = partial(grouped_topk, is_padding=is_padding)
 
         topk_weights, topk_ids = grouped_topk_impl(
             hidden_states=hidden_states,
@@ -349,15 +368,9 @@ class GroupedTopKRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias,
         )
 
-        if (
-            self.skip_padding
-            and envs.VLLM_MOE_SKIP_PADDING
-            and is_forward_context_available()
-        ):
-            is_padding = get_forward_context().is_padding
-            if is_padding is not None:
-                is_padding = is_padding[: topk_ids.shape[0]].unsqueeze(1)
-                topk_weights = topk_weights.masked_fill(is_padding, 0)
-                topk_ids = topk_ids.masked_fill(is_padding, -1)
+        # AITER retains its existing interface and masking behavior.
+        if rocm_aiter_ops.is_fused_moe_enabled() and is_padding is not None:
+            topk_weights = topk_weights.masked_fill(is_padding.unsqueeze(1), 0)
+            topk_ids = topk_ids.masked_fill(is_padding.unsqueeze(1), -1)
 
         return topk_weights, topk_ids

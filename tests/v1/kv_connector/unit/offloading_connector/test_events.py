@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -21,28 +23,38 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
+    OffloadingConnectorScheduler,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
     KVCacheSpecKind,
+    MambaSpec,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.kv_offload.base import (
     Locality,
+    LookupResult,
     Medium,
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
     kv_cache_spec_kind=KVCacheSpecKind.FULL_ATTENTION.value,
+    kv_cache_spec_sliding_window=None,
+)
+_MAMBA_EVENT_SPEC = OffloadingEventGroupSpec(
+    kv_cache_spec_kind=KVCacheSpecKind.MAMBA.value,
     kv_cache_spec_sliding_window=None,
 )
 
@@ -84,17 +96,31 @@ def _group_config(
     blocks_per_chunk: int = 1,
     tokens_per_hash: int | None = None,
     sliding_window_size_in_chunks: int | None = None,
+    mamba: bool = False,
 ) -> GroupOffloadConfig:
     if tokens_per_hash is None:
         tokens_per_hash = block_size
     tokens_per_chunk = block_size * blocks_per_chunk
     assert tokens_per_chunk % tokens_per_hash == 0
-    kv_spec = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
+    kv_spec: KVCacheSpec
+    if mamba:
+        # A recurrent group: one state per chunk, offloaded in align mode.
+        kv_spec = MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        )
+        sliding_window_size_in_chunks = 1
+        event_spec = _MAMBA_EVENT_SPEC
+    else:
+        kv_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+        event_spec = _FULL_ATTENTION_EVENT_SPEC
     manager_cls = KVCacheSpecRegistry.get_manager_class(kv_spec)
     assert manager_cls is not None
     return GroupOffloadConfig(
@@ -105,7 +131,8 @@ def _group_config(
         sliding_window_size_in_chunks=sliding_window_size_in_chunks,
         kv_cache_spec=kv_spec,
         manager_cls=manager_cls,
-        kv_event_group_spec=_FULL_ATTENTION_EVENT_SPEC,
+        kv_event_group_spec=event_spec,
+        requires_cow_source=mamba,
     )
 
 
@@ -228,6 +255,34 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
     assert events[0].locality == "REMOTE"
+
+
+@pytest.mark.parametrize(
+    "kind,window", [("mamba", None), ("sliding_window", 16), (None, None)]
+)
+@pytest.mark.parametrize("reset", [False, True])
+@pytest.mark.parametrize("self_describing", [False, True])
+def test_placeholder_group_classification_survives_reset(
+    kind, window, reset, self_describing
+):
+    tracker = OffloadingEventsTracker(
+        OffloadingKVEventsConfig(True, self_describing),
+        {0: OffloadingEventGroupSpec(kind, window)},
+    )
+    if reset:
+        tracker.reset()
+    key = make_offload_key(_hash(0), 0)
+    # A removal can arrive before any store metadata is available.
+    removed, stored = tracker.take_events(
+        [_removed_event([key], ownership="kvcr"), _stored_event([key])]
+    )
+    assert (stored.block_size, stored.token_ids) == (0, [])
+    assert (stored.kv_cache_spec_kind, stored.kv_cache_spec_sliding_window) == (
+        (kind, window) if self_describing else (None, None)
+    )
+    # Removals stay group_idx + hash only; consumers classify from the store.
+    assert removed.ownership == "kvcr"
+    assert not hasattr(removed, "kv_cache_spec_kind")
 
 
 def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
@@ -482,12 +537,84 @@ def test_take_events_opt_out_keeps_placeholders():
     assert len(events[3].block_hashes) == 3
 
 
+def test_mamba_chunk_store_emits_state_checkpoint_event():
+    """A recurrent group's chunk is announced as one state checkpoint: the
+    chunk's last hash, chained to its predecessor, with no tokens and
+    kv_cache_spec_kind "mamba", so a consumer aligns it by hash."""
+    tracker = _tracker()
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    req = _request(block_hashes=[_hash(i) for i in range(4)], token_count=16)
+    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+
+    events = list(tracker.take_events([_stored_event(keys[1:])]))
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(3))]
+    assert event.parent_block_hash == _wire_hash(_hash(1))
+    assert event.token_ids == []
+    assert event.block_size == 8
+    assert event.group_idx == 1
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+    assert event.kv_cache_spec_sliding_window is None
+
+    [removed] = tracker.take_events([_removed_event(keys[1:])])
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(_hash(3))]
+    assert removed.group_idx == 1
+
+
+def test_mamba_multi_hash_chunk_announces_only_last_hash():
+    """In chunk mode a recurrent chunk spans several hashes, but only the
+    last one is a resumable checkpoint; the others are not announced."""
+    tracker = _tracker()
+    group_config = _group_config(block_size=4, blocks_per_chunk=4, mamba=True)
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    keys = _record_chunks(tracker, req, group_config, num_chunks=2)
+
+    [event] = tracker.take_events([_stored_event(keys[1:])])
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(7))]
+    assert event.parent_block_hash == _wire_hash(_hash(6))
+    assert event.token_ids == []
+    assert event.block_size == 4
+
+    [removed] = tracker.take_events([_removed_event(keys[1:])])
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(_hash(7))]
+
+
+@pytest.mark.parametrize(
+    "record_method", ["record_partial_store", "record_partial_lookup"]
+)
+def test_mamba_partial_tail_event_is_state_checkpoint(record_method):
+    tracker = _tracker()
+    group_config = _group_config(
+        block_size=16, blocks_per_chunk=1, mamba=True
+    )._replace(hashes_per_chunk=4)
+    req = _request(block_hashes=[_hash(i) for i in range(8)], token_count=32)
+    key = make_offload_key(req.block_hashes[6], group_config.group_idx)
+
+    getattr(tracker, record_method)(req, group_config, 28, key)
+    [event] = tracker.take_events([_stored_event([key])])
+
+    assert isinstance(event, BlockStored)
+    assert event.block_hashes == [_wire_hash(_hash(6))]
+    assert event.parent_block_hash == _wire_hash(_hash(5))
+    assert event.token_ids == []
+    assert event.block_size == 4
+    assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+
+
 @pytest.mark.parametrize(
     "sliding_window_size_in_chunks",
     [1, 2],
-    ids=["ssm", "sliding-window"],
+    ids=["one-chunk-window", "sliding-window"],
 )
-def test_event_metadata_skips_non_full_attention_group(
+def test_event_metadata_skips_windowed_attention_group(
     sliding_window_size_in_chunks: int,
 ):
     tracker = _tracker()
@@ -542,6 +669,139 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
     # Nothing holds a residency now, so the payload is gone.
     [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
     assert after_eviction.block_size == 0
+
+
+@pytest.mark.parametrize(
+    "history", ["never_seen", "evicted", "retained", "secondary_only"]
+)
+@pytest.mark.parametrize("success", [False, True])
+def test_pending_promotion_captures_payload_before_inventory(history, success):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=1600)
+    group = _group_config(block_size=1600)
+    key = make_offload_key(_hash(0), 0)
+    if history != "never_seen":
+        tracker.record_store(req, group, 0, key)
+        if history == "evicted":
+            list(tracker.take_events([_removed_event([key])]))
+        elif history == "secondary_only":
+            list(
+                tracker.take_events(
+                    [
+                        _stored_event([key], ownership="kvcr", removal_expected=True),
+                        _removed_event([key]),
+                    ]
+                )
+            )
+
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="promotion")
+    primary.prepare_store([key], ctx)
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    assert (
+        OffloadingConnectorScheduler._maximal_prefix_lookup(
+            scheduler, [key], ctx, req, group, 0
+        )
+        is None
+    )
+    assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
+    assert list(tracker.take_events(primary.take_events())) == []
+
+    if history == "secondary_only":
+        list(tracker.take_events([_removed_event([key], ownership="kvcr")]))
+
+    if success:
+        [event] = tracker.take_events(
+            [_stored_event([key], ownership="kvcr", removal_expected=True)]
+        )
+        assert event.ownership == "kvcr"
+        assert event.block_size == 1600
+        assert event.token_ids == req.all_token_ids
+        assert event.block_hashes == [_wire_hash(_hash(0))]
+
+    primary.complete_store([key], ctx, success=success)
+    events = list(tracker.take_events(primary.take_events()))
+    if success:
+        assert primary.lookup(key, ctx) is LookupResult.HIT
+        assert len(events) == 1 and isinstance(events[0], BlockStored)
+        assert events[0].block_size == 1600
+        list(
+            tracker.take_events(
+                [_removed_event([key]), _removed_event([key], ownership="kvcr")]
+            )
+        )
+    else:
+        assert primary.lookup(key, ctx) is LookupResult.MISS
+        assert events == []
+    assert key not in tracker._pending_event_metadata
+
+
+def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
+    tracker = _tracker()
+    group = _group_config(block_size=1600, blocks_per_chunk=2)
+    ready_req = _request(block_hashes=[_hash(0), _hash(1)], token_count=3200)
+    failed_req = _request(block_hashes=[_hash(0), _hash(2)], token_count=3200)
+    ready_key, failed_key = [make_offload_key(_hash(i), 0) for i in (1, 2)]
+    primary = CPUOffloadingManager(num_chunks=2, enable_events=True)
+    ctx = ReqContext(req_id="shared-prefix")
+    primary.prepare_store([ready_key], ctx)
+    tracker.record_store(ready_req, group, 0, ready_key)
+    primary.complete_store([ready_key], ctx)
+    [stored] = tracker.take_events(primary.take_events())
+    assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
+
+    primary.prepare_store([failed_key], ctx)
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    assert (
+        OffloadingConnectorScheduler._maximal_prefix_lookup(
+            scheduler, [failed_key], ctx, failed_req, group, 0
+        )
+        is None
+    )
+    primary.complete_store([failed_key], ctx, success=False)
+    assert list(tracker.take_events(primary.take_events())) == []
+    assert primary.lookup(ready_key, ctx) is LookupResult.HIT
+    assert ready_key in tracker._pending_event_metadata
+    assert failed_key not in tracker._pending_event_metadata
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_failed_pending_retry_preserves_replacement_metadata(success):
+    tracker = _tracker()
+    req = _request(block_hashes=[_hash(0)], token_count=1600)
+    group = _group_config(block_size=1600)
+    key = make_offload_key(_hash(0), 0)
+    primary = CPUOffloadingManager(num_chunks=1, enable_events=True)
+    ctx = ReqContext(req_id="retry")
+    scheduler = SimpleNamespace(manager=primary, _events_tracker=tracker)
+    for attempt in range(2):
+        primary.prepare_store([key], ctx)
+        assert (
+            OffloadingConnectorScheduler._maximal_prefix_lookup(
+                scheduler, [key], ctx, req, group, 0
+            )
+            is None
+        )
+        if attempt == 0:
+            primary.complete_store([key], ctx, success=False)
+    # Drain the old failure only after the retry captured its metadata.
+    old_cleanup = list(tracker.take_events(primary.take_events()))
+    [inventory] = tracker.take_events(
+        [_stored_event([key], ownership="kvcr", removal_expected=True)]
+    )
+    assert inventory.block_size == 1600
+    assert inventory.token_ids == req.all_token_ids
+    assert old_cleanup == []
+    assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
+    primary.complete_store([key], ctx, success=success)
+    events = list(tracker.take_events(primary.take_events()))
+    assert len(events) == int(success)
+    assert key in tracker._pending_event_metadata
+    removals = [_removed_event([key], ownership="kvcr")]
+    if success:
+        removals.append(_removed_event([key]))
+    list(tracker.take_events(removals))
+    assert key not in tracker._pending_event_metadata
 
 
 def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
@@ -607,17 +867,16 @@ def test_reoffload_preserves_secondary_residency(record_method, position):
 
     getattr(tracker, record_method)(req, group_config, position, key)
 
-    assert tracker._pending_event_metadata[key].active_residencies == {
-        (Medium.CPU, None),
-        (Medium.STORAGE, "custom"),
-    }
+    assert not gc.is_tracked(tracker._pending_event_metadata[key])
+    list(tracker.take_events([_removed_event([key])]))
+    assert key in tracker._pending_event_metadata
     [removed] = tracker.take_events(
         [_removed_event([key], Medium.STORAGE, ownership="custom")]
     )
 
     assert stored.token_ids == [1, 2, 3, 4]
     assert stored.ownership == removed.ownership == "custom"
-    assert key in tracker._pending_event_metadata
+    assert key not in tracker._pending_event_metadata
 
 
 def test_take_events_groups_removed_hashes_by_kv_group():

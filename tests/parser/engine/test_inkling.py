@@ -23,8 +23,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.engine.registered_adapters import (
+    InklingParserReasoningAdapter,
+    InklingParserToolAdapter,
+)
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.inkling import InklingParser, _inkling_arg_converter, inkling_config
 from vllm.parser.parser_manager import ParserManager
@@ -163,7 +168,13 @@ def _delegating(mock_tokenizer, tools=None):
         reasoning_parser_name="inkling",
         enable_auto_tools=True,
     )
+    assert parser_cls is not None
     return parser_cls(mock_tokenizer, tools or [])
+
+
+class _TwoPassInklingParser(DelegatingParser):
+    reasoning_parser_cls = InklingParserReasoningAdapter
+    tool_parser_cls = InklingParserToolAdapter
 
 
 def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
@@ -397,6 +408,7 @@ class TestStreaming:
             reasoning_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         parser = parser_cls(mock_tokenizer, [])
 
         first = parser.parse_delta(
@@ -433,8 +445,10 @@ class TestStreaming:
         )
         assert third is not None
         assert third.tool_calls
-        assert third.tool_calls[0].function.name == "get_weather"
-        assert third.tool_calls[0].function.arguments == '{"city":"Seattle"}'
+        function = third.tool_calls[0].function
+        assert function is not None
+        assert function.name == "get_weather"
+        assert function.arguments == '{"city":"Seattle"}'
         assert TOOL_JSON not in ((third.content or "") + (third.reasoning or ""))
 
     def test_streamed_args_are_object_only(self, parser, mock_request):
@@ -538,6 +552,7 @@ class TestToolCallFiltering:
         first.skip_tool_parsing = True
         reasoning, content = first.extract_reasoning(text, mock_request)
         assert reasoning == "plan"
+        assert content is not None
         assert content.count(TOOL_JSON) == 2
 
         second = InklingParser(mock_tokenizer)
@@ -582,6 +597,8 @@ class TestRegisteredAdapters:
 
         reasoning_cls = ReasoningParserManager.get_reasoning_parser("inkling")
         tool_cls = ToolParserManager.get_tool_parser("inkling")
+        assert issubclass(reasoning_cls, InklingParserReasoningAdapter)
+        assert issubclass(tool_cls, InklingParserToolAdapter)
         assert reasoning_cls._parser_engine_cls is InklingParser
         assert tool_cls._parser_engine_cls is InklingParser
         assert tool_cls.supports_required_and_named is False
@@ -759,6 +776,30 @@ class TestDelegatingTwoPass:
         assert TOOL_JSON not in content
         assert END_MESSAGE not in content
 
+    def test_function_name_not_in_content_after_reasoning(
+        self, mock_tokenizer, mock_request
+    ):
+        name = "search_documents_by_keyword"
+        tools = [_function_tool(name)]
+        mock_request.tools = tools
+        text = (
+            f"{THINK_START} context.{END_MESSAGE}{MSG_MODEL}"
+            f"{name}{_tool_block(name, '{}')}"
+        )
+
+        content, reasoning, names, args = _stream_delegating(
+            _TwoPassInklingParser(mock_tokenizer, tools),
+            mock_request,
+            text,
+            chunk_size=12,
+            prompt_token_ids=self.GEN_PROMPT,
+        )
+
+        assert reasoning == " context."
+        assert content == ""
+        assert names == [name]
+        assert json.loads(args[0]) == {}
+
     @pytest.mark.parametrize("opener", [TEXT_START, TOOL_TEXT, TOOL_ERROR])
     @pytest.mark.parametrize("chunk_size", [1, 3, 64])
     def test_visible_text_then_tool_streaming(
@@ -905,6 +946,7 @@ class TestToolParserWithoutReasoningParser:
             tool_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         return parser_cls(mock_tokenizer, tools or [])
 
     def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):
