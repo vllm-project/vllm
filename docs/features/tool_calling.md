@@ -128,6 +128,8 @@ For parsers using schema-derived JSON constraints, required and named calls cont
 
 Structural-tag constraints have two layers. The tool-call *envelope* (markup and function name) is constrained whenever a structural tag applies: always for `tool_choice="required"` and named function calling, and for `tool_choice="auto"` once at least one tool sets `strict: true` or the server raises the floor. The *argument schema* of an individual tool is pinned only when that tool sets `strict: true` (or under `--tool-strict-level parameter`); a tool that omits `strict` keeps its arguments unconstrained, even when another tool in the same request is strict. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
 
+Where a pinned argument schema fixes the order of an object's properties, required properties come first, then optional ones, each group in the order declared in `properties`. This keeps every optional property reachable after the required ones regardless of where it is declared. The tool definitions rendered into the prompt are unchanged.
+
 For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
 
 * Set `additionalProperties` to `false` for each object in `parameters`.

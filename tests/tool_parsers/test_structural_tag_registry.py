@@ -194,6 +194,89 @@ def test_deepseek_v41_non_strict_parallel_calls_keep_typed_dsml(sample_tools):
     )
 
 
+def _dsml_weather_grammar(parameters: dict[str, Any]) -> Grammar:
+    declared = json.dumps(parameters)
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={"name": "weather", "parameters": parameters},
+        )
+    ]
+    tag = get_model_structural_tag(
+        "deepseek_v4_1",
+        tools,
+        "required",
+        reasoning=False,
+        strict_level=ToolStrictLevel.PARAMETER,
+    )
+    assert json.dumps(tools[0].function.parameters) == declared
+    return Grammar.from_structural_tag(tag)
+
+
+def _dsml_weather_call(*params: tuple[str, str, str]) -> str:
+    body = "".join(
+        f'<｜DSML｜ parameter name="{name}" string="{string}">'
+        f"{value}</｜DSML｜ parameter>\n"
+        for name, string, value in params
+    )
+    return (
+        '\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name="weather">\n'
+        + body
+        + "</｜DSML｜ invoke>\n</｜DSML｜ calls>"
+    )
+
+
+def test_strict_tool_grammar_accepts_optionals_after_required():
+    """An optional parameter declared before a required one must stay
+    reachable after the model emits the required one (#65173)."""
+    grammar = _dsml_weather_grammar(
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "locations": {"type": "array", "items": {"type": "string"}},
+                "action": {"type": "string", "enum": ["search", "forecast"]},
+                "query": {"type": "string"},
+            },
+            "required": ["action"],
+        }
+    )
+    action = ("action", "true", "forecast")
+    locations = ("locations", "false", '["Paris"]')
+    assert _is_grammar_accept_string(grammar, _dsml_weather_call(action, locations))
+    assert not _is_grammar_accept_string(grammar, _dsml_weather_call(locations))
+    assert not _is_grammar_accept_string(
+        grammar, _dsml_weather_call(action, action, locations)
+    )
+
+
+def test_strict_tool_grammar_reorders_nested_object_properties():
+    grammar = _dsml_weather_grammar(
+        {
+            "type": "object",
+            "properties": {
+                "place": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "note": {"type": "string"},
+                        "city": {"type": "string"},
+                    },
+                    "required": ["city"],
+                }
+            },
+            "required": ["place"],
+        }
+    )
+    place = '{"city": "Paris", "note": "rain"}'
+    assert _is_grammar_accept_string(
+        grammar, _dsml_weather_call(("place", "false", place))
+    )
+    assert not _is_grammar_accept_string(
+        grammar, _dsml_weather_call(("place", "false", '{"note": "rain"}'))
+    )
+
+
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     model: str,
@@ -1192,7 +1275,7 @@ def test_kimi_k3_property_ref_to_root_defs_compiles_and_accepts():
             _k3_arg(
                 "config",
                 "object",
-                '{"build": {"outDir": "dist"}, "index": "a.html"}',
+                '{"index": "a.html", "build": {"outDir": "dist"}}',
             ),
         )
     )

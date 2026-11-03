@@ -278,6 +278,50 @@ def limit_to_single_tool_call(tag: StructuralTag) -> StructuralTag:
     return tag
 
 
+_SUBSCHEMA_KEYS = (
+    "items",
+    "prefixItems",
+    "additionalProperties",
+    "anyOf",
+    "oneOf",
+    "allOf",
+    "not",
+)
+_SUBSCHEMA_MAP_KEYS = ("properties", "patternProperties", "$defs", "definitions")
+
+
+def _required_properties_first(schema: Any) -> Any:
+    """Return a copy of ``schema`` with each object's required properties first.
+
+    xgrammar pins object properties to their declared order, so an optional
+    property declared before a required one becomes unreachable once the
+    required one is generated. JSON object order carries no meaning, so the
+    arguments still validate against the same schema.
+    """
+    if isinstance(schema, list):
+        return [_required_properties_first(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    schema = dict(schema)
+    for key in _SUBSCHEMA_KEYS:
+        if key in schema:
+            schema[key] = _required_properties_first(schema[key])
+    for key in _SUBSCHEMA_MAP_KEYS:
+        if isinstance(schema.get(key), dict):
+            schema[key] = {
+                name: _required_properties_first(subschema)
+                for name, subschema in schema[key].items()
+            }
+    properties = schema.get("properties")
+    required = schema.get("required")
+    if isinstance(properties, dict) and isinstance(required, list):
+        schema["properties"] = {
+            **{k: v for k, v in properties.items() if k in required},
+            **{k: v for k, v in properties.items() if k not in required},
+        }
+    return schema
+
+
 def _dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
@@ -287,7 +331,7 @@ def _dump_tool_for_xgrammar(
         if tool.description is not None:
             function["description"] = tool.description
         if tool.parameters is not None:
-            function["parameters"] = tool.parameters
+            function["parameters"] = _required_properties_first(tool.parameters)
         if tool.strict is not None:
             function["strict"] = tool.strict
         return {"type": "function", "function": function}
@@ -298,6 +342,9 @@ def _dump_tool_for_xgrammar(
         return {"type": "function", "function": function}
     dumped_tool = tool.model_dump(mode="json", exclude_none=True)
     if isinstance(tool, ChatCompletionToolsParam):
+        function = dumped_tool["function"]
+        if "parameters" in function:
+            function["parameters"] = _required_properties_first(function["parameters"])
         return dumped_tool
     return dict(dumped_tool)
 
