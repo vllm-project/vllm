@@ -5,6 +5,9 @@
 import httpx
 import pytest
 import pytest_asyncio
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import LlamaConfig, TokenizersBackend
 
 from tests.utils import RemoteLaunchRenderServer
 
@@ -24,6 +27,53 @@ async def client(server):
         base_url=server.url_for(""), timeout=30.0
     ) as http_client:
         yield http_client
+
+
+@pytest.fixture(scope="module")
+def deepseek_v41_server(tmp_path_factory):
+    model_path = tmp_path_factory.mktemp("deepseek_v41")
+    LlamaConfig(
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        vocab_size=3,
+        max_position_embeddings=128,
+    ).save_pretrained(model_path)
+    TokenizersBackend(
+        tokenizer_object=Tokenizer(
+            WordLevel({"[UNK]": 0, "[BOS]": 1, "[EOS]": 2}, unk_token="[UNK]")
+        ),
+        unk_token="[UNK]",
+    ).save_pretrained(model_path)
+    with RemoteLaunchRenderServer(
+        str(model_path),
+        ["--tokenizer-mode", "deepseek_v41", "--served-model-name", "deepseek-v41"],
+        max_wait_seconds=120,
+    ) as srv:
+        yield srv
+
+
+@pytest.mark.parametrize(
+    "message", [{"role": "developer", "content": ""}, {"role": "developer"}]
+)
+def test_empty_developer_content_returns_400(deepseek_v41_server, message):
+    response = httpx.post(
+        deepseek_v41_server.url_for("v1/chat/completions/render"),
+        json={
+            "model": "deepseek-v41",
+            "messages": [message],
+            "chat_template_kwargs": {"thinking": False},
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"] == (
+        "Developer message content must not be empty."
+    )
+    assert "_image_indices" not in response.text
+    assert str(message) not in response.text
 
 
 # -- Chat Completion Render --
