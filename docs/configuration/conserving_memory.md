@@ -75,6 +75,13 @@ from vllm import LLM
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 ```
 
+## Sparse indexer decode logits
+
+On SM100, the sparse indexer computes decode logits in chunks of query rows whose
+BF16 logits fit `VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB` (default `2048`; `0`
+disables chunking). Batches that fit are not split. A larger budget launches fewer
+chunks in eager and piecewise steps; a smaller one reserves less memory.
+
 ## Adjust cache size
 
 If you run out of CPU RAM, try the following options:
