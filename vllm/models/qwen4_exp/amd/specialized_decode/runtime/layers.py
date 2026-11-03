@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The launches of one decoder layer: vLLM's modules and tensors in, the
 kernels' arguments out (``Launcher``), and ``qsa_core``, the QSA attention
-up to o_proj's input (vLLM's prepare and top-k around the wide indexer
-scores and sparse attention).
+up to o_proj's input (the wide indexer launch: vLLM's fused prepare, the
+scores and the top-k selection; then the sparse attention).
 
 ``Launcher`` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the block-input buffer, the
@@ -16,9 +16,9 @@ from typing import cast
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
     experts_rip,
     gdn_states,
@@ -38,6 +38,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
     sync_words,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa as qsa_
 from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
 from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadata
 from vllm.platforms import current_platform
@@ -84,6 +85,13 @@ class Launcher:
             K.scratch_bytes(max(widths)), dtype=torch.uint8, device=dev
         )
         self.x = torch.empty(max(widths), L.HIDDEN, dtype=torch.bfloat16, device=dev)
+        # qsa_front's projections of x: qkv_proj's and index_qk_proj's outputs
+        self.qkv = torch.empty(max(widths), qsa_.QKV, dtype=torch.bfloat16, device=dev)
+        self.ixqk = torch.empty(max(widths), qsa_.IX, dtype=torch.bfloat16, device=dev)
+        # vLLM's skinny GEMMs create their workspace pool on first use, which
+        # must not be inside a graph capture; the decode steps no longer run
+        # one eagerly before the stock graphs are captured
+        warmup_rocm_skinny_gemm_workspaces(dev)
         self.sync = torch.zeros(sync_words(), dtype=torch.int32, device=dev)
         self.health = torch.zeros(health_words(L.BLOCKS), dtype=torch.int32, device=dev)
         self.epoch = torch.zeros(4, dtype=torch.int32, device=dev)
@@ -151,7 +159,14 @@ class Launcher:
                 "w_out_s": g.out_proj.weight_scale,
             }
         else:
-            a["w_out"] = layer.self_attn.o_proj.weight
+            attn = layer.self_attn
+            a |= {
+                "w_out": attn.o_proj.weight,
+                "w_qkv": attn.qkv_proj.weight,
+                "w_ix": attn.indexer.index_qk_proj.weight,
+                "qkv_out": self.qkv,
+                "ix_out": self.ixqk,
+            }
         return a
 
     def bind_caches(self) -> None:
@@ -239,16 +254,74 @@ def _select_buffers(rows: int, columns: int, blocks: int, device):
     return _SELECT[k]
 
 
-def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
+def _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp):
+    """The score launch's fused prepare (``indexer.Prep``) when the layer's
+    rope, caches and metadata are the ones it is written for, else None
+    (vLLM's prepare runs)."""
+    ix = attn.indexer
+    rope = ix.rotary_emb
+    section = getattr(rope, "mrope_section", None)
+    ring = ix.raw_key_cache.kv_cache
+    if ring.dim() == 4 and ring.shape[2] == 1:
+        ring = ring.flatten(2)  # [rings, ring rows, 1 kv head, row]
+    tail = ix.raw_key_cache.cache_rope_positions
+    ok = (
+        ix.use_fused_pre_indexer
+        and ix.compress_ratio == 4
+        and ix.index_n_heads == 4
+        and attn.num_heads == indexer.MAIN_HEADS
+        and positions.dtype == torch.int64
+        and rope.cos_sin_cache.dtype == torch.bfloat16
+        and rope.cos_sin_cache.shape[1] == 64
+        and (not section or bool(getattr(rope, "mrope_interleaved", False)))
+        and ring.dtype == torch.bfloat16
+        and ring.dim() == 3
+        and ring.shape[2] == (indexer.DIM + 12 if tail else indexer.DIM)
+        and (not tail or ix.raw_key_cache.rope_position_offset == indexer.DIM)
+        and all(
+            t.dtype == torch.int64
+            for t in (main.slot_mapping, raw.slot_mapping, comp.slot_mapping)
+        )
+        and raw.block_table.dtype == torch.int32
+    )
+    if not ok:
+        return None
+    return indexer.Prep(
+        ixqk[:rows],
+        qkv[:rows],
+        query[:rows],
+        gate[:rows],
+        positions,
+        rope.cos_sin_cache,
+        attn.q_norm.weight,
+        attn.k_norm.weight,
+        ix.q_layernorm.weight,
+        ix.k_layernorm.weight,
+        attn.q_norm.variance_epsilon,
+        ix.q_layernorm.variance_epsilon,
+        (int(section[1]), int(section[2])) if section else None,
+        attn.kv_cache,
+        main.slot_mapping,
+        ring,
+        raw.slot_mapping,
+        raw.block_table,
+        comp.slot_mapping,
+    )
+
+
+def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]:
     """``Qwen4ExpQSAAttention.forward`` up to the output gate (the qsa_back
     launch applies it to o_proj's input) -> (attention output [S, heads HD],
-    gate [S, heads HD]). vLLM's fused prepare writes the caches and prepares
-    the queries and the gate; ``wide.indexer`` scores the compressed blocks,
-    vLLM's decode top-k selects them and ``wide.attention`` attends their
-    tokens in place (other cache formats run vLLM's whole QSA)."""
+    gate [S, heads HD]). ``qkv`` and ``ixqk``: ``attn.qkv_proj(x)`` and
+    ``attn.indexer.index_qk_proj(x)`` (qsa_front's projections). The wide
+    indexer launch runs vLLM's fused prepare (the queries, the gate, the K/V
+    and indexer caches; ``indexer.Prep``), scores the compressed blocks and
+    selects them (the decode top-k's set; a row within the budget takes all
+    of its blocks unscored), and ``wide.attention`` attends their tokens in
+    place (other cache formats run vLLM's whole QSA; other ropes or metadata
+    vLLM's prepare)."""
     from vllm.models.qwen4_exp.amd import qsa
 
-    qkv, _ = attn.qkv_proj(x)
     n = x.shape[0]
     name = qsa._encode_layer_name(attn.layer_name)
     out = qkv.new_empty(n, attn.num_heads, attn.head_dim)
@@ -260,18 +333,24 @@ def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
         raw = cast(QSAIndexerMetadata, md[ix.raw_key_cache.prefix])
         comp = cast(QSAIndexerMetadata, md[ix.compressed_key_cache.prefix])
         rows = raw.num_actual_tokens
-        q_raw, raw_keys = ix.project(x[:rows])
-        q_ix, (query, _) = ix._fused_prepare(
-            q_raw,
-            raw_keys,
-            positions[..., :rows],
-            raw,
-            comp,
-            attn,
-            qkv,
-            main.slot_mapping,
-            gate,
-        )
+        query = torch.empty_like(out)
+        prep = _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp)
+        q_ix = None
+        if prep is None:
+            q_raw, raw_keys = ixqk[:rows].split(
+                (ix.index_n_heads * ix.index_head_dim, ix.index_head_dim), dim=-1
+            )
+            q_ix, (query, _) = ix._fused_prepare(
+                q_raw,
+                raw_keys,
+                positions[..., :rows],
+                raw,
+                comp,
+                attn,
+                qkv,
+                main.slot_mapping,
+                gate,
+            )
         keys = ix.compressed_key_cache.kv_cache
         top = ix.token_topk // ix.compress_ratio
         logits, visible, blocks = _select_buffers(
@@ -289,12 +368,11 @@ def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
             ix.compress_ratio,
             logits,
             visible,
-        )
-        ops.top_k_per_row_decode(
-            logits, 1, visible, blocks, rows, logits.stride(0), logits.stride(1), top
+            selected=blocks,
+            prep=prep,
         )
         attention.sparse_attention(
-            query,
+            query[:rows],
             attn.kv_cache,
             blocks,
             main.block_table,
@@ -302,6 +380,7 @@ def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
             comp.seq_lens,
             ix.compress_ratio,
             out[:rows],
+            dense=True,
         )
         if rows < n:
             # padded rows: zero output, as vLLM's attention leaves them

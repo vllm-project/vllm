@@ -16,8 +16,8 @@ around vLLM's attention (``wide.layer``):
 
     GDN layer   gdn        attn mix, GDN, out_proj + all-reduce + combine,
                            MLP mix, MoE + all-reduce + combine
-    QSA layer   qsa_front  attn mix -> x
-                (vLLM)     qkv_proj, QSA attention -> attention output, gate
+    QSA layer   qsa_front  attn mix -> x, qkv_proj + index_qk_proj
+                (vLLM)     QSA attention -> attention output, gate
                 qsa_back   o_proj + all-reduce + combine, MLP half
 
 The PLE layer, the final mixer and the embedding stay vLLM's. The kernels keep
@@ -222,7 +222,9 @@ class SpecializedDecode:
                 seq = la.launch(keys[0], i, seq, dyn)
             else:
                 seq = la.launch(keys[0], i, seq, dyn)
-                attn, gate = qsa_core(layer.self_attn, x, positions)
+                attn, gate = qsa_core(
+                    layer.self_attn, x, la.qkv[:rows], la.ixqk[:rows], positions
+                )
                 seq = la.launch(keys[1], i, seq, dyn | {"attn": attn, "gate": gate})
             stats = False
         _, h, _ = model.hyper_connection_mixer.mix(state)

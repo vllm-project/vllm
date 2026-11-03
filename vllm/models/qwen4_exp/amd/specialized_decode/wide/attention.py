@@ -20,7 +20,10 @@ builds. ``splits`` CTAs a row each attend a contiguous range of the list's
   joint one, not its reduction order.
 * The four waves merge through LDS; with several splits, each stores its
   partial and the row's last-arriving CTA merges them in the ``exp2`` domain
-  and resets the row's counter for the next launch.
+  and resets the row's counter for the next launch. With ``spread`` (four
+  splits a row or more, the small batches) every split instead waits until
+  the row's splits have all arrived and merges its own slice of the output
+  (one CTA reading every partial is the slowest part of a short row).
 
 The kernel reads the cache in place: a token's K and V are one 1 KiB record
 (``[blocks, kv heads, block_size, 2 head_dim]``, one kv head on a rank), pages
@@ -37,6 +40,7 @@ import torch
 from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Int32, Int64
 
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.abi import WAIT_TICKS
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     CM_DEV,
     LOG2E,
@@ -49,6 +53,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     lds_ld,
     lds_ld_tr16,
     lds_st,
+    memrealtime,
     mfma_bf16,
     mfma_bf16_k16,
     pack_bf16,
@@ -79,6 +84,12 @@ class AttnBuild:
     top_blocks: int  # the selection's blocks a row
     group: int  # query heads a kv head
     ratio: int  # the indexer's compression ratio
+    # a row with at most ``top_blocks`` complete blocks attends all of them
+    # without reading ``sel`` (the selection stock would make, in order)
+    dense: bool = False
+    # every split merges a slice of the row's output once all have arrived
+    # (else the last to arrive merges all of it)
+    spread: bool = False
 
 
 def splits_for(rows: int) -> int:
@@ -118,7 +129,8 @@ def build(key: AttnBuild):
         aux: fx.Array[fx.Int32, 2 * WAVES * COLS + 4, 16]
         tbl: fx.Array[fx.Int32, tbl_words, 16]
 
-    name = f"q4w_qsa_attn_s{key.rows}_x{splits}"
+    name = f"q4w_qsa_attn_s{key.rows}_x{splits}" + ("_d" if key.dense else "")
+    name += "_m" if key.spread else ""
     # FlyDSL keys its compile cache on closure scalars and tuples, not on the
     # dataclass: both functions reference the key's fields
     keyed = astuple(key)
@@ -170,10 +182,20 @@ def build(key: AttnBuild):
         # the split's token positions, then their byte offsets
         first = s0 * STAGE
         selected = []
+        listed = None
+        sel_bytes = None
+        if const_expr(key.dense):
+            listed = complete > i32(top_blocks)
+            sel_bytes = i32(key.rows) * sel_stride * i32(4)
         for r in range_constexpr(rounds):
             j = first + tid + r * THREADS
             bi = (j < expanded).select(j // ratio, i32(0))
-            selected.append(ld(sel, row * sel_stride + bi, Int32))
+            if const_expr(key.dense):
+                # a short row's list is its blocks in order: no load (masked)
+                v = ld(sel, row * sel_stride + bi, Int32, nbytes=sel_bytes, mask=listed)
+                selected.append(listed.select(v, bi))
+            else:
+                selected.append(ld(sel, row * sel_stride + bi, Int32))
         pos = []
         for r in range_constexpr(rounds):
             j = first + tid + r * THREADS
@@ -297,13 +319,14 @@ def build(key: AttnBuild):
             # partial: [row][member][head][head_dim] f32, then
             # [row][member][head] (max, sum)
             pbase = (row * splits + member) * COLS
-            for i in range_constexpr(4):
-                st(
-                    part,
-                    (pbase + n) * HEAD_DIM + dims[i],
-                    fx.Vector.from_elements(nums[i], fx.Float32),
-                    CM_DEV,
-                )
+            if n < group:
+                for i in range_constexpr(4):
+                    st(
+                        part,
+                        (pbase + n) * HEAD_DIM + dims[i],
+                        fx.Vector.from_elements(nums[i], fx.Float32),
+                        CM_DEV,
+                    )
             ml = Int64(key.rows * splits * COLS * HEAD_DIM)
             if (wave == 0) & (g == 0):
                 st(
@@ -312,7 +335,11 @@ def build(key: AttnBuild):
                     fx.Vector.from_elements([m, tot], fx.Float32),
                     CM_DEV,
                 )
-            if _arrive(counters, row, splits, tid, verdict):
+            if const_expr(key.spread):
+                _gather(counters, row, splits, tid)
+                _merge_slice(part, ml, out, row, member, splits, group, tid)
+                _depart(counters, row, splits, tid)
+            elif _arrive(counters, row, splits, tid, verdict):
                 mls = [
                     ld(
                         part + ml * Int64(4),
@@ -400,6 +427,90 @@ def _store_out(out, orow, ok, dims, nums, tot):
 
 
 @traced
+def _gather(counters, row, arrivals: int, tid):
+    """The split's arrival on its row's counter after its partial, then a
+    wait (bounded) until every split of the row has arrived: the row's
+    splits are co-resident (at most one CTA a CU)."""
+    drain_stores()
+    fx.barrier()
+    if tid == 0:
+        addr = counters + Int64(row * (COUNTER_WORDS * 4))
+        atomic_add(addr, 1)
+        t0 = memrealtime()
+        seen = ld(addr, 0, Int32, cm=CM_DEV)
+        late = Int64(0)
+        while (seen < i32(arrivals)) & (late < Int64(WAIT_TICKS)):
+            seen = ld(addr, 0, Int32, cm=CM_DEV)
+            late = memrealtime() - t0
+    fx.barrier()
+
+
+@traced
+def _depart(counters, row, arrivals: int, tid):
+    """After the split's merge: the row's last to leave resets both counters
+    for the next launch (every split has seen all arrivals by then)."""
+    fx.barrier()
+    if tid == 0:
+        addr = counters + Int64(row * (COUNTER_WORDS * 4))
+        old = atomic_add(addr + Int64(4 * (COUNTER_WORDS // 2)), 1)
+        if old == i32(arrivals - 1):
+            st(addr, 0, i32(0), cm=CM_DEV)
+            st(addr, COUNTER_WORDS // 2, i32(0), cm=CM_DEV)
+
+
+@traced
+def _merge_slice(part, ml, out, row, member, splits: int, group: int, tid):
+    """Split ``member``'s slice of the row's output (``HEAD_DIM / splits``
+    dims of every head) from all splits' partials, in the ``exp2`` domain."""
+    span = HEAD_DIM // splits
+    quads = span // 4
+    chunks = group * quads
+    for r in range_constexpr(-(-chunks // THREADS)):
+        c = tid + i32(r * THREADS)
+        if c < i32(chunks):
+            head = c // i32(quads)
+            d = member * i32(span) + c % i32(quads) * i32(4)
+            mls = [
+                ld(
+                    part + ml * Int64(4),
+                    ((row * splits + j) * COLS + head) * 2,
+                    fx.Float32,
+                    2,
+                    cm=CM_DEV,
+                )
+                for j in range(splits)
+            ]
+            parts = [
+                ld(
+                    part,
+                    ((row * splits + j) * COLS + head) * HEAD_DIM + d,
+                    fx.Float32,
+                    4,
+                    cm=CM_DEV,
+                )
+                for j in range(splits)
+            ]
+            mx = mls[0][0]
+            for j in range_constexpr(1, splits):
+                mx = fx.max(mx, mls[j][0])
+            fs = [hw_exp2(mls[j][0] - mx) for j in range(splits)]
+            tot = f32(0.0)
+            vals = [f32(0.0)] * 4
+            for j in range_constexpr(splits):
+                tot = tot + fs[j] * mls[j][1]
+                vals = [vals[e] + parts[j][e] * fs[j] for e in range(4)]
+            inv = (tot > f32(0.0)).select(hw_rcp(tot), f32(0.0))
+            words = fx.Vector.from_elements(
+                [
+                    pack_bf16(vals[0] * inv, vals[1] * inv),
+                    pack_bf16(vals[2] * inv, vals[3] * inv),
+                ],
+                Int32,
+            )
+            st(out, ((row * group + head) * HEAD_DIM + d) // 2, words)
+
+
+@traced
 def _arrive(counters, row, arrivals: int, tid, verdict):
     """The split's arrival on its row's counter after its partial: True on
     the row's last CTA, which resets the counter."""
@@ -447,11 +558,16 @@ def sparse_attention(
     ratio: int,
     out: torch.Tensor,
     splits: int | None = None,
+    dense: bool = False,
+    spread: bool | None = None,
 ) -> torch.Tensor:
     """``out`` [rows, heads, 256] bf16: attention of ``q`` [rows, heads, 256]
     over the tokens of the compressed blocks ``selected`` [rows, top_blocks]
     lists (the indexer top-k's) and the open tail, in ``kv_cache`` [blocks, 1,
-    block_size, 512] bf16 (K | V a token)."""
+    block_size, 512] bf16 (K | V a token). ``dense``: a row with at most
+    ``top_blocks`` complete blocks attends all of them, its list unread.
+    ``spread``: every split merges a slice of the output (``AttnBuild.spread``;
+    default: at 4 splits a row or more, where it is faster)."""
     from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
     rows, group, hd = q.shape
@@ -464,7 +580,16 @@ def sparse_attention(
     assert seq_lens.dtype == torch.int32 and selected.stride(1) == 1
     assert block_table.stride(1) == 1
     splits = splits or splits_for(rows)
-    key = AttnBuild(rows, splits, page, selected.shape[1], group, ratio)
+    key = AttnBuild(
+        rows,
+        splits,
+        page,
+        selected.shape[1],
+        group,
+        ratio,
+        dense,
+        (splits >= 4 if spread is None else spread) and splits > 1,
+    )
     part, counters = _workspace(rows, splits, q.device)
     _run_compiled(
         build(key),

@@ -1704,3 +1704,421 @@ def test_qsa_indexer_scores(rows):
         keys = kc[table[r][cols // page].long(), cols % page, 0].double()  # [want, dim]
         expect = (q[r].double() @ keys.T).clamp(min=0).sum(0) / dim**0.5
         assert rel(logits[r, :want], expect) < 1e-5
+
+
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128])
+def test_qsa_select(rows):
+    """``wide.indexer.score`` with the in-kernel top-k (``selected``) against
+    vLLM's ``top_k_per_row_decode`` on the same scores, compared as sets: a
+    row within the budget lists all of its blocks in order (-1 after) without
+    scoring; a longer row picks stock's 512 but for ties at the boundary
+    (stock's pick among ties is arbitrary; ours takes the lowest blocks), in
+    ascending order. Rows from no context to past the LDS-staged keys
+    (``select.MAX_KEYS``), and a padded row."""
+    from vllm import _custom_ops as ops
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer, select
+
+    gen = torch.Generator().manual_seed(rows)
+    page, heads, dim, ratio, top = 64, 4, 128, 4, 512
+    base = [9001, 0, 3, 2048, 2051, 2120, 37, 6000, 33000, 2600]
+    contexts = [base[r % len(base)] for r in range(rows)]
+    if rows >= 8:
+        # past the LDS-staged keys: the select re-reads the scores
+        contexts[rows // 2] = (select.MAX_KEYS + 300) * ratio
+    width = -(-max(contexts) // page)
+    need = [-(-c // page) for c in contexts]
+    stride = page * dim + 1024
+    pool_pages = sum(need) + 1
+    pool = torch.randn(pool_pages * stride, generator=gen).to(torch.bfloat16)
+    kc = pool.as_strided((pool_pages, page, 1, dim), (stride, dim, dim, 1))
+    order = (torch.randperm(pool_pages - 1, generator=gen) + 1).int()
+    table = torch.full((rows, width), -1, dtype=torch.int32)
+    at = 0
+    for r, n in enumerate(need):
+        table[r, :n] = order[at : at + n]
+        at += n
+    t2r = torch.arange(rows, dtype=torch.int32)
+    if rows > 1:
+        t2r[1] = -1
+    q = torch.randn(rows, heads, dim, generator=gen).to(torch.bfloat16)
+    seq = torch.tensor(contexts, dtype=torch.int32)
+    positions = (seq - 1).clamp(min=0).long()
+
+    dev = torch.device("cuda")
+    args = (
+        q.to(dev),
+        pool.to(dev).as_strided(kc.shape, kc.stride()),
+        table.to(dev),
+        t2r.to(dev),
+        positions.to(dev),
+        seq.to(dev),
+        ratio,
+    )
+    columns = width * page
+    logits = torch.zeros(rows, columns, device=dev)
+    visible = torch.empty(rows, dtype=torch.int32, device=dev)
+    indexer.score(*args, logits, visible)
+    stock = torch.empty(rows, top, dtype=torch.int32, device=dev)
+    ops.top_k_per_row_decode(
+        logits, 1, visible, stock, rows, logits.stride(0), logits.stride(1), top
+    )
+    mine_logits = torch.zeros(rows, columns, device=dev)
+    mine_visible = torch.empty(rows, dtype=torch.int32, device=dev)
+    mine = torch.full((rows, top), -7, dtype=torch.int32, device=dev)
+    for _ in range(2):  # the arrival counters reset themselves
+        indexer.score(*args, mine_logits, mine_visible, selected=mine)
+    assert torch.equal(mine_visible, visible)
+    logits, stock, mine, visible = logits.cpu(), stock.cpu(), mine.cpu(), visible.cpu()
+    for r in range(rows):
+        v = visible[r].item()
+        got = mine[r][mine[r] >= 0]
+        assert torch.equal(got, got.sort().values), r
+        assert (mine[r] >= 0).sum().item() == min(v, top), r
+        assert set(stock[r][stock[r] >= 0].tolist()) <= set(range(v)), r
+        if v <= top:
+            assert torch.equal(mine[r][:v], torch.arange(v, dtype=torch.int32)), r
+            assert (mine[r][v:] == -1).all(), r
+            assert set(stock[r][stock[r] >= 0].tolist()) == set(range(v)), r
+            continue
+        scores = logits[r, :v]
+        ours, theirs = set(got.tolist()), set(stock[r].tolist())
+        boundary = scores[got.long()].min().item()
+        assert scores[stock[r].long()].min().item() == boundary, r
+        # every score above the boundary is in both; they differ only in ties
+        above = set(torch.nonzero(scores > boundary).flatten().tolist())
+        assert above <= ours and above <= theirs, r
+        assert all(scores[i].item() == boundary for i in ours ^ theirs), r
+        ties = torch.nonzero(scores == boundary).flatten()
+        assert torch.equal(
+            got[scores[got.long()] == boundary], ties[: top - len(above)].int()
+        ), r
+
+
+@pytest.mark.parametrize("spread", [False, True])
+@pytest.mark.parametrize("rows", [1, 8, 16, 32, 128])
+def test_qsa_sparse_attention_dense(rows, spread):
+    """``wide.attention`` with ``dense``: a row within the budget attends all
+    of its complete blocks and the tail whatever its list holds; a longer row
+    reads its list as before. ``spread``: every split merges a slice of the
+    output. Twice (the arrival counters reset themselves), against float64
+    softmax attention."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention
+
+    gen = torch.Generator().manual_seed(100 + rows)
+    page, heads, hd, top, ratio = 96, 12, 256, 512, 4
+    contexts = [[1100, 0, 1, 37, 2048, 2051, 3003, 5001][r % 8] for r in range(rows)]
+    pages_per_row = -(-max(contexts) // page)
+    blocks = rows * pages_per_row + 1
+    stride = page * 2 * hd + 4096
+    pool = torch.randn(blocks * stride, generator=gen).to(torch.bfloat16)
+    kv = pool.as_strided((blocks, 1, page, 2 * hd), (stride, page * 2 * hd, 2 * hd, 1))
+    table = (
+        torch.randperm(blocks - 1, generator=gen)[: rows * pages_per_row] + 1
+    ).view(rows, -1)
+    t2r = torch.arange(rows, dtype=torch.int32)
+    if rows > 1:
+        t2r[1] = -1
+    sel = torch.full((rows, top), -3, dtype=torch.int32)  # unread for short rows
+    for r, c in enumerate(contexts):
+        if c // ratio > top:
+            sel[r] = torch.randperm(c // ratio, generator=gen)[:top].int()
+    if rows > 7:
+        sel[7, 3] = -1  # a hole in a long row's list
+    q = (torch.randn(rows, heads, hd, generator=gen) * 0.5).to(torch.bfloat16)
+
+    expect = torch.zeros(rows, heads, hd, dtype=torch.float64)
+    for r, c in enumerate(contexts):
+        if c // ratio > top:
+            chosen = sel[r][sel[r] >= 0].long()
+        else:
+            chosen = torch.arange(c // ratio)
+        t = torch.cat(
+            [
+                (chosen[:, None] * ratio + torch.arange(ratio)).flatten(),
+                torch.arange(c // ratio * ratio, c),
+            ]
+        )
+        if t2r[r] < 0 or not t.numel():
+            continue
+        rec = kv[table[r][t // page], 0, t % page].double()
+        k, v = rec[:, :hd], rec[:, hd:]
+        p = torch.softmax(q[r].double() @ k.T / hd**0.5, dim=-1)
+        expect[r] = p @ v
+
+    dev = torch.device("cuda")
+    args = (
+        q.to(dev),
+        pool.to(dev).as_strided(kv.shape, kv.stride()),
+        sel.to(dev),
+        table.int().to(dev).contiguous(),
+        t2r.to(dev),
+        torch.tensor(contexts, dtype=torch.int32, device=dev),
+        ratio,
+    )
+    for _ in range(2):
+        out = torch.full((rows, heads, hd), 3.0, dtype=torch.bfloat16, device=dev)
+        attention.sparse_attention(*args, out, dense=True, spread=spread)
+        if rows > 1:
+            assert out[1].abs().max().item() == 0
+        assert rel(out.float(), expect) < 1e-2
+
+
+def _qsa_proj_kernel(rows):
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from flydsl.expr.typing import Int64
+
+    default_stream = fx.Stream(None)
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
+        Grid,
+        prologue,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import BLOCKS, THREADS
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa, tiled
+
+    chunks = max(qsa.qkv_plan().per, qsa.ix_plan().per)  # a resident unit's K slice
+
+    @fx.struct
+    class Smem:
+        stage: fx.Array[fx.Int32, tiled.stage_words(rows, chunks), 16]
+        word: fx.Array[fx.Int32, 4, 16]
+
+    @flyc.kernel(name=f"t_qsa_proj_{rows}", known_block_size=[THREADS, 1, 1])
+    def kern(
+        x: Int64,
+        w_qkv: Int64,
+        w_ix: Int64,
+        qkv: Int64,
+        ix: Int64,
+        part: Int64,
+        s0: Int64,
+        s1: Int64,
+        folds: Int64,
+        health: Int64,
+    ):
+        tid, bid = fx.thread_idx.x, fx.block_idx.x
+        sm = fx.SharedAllocator().allocate(Smem).peek()
+        g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
+        prologue(g)
+        gemm = tiled.Gemm(sm.stage.ptr, rows, tid, chunks=chunks)
+        qsa.proj(g, gemm, w_qkv, w_ix, x, qkv, ix, part, rows)
+
+    @flyc.jit
+    def launch(
+        x: Int64,
+        w_qkv: Int64,
+        w_ix: Int64,
+        qkv: Int64,
+        ix: Int64,
+        part: Int64,
+        s0: Int64,
+        s1: Int64,
+        folds: Int64,
+        health: Int64,
+        stream: fx.Stream = default_stream,
+    ):
+        kern(x, w_qkv, w_ix, qkv, ix, part, s0, s1, folds, health).launch(
+            grid=(BLOCKS,), block=(THREADS,), stream=stream
+        )
+
+    return launch
+
+
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 128])
+def test_qsa_proj(harness, rows):
+    """qsa_front's projection phase: ``x @ W_qkv.T`` and ``x @ W_ix.T`` (bf16
+    weights in vLLM's row-major layout), f32 accumulation of exact bf16
+    products rounded to bf16 once, against float64 and against torch's bf16
+    GEMM (the stock ``qkv_proj`` / ``index_qk_proj``); rows past the step
+    untouched."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa
+
+    gen = torch.Generator().manual_seed(rows)
+    x = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
+    w_qkv = (torch.randn(qsa.QKV, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    w_ix = (torch.randn(qsa.IX, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    dev = torch.device("cuda")
+    xd, wqd, wid = x.to(dev), w_qkv.to(dev), w_ix.to(dev)
+    qkv = torch.full((rows + 1, qsa.QKV), 7.0, dtype=torch.bfloat16, device=dev)
+    ix = torch.full((rows + 1, qsa.IX), 7.0, dtype=torch.bfloat16, device=dev)
+    part = torch.zeros(qsa.partial_words(rows), device=dev)
+    launch = _qsa_proj_kernel(rows)
+    for _ in range(2):  # the fold counters reset themselves
+        launch(
+            xd.data_ptr(),
+            wqd.data_ptr(),
+            wid.data_ptr(),
+            qkv.data_ptr(),
+            ix.data_ptr(),
+            part.data_ptr(),
+            *harness.sync_args(),
+            torch.cuda.current_stream(),
+        )
+    torch.accelerator.synchronize()
+    assert harness.health[0].item() == 0
+    for out, w, wd in ((qkv, w_qkv, wqd), (ix, w_ix, wid)):
+        assert (out[rows] == 7.0).all()
+        assert rel(out[:rows].float(), ref.bf(x.double() @ w.double().T)) < 1e-2
+        assert rel(out[:rows].float(), (xd @ wd.T).float()) < 1e-2
+
+
+@pytest.mark.parametrize("rows", [1, 4, 8, 16, 32])
+def test_qsa_score_prepare(rows):
+    """``wide.indexer.score`` with vLLM's fused prepare in the launch
+    (``prep``) against ``ops.qsa_prepare`` and the plain score on its output:
+    the main queries, gates, K | V cache rows, the raw-key ring (keys and
+    MRoPE positions), the compressed keys of the rows that complete a group
+    (rotated at MRoPE positions read from the ring) and the scores, from
+    decode rows of the projections; then the selection of those scores. A
+    padded row writes no cache."""
+    from vllm.models.qwen4_exp.amd.ops.qsa_prepare import qsa_prepare
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer
+
+    gen = torch.Generator().manual_seed(200 + rows)
+    dev = torch.device("cuda")
+    page, cpage, size, ratio, top = 64, 64, 4, 4, 512
+    seqs = [4096, 2052, 1031, 8, 3001, 2048, 37, 5000, 6]
+    seqs = [seqs[r % len(seqs)] for r in range(rows)]
+    lp = torch.tensor([s - 1 for s in seqs])
+    t2r = torch.arange(rows, dtype=torch.int32)
+    if rows > 2:
+        t2r[2] = -1
+    live = t2r >= 0
+
+    def rnd(*shape, scale=1.0):
+        return (torch.randn(*shape, generator=gen) * scale).to(torch.bfloat16)
+
+    qkv, ixqk = rnd(rows, indexer.QKV_ROW), rnd(rows, indexer.IX_ROW)
+    qn, kn, iqn, ikn = rnd(256, scale=0.2), rnd(256, scale=0.2), rnd(128), rnd(128)
+    cos_sin = (torch.rand(8192, 64, generator=gen) * 2 - 1).to(torch.bfloat16)
+    rope = torch.zeros(3, rows + 5, dtype=torch.int64)
+    rope[:, :rows] = lp  # a decode row's three axes agree
+    # main K | V: a page a row
+    kv = rnd(rows + 1, 1, page, 512)
+    main_slots = torch.tensor(
+        [(r + 1) * page + int(lp[r]) % page if live[r] else -1 for r in range(rows)]
+    )
+    # the raw-key rings: one a request, keys then (t, h, w) of an image-like
+    # position, so the compressed key's MRoPE axes differ
+    ring = rnd(rows + 1, size, 140)
+    for r in range(rows):
+        for j in range(size):
+            p = int(lp[r]) - ((int(lp[r]) - j) % size)
+            ring[r + 1, j, 128:].view(torch.int64)[:] = torch.tensor(
+                [p % 8000, (p + 3) % 8000, (p + 11) % 8000]
+            )
+    ring_table = torch.arange(1, rows + 1, dtype=torch.int32).view(rows, 1)
+    ring_slots = torch.tensor(
+        [(r + 1) * size + int(lp[r]) % size if live[r] else -1 for r in range(rows)]
+    )
+    # compressed keys: pages a row, then a padding page 0
+    width = -(-(max(seqs) // ratio) // cpage)
+    kc = rnd(rows * width + 1, cpage, 1, 128)
+    ctable = (torch.randperm(rows * width, generator=gen) + 1).int().view(rows, width)
+    comp_slots = torch.full((rows,), -1, dtype=torch.int64)
+    for r in range(rows):
+        b = int(lp[r]) // ratio
+        if live[r] and (int(lp[r]) + 1) % ratio == 0:
+            comp_slots[r] = int(ctable[r, b // cpage]) * cpage + b % cpage
+    seq = torch.tensor(seqs, dtype=torch.int32)
+    eps, ix_eps = 1e-6, 1e-6
+
+    # stock: the fused prepare, then the plain scores of its queries
+    d = dict(dev=dev)
+    s_kv, s_ring, s_kc = kv.to(dev), ring.to(dev), kc.to(dev)
+    s_ixq = torch.empty(rows, 4, 128, dtype=torch.bfloat16, device=dev)
+    s_gate = torch.empty(rows, 12, 256, dtype=torch.bfloat16, device=dev)
+    work = torch.stack([t2r.long(), torch.zeros(rows, dtype=torch.long)], 1)
+    ixqk_d, qkv_d = ixqk.to(dev), qkv.to(dev)
+    s_q, _ = qsa_prepare(
+        ixqk_d[:, :512],
+        ixqk_d[:, 512:],
+        rope.to(dev)[:, :rows],
+        cos_sin.to(dev),
+        iqn.to(dev),
+        ikn.to(dev),
+        ix_eps,
+        s_ixq,
+        s_ring,
+        ring_slots.to(dev),
+        ring_table.to(dev),
+        torch.arange(rows + 1, dtype=torch.int32, device=dev),
+        lp.to(dev),
+        s_kc,
+        comp_slots.to(dev),
+        work.int().to(dev),
+        compress_ratio=ratio,
+        mrope_section=(11, 11, 10),
+        rope_pos_offset=128,
+        main_qkv=qkv_d,
+        main_q_norm_weight=qn.to(dev),
+        main_k_norm_weight=kn.to(dev),
+        main_eps=eps,
+        main_kv_cache=s_kv.transpose(1, 2),
+        main_slot_mapping=main_slots.to(dev),
+        main_k_scale=1.0,
+        main_v_scale=1.0,
+        main_gate_out=s_gate,
+    )
+    columns = width * cpage
+    s_logits = torch.zeros(rows, columns, device=dev)
+    s_vis = torch.empty(rows, dtype=torch.int32, device=dev)
+    common = (ctable.to(dev), t2r.to(dev), lp.to(dev), seq.to(dev), ratio)
+    indexer.score(s_ixq, s_kc, *common, s_logits, s_vis)
+
+    # the score launch's own prepare
+    m_kv, m_ring, m_kc = kv.to(dev), ring.to(dev), kc.to(dev)
+    query = torch.empty(rows, 12, 256, dtype=torch.bfloat16, device=dev)
+    gate = torch.empty_like(query)
+    logits = torch.zeros(rows, columns, device=dev)
+    vis = torch.empty(rows, dtype=torch.int32, device=dev)
+    sel = torch.full((rows, top), -7, dtype=torch.int32, device=dev)
+    prep = indexer.Prep(
+        ixqk_d,
+        qkv_d,
+        query,
+        gate,
+        rope.to(dev),
+        cos_sin.to(dev),
+        qn.to(dev),
+        kn.to(dev),
+        iqn.to(dev),
+        ikn.to(dev),
+        eps,
+        ix_eps,
+        (11, 10),
+        m_kv,
+        main_slots.to(dev),
+        m_ring,
+        ring_slots.to(dev),
+        ring_table.to(dev),
+        comp_slots.to(dev),
+    )
+    indexer.score(None, m_kc, *common, logits, vis, selected=sel, prep=prep)
+    torch.accelerator.synchronize()
+    del d
+
+    assert torch.equal(vis, s_vis)
+    assert torch.equal(gate, s_gate)
+    assert rel(query.float(), s_q.float()) < 1e-2
+    assert torch.equal(m_ring, s_ring)
+    for mine, stock, init in ((m_kv, s_kv, kv), (m_kc, s_kc, kc)):
+        mine, stock = mine.cpu(), stock.cpu()
+        changed = (stock != init).flatten(1).any(1) | (mine != init).flatten(1).any(1)
+        assert torch.equal(mine[~changed], stock[~changed])
+        assert rel(mine.float(), stock.float()) < 1e-2
+    logits, s_logits, vis, sel = logits.cpu(), s_logits.cpu(), vis.cpu(), sel.cpu()
+    for r in range(rows):
+        v = int(vis[r])
+        if v <= top:
+            assert torch.equal(sel[r][:v], torch.arange(v, dtype=torch.int32)), r
+            continue
+        assert rel(logits[r, :v], s_logits[r, :v]) < 1e-2, r
+        got = sel[r][sel[r] >= 0].long()
+        assert got.numel() == top, r
+        boundary = logits[r, got].min()
+        rest = torch.ones(v, dtype=torch.bool)
+        rest[got] = False
+        assert (logits[r, :v][rest] <= boundary).all(), r

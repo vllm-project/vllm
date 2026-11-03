@@ -7,7 +7,8 @@ QSA layer around vLLM's attention (``LayerBuild.kind``):
                -> out_proj -> TP exchange -> attn combine
                -> mlp mix -> router -> route + quantize -> experts
                -> TP exchange -> mlp combine
-    qsa_front  [stats] attn mix -> x (vLLM's qkv_proj and QSA attention follow)
+    qsa_front  [stats] attn mix -> x -> qkv_proj + index_qk_proj
+               (vLLM's QSA attention follows)
     qsa_back   o_proj (gated) -> TP exchange -> attn combine -> the MLP half
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
@@ -64,6 +65,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
     tagged,
     tiled,
 )
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa as qsa_
 
 KINDS = ("gdn", "qsa_front", "qsa_back")
 ATTN, MLP = 0, 1  # a layer's two exchanges
@@ -134,6 +136,10 @@ ABI = KernelAbi(
         "health",
         "alarm",
         "trace",
+        "w_qkv",
+        "w_ix",
+        "qkv_out",
+        "ix_out",
     )
 )
 TRACE_WORDS = 32  # i64 stamps a layer in the trace buffer
@@ -151,6 +157,8 @@ def phase_names(key) -> list[str]:
     out = ["start"] + (["stats"] if key.stats else [])
     if key.kind != "qsa_back":
         out += mix("attn")
+    if key.kind == "qsa_front":
+        out += ["qsa_proj"]
     if key.kind == "gdn":
         gdn_ = ["gdn_proj+conv", "gdn_recur", "out+allreduce+combine"]
         if tiled.resident(key.tokens):
@@ -186,6 +194,8 @@ def _resident_chunks() -> int:
         gdn.out_plan(),
         gdn.out_plan(QSA_CORE),
         moe.router_plan(),
+        qsa_.qkv_plan(),
+        qsa_.ix_plan(),
     ]
     return max([p.per for p in plans] + [hc.UP_CHUNKS])
 
@@ -282,6 +292,9 @@ def build(key: LayerBuild):
     class Smem:
         word: fx.Array[fx.Int32, 4, 16]
 
+    if key.kind == "qsa_front":
+        part_bytes = scratch_layout(S)["part"][1]
+        assert qsa_.partial_words(S) * 4 <= part_bytes, "qsa_proj partials"
     keyed = key_tuple(key)
     name = f"q4w_{key.kind}_s{S}_tp{tp}" + ("_st" if key.stats else "")
     name += "" if key.allreduce == "bf16" else f"_{key.allreduce}"
@@ -328,6 +341,10 @@ def build(key: LayerBuild):
         health: Int64,
         alarm: Int64,
         trace: Int64,
+        w_qkv: Int64,
+        w_ix: Int64,
+        qkv_out: Int64,
+        ix_out: Int64,
     ):
         _ = keyed
         tid = fx.thread_idx.x
@@ -439,6 +456,9 @@ def build(key: LayerBuild):
             down_w = end_phase("stats", lambda: hc.mix_issue(g, a_di, a_up, S))
         if const_expr(key.kind == "qsa_front"):
             mix("attn", ATTN, a_norm, a_di, a_up, scr.inj_a, down_w)
+            qsa_.proj(g, gemm, w_qkv, w_ix, x, qkv_out, ix_out, scr.part, S)
+            if const_expr(key.trace):
+                end_phase("qsa_proj")
         if const_expr(key.kind == "gdn"):
             w = gdn.Bufs(
                 qkvz=w_qkvz,
@@ -546,6 +566,10 @@ def build(key: LayerBuild):
         health: Int64,
         alarm: Int64,
         trace: Int64,
+        w_qkv: Int64,
+        w_ix: Int64,
+        qkv_out: Int64,
+        ix_out: Int64,
         stream: fx.Stream = _STREAM,
     ):
         _ = keyed
@@ -590,6 +614,10 @@ def build(key: LayerBuild):
             health,
             alarm,
             trace,
+            w_qkv,
+            w_ix,
+            qkv_out,
+            ix_out,
         ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     ABI.check(kernel, launch)

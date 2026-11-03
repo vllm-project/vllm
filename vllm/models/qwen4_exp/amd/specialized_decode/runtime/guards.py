@@ -10,6 +10,7 @@ import torch
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime import NAME
 from vllm.models.qwen4_exp.amd.specialized_decode.wide import layout as L
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa
 
 FP4 = (torch.uint8, torch.float4_e2m1fn_x2)
 
@@ -168,6 +169,16 @@ def _layer_reasons(layer) -> list[str]:
         elif not a.attn_output_gate or not a.use_fused_qsa_prepare:
             out.append("attention without the fused prepare and output gate")
         dense["o_proj"] = a.o_proj.weight
+        # qsa_front projects x through both in place, [rows, HIDDEN] row-major
+        for name, linear, rows in (
+            ("qkv_proj", a.qkv_proj, qsa.QKV),
+            ("index_qk_proj", a.indexer.index_qk_proj, qsa.IX),
+        ):
+            w = linear.weight
+            bias = getattr(linear, "bias", None) is not None
+            if tuple(w.shape) != (rows, L.HIDDEN) or bias:
+                out.append(f"{name} {tuple(w.shape)}{' with bias' if bias else ''}")
+            dense[name] = w
     out += [f"{name} {w.dtype}, not bf16" for name, w in dense.items() if w.dtype != bf]
     out += [
         f"{name} not contiguous" for name, w in dense.items() if not w.is_contiguous()
