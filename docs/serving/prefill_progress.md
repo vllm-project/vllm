@@ -1,89 +1,49 @@
-# Request-scoped prefill progress
+# Prefill Progress over gRPC
 
-The experimental Rust gRPC frontend can report remaining prefill work to a
-router. A client first checks
-`Control.GetServerInfo.supports_prefill_progress`, then opts in with
-`GenerateRequest.include_prefill_progress` on `GenerateStream`. Unary
-`Generate` rejects this option.
+The experimental Rust frontend can report the remaining prefill work for each
+request. Progress is disabled by default and is available through the
+`vllm.Inference/GenerateStream` gRPC API.
 
-Progress responses contain `request_id`, a monotonically increasing `sequence`,
-and token-work accounting. They are snapshots: a newer response replaces an
-older one. They do not measure FLOPs, GPU utilization, or total worker load.
-Consumers must ignore out-of-order snapshots and release request reservations
-when generation completes, errors, or is cancelled, even if no final progress
-response reaches them.
+## Start the server
 
-The gRPC progress identity is the caller's request ID, even when the Rust
-frontend randomizes the internal engine request ID. A DECODE report does not
-end the request: preemption or invalidation can restore positive remaining
-work, which the consumer must charge until the request is released.
+Start the Rust frontend with a gRPC port:
 
-## Reporting cost and batching
+```bash
+VLLM_USE_RUST_FRONTEND=1 vllm serve Qwen/Qwen3-0.6B \
+  --host 127.0.0.1 --port 8000 --grpc-port 50051
+```
 
-Ordinary updates require both at least 100ms since the previous report and at
-least 1% more completed uncached prompt work, rounded up to one token. The
-scheduler skips intermediate states instead of queuing them. A continuous
-prefill with stable cache accounting therefore generates no more than 100
-ordinary updates, regardless of its chunk count. First reports, prefill
-completion, phase/cache-accounting changes, and increases in remaining work
-bypass the thresholds. In particular, recomputation must not leave a router
-underestimating the remaining work.
+## Request progress
 
-Unresolved prefill state is also revalidated at scheduler-output processing
-time with a one-second refresh target. This includes queued, KV-waiting and
-preempted requests that did not run in that batch. Unchanged-state refreshes
-use newer sequences and bypass the ordinary percentage gate; they are not
-included in the 100 ordinary-report bound. No refresh can be guaranteed while
-the scheduler or transport is stalled. Consumers must track valid receipt age
-separately, retain the last-known balance when stale, and use an independent
-overall request deadline. Receipt age alone does not measure sample age.
+From the vLLM repository root, use [grpcurl](https://github.com/fullstorydev/grpcurl)
+to check whether the server supports progress:
 
-Pending external KV remains charged as work until transfer completion. Cache
-credit is updated after admission, transfer completion and invalidation;
-historical first-prefill statistics do not override a recomputation cycle.
+```bash
+grpcurl -plaintext -import-path rust/proto -proto control.proto \
+  -d '{}' localhost:50051 vllm.Control/GetServerInfo
+```
 
-A request may report `QUEUED` before its first cache lookup is complete. In
-that case `cache_accounting_final` is false and a zero cached-token count does
-not mean the prefix will miss: unconfirmed cache is still charged as work.
-Once the request is admitted and usable cache is accounted for, a later
-snapshot includes the confirmed credit. A consumer may retain its own cache
-estimate while handling the initial unresolved `QUEUED` state, but that is a
-routing heuristic: cache can be evicted between the estimate and admission,
-so it can underestimate the work. The consumer must still track sequence and
-freshness, and account for later snapshots that report preemption,
-invalidation, or failed KV transfers; they can legitimately increase work.
+If `supportsPrefillProgress` is true, set `include_prefill_progress` on a
+streaming request:
 
-All requests processed in one scheduler step share the same sampling timestamp.
-Their outputs use the existing `EngineCoreOutputs` batch on the engine-to-frontend
-transport. The gRPC API still uses one stream per request; it does not combine
-unrelated requests into a shared response. Progress bypasses the generated-token
-`stream_interval`, since a request can spend many steps in prefill without
-generating a token. No per-request timer or per-snapshot informational log is
-created.
+```bash
+grpcurl -plaintext -import-path rust/proto -proto inference.proto \
+  -d '{"request_id":"example","text":"Explain KV caching.","include_prefill_progress":true,"stopping":{"max_new_tokens":16}}' \
+  localhost:50051 vllm.Inference/GenerateStream
+```
 
-These limits apply per request. Aggregate traffic still grows with the number
-of active prefills. A worker-wide shared gRPC progress stream would require a
-separate protocol with request lifecycle and reconnection handling; the current
-per-request API does not provide that transport-level batching.
+If the capability is unavailable, omit the flag and use the normal stream.
+Unary `Generate` does not accept the flag.
 
-Only unresolved prefill requests remain in refresh tracking, ordered by their
-last report time. Each output batch checks changed requests and the due prefix
-of that order. Stable decode requests leave refresh tracking; preemption,
-invalidation, or new streaming input reactivates them. There is no full scan of
-all opted-in requests on every output batch and no per-request timer.
+## Consume updates
 
-The Rust engine output channel keeps at most one pending pure-progress output
-per request. A newer snapshot replaces that slot at its new position relative
-to queued model outputs. Tokens and terminal events therefore cannot be crossed
-by a newer re-prefill snapshot. Outputs carrying other metadata remain lossless,
-as do errors and generated tokens. Receiver teardown clears pending state.
-This bounds additional pure-progress buffering, not the existing model-output
-FIFO, which remains unbounded. Slow-consumer memory for model outputs still
-requires separate admission and backpressure analysis.
+- Read `prefillProgress` responses alongside the normal `outputs` responses.
+  For each request, replace the previous estimate with the newest `sequence`
+  and `remainingComputeTokens`; do not add snapshots together.
+- Remaining work can increase after preemption or recomputation. When
+  `cacheAccountingFinal` is false, cache-hit counts are not yet confirmed.
+- Track update freshness and release request reservations on completion, error,
+  or cancellation, even if no final progress update arrives.
 
-The thresholds trade fresher load estimates for fewer messages. Validate their
-effect under the deployment's prompt lengths, chunk sizes, and concurrency;
-functional correctness alone does not establish negligible serving overhead.
-
-See the [protocol documentation](https://github.com/vllm-project/vllm/blob/main/rust/proto/README.md) for schema and
-client-generation details.
+See the [gRPC protocol](https://github.com/vllm-project/vllm/tree/main/rust/proto)
+for the schema and client bindings.

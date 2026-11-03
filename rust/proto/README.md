@@ -16,7 +16,7 @@ the schemas on pull requests, including on forks.
 
 ```toml
 [dependencies]
-vllm-proto = "0.7"
+vllm-proto = "0.6"
 ```
 
 For example, import `vllm_proto::inference_client::InferenceClient` or
@@ -27,29 +27,11 @@ credentials, the vLLM checkout, or a separately installed `protoc`.
 
 ### Request-level prefill progress
 
-See [prefill progress](../../docs/serving/prefill_progress.md) for reporting
-limits, batching, and reservation lifecycle requirements.
-
-Clients may set `GenerateRequest.include_prefill_progress` on `GenerateStream` to
-receive request-scoped progress-only `GenerateResponse` messages before the
-first generated token. These messages carry a monotonically increasing sequence
-and overwrite-style snapshots; apply only snapshots newer than the last one.
-Progress counts are a token-work proxy for routing, not measurements of FLOPs,
-GPU utilization, or total worker load. Unary `Generate` does not support this
-option and returns `FAILED_PRECONDITION` if it is set. Check
-`Control.GetServerInfo.supports_prefill_progress` before opting in; older
-workers report the capability as false.
-
-Progress is sampled at engine-output processing time; requests updated in the
-same scheduler step share a timestamp and the existing `EngineCoreOutputs`
-batch. Ordinary prefill updates require both 100ms since the last report and a
-change of at least 1% of the current uncached prompt work (rounded up to one
-token). Skipped updates are not queued; the next report describes the latest
-state. This limits ordinary reports to at most 100 per uninterrupted prefill,
-independent of its chunk count. First reports, accounting/phase changes,
-completion, and increases in remaining work bypass these thresholds. No
-per-request timer or periodic logging is created. These are replaceable state
-snapshots, not a lossless record of every engine step.
+`GenerateStream` can report request-level prefill progress. See
+[prefill progress](../../docs/serving/prefill_progress.md) for setup and usage.
+The progress fields require `vllm-proto` 0.7 or newer. If 0.7 is not yet
+available, use the crate from this repository or generate bindings from these
+schemas.
 
 ### Versioning and releases
 
