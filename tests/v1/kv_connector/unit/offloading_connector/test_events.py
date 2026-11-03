@@ -371,6 +371,7 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     key = make_offload_key(block_hashes[1], group_config.group_idx)
     context.set_offload_key_position(key, 8)
     tracker = _tracker()
+    tracker.num_hash_lookahead_tokens = 5
     tracker.on_new_request(context, request, (group_config,))
     if record_snapshot:
         tracker.record_store(request, group_config, 0, key)
@@ -396,6 +397,10 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
     assert stored.token_ids == ([] if record_snapshot else list(range(1, 9)))
     assert stored.block_size == 4
+    assert stored.lookahead_token_ids == [
+        list(range(5, 10)),
+        list(range(9, 14)),
+    ]
     assert key in tracker._pending_event_metadata
 
     [removed] = tracker.take_events(

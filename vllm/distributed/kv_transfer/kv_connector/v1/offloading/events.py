@@ -346,7 +346,7 @@ class OffloadingEventsTracker:
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
             lookahead_token_ids=self._lookahead_tokens(
-                req, chunk_start, boundary_tokens, tokens_per_hash
+                req.all_token_ids, chunk_start, boundary_tokens, tokens_per_hash
             ),
             block_size=tokens_per_hash,
             lora_id=lora_id,
@@ -396,14 +396,14 @@ class OffloadingEventsTracker:
         self._pending_event_metadata.clear()
 
     def _lookahead_tokens(
-        self, req: Request, start: int, end: int, block_size: int
+        self, all_token_ids: Sequence[int], start: int, end: int, block_size: int
     ) -> tuple[tuple[int, ...], ...] | None:
         length = self.num_hash_lookahead_tokens
         if not length:
             return None
-        assert end + length <= req.num_tokens
+        assert end + length <= len(all_token_ids)
         return tuple(
-            tuple(req.all_token_ids[i : i + length])
+            tuple(all_token_ids[i : i + length])
             for i in range(start + block_size, end + 1, block_size)
         )
 
@@ -473,7 +473,7 @@ class OffloadingEventsTracker:
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
             lookahead_token_ids=self._lookahead_tokens(
-                req, tok_start, tok_end, group_config.tokens_per_block
+                req.all_token_ids, tok_start, tok_end, group_config.tokens_per_block
             ),
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
