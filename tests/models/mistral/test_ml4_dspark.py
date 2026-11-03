@@ -17,19 +17,19 @@ from torch import nn
 from vllm.platforms import current_platform
 
 if current_platform.is_rocm():
-    from vllm.models.mistral_large4.amd.dspark import (
+    from vllm.models.mistral.mistral_large4.amd.dspark import (
         MistralLarge4DSparkModel,
         _to_draft_weight_name,
         draft_attention_windows,
     )
-    from vllm.models.mistral_large4.amd.model import MistralLarge4Model
+    from vllm.models.mistral.mistral_large4.amd.model import MistralLarge4Model
 else:
-    from vllm.models.mistral_large4.nvidia.dspark import (
+    from vllm.models.mistral.mistral_large4.nvidia.dspark import (
         MistralLarge4DSparkModel,
         _to_draft_weight_name,
         draft_attention_windows,
     )
-    from vllm.models.mistral_large4.nvidia.model import MistralLarge4Model
+    from vllm.models.mistral.mistral_large4.nvidia.model import MistralLarge4Model
 
 
 @pytest.mark.parametrize(

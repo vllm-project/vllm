@@ -1286,7 +1286,7 @@ def test_quark_mxfp4_non_gpt_oss_uses_standard_weight_layout():
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="Mistral Large 4 AMD")
 def test_quark_native_mistral_large4_quant_config_mapping():
     from vllm.model_executor.models.pixtral import PixtralForConditionalGeneration
-    from vllm.models.mistral_large4.amd.model import _map_quant_config_layers
+    from vllm.models.mistral.mistral_large4.amd.model import _map_quant_config_layers
 
     fp8_config = {"weight": {"dtype": "fp8_e4m3"}}
     quant_config = QuarkConfig(
