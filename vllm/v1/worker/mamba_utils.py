@@ -799,15 +799,16 @@ def _get_mamba_gpu_state_copy_funcs(
     if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
+            or len(spec.shapes) != 6
+            or len(spec.dtypes) != 6
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
                 "FlashInfer ReplaySSM requires two canonical Mamba2 "
-                "states and three ring states"
+                "states, three ring states and the ring trackers"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
+        # The rings and their trackers move together between block columns.
+        state_copy_funcs += (get_temporal_copy_spec,) * 4
     return state_copy_funcs
 
 
@@ -1064,7 +1065,7 @@ class MambaSpecDecodeGPUContext:
                 if is_flashinfer_replayssm:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "FlashInfer ReplaySSM requires five bound Mamba2 states"
+                            "FlashInfer ReplaySSM requires six bound Mamba2 states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):
@@ -1661,12 +1662,6 @@ def preprocess_mamba(
                 MAMBA_BLOCK_SIZE=block_size,
                 HAS_IDX_MAPPING=False,
             )
-            fused.ctx.replayssm.reset_new_slots(
-                idx_mapping=None,
-                src_cols=fused.src_col.gpu,
-                dst_cols=fused.state_idx.gpu,
-                num_reqs=num_reqs,
-            )
         else:
             fused.src_col.copy_to_gpu(num_reqs)
             fused.token_bias.copy_to_gpu(num_reqs)
@@ -1677,6 +1672,15 @@ def preprocess_mamba(
             token_bias_gpu=fused.token_bias.gpu,
             idx_mapping=None,
         )
+        if fused.ctx.replayssm is not None:
+            # After the pre-copy, which also reads the null block for a missing
+            # source: resetting fresh slots last wins.
+            fused.ctx.replayssm.reset_new_slots(
+                idx_mapping=None,
+                src_cols=fused.src_col.gpu,
+                dst_cols=fused.state_idx.gpu,
+                num_reqs=num_reqs,
+            )
     else:
         do_mamba_copy_block(copy_bufs)
 

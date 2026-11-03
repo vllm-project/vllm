@@ -92,10 +92,17 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
         """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(x_cache, B_cache, dt_cache)`` = ``(activation, activation, fp32)``.
+        ``(x_cache, B_cache, dt_cache, trackers)`` =
+        ``(activation, activation, fp32, int32)``.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, activation_dtype, torch.float32)
+        return (
+            *base_dtypes,
+            activation_dtype,
+            activation_dtype,
+            torch.float32,
+            torch.int32,
+        )
 
     @classmethod
     def _mamba_state_dtype(
@@ -228,8 +235,10 @@ class MambaStateShapeCalculator:
         tuple[int, int, int],
         tuple[int, int, int],
         tuple[int, int],
+        tuple[int],
     ]:
-        """Append the physical ReplaySSM ring shapes ``(x, B, dt)``.
+        """Append the physical ReplaySSM ring shapes ``(x, B, dt)`` and the
+        per-slot ring trackers ``(ring_start, num_committed)``.
 
         The fp32 dt ring goes last: FlashInfer reads the state and the x and B
         rings with 16-byte copies, while dt needs only 4-byte alignment. With dt
@@ -251,6 +260,7 @@ class MambaStateShapeCalculator:
             (local_nheads, ring_buffer_len, head_dim),
             (local_ngroups, ring_buffer_len, state_size),
             (local_nheads, ring_buffer_len),
+            (2,),
         )
 
     @classmethod

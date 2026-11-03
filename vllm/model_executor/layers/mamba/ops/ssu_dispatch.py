@@ -25,7 +25,12 @@ logger = init_logger(__name__)
 
 
 @triton.jit(
-    do_not_specialize=["n_rows", "num_states", "state_batch_indices_stride"],
+    do_not_specialize=[
+        "n_rows",
+        "num_states",
+        "state_batch_indices_stride",
+        "ring_pos_stride",
+    ],
     do_not_specialize_on_alignment=["state_batch_indices", "seq_lens"],
 )
 def _plan_replayssm_decode_kernel(
@@ -35,6 +40,7 @@ def _plan_replayssm_decode_kernel(
     write_pos,
     is_flush,
     state_batch_indices_stride,
+    ring_pos_stride,
     n_rows,
     num_states,
     buffer_len: tl.constexpr,
@@ -50,7 +56,9 @@ def _plan_replayssm_decode_kernel(
         other=pad_slot_id,
     )
     valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
-    pos = tl.load(ring_pos + slots, mask=valid, other=0)
+    # In-page trackers have page-sized strides: index in 64 bits.
+    ring_pos_rows = ring_pos + slots.to(tl.int64) * ring_pos_stride
+    pos = tl.load(ring_pos_rows, mask=valid, other=0)
     pos = tl.minimum(pos, buffer_len - 1)
     flush = pos == buffer_len - 1
     if align_block_size > 0:
@@ -64,7 +72,7 @@ def _plan_replayssm_decode_kernel(
     flush = valid & flush
     tl.store(write_pos + rows, pos, mask=mask)
     tl.store(is_flush + rows, flush.to(tl.int8), mask=mask)
-    tl.store(ring_pos + slots, tl.where(flush, 0, pos + 1), mask=valid)
+    tl.store(ring_pos_rows, tl.where(flush, 0, pos + 1), mask=valid)
 
 
 def plan_replayssm_decode(
@@ -80,7 +88,8 @@ def plan_replayssm_decode(
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
     ``ring_pos[slot]`` counts the tokens buffered since the slot's last
-    full-state write. For each decode row this writes the step's
+    full-state write; it may be a strided view (the in-page ring trackers).
+    For each decode row this writes the step's
     ``write_pos``/``is_flush`` (read by every layer of the cache group) and
     advances the slot's counter, so the runner supplies no ring metadata.
     Prefill resets the counters in the same layer.
@@ -105,6 +114,7 @@ def plan_replayssm_decode(
         write_pos,
         is_flush,
         state_batch_indices.stride(0),
+        ring_pos.stride(0),
         n_rows,
         ring_pos.numel(),
         buffer_len,

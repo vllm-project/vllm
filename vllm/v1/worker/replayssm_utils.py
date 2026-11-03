@@ -16,11 +16,15 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 
-def initialize_replayssm_ring_trackers(
+def assign_replayssm_decode_planners(
     kv_cache_config: KVCacheConfig,
     forward_context: Mapping[str, Any],
 ) -> None:
-    """Allocate and bind one tracker pair per ReplaySSM cache group."""
+    """Pick, per cache group, the layer that plans each Triton decode step.
+
+    The ring trackers live in each layer's Mamba page (state 5), so block copies,
+    the align pre-copy and KV cache accounting handle them like the rings.
+    """
     for group in kv_cache_config.kv_cache_groups:
         names = [
             name
@@ -30,50 +34,42 @@ def initialize_replayssm_ring_trackers(
         ]
         if not names:
             continue
-        layers = [forward_context[name] for name in names]
-        state = layers[0].kv_cache[0]
-        num_blocks, device = state.shape[0], state.device
-        trackers = (
-            layers[0]._replayssm_ring_start,
-            layers[0]._replayssm_prev_num_accepted,
-        )
-        # Extensible caches rebind after capture. Keep the captured addresses.
-        if all(
-            t.numel() >= num_blocks and t.device == device for t in trackers
-        ) and all(
-            layer._replayssm_ring_start is trackers[0]
-            and layer._replayssm_prev_num_accepted is trackers[1]
-            for layer in layers
-        ):
-            ring_start, num_committed = (t[:num_blocks] for t in trackers)
-        else:
-            ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
-            num_committed = torch.zeros_like(ring_start)
-        for layer in layers:
-            layer._replayssm_ring_start = ring_start
-            layer._replayssm_prev_num_accepted = num_committed
-            layer._plans_replayssm_decode = False
+        for name in names:
+            forward_context[name]._plans_replayssm_decode = False
         # Triton plans each decode step in the group's first executed layer.
         planner = min(names, key=extract_layer_index)
         forward_context[planner]._plans_replayssm_decode = True
 
 
-def get_replayssm_block_copy_tensors(
-    forward_context: Mapping[str, Any],
-) -> list[torch.Tensor]:
-    """Include shared trackers in scheduler block copies alongside packed pages."""
-    tensors: list[torch.Tensor] = []
-    for layer in forward_context.values():
-        if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
-            tensors.extend(
-                (layer._replayssm_ring_start, layer._replayssm_prev_num_accepted)
-            )
-    return tensors
-
-
 def _reinterpret_u64_as_i64(value: int) -> int:
     """Preserve a uint64 pointer bit pattern in a torch.int64 tensor."""
     return value if value < (1 << 63) else value - (1 << 64)
+
+
+@triton.jit
+def _tracker_row(tracker_ptrs, tracker_slot_strides, layer, slot):
+    """Address of a slot's (ring_start, num_committed) pair in a layer's page."""
+    base = tl.load(tracker_ptrs + layer).to(tl.pointer_type(tl.int32))
+    # Page-sized slot strides: index in 64 bits.
+    return base + slot.to(tl.int64) * tl.load(tracker_slot_strides + layer)
+
+
+@triton.jit
+def _store_trackers(
+    tracker_ptrs,
+    tracker_slot_strides,
+    first_layer,
+    num_layers,
+    slot,
+    start,
+    committed,
+    mask,
+):
+    """Write a slot's trackers to every layer of a cache group."""
+    for layer in range(first_layer, first_layer + num_layers):
+        row = _tracker_row(tracker_ptrs, tracker_slot_strides, layer, slot)
+        tl.store(row, start, mask=mask)
+        tl.store(row + 1, committed, mask=mask)
 
 
 @triton.jit
@@ -96,26 +92,24 @@ def _reset_new_replayssm_slots_kernel(
     src_cols,
     dst_cols,
     block_table_ptrs,
-    tracker_start_ptrs,
-    tracker_committed_ptrs,
+    tracker_ptrs,
+    tracker_slot_strides,
+    layer_offsets,
+    num_layers,
     block_table_strides,
     PAD_SLOT_ID: tl.constexpr,
     HAS_IDX_MAPPING: tl.constexpr,
 ) -> None:
-    """Copy live cursors or reset a fresh destination in this cache group.
+    """Reset the trackers of a fresh destination slot in this cache group.
 
     Source and destination are logical block-table columns. Their slot lookups
-    distinguish a missing group-local source from a continuation.
+    distinguish a missing group-local source from a continuation. A
+    continuation needs nothing here: the align pre-copy, which runs first,
+    copies the source page, trackers included.
     """
     batch_idx = tl.program_id(0)
     group_idx = tl.program_id(1)
     block_table = tl.load(block_table_ptrs + group_idx).to(tl.pointer_type(tl.int32))
-    tracker_start = tl.load(tracker_start_ptrs + group_idx).to(
-        tl.pointer_type(tl.int32)
-    )
-    tracker_committed = tl.load(tracker_committed_ptrs + group_idx).to(
-        tl.pointer_type(tl.int32)
-    )
     block_table_stride_req = tl.load(block_table_strides + group_idx)
     req_idx = batch_idx
     if HAS_IDX_MAPPING:
@@ -140,11 +134,16 @@ def _reset_new_replayssm_slots_kernel(
     )
     valid_src = valid_src_col & (src_slot != PAD_SLOT_ID)
 
-    changed = valid_dst & (~valid_src | (src_slot != dst_slot))
-    start = tl.load(tracker_start + src_slot, mask=valid_src, other=0)
-    committed = tl.load(tracker_committed + src_slot, mask=valid_src, other=0)
-    tl.store(tracker_start + dst_slot, start, mask=changed)
-    tl.store(tracker_committed + dst_slot, committed, mask=changed)
+    _store_trackers(
+        tracker_ptrs,
+        tracker_slot_strides,
+        tl.load(layer_offsets + group_idx),
+        tl.load(num_layers + group_idx),
+        dst_slot,
+        0,
+        0,
+        valid_dst & ~valid_src,
+    )
 
 
 @triton.jit
@@ -156,8 +155,9 @@ def _postprocess_replayssm_kernel(
     is_prefilling,
     live_cols,
     block_table_ptrs,
-    tracker_start_ptrs,
-    tracker_committed_ptrs,
+    tracker_ptrs,
+    tracker_slot_strides,
+    layer_offsets,
     src_slots_ptrs,
     dst_slots_ptrs,
     plan_ring_start,
@@ -179,12 +179,9 @@ def _postprocess_replayssm_kernel(
     batch_idx = tl.program_id(0)
     group_idx = tl.program_id(1)
     block_table = tl.load(block_table_ptrs + group_idx).to(tl.pointer_type(tl.int32))
-    tracker_start = tl.load(tracker_start_ptrs + group_idx).to(
-        tl.pointer_type(tl.int32)
-    )
-    tracker_committed = tl.load(tracker_committed_ptrs + group_idx).to(
-        tl.pointer_type(tl.int32)
-    )
+    # Every layer's page holds the group's trackers: read the first, write all.
+    first_layer = tl.load(layer_offsets + group_idx)
+    group_layers = tl.load(num_layers + group_idx)
     src_slots = tl.load(src_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
     dst_slots = tl.load(dst_slots_ptrs + group_idx).to(tl.pointer_type(tl.int32))
     block_table_stride_req = tl.load(block_table_strides + group_idx)
@@ -250,7 +247,7 @@ def _postprocess_replayssm_kernel(
     if MATERIALIZE_PREFIXES:
         # FlashInfer's ABI requires packed [layer, batch] tables even though all
         # layers in this cache group share the same physical slot namespace.
-        for layer_idx in range(tl.load(num_layers + group_idx)):
+        for layer_idx in range(group_layers):
             slot_offset = layer_idx * MAX_NUM_REQS + batch_idx
             tl.store(
                 src_slots + slot_offset,
@@ -273,19 +270,37 @@ def _postprocess_replayssm_kernel(
                 prefill_slot = tl.load(
                     block_table + batch_idx * block_table_stride_req + col
                 )
-                valid_prefill_slot = prefill_slot != PAD_SLOT_ID
-                tl.store(tracker_start + prefill_slot, 0, mask=valid_prefill_slot)
-                tl.store(tracker_committed + prefill_slot, 0, mask=valid_prefill_slot)
+                _store_trackers(
+                    tracker_ptrs,
+                    tracker_slot_strides,
+                    first_layer,
+                    group_layers,
+                    prefill_slot,
+                    0,
+                    0,
+                    prefill_slot != PAD_SLOT_ID,
+                )
         else:
             # Mode none has one live column, regardless of the prompt length.
-            tl.store(tracker_start + live_slot, 0, mask=valid_live)
-            tl.store(tracker_committed + live_slot, 0, mask=valid_live)
+            _store_trackers(
+                tracker_ptrs,
+                tracker_slot_strides,
+                first_layer,
+                group_layers,
+                live_slot,
+                0,
+                0,
+                valid_live,
+            )
         if wants_materialize & (live_col != dst_col):
             # Prefill already wrote canonical state; only another slot needs a copy.
             tl.store(plan_flush_count + batch_idx, 0, mask=writes_plan)
     elif valid_live:
-        old_start = tl.load(tracker_start + live_slot)
-        old_committed = tl.load(tracker_committed + live_slot)
+        live_row = _tracker_row(
+            tracker_ptrs, tracker_slot_strides, first_layer, live_slot
+        )
+        old_start = tl.load(live_row)
+        old_committed = tl.load(live_row + 1)
         checkpointed = old_committed + query_len > LOGICAL_WINDOW
         next_start = tl.where(
             checkpointed,
@@ -293,8 +308,16 @@ def _postprocess_replayssm_kernel(
             old_start,
         )
         next_committed = tl.where(checkpointed, accepted, old_committed + accepted)
-        tl.store(tracker_start + live_slot, next_start)
-        tl.store(tracker_committed + live_slot, next_committed)
+        _store_trackers(
+            tracker_ptrs,
+            tracker_slot_strides,
+            first_layer,
+            group_layers,
+            live_slot,
+            next_start,
+            next_committed,
+            valid_live,
+        )
 
         if wants_materialize:
             tl.store(plan_ring_start + batch_idx, next_start, mask=writes_plan)
@@ -307,8 +330,16 @@ def _postprocess_replayssm_kernel(
     # The published destination is canonical and therefore has no live replay.
     # When dst_slot aliases live_slot, these stores intentionally supersede the
     # live tracker update above: the newly published snapshot is canonical.
-    tl.store(tracker_start + dst_slot, 0, mask=materialize)
-    tl.store(tracker_committed + dst_slot, 0, mask=materialize)
+    _store_trackers(
+        tracker_ptrs,
+        tracker_slot_strides,
+        first_layer,
+        group_layers,
+        dst_slot,
+        0,
+        0,
+        materialize,
+    )
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
@@ -362,8 +393,11 @@ class ReplaySSMModelContext:
     block_tables: list[torch.Tensor]
     block_table_ptrs: torch.Tensor
     block_table_strides: torch.Tensor
-    ring_start_ptrs: torch.Tensor
-    num_committed_ptrs: torch.Tensor
+    # Per layer, flat over groups: each page's tracker base and slot stride.
+    tracker_ptrs: torch.Tensor
+    tracker_slot_strides: torch.Tensor
+    # Per group: index of its first layer in the flat per-layer tables.
+    layer_offsets: torch.Tensor
     src_slots_ptrs: torch.Tensor
     dst_slots_ptrs: torch.Tensor
     num_layers: torch.Tensor
@@ -436,11 +470,12 @@ class ReplaySSMModelContext:
             block_tables=block_tables,
             block_table_ptrs=_cuda_i64_ptrs(block_tables),
             block_table_strides=_cuda_i64_slot_strides(block_tables),
-            ring_start_ptrs=_cuda_i64_ptrs(
-                [group[0]._replayssm_ring_start for group, _, _ in grouped]
+            tracker_ptrs=_cuda_i64_ptrs([m.kv_cache[5] for m in mixers]),
+            tracker_slot_strides=_cuda_i64_slot_strides(
+                [m.kv_cache[5] for m in mixers]
             ),
-            num_committed_ptrs=_cuda_i64_ptrs(
-                [group[0]._replayssm_prev_num_accepted for group, _, _ in grouped]
+            layer_offsets=torch.tensor(
+                layer_offsets[:-1], dtype=torch.int32, device=device
             ),
             src_slots_ptrs=_cuda_i64_ptrs(
                 [src_slots[offset] for offset in layer_offsets[:-1]]
@@ -530,7 +565,10 @@ class ReplaySSMModelContext:
         dst_cols: torch.Tensor,
         num_reqs: int,
     ) -> None:
-        """Migrate live cursors and reset fresh physical slots in all groups."""
+        """Reset the trackers of fresh physical slots in all groups.
+
+        Run after the align pre-copy, which copies continuing slots' pages.
+        """
         if num_reqs == 0:
             return
         _reset_new_replayssm_slots_kernel[(num_reqs, len(self.block_tables))](
@@ -538,8 +576,10 @@ class ReplaySSMModelContext:
             src_cols,
             dst_cols,
             self.block_table_ptrs,
-            self.ring_start_ptrs,
-            self.num_committed_ptrs,
+            self.tracker_ptrs,
+            self.tracker_slot_strides,
+            self.layer_offsets,
+            self.num_layers,
             self.block_table_strides,
             PAD_SLOT_ID=NULL_BLOCK_ID,
             HAS_IDX_MAPPING=idx_mapping is not None,
@@ -569,8 +609,9 @@ class ReplaySSMModelContext:
             is_prefilling,
             live_cols,
             self.block_table_ptrs,
-            self.ring_start_ptrs,
-            self.num_committed_ptrs,
+            self.tracker_ptrs,
+            self.tracker_slot_strides,
+            self.layer_offsets,
             self.src_slots_ptrs,
             self.dst_slots_ptrs,
             self.plan_ring_start,

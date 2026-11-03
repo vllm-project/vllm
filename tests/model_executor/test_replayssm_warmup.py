@@ -153,8 +153,9 @@ def test_replayssm_autotune_warmup_commits_dummy_slots_first():
 def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
     spec = MambaSpec(
         block_size=16,
-        shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
-        dtypes=(torch.float32,) * 5,
+        # conv, ssm, x, B, dt and the in-page (ring_start, num_committed).
+        shapes=((2,), (2,), (2, 11), (2, 11), (2, 11), (2,)),
+        dtypes=(torch.float32,) * 5 + (torch.int32,),
         page_size_padded=384,
     )
     config = SimpleNamespace(
@@ -173,7 +174,6 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
     pages = allocate_kv_cache(kv_config, torch.device("cpu"), layout)
     mixers = []
     states: list[torch.Tensor] = []
-    trackers: list[torch.Tensor] = []
     for page in pages.values():
         page.fill_(3)
         mixer = MambaMixer2.__new__(MambaMixer2)
@@ -186,12 +186,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
         mixer.bind_kv_cache(page)
         for tensor in mixer.kv_cache:
             tensor.fill_(3)
-        mixer._replayssm_ring_start = torch.full((5,), 3, dtype=torch.int32)
-        mixer._replayssm_prev_num_accepted = torch.full((5,), 3, dtype=torch.int32)
         states.extend(mixer.kv_cache)
-        trackers.extend(
-            (mixer._replayssm_ring_start, mixer._replayssm_prev_num_accepted)
-        )
         mixers.append(mixer)
     assert mixers[0].kv_cache[0].data_ptr() == mixers[2].kv_cache[0].data_ptr()
     block_ids = np.arange(10, 14, dtype=np.int32).reshape(4, 1)
@@ -213,7 +208,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
     ):
         if not use_v2:
             assert block_ids[:2, 0].tolist() == [1, 2]
-        for tensor in (*states, *trackers):
+        for tensor in states:
             tensor[1:3].fill_(9)
         raise RuntimeError("warmup failed")
 
@@ -225,11 +220,10 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
             ((2,), {}),
             ((2,), {}),
         ]
+    # Including the in-page trackers: only the warmup slots are cleared.
     for tensor in states:
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
         assert torch.all(tensor[3:] == 3)
-    for tensor in trackers:
-        assert torch.count_nonzero(tensor) == 0
     for page in pages.values():
         assert torch.all(page[..., spec.state_content_size_bytes :] == 3)

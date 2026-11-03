@@ -925,9 +925,6 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
                 layer.impl._k_scale_cache = None
             if hasattr(layer.impl, "_v_scale_cache"):
                 layer.impl._v_scale_cache = None
-        for name in ("_replayssm_ring_start", "_replayssm_prev_num_accepted"):
-            if hasattr(layer, name):
-                setattr(layer, name, torch.empty(0, dtype=torch.int32))
 
 
 def copy_kv_cache_blocks_inplace(
