@@ -13,7 +13,6 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
-  statuses: read
 
 jobs:
   pre-run-check:
@@ -65,28 +64,16 @@ jobs:
         key: pre-commit-uv|${{ runner.os }}|${{ env.UV_PYTHON }}|${{ hashFiles('.pre-commit-config.yaml') }}
     - run: >-
         uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
-    # run_ci_command.py re-runs this job once the rocm-base-cache status turns green.
+    # The checkout is the PR merged into main: if that changes the ROCm stack inputs, main
+    # needs its stack image (build.sh's key) before merging; /amd-ci cache builds it.
     - name: ROCm base image cache
       if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-      with:
-        script: |
-          const stackInputs = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
-          const pr = context.payload.pull_request;
-          const files = await github.paginate(github.rest.pulls.listFiles, {
-            ...context.repo,
-            pull_number: pr.number,
-            per_page: 100,
-          });
-          if (!files.some(f => stackInputs.includes(f.filename))) {
-            return;
-          }
-          const { data } = await github.rest.repos.getCombinedStatusForRef({
-            ...context.repo,
-            ref: pr.head.sha,
-            per_page: 100,
-          });
-          const cache = data.statuses.find(s => s.context === 'rocm-base-cache');
-          if (cache?.state !== 'success') {
-            core.setFailed('This PR changes the ROCm base image, which must be cached before it merges. Once Buildkite CI is green and the PR is approved, a member of @vllm-project/vllm-ci-maintainers must comment `/amd-ci cache`. This job re-runs by itself when that build passes.');
-          }
+      run: |
+        inputs=(docker/Dockerfile.rocm_base tools/vllm-rocm/therock_wheels.py)
+        git fetch -q --depth=1 origin main
+        [[ $(git ls-tree HEAD -- "${inputs[@]}") != $(git ls-tree FETCH_HEAD -- "${inputs[@]}") ]] || exit 0
+        SDF=docker/Dockerfile.rocm_base STACK=rocm
+        eval "$(grep -E '^(_trw|Ks)=' .buildkite/scripts/rocm/build.sh)"
+        curl -fsS -o /dev/null "https://hub.docker.com/v2/repositories/rocm/vllm-ci/tags/stack-rocm-$Ks" && exit 0
+        echo "::error::This PR changes the ROCm base image, and rocm/vllm-ci:stack-rocm-$Ks does not exist yet. Once Buildkite CI is green and the PR is approved, a member of @vllm-project/vllm-ci-maintainers comments /amd-ci cache, then again once that build passes to re-run this job."
+        exit 1

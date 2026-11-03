@@ -297,76 +297,24 @@ def test_only_release_builders_share_the_host_network(tmp_path, mode):
     assert ("network=host" in builder) == (mode == "release"), stderr
 
 
-KS = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]  # fake git
-PIN = "@sha256:" + "a" * 64
-
-
-def run_prebuild(tmp_path: Path, images: list[str], **env: str):
-    return run_build(
-        tmp_path,
-        "prebuild",
-        ROCM_PREBUILD_PR="7",
-        ROCM_PREBUILD_SHA="a" * 40,
-        ROCM_PREBUILD_IMAGES=" ".join(images),
-        **env,
-    )
-
-
-def copies(calls: list[str]) -> list[str]:
-    return [
-        call.removeprefix("create ") for call in calls if call.startswith("create ")
-    ]
-
-
-def test_prebuild_copies_only_the_pr_images_with_this_merges_keys(tmp_path):
-    stack = f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"
-    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{KS}-wheels{PIN}"
-    status, stderr, calls = run_prebuild(
-        tmp_path,
-        [
-            stack,
-            wheels,
-            f"rocm/vllm-dev:pr7-runtime-rocm-{'0' * 16}{PIN}",  # another key
-            f"rocm/vllm-dev:pr8-test-deps-rocm-{KS}{PIN}",  # another PR
-            f"ghcr.io/x/vllm-dev:pr7-stack-rocm-{KS}{PIN}",  # another repo
-            f"rocm/vllm-dev:pr7-stack-rocm-{KS}",  # not pinned
-        ],
-    )
-    assert status == 0, stderr
-    # -wheels first: the stack tag marks the pair complete.
-    assert copies(calls) == [wheels, stack]
-    assert not any(call.startswith("bake") for call in calls)
-    assert stderr.count("its key is not this merge's") == 1
-    assert stderr.count("not a pinned image of #7") == 3
-
-
-def test_prebuild_copies_runtime_images_only_with_their_stack(tmp_path):
-    stack = f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"
-    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{KS}-wheels{PIN}"
-    kr = "f" * 16
-    runtime = f"rocm/vllm-dev:pr7-runtime-rocm-{kr}{PIN}"
-    # The trusted stack already exists: a PR runtime built on another stack digest
-    # must not be paired with it.
-    status, stderr, calls = run_build(
-        tmp_path,
-        "prebuild",
-        existing=(f"rocm/vllm-ci:stack-rocm-{KS}",),
-        ROCM_PREBUILD_PR="7",
-        ROCM_PREBUILD_SHA="a" * 40,
-        ROCM_PREBUILD_IMAGES=" ".join([wheels, stack, runtime]),
-    )
-    assert status == 0, stderr
-    assert not any("runtime" in ref for ref in copies(calls))
-
-
-def test_prebuild_copies_nothing_built_with_another_recipe(tmp_path):
-    status, stderr, calls = run_prebuild(
-        tmp_path,
-        [f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"],
-        RECIPE_DIFF="1",
-    )
-    assert status == 0, stderr
-    assert "another build.sh or bake file" in stderr
-    assert not copies(calls)
-    (tag,) = built_tags(calls, stderr)
-    assert tag.startswith("rocm/vllm-ci:stack-rocm-")
+def test_prebuild_copies_the_pr_stack_images_with_this_merges_key(tmp_path):
+    # The fake git lists no files, so Ks hashes only the layer format line.
+    ks = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]
+    pin = "@sha256:" + "a" * 64
+    stack = f"rocm/vllm-dev:pr7-stack-rocm-{ks}{pin}"
+    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{ks}-wheels{pin}"
+    images = " ".join([stack, wheels, f"rocm/vllm-dev:pr8-stack-rocm-{ks}{pin}"])
+    env = dict(ROCM_PREBUILD_PR="7", ROCM_PREBUILD_SHA="a" * 40)
+    for recipe_diff, copied in (("0", [wheels, stack]), ("1", [])):
+        out = tmp_path / recipe_diff
+        out.mkdir()
+        status, stderr, calls = run_build(
+            out,
+            "prebuild",
+            ROCM_PREBUILD_IMAGES=images,
+            RECIPE_DIFF=recipe_diff,  # the PR built with another build.sh or bake file
+            **env,
+        )
+        assert status == 0, stderr
+        assert [c[7:] for c in calls if c.startswith("create ")] == copied
+        assert bool(built_tags(calls, stderr)) == (not copied)
