@@ -184,9 +184,9 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     return out
 
 
-# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 1280;
+# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 512;
 # decode-sized batches keep the unfused path.
-MIN_FUSED_UP_M = 1280
+MIN_FUSED_UP_M = 512
 
 
 def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
@@ -204,7 +204,8 @@ def hc_up_gate_mix(
 ) -> torch.Tensor:
     """``hc_gate_mix(xn, F.linear(lowrank, w_up), 4)`` in one SM100 kernel.
 
-    The gate stays on chip; the result is bitwise equal to the unfused chain.
+    The gate stays on chip and is rounded to bf16 as in the chain; the sigmoid
+    uses ``tanh.approx``, so results are within one bf16 ULP of the chain.
     Only hc_count 4, hidden size 2560 and rank 320 are supported.
     """
     out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)
