@@ -586,6 +586,14 @@ class AiterPreshuffledFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ),
             )
 
+        # The plain blockscale GEMM keeps the checkpoint layout, so it wins
+        # whenever its own table covers the shape.
+        if rocm_aiter_ops.prefers_plain_blockscale(n, k):
+            return (
+                False,
+                f"the plain aiter blockscale GEMM is tuned for N={n} and K={k}.",
+            )
+
         return True, None
 
     @staticmethod
