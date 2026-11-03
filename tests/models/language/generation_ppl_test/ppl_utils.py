@@ -5,6 +5,7 @@ from typing import cast
 
 import torch
 from datasets import load_dataset
+from transformers import PaliGemmaForConditionalGeneration
 
 import tests.ci_envs as ci_envs
 from tests.models.utils import (
@@ -95,6 +96,7 @@ def wikitext_ppl_test(
         with hf_runner(
             model_info.name,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
+            auto_cls=PaliGemmaForConditionalGeneration,
         ) as hf_model:
             nll_sum = torch.tensor(0.0, dtype=torch.float32, device="cpu")
             n_tokens = 0
@@ -122,8 +124,5 @@ def wikitext_ppl_test(
     print("Transformers:", hf_dtype, hf_ppl)
     print("Difference (%):", differ * 100)
 
-    # PPL the smaller, the better
-    # We are not concerned that the vllm PPL is less than Transformers,
-    # so we only perform one-sided testing.
-    assert differ < atol
+    assert -atol < differ < atol
     return vllm_ppl
