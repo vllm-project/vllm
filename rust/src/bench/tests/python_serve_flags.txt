@@ -69,6 +69,7 @@
 --random-mm-bucket-config
 --random-mm-limit-mm-per-prompt
 --random-mm-num-mm-items-range-ratio
+--random-mm-video-encode-fps
 --random-output-len
 --random-prefix-len
 --random-range-ratio

@@ -936,6 +936,8 @@ class RandomMultiModalDataset(RandomDataset):
         (720, 1280, 16): 0.0,
     }
     DEFAULT_ENABLE_MULTIMODAL_CHAT = False
+    # Synthetic video container encode rate; see --random-mm-video-encode-fps.
+    DEFAULT_VIDEO_ENCODE_FPS = 30.0
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -957,12 +959,19 @@ class RandomMultiModalDataset(RandomDataset):
         return Image.fromarray(random_pixels)
 
     def generate_synthetic_video(
-        self, width: int, height: int, num_frames: int
+        self,
+        width: int,
+        height: int,
+        num_frames: int,
+        encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
     ) -> dict:
         """Generate synthetic video with random values.
 
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
+
+        `encode_fps` is container metadata only; the target model may
+        resample at its own native fps, so processed frame count can differ.
         """
         import cv2
 
@@ -974,7 +983,7 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        fps = 30  # frames per second
+        fps = encode_fps
 
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / "video.mp4"
@@ -1026,6 +1035,7 @@ class RandomMultiModalDataset(RandomDataset):
     def generate_mm_item(
         self,
         mm_item_config: tuple[int, int, int],
+        video_encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
     ) -> Mapping[str, Any]:
         """Create synthetic images and videos and
         apply process_image/process_video respectively.
@@ -1039,7 +1049,10 @@ class RandomMultiModalDataset(RandomDataset):
         elif self.map_config_to_modality(mm_item_config) == "video":
             return process_video(
                 self.generate_synthetic_video(
-                    mm_item_config[1], mm_item_config[0], mm_item_config[2]
+                    mm_item_config[1],
+                    mm_item_config[0],
+                    mm_item_config[2],
+                    video_encode_fps,
                 )
             )
         else:
@@ -1200,6 +1213,7 @@ class RandomMultiModalDataset(RandomDataset):
             tuple[int, int, int], float
         ] = DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        video_encode_fps: float = DEFAULT_VIDEO_ENCODE_FPS,
         **kwargs,
     ) -> list[SampleRequest]:
         if batchsize != 1:
@@ -1276,7 +1290,9 @@ class RandomMultiModalDataset(RandomDataset):
             mm_content = cast(
                 list[dict[str, Any]],
                 [
-                    self.generate_mm_item(mm_item_config)
+                    self.generate_mm_item(
+                        mm_item_config, video_encode_fps=video_encode_fps
+                    )
                     for mm_item_config in mm_item_iterator
                 ],
             )
@@ -2037,6 +2053,26 @@ def add_random_multimodal_dataset_args(
         ),
     )
 
+    def _parse_positive_float(v: str) -> float:
+        parsed = float(v)
+        if parsed <= 0:
+            raise argparse.ArgumentTypeError(
+                f"must be a positive float, got {parsed!r}"
+            )
+        return parsed
+
+    parser_or_group.add_argument(
+        "--random-mm-video-encode-fps",
+        type=_parse_positive_float,
+        default=RandomMultiModalDataset.DEFAULT_VIDEO_ENCODE_FPS,
+        help=(
+            "Encode rate for synthetic video containers. Container metadata "
+            "only -- set to match the target model's native sampling fps so "
+            "num_frames in --random-mm-bucket-config reflects the frame "
+            "count it actually processes."
+        ),
+    )
+
 
 def _parse_range_ratio(value: str) -> RangeRatio:
     """Parse a ``--random-range-ratio`` CLI string.
@@ -2364,6 +2400,7 @@ def get_samples(
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
                 bucket_config=args.random_mm_bucket_config,
+                video_encode_fps=args.random_mm_video_encode_fps,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,

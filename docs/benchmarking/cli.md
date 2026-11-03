@@ -1383,6 +1383,7 @@ Flags specific to `random-mm`:
 - `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
 - `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
 - `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+- `--random-mm-video-encode-fps`: encode rate (fps) for the synthetic video container. Container metadata only -- set to match the target model's native sampling fps so `num_frames` reflects the frame count the model actually processes. Defaults to 30.0.
 
 Behavioral notes:
 
