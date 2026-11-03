@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kInt4Static,
     kInt8DynamicTokenSym,
+    kInt8Static,
     kInt8StaticChannelSym,
     kMxfp4Static,
 )
@@ -1016,6 +1017,51 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             None,  # a1_scale
             _CPU_ACT_METHODS[activation],
         )
+
+
+def dequantize_int8_moe_weight(
+    weight_packed: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Dequantize an N-first grouped INT8 MoE weight tensor."""
+    weight = weight_packed.view(torch.int8).reshape(
+        weight_packed.shape[0], weight_packed.shape[1], -1
+    )
+    scales = torch.repeat_interleave(weight_scale, group_size, dim=2)
+    return weight.to(dtype) * scales
+
+
+class CPUExpertsWNA16(X86CPUUnquantizedExperts):
+    """CPU fallback for grouped INT8 W8A16 MoE experts."""
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kInt8Static, None)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        group_size = self.quant_config.block_shape[1]
+        w13 = dequantize_int8_moe_weight(
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            group_size,
+            self.moe_config.in_dtype,
+        )
+        w2 = dequantize_int8_moe_weight(
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            group_size,
+            self.moe_config.in_dtype,
+        )
+        replace_parameter(layer, "w13_weight_packed", w13)
+        replace_parameter(layer, "w2_weight_packed", w2)
+        layer.w13_weight = layer.w13_weight_packed
+        layer.w2_weight = layer.w2_weight_packed
+        super().process_weights_after_loading(layer)
 
 
 class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
