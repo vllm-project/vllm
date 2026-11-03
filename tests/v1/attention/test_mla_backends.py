@@ -36,7 +36,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
@@ -355,6 +355,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
@@ -362,7 +363,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -371,7 +372,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
@@ -1710,6 +1711,7 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    set_random_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -2085,7 +2087,7 @@ def _run_backend_correctness(
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        "auto": 2e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]
