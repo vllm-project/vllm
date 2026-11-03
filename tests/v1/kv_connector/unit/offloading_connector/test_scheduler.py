@@ -63,6 +63,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
@@ -360,7 +361,7 @@ def _reduce_kv_connector_stats(runner):
 
 def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     scheduler = _make_partial_tail_scheduler()
-    _make_partial_tail_request(scheduler)
+    request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
@@ -415,11 +416,15 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert full_attention_event.parent_block_hash is not None
 
     recurrent_event = events_by_group[1]
-    assert recurrent_event.block_size == 0
+    assert recurrent_event.block_size == 4
     assert recurrent_event.token_ids == []
     assert recurrent_event.kv_cache_spec_kind == "mamba"
-    assert len(recurrent_event.block_hashes) == 1
-    assert recurrent_event.parent_block_hash is None
+    assert recurrent_event.block_hashes == [
+        maybe_convert_block_hash(request.block_hashes[6])
+    ]
+    assert recurrent_event.parent_block_hash == maybe_convert_block_hash(
+        request.block_hashes[5]
+    )
 
 
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
@@ -1702,7 +1707,11 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
         num_external_tokens=24,
     )
     [load_job_id] = scheduler._current_batch_load_jobs
-    assert scheduler._jobs[load_job_id].keys == stored
+    assert scheduler._jobs[load_job_id].keys == (
+        make_offload_key(consumer.block_hashes[3], 0),
+        make_offload_key(consumer.block_hashes[6], 0),
+        make_offload_key(consumer.block_hashes[5], 1),
+    )
 
 
 @pytest.mark.parametrize("host_hit", [False, True])
@@ -3129,6 +3138,49 @@ def test_sliding_window_chunk_with_null_block_is_not_stored(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=((0, 0), (0, 1), (1, 0), (1, 1)),
     )
+
+
+def test_swa_retry_keeps_internal_null_block_in_store_spec(request_runner):
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        blocks_per_chunk=3,
+        async_scheduling=False,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            )
+        ],
+    )
+    runner.new_request(token_ids=[0] * (9 * block_size))
+    runner.manager.prepare_store.return_value = None
+    for _ in range(2):
+        output = runner.scheduler.schedule()
+        assert not output.kv_connector_metadata.store_jobs
+        runner.scheduler.update_from_output(
+            output, create_model_runner_output(runner.scheduler.running, token_id=0)
+        )
+
+    state = runner.connector_scheduler._req_status[str(runner.req_id)].group_states[0]
+    assert state.next_stored_chunk_idx == 0
+    assert state.block_ids[6] == 0
+    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
+        keys
+    )
+    output = runner.scheduler.schedule()
+    [job] = output.kv_connector_metadata.store_jobs.values()
+    assert isinstance(job.src_spec, GPULoadStoreSpec)
+    assert job.src_spec.block_ids.tolist() == state.block_ids[:9]
+    assert job.src_spec.group_sizes == [9]
+    assert job.src_spec.block_indices == [0]
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
