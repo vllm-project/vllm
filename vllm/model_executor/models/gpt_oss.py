@@ -222,16 +222,23 @@ class OAIAttention(nn.Module):
 class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
-    @staticmethod
-    def _narrow_for_rank(
-        loaded_weight: torch.Tensor,
-        dim: int,
-        rank: int,
-        size: int,
-    ) -> torch.Tensor:
-        start = rank * size
-        available = loaded_weight.shape[dim] - start
-        return loaded_weight.narrow(dim, start, min(size, max(available, 0)))
+    def _narrow_for_rank(self, loaded_weight: torch.Tensor, dim: int) -> torch.Tensor:
+        """This rank's part of the intermediate dimension ``dim`` of one expert,
+        split as the full-checkpoint loaders split it (MXFP4: in whole blocks),
+        whatever padding the parameter has: a reload may mix both loaders."""
+        moe = self.moe_config
+        tp_size = moe.moe_parallel_config.tp_size
+        tp_rank = moe.moe_parallel_config.tp_rank
+        mx = getattr(self.quant_method, "weight_dtype", "") in (
+            "gpt_oss_mxfp4",
+            "mxfp4",
+        )
+        blocks = moe.intermediate_size // (OCP_MX_BLOCK_SIZE if mx else 1)
+        per_rank = cdiv(blocks, tp_size)
+        length = loaded_weight.shape[dim]
+        start = min(tp_rank * per_rank, blocks) * length // blocks
+        end = min((tp_rank + 1) * per_rank, blocks) * length // blocks
+        return loaded_weight.narrow(dim, start, end - start)
 
     @staticmethod
     def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -251,9 +258,7 @@ class GptOssRoutedExperts(RoutedExperts):
     ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[0]
-            )
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0)
         elif tp_rank != 0:
             loaded_weight = torch.zeros_like(loaded_weight)
         self._copy_to_expert(expert_data, loaded_weight)
@@ -264,17 +269,11 @@ class GptOssRoutedExperts(RoutedExperts):
         loaded_weight: torch.Tensor,
         shard_id: str,
     ) -> None:
-        tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 1, tp_rank, expert_data.shape[0]
-            )
-            loaded_weight = loaded_weight.t().contiguous()
+            loaded_weight = self._narrow_for_rank(loaded_weight, 1)
         else:
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[1]
-            )
-            loaded_weight = loaded_weight.t().contiguous()
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0)
+        loaded_weight = loaded_weight.t().contiguous()
         self._copy_to_expert(expert_data, loaded_weight)
 
     def _load_packed_expert(
@@ -284,7 +283,6 @@ class GptOssRoutedExperts(RoutedExperts):
         weight_name: str,
         shard_id: str,
     ) -> None:
-        tp_rank = self.moe_config.moe_parallel_config.tp_rank
         is_w13 = shard_id == "gpt_oss_w13"
         is_weight = weight_name.endswith(("_weight", "_weight_packed"))
         is_partitioned_scale = weight_name.endswith("_weight_scale")
@@ -292,14 +290,8 @@ class GptOssRoutedExperts(RoutedExperts):
         if is_weight:
             loaded_weight = loaded_weight.reshape(loaded_weight.shape[0], -1)
 
-        if is_w13 and (is_weight or is_partitioned_scale):
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[0]
-            )
-        elif not is_w13 and (is_weight or is_partitioned_scale):
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, -1, tp_rank, expert_data.shape[-1]
-            )
+        if is_weight or is_partitioned_scale:
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0 if is_w13 else -1)
 
         self._copy_to_expert(expert_data, loaded_weight)
 
