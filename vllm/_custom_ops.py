@@ -3597,7 +3597,8 @@ def topp_cutoffs_lse(
 
     Args:
         logits: [num_rows, vocab_size] bf16 raw logits with unit vocab stride.
-        expanded_idx_mapping: [num_rows] int32 request index of each row.
+        expanded_idx_mapping: [num_rows] int64 request index of each row, as the
+            model runner builds it.
         temperature: [max_num_reqs] fp32; 0 marks a greedy request.
         top_p: [max_num_reqs] fp32.
         cluster_size: CTAs per row (1, 2, 4, 8 or 16); 0 picks the fastest
