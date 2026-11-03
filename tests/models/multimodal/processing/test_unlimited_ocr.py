@@ -22,6 +22,24 @@ def test_v2_output_window_reaches_runtime_config(overrides, expected):
     assert config.hf_text_config.rswa_window == expected
 
 
+def test_v2_dummy_layers_preserve_dash_configuration():
+    """Generic initialization and schema tests must shrink per-layer DASH metadata."""
+    from functools import partial
+
+    from tests.models.utils import dummy_hf_overrides
+
+    config = ModelConfig(
+        model="baidu/Unlimited-OCR-2",
+        hf_overrides=partial(
+            dummy_hf_overrides, model_arch="UnlimitedOCR2TextForCausalLM"
+        ),
+    )
+    text = config.hf_text_config
+    assert text.num_hidden_layers == 1
+    assert text.sparse_attention_config["sparse_attention_freq"] == [1]
+    assert text.unlimited_ocr2
+
+
 def test_v2_base_mode_preserves_page_aspect_ratio():
     config = ModelConfig(
         model="baidu/Unlimited-OCR-2", max_model_len=4096, enforce_eager=True

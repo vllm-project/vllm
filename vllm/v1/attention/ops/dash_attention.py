@@ -757,7 +757,19 @@ def _indptr(device, n, topk, bs, local):
     lengths = torch.tensor([bs] * topk + [local], dtype=torch.int32)
     kv = torch.cat((torch.zeros(1, dtype=torch.int32), lengths.repeat(n).cumsum(0)))
     qo = torch.arange(n * (topk + 1) + 1, dtype=torch.int32)
-    return qo, kv.to(torch.int32), qo.to(device), kv.to(device, dtype=torch.int32)
+    qo_gpu = torch.arange(n * (topk + 1) + 1, dtype=torch.int32, device=device)
+    kv_gpu = (qo_gpu // (topk + 1)) * (topk * bs + local)
+    kv_gpu += (qo_gpu % (topk + 1)) * bs
+    return qo, kv.to(torch.int32), qo_gpu, kv_gpu
+
+
+@cache
+def _flash_attn_block_table(device, n, topk, bs, local):
+    _, _, _, kv = _indptr(device, n, topk, bs, local)
+    pages = torch.arange(
+        triton.cdiv(max(bs, local), bs), dtype=torch.int32, device=device
+    )
+    return kv[:-1, None] // bs + pages[None, :]
 
 
 @cache
@@ -777,7 +789,7 @@ def _flashinfer_plan(device, n, topk, bs, local, heads, kv_heads, dim, dtype):
     qo, kv, qo_gpu, kv_gpu = _indptr(device, n, topk, bs, local)
     total = n * (topk * bs + local)
     packed_mask = torch.empty(total // 8, dtype=torch.uint8, device=device)
-    mask_indptr = torch.empty_like(qo_gpu)
+    mask_indptr = kv_gpu // 8
     wrapper = BatchPrefillWithRaggedKVCacheWrapper(
         _workspace(device),
         kv_layout="NHD",
@@ -788,13 +800,13 @@ def _flashinfer_plan(device, n, topk, bs, local, heads, kv_heads, dim, dtype):
         mask_indptr_buf=mask_indptr,
         backend="fa2",
     )
+    # Graph mask buffers are filled directly; planning only stages pinned metadata.
     wrapper.plan(
-        qo,
-        kv,
+        qo.pin_memory(),
+        kv.pin_memory(),
         heads,
         kv_heads,
         dim,
-        custom_mask=torch.ones(total, dtype=torch.bool, device=device),
         causal=False,
         q_data_type=dtype,
         kv_data_type=dtype,
@@ -829,6 +841,14 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
             raise RuntimeError(
                 "DASH FLASH_ATTN requires a supported CUDA FlashAttention"
             )
+        block_table = None
+        if version != 4:
+            # FA2/3 use paged addressing to separate segment offsets and lengths.
+            block_table = _flash_attn_block_table(device, n, topk, bs, local)
+            k = k.view(-1, bs, k.shape[1], dim)
+            v = v.view_as(k)
+        # Empty FA2 GQA segments can leave invalid LSE; their results are masked below.
+        lengths = used.clamp_min(1) if version == 2 else used
         out, lse = flash_attn_varlen_func(
             queries,
             k,
@@ -836,8 +856,9 @@ def flash_dash_attention(q, k, v, used, bias, backend, bs, local):
             max_seqlen_q=1,
             cu_seqlens_q=cuq,
             max_seqlen_k=max(bs, local),
-            cu_seqlens_k=cuk,
-            seqused_k=used,
+            cu_seqlens_k=cuk if version == 4 else None,
+            seqused_k=lengths,
+            block_table=block_table,
             softmax_scale=dim**-0.5,
             causal=False,
             return_softmax_lse=True,

@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.config import AttentionConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.dash_attention import (
     dash_attention,
     page_coordinates,
@@ -98,18 +99,21 @@ def test_page_filter_excludes_other_page_remote_values():
 
 @pytest.mark.parametrize("rswa", [False, True])
 @pytest.mark.parametrize(
-    "dtype,backend",
+    "dtype,backend,fa_version",
     [
-        (torch.bfloat16, "FLASH_ATTN"),
-        (torch.bfloat16, "FLASHINFER"),
+        (torch.bfloat16, "FLASH_ATTN", None),
+        (torch.bfloat16, "FLASH_ATTN", 2),
+        (torch.bfloat16, "FLASHINFER", None),
     ],
 )
 @pytest.mark.parametrize("block_size", [16, 32])
 def test_paged_decode_graph_replay_tracks_requests_and_page_markers(
-    dtype, backend, block_size, rswa
+    dtype, backend, fa_version, block_size, rswa
 ):
     """Replay changes lengths, page markers and KV while keeping captured addresses."""
-    _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
+    config = VllmConfig(attention_config=AttentionConfig(flash_attn_version=fa_version))
+    with set_current_vllm_config(config):
+        _check_paged_decode_graph(dtype, backend, block_size, rswa, high_cache=False)
 
 
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
@@ -326,9 +330,12 @@ def test_rswa_keeps_input_and_bounds_1000_output_tokens(block_size):
     assert any(b.is_null for b in manager.req_to_blocks["doc"][prefix_blocks:])
 
 
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize(
+    "backend,fa_version",
+    [("FLASH_ATTN", None), ("FLASH_ATTN", 2), ("FLASHINFER", None)],
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_flash_prefill_preserves_route_priors_and_gqa(backend, dtype):
+def test_flash_prefill_preserves_route_priors_and_gqa(backend, fa_version, dtype):
     """Compare real kernels with DASH math across page and partial-block edges."""
     torch.manual_seed(23)
     length, dim = 577, 128
@@ -351,7 +358,9 @@ def test_flash_prefill_preserves_route_priors_and_gqa(backend, dtype):
     }
     cls = torch.randn(dim, device="cuda")
     expected = dash_attention(q, k, v, iq, ik, roles, cls, sp, 0)
-    result = dash_attention(q, k, v, iq, ik, roles, cls, sp, 0, backend=backend)
+    config = VllmConfig(attention_config=AttentionConfig(flash_attn_version=fa_version))
+    with set_current_vllm_config(config):
+        result = dash_attention(q, k, v, iq, ik, roles, cls, sp, 0, backend=backend)
     atol = 0.00390625 if dtype == torch.bfloat16 else 0.00048828125
     torch.testing.assert_close(result, expected, atol=atol, rtol=0.01)
 
@@ -673,7 +682,6 @@ def test_dash_mixed_forward_does_not_read_cuda_metadata(dist_init):
         create_standard_kv_cache_spec,
         create_vllm_config,
     )
-    from vllm.config import set_current_vllm_config
     from vllm.forward_context import get_forward_context, set_forward_context
     from vllm.model_executor.layers.dash_attention import (
         PAGE_POSITIONS_KEY,
