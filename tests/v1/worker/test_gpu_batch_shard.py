@@ -881,7 +881,10 @@ def test_dummy_sampler_run_profiles_rank_without_local_reqs(tp_rank: int):
             local_batch,
             torch.zeros(num_reqs, dtype=torch.int64),
             None,
-            SimpleNamespace(),
+            SimpleNamespace(
+                num_logits_per_rank=[1] * num_reqs + [0] * (tp_size - num_reqs),
+                num_local_logits=num_local_reqs,
+            ),
         )
     )
     fake_runner = SimpleNamespace(
@@ -896,11 +899,12 @@ def test_dummy_sampler_run_profiles_rank_without_local_reqs(tp_rank: int):
         sampler=mock.Mock(),
         rejection_sampler=None,
         device=torch.device("cpu"),
+        model_state=SimpleNamespace(dummy_sampler_run=lambda *_: False),
     )
     fake_runner.sample = GPUModelRunner.sample.__get__(fake_runner)
     make_dummy = mock.Mock(side_effect=[full_batch, one_row_batch])
-    all_to_all_logits = mock.Mock(
-        side_effect=lambda shard, _: shard.new_zeros(num_local_reqs, padded_vocab_size)
+    all_to_all_vocab_shards = mock.Mock(
+        side_effect=lambda shard, *_: shard.new_zeros(num_local_reqs, padded_vocab_size)
     )
     gather_sampler_output = mock.Mock(
         return_value=SimpleNamespace(num_sampled=None, num_rejected=None)
@@ -908,14 +912,16 @@ def test_dummy_sampler_run_profiles_rank_without_local_reqs(tp_rank: int):
     with (
         mock.patch.object(batch_sharder, "shard_sampler_inputs", shard_sampler_inputs),
         mock.patch.object(model_runner.InputBatch, "make_dummy", make_dummy),
-        mock.patch.object(model_runner, "all_to_all_logits", all_to_all_logits),
+        mock.patch.object(
+            model_runner, "all_to_all_vocab_shards", all_to_all_vocab_shards
+        ),
         mock.patch.object(model_runner, "gather_sampler_output", gather_sampler_output),
         mock.patch.object(model_runner.current_platform, "is_cpu", return_value=False),
     ):
         GPUModelRunner._dummy_sampler_run(fake_runner, torch.randn(num_reqs, 4))
 
     # Default pass and warmup-param pass: each runs both collectives.
-    assert all_to_all_logits.call_count == 2
+    assert all_to_all_vocab_shards.call_count == 2
     assert gather_sampler_output.call_count == 2
     for call in shard_sampler_inputs.call_args_list:
         assert call.args == (full_batch, None)
