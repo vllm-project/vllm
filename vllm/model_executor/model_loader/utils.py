@@ -214,12 +214,10 @@ def process_weights_after_loading(
     # weights.
     for _, module in model.named_modules():
         if is_deferred_attention_layer(module):
-            # TODO(lucas): see if there is a way to unify the signatures
-            # of process_weights_after_loading
             with device_loading_context(module, target_device):
-                module.process_weights_after_loading(model_config.dtype)
+                module.process_weights_after_loading()
 
-    # Model-level post-load hook, after the per-layer quant finalize.
+    # Every other module's own post-load hook, after the per-layer passes.
     finalize_model_weights(model)
 
     # Needed for torchao model reloading via model.reload_weights
