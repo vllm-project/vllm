@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
 use std::slice;
 
+use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_chat::ChatTokenUsage;
+use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
 // Constants
@@ -43,7 +43,7 @@ where
 ///
 /// Fixed OpenAI HTTP request grades. Request conversion maps these names to
 /// the model-independent `vllm_chat::EffortValue` before renderer validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     None,
@@ -124,7 +124,7 @@ pub fn validate_stop(stop: &StringOrArray) -> Result<(), validator::ValidationEr
 
 #[cfg(test)]
 mod tests {
-    use super::{StringOrArray, validate_stop};
+    use super::{ChatMessage, StringOrArray, validate_stop};
 
     #[test]
     fn validate_stop_accepts_four_stop_strings() {
@@ -150,6 +150,47 @@ mod tests {
             error.code.as_ref(),
             "stop strings must contain at most 4 items"
         );
+    }
+
+    #[test]
+    fn assistant_reasoning_aliases_fold_into_reasoning() {
+        for (fields, expected) in [
+            (
+                r#""reasoning":"canonical","reasoning_content":"legacy","thinking":"thought""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","reasoning":"canonical""#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning":null,"reasoning_content":"legacy""#,
+                Some("legacy"),
+            ),
+            (r#""reasoning":"","reasoning_content":"legacy""#, Some("")),
+            (
+                r#""reasoning":"canonical","reasoning_content":42"#,
+                Some("canonical"),
+            ),
+            (
+                r#""reasoning_content":"legacy","thinking":"thought""#,
+                Some("legacy"),
+            ),
+            (
+                r#""reasoning_content":null,"thinking":"thought""#,
+                Some("thought"),
+            ),
+            (r#""reasoning_content":null"#, None),
+        ] {
+            let message = serde_json::from_str(&format!(
+                r#"{{"role":"assistant","content":"answer",{fields}}}"#
+            ))
+            .unwrap_or_else(|error| panic!("{fields}: {error}"));
+            let ChatMessage::Assistant { reasoning, .. } = message else {
+                panic!("{fields}: expected an assistant message, got {message:?}");
+            };
+            assert_eq!(reasoning.as_deref(), expected, "{fields}");
+        }
     }
 }
 
@@ -259,6 +300,20 @@ impl StreamResponseEnvelope {
 pub struct StreamOptions {
     pub include_usage: Option<bool>,
     pub continuous_usage_stats: Option<bool>,
+}
+
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
 }
 
 // ============================================================================
@@ -444,9 +499,8 @@ pub enum ChatMessage {
         content: Option<MessageContent>,
         name: Option<String>,
         tool_calls: Option<Vec<ToolCall>>,
-        /// Reasoning content for reasoning-capable models.
-        #[serde(alias = "reasoning_content")]
-        #[serde(alias = "thinking")]
+        /// Reasoning content for reasoning-capable models. Its aliases are
+        /// folded in by `normalize_reasoning_aliases`.
         reasoning: Option<String>,
     },
     #[serde(rename = "tool")]
@@ -502,14 +556,39 @@ impl Serialize for ChatMessage {
     }
 }
 
+/// Fold the `reasoning_content` and `thinking` aliases of a message into
+/// `reasoning`, so clients replaying history may send several spellings.
+///
+/// Mirrors the Python frontend's `_normalize_messages_before`: aliases are
+/// always removed, and the first non-null one fills `reasoning` only when it is
+/// absent or null. `thinking` is a Rust-only alias with the lowest precedence.
+fn normalize_reasoning_aliases(message: &mut Value) {
+    let Some(message) = message.as_object_mut() else {
+        return;
+    };
+    for alias in ["reasoning_content", "thinking"] {
+        let Some(alias_value) = message.remove(alias) else {
+            continue;
+        };
+        if alias_value.is_null() {
+            continue;
+        }
+        if message.get("reasoning").is_none_or(Value::is_null) {
+            message.insert("reasoning".to_string(), alias_value);
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ChatMessage {
-    /// Dispatch on the role tag: standard roles keep their derived errors,
-    /// and any other string role becomes [`ChatMessage::Custom`].
+    /// Normalize the reasoning aliases, then dispatch on the role tag: standard
+    /// roles keep their derived errors, and any other string role becomes
+    /// [`ChatMessage::Custom`].
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let value = Value::deserialize(deserializer)?;
+        let mut value = Value::deserialize(deserializer)?;
+        normalize_reasoning_aliases(&mut value);
         let is_custom = value
             .get("role")
             .and_then(Value::as_str)
@@ -546,41 +625,46 @@ pub struct Usage {
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
-    /// Reasoning-token breakdown.
-    /// Always present, 0 when the configured parser has no reasoning channel.
-    pub completion_tokens_details: CompletionTokenUsageInfo,
+    /// Reasoning-token breakdown. `None` when the frontend cannot count
+    /// reasoning tokens: on chat without a reasoning parser, and always on
+    /// completions and generate.
+    pub completion_tokens_details: Option<CompletionTokenUsageInfo>,
 }
 
 impl Usage {
     /// Create a Usage with prompt-token cache and reasoning-token details.
-    pub fn from_counts(
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        cached_tokens: Option<usize>,
-        reasoning_tokens: usize,
+    ///
+    /// The one mapping from token usage onto the wire: every field comes from
+    /// `usage`, and `enable_prompt_tokens_details` only decides whether
+    /// prompt-token details are reported. `usage` is destructured exhaustively,
+    /// so a new usage field fails to compile until it is mapped here.
+    /// `reasoning_tokens` is `None` when the route does not count reasoning
+    /// tokens.
+    pub fn from_token_usage(
+        usage: TokenUsage,
+        enable_prompt_tokens_details: bool,
+        reasoning_tokens: Option<usize>,
     ) -> Self {
+        let TokenUsage {
+            prompt_token_count: prompt_tokens,
+            output_token_count: completion_tokens,
+            prompt_cache_usage:
+                PromptCacheUsage {
+                    cached_token_count,
+                    cache_creation_token_count,
+                },
+        } = usage;
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
-            completion_tokens_details: CompletionTokenUsageInfo { reasoning_tokens },
+            prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
+                cached_tokens: cached_token_count,
+                created_cache_tokens: cache_creation_token_count,
+            }),
+            completion_tokens_details: reasoning_tokens
+                .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
-    }
-
-    pub fn from_token_usage(
-        usage: impl Into<ChatTokenUsage>,
-        enable_prompt_tokens_details: bool,
-    ) -> Self {
-        let usage = usage.into();
-        Self::from_counts(
-            usage.prompt_token_count,
-            usage.output_token_count,
-            enable_prompt_tokens_details.then_some(usage.cached_token_count),
-            usage.reasoning_tokens,
-        )
     }
 }
 
@@ -588,6 +672,9 @@ impl Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache. Python reports it on
+    /// chat only; Rust reports it wherever `cached_tokens` is reported.
+    pub created_cache_tokens: usize,
 }
 
 /// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
@@ -598,21 +685,23 @@ pub struct CompletionTokenUsageInfo {
 
 #[cfg(test)]
 mod usage_tests {
-    use vllm_chat::ChatTokenUsage;
-    use vllm_llm::TokenUsage;
+    use serde_json::json;
+    use vllm_llm::{PromptCacheUsage, TokenUsage};
 
     use super::Usage;
 
+    const USAGE: TokenUsage = TokenUsage {
+        prompt_token_count: 5,
+        output_token_count: 2,
+        prompt_cache_usage: PromptCacheUsage {
+            cached_token_count: 3,
+            cache_creation_token_count: 1,
+        },
+    };
+
     #[test]
     fn token_usage_hides_prompt_token_details_by_default() {
-        let usage = Usage::from_token_usage(
-            TokenUsage {
-                prompt_token_count: 5,
-                output_token_count: 2,
-                cached_token_count: 3,
-            },
-            false,
-        );
+        let usage = Usage::from_token_usage(USAGE, false, None);
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
@@ -621,72 +710,43 @@ mod usage_tests {
 
     #[test]
     fn token_usage_includes_prompt_token_details_when_enabled() {
+        let usage = Usage::from_token_usage(USAGE, true, None);
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(
+            json["prompt_tokens_details"],
+            json!({"cached_tokens": 3, "created_cache_tokens": 1})
+        );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
         let usage = Usage::from_token_usage(
             TokenUsage {
-                prompt_token_count: 5,
+                prompt_token_count: 8,
                 output_token_count: 2,
-                cached_token_count: 3,
+                prompt_cache_usage: Default::default(),
             },
             true,
+            None,
         );
-
-        assert_eq!(
-            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
-            Some(3)
-        );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
     }
 
+    /// Like Python's `UsageInfo`, reasoning-token details are reported only
+    /// when counted (including a zero count), and `null` otherwise.
     #[test]
-    fn token_usage_includes_reasoning_token_details() {
-        let usage = Usage::from_token_usage(
-            ChatTokenUsage {
-                engine: TokenUsage {
-                    prompt_token_count: 5,
-                    output_token_count: 4,
-                    cached_token_count: 0,
-                },
-                reasoning_tokens: 3,
-            },
-            false,
-        );
+    fn token_usage_serializes_reasoning_token_details_only_when_counted() {
+        let json = |reasoning_tokens| {
+            serde_json::to_value(Usage::from_token_usage(USAGE, false, reasoning_tokens))
+                .expect("usage serializes")["completion_tokens_details"]
+                .clone()
+        };
 
-        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 3);
-        let json = serde_json::to_value(&usage).expect("usage serializes");
-        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 3);
-    }
-
-    #[test]
-    fn token_usage_serializes_zero_reasoning_tokens() {
-        let usage = Usage::from_token_usage(
-            ChatTokenUsage {
-                engine: TokenUsage {
-                    prompt_token_count: 5,
-                    output_token_count: 0,
-                    cached_token_count: 0,
-                },
-                reasoning_tokens: 0,
-            },
-            false,
-        );
-
-        let json = serde_json::to_value(&usage).expect("usage serializes");
-        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
-    }
-
-    #[test]
-    fn token_usage_reports_zero_reasoning_tokens_without_reasoning_parser() {
-        let usage = Usage::from_token_usage(
-            TokenUsage {
-                prompt_token_count: 5,
-                output_token_count: 2,
-                cached_token_count: 0,
-            },
-            false,
-        );
-
-        assert_eq!(usage.completion_tokens_details.reasoning_tokens, 0);
-        let json = serde_json::to_value(&usage).expect("usage serializes");
-        assert_eq!(json["completion_tokens_details"]["reasoning_tokens"], 0);
+        assert_eq!(json(Some(3)), json!({"reasoning_tokens": 3}));
+        assert_eq!(json(Some(0)), json!({"reasoning_tokens": 0}));
+        assert_eq!(json(None), json!(null));
     }
 }
 
@@ -695,7 +755,9 @@ mod usage_tests {
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
-    pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
+    /// Each position's candidates in the engine's order (the sampled token
+    /// first), serialized in that order like Python's dict.
+    pub top_logprobs: Vec<Option<IndexMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
 
@@ -707,7 +769,9 @@ pub struct PromptLogprob {
     pub decoded_token: String,
 }
 
-pub type PromptLogprobs = Vec<Option<HashMap<u32, PromptLogprob>>>;
+/// Each scored position's candidates in the engine's order (the prompt token
+/// first), serialized in that order like Python's dict.
+pub type PromptLogprobs = Vec<Option<IndexMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]
@@ -741,13 +805,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================

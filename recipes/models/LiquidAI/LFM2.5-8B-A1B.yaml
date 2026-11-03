@@ -1,0 +1,189 @@
+meta:
+  title: "LFM2.5 8B A1B"
+  slug: "lfm2.5-8b-a1b"
+  provider: "LiquidAI"
+  description: "Liquid AI's 8B mixture-of-experts model (~1B active) on the LFM2 hybrid conv+attention backbone, with <think> reasoning and tool calling at ~1B decode cost."
+  date_added: 2026-06-25
+  date_updated: 2026-06-24
+  tasks:
+    - text
+  performance_headline: "8B-total / ~1B-active hybrid MoE with reasoning and tool calling — 8B quality at ~1B decode cost on a single GPU"
+  related_recipes:
+    - LiquidAI/LFM2.5-1.2B-Instruct
+    - LiquidAI/LFM2.5-1.2B-Thinking
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+
+model:
+  model_id: "LiquidAI/LFM2.5-8B-A1B"
+  min_vllm_version: "0.23.0"
+  architecture: moe
+  parameter_count: "8B"
+  active_parameters: "1B"
+  context_length: 128000
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Split the model's <think>…</think> chain-of-thought into a separate reasoning field via vLLM's qwen3 parser"
+    args:
+      - "--reasoning-parser"
+      - "qwen3"
+  tool_calling:
+    description: "Surface LFM2.5's Pythonic tool calls (wrapped in <|tool_call_start|>…<|tool_call_end|>) as OpenAI tool_calls via vLLM's native lfm2 parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "lfm2"
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 21
+    description: "Full BF16 — all 8B of experts live in VRAM; single 24 GB+ NVIDIA GPU"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  # Blackwell (B200) only: route RMSNorm to the bundled oink kernels (measured ~+2.6% on B200,
+  # output identical). Inert (falls back to native) on non-Blackwell GPUs.
+  blackwell:
+    extra_env:
+      VLLM_USE_OINK_OPS: "1"
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B) is [Liquid AI's](https://www.liquid.ai/)
+  mixture-of-experts model: ~8B total parameters with only ~1B activated per token. It pairs the
+  **LFM2 hybrid backbone** (short-range gated convolution blocks interleaved with grouped-query
+  attention) with sparse MoE feed-forward layers, so it reaches 8B-class quality at roughly 1B
+  decode cost. It supports explicit `<think>` reasoning and Pythonic tool calling through vLLM's
+  OpenAI-compatible API.
+
+  ### Key Features
+  - **Hybrid + MoE**: Gated short convolutions + grouped-query attention with sparse expert FFNs — ~1B active parameters per token out of ~8B total.
+  - **`<think>` reasoning**: Emits an explicit `<think>…</think>` chain-of-thought on non-trivial problems; vLLM's `qwen3` parser splits it into `reasoning`.
+  - **Tool calling**: Pythonic tool calls surfaced as OpenAI `tool_calls` by vLLM's native `lfm2` parser.
+  - **128K context**: Long-context support (`max_position_embeddings = 128000`).
+  - **Native vLLM support**: Served via the `Lfm2MoeForCausalLM` architecture.
+
+  ### Supported Variants
+
+  Dense:
+  - `LiquidAI/LFM2.5-230M` (230M)
+  - `LiquidAI/LFM2.5-350M` (350M)
+  - `LiquidAI/LFM2.5-1.2B-Instruct` (1.2B)
+  - `LiquidAI/LFM2.5-1.2B-Thinking` (1.2B, reasoning)
+  - `LiquidAI/LFM2.5-1.2B-JP` / `LiquidAI/LFM2.5-1.2B-JP-202606` (Japanese)
+  - `LiquidAI/LFM2.5-1.2B-Base` (pretrained base)
+
+  MoE:
+  - `LiquidAI/LFM2.5-8B-A1B` (8B total / ~1B active)
+
+  Vision-Language:
+  - `LiquidAI/LFM2.5-VL-450M`, `LiquidAI/LFM2.5-VL-1.6B`
+
+  See the [LFM2.5 usage guide](../../LiquidAI/LFM2.5) for the full family.
+
+  > **Sizing**: MoE keeps every expert resident in VRAM, so size the GPU for the full ~8B of
+  > weights (≈17 GB BF16 + KV cache) even though only ~1B is active per token.
+
+  ## Prerequisites
+
+  - **Hardware**: 1× GPU with ≥24 GB VRAM.
+  - **vLLM**: ≥ 0.23.0.
+
+  ### pip (NVIDIA CUDA)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend auto
+  ```
+
+  ## Deployment Configurations
+
+  ### Quick Start (Single GPU, BF16)
+  ```bash
+  vllm serve LiquidAI/LFM2.5-8B-A1B
+  ```
+
+  ### Full-Featured Server Launch
+  Reasoning **and** tool calling:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-8B-A1B \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice \
+    --tool-call-parser lfm2 \
+    --host 0.0.0.0 --port 8000
+  ```
+
+  ### Multi-GPU
+  This model fits on a single 24 GB+ GPU, so tensor parallelism gives no meaningful speedup on
+  basically any GPU — there's nothing to split that helps. You can still try it on a multi-GPU
+  node if you want, but expect no throughput gain:
+  ```bash
+  vllm serve LiquidAI/LFM2.5-8B-A1B --tensor-parallel-size 2
+  ```
+
+  ### Docker (NVIDIA)
+  ```bash
+  docker run -itd --name lfm2.5-8b-a1b \
+    --ipc=host --network host --shm-size 16G --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:latest \
+      --model LiquidAI/LFM2.5-8B-A1B \
+      --reasoning-parser qwen3 \
+      --host 0.0.0.0 --port 8000
+  ```
+
+  ## Client Usage
+
+  ### Reasoning Mode
+  The model card recommends temperature `0.2`, `top_k 80`, `repetition_penalty 1.05`. Leave
+  `max_tokens` unset so the `<think>` block and answer aren't truncated mid-stream.
+  ```python
+  from openai import OpenAI
+  client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+  response = client.chat.completions.create(
+      model="LiquidAI/LFM2.5-8B-A1B",
+      messages=[{"role": "user", "content": "A snail climbs 3 ft up a 20 ft well each day and slides 2 ft back each night. How many days to reach the top?"}],
+      temperature=0.2,
+      extra_body={"top_k": 80, "repetition_penalty": 1.05},
+  )
+  msg = response.choices[0].message
+  print("reasoning:", msg.reasoning)
+  print("answer:", msg.content)
+  ```
+
+  > **Note**: the model opens the `<think>` channel for non-trivial problems; a simple prompt may
+  > be answered directly, in which case `reasoning` is empty. That is expected behavior —
+  > the `qwen3` parser extracts the block whenever it is present.
+
+  ### Tool Calling
+  Add `--enable-auto-tool-choice --tool-call-parser lfm2` at launch, then pass `tools=[…]`; the
+  `lfm2` parser converts the model's Pythonic call into a standard `tool_calls` array.
+
+  ### Structured Outputs
+  vLLM's guided decoding constrains output to a JSON schema via `response_format`. The model does
+  not see the schema itself — put semantic instructions in the system prompt.
+
+  ## Configuration Tips
+  - Size the GPU for the full ~8B of weights — all experts are resident even though ~1B is active.
+  - It fits on one GPU; tensor parallelism gives no real speedup on basically any GPU (you can still try `--tensor-parallel-size N`).
+  - Set `--max-model-len` to match your workload (up to 128K).
+  - `--gpu-memory-utilization 0.90–0.95` maximizes KV cache capacity.
+  - Sampling presets are per-request client defaults — don't bake them into `vllm serve`.
+
+  ## References
+  - [Model card](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B)
+  - [LFM2.5 usage guide](../../LiquidAI/LFM2.5)
+  - [Liquid AI](https://www.liquid.ai/)
+  - [vLLM supported models](https://docs.vllm.ai/en/latest/models/supported_models.html)

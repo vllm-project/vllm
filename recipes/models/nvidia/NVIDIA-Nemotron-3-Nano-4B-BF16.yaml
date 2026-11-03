@@ -1,0 +1,200 @@
+meta:
+  title: "NVIDIA Nemotron-3-Nano-4B"
+  slug: "nemotron-3-nano-4b"
+  provider: "NVIDIA"
+  description: "NVIDIA Nemotron-3-Nano 4B (Mamba-hybrid dense) — compact reasoning + tool-use model with BF16 and FP8 variants"
+  date_added: 2026-04-28
+  date_updated: 2026-04-28
+  tasks:
+    - text
+  related_recipes:
+    - nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16
+    - nvidia/NVIDIA-Nemotron-Nano-9B-v2
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+  min_vllm_version: "0.11.2"
+  architecture: dense
+  parameter_count: "4B"
+  active_parameters: "4B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+    - "--async-scheduling"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Qwen3 Coder tool-call parser with automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Custom Nano v3 reasoning parser (download plugin: nano_v3_reasoning_parser.py)"
+    args:
+      - "--reasoning-parser-plugin"
+      - "nano_v3_reasoning_parser.py"
+      - "--reasoning-parser"
+      - "nano_v3"
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 10
+    description: "BF16 weights"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "auto"
+
+  fp8:
+    model_id: "nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8"
+    precision: fp8
+    vram_minimum_gb: 5
+    description: "FP8 weights + FP8 KV cache"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+  - multi_node_tp_pp
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  xpu:
+    extra_args:
+      - "--enforce-eager"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Nemotron-3-Nano-4B is the smallest member of the Nemotron-3 hybrid-Mamba family.
+  It's tuned for low-latency reasoning, tool calling, and edge deployments — DGX Spark
+  and Jetson Thor are both supported alongside standard Hopper/Blackwell servers.
+
+  ## Prerequisites
+
+  - Hardware: 1x H100/H200/B200, DGX Spark, Jetson Thor, or Intel Arc Pro B60/B70
+  - vLLM >= 0.11.2 (0.28.0 recommended)
+  - Docker with NVIDIA Container Toolkit (recommended)
+
+  ### Pull Docker Image
+
+  ```bash
+  docker pull --platform linux/amd64 vllm/vllm-openai:v0.28.0
+  ```
+
+  Jetson Thor:
+
+  ```bash
+  docker pull ghcr.io/nvidia-ai-iot/vllm:latest-jetson-thor
+  ```
+
+  Intel XPU (B60 / B70):
+
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Launch commands
+
+  BF16:
+
+  ```bash
+  wget https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16/resolve/main/nano_v3_reasoning_parser.py
+
+  vllm serve nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 \
+    --trust-remote-code \
+    --async-scheduling \
+    --max-model-len 262144 \
+    --tensor-parallel-size 1 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser-plugin nano_v3_reasoning_parser.py \
+    --reasoning-parser nano_v3
+  ```
+
+  FP8:
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 1
+  ```
+
+  ### Intel XPU (B60, B70)
+
+  Validated on 1× Intel Arc Pro B60 / B70 (B60 24 GB, B70 32 GB per card) with the
+  official vLLM XPU image `vllm/vllm-openai-xpu:latest`.
+
+  BF16:
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype auto \
+    --tensor-parallel-size 1 \
+    --enforce-eager \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser-plugin nano_v3_reasoning_parser.py \
+    --reasoning-parser nano_v3 \
+    --max-model-len 8192
+  ```
+
+  FP8:
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8 \
+    --trust-remote-code \
+    --async-scheduling \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 1 \
+    --enforce-eager \
+    --max-model-len 8192
+  ```
+
+  ## Benchmarking
+
+  ```bash
+  vllm bench serve \
+    --model nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8 \
+    --trust-remote-code \
+    --dataset-name random \
+    --random-input-len 1024 --random-output-len 1024 \
+    --num-warmups 20 \
+    --ignore-eos \
+    --max-concurrency 256 \
+    --num-prompts 1024
+  ```
+
+  ## References
+
+  - [Nemotron-3-Nano-4B-BF16](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16)
+  - [Nemotron-3-Nano-4B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8)

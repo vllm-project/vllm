@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from vllm.config.attention import AttentionConfig
+from vllm.config.parallel import ParallelConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
@@ -44,6 +46,48 @@ def cleared_attention_selector_cache():
     _cached_get_attn_backend.cache_clear()
 
 
+def test_deepseek_rocm_backend_registry_paths_are_model_specific():
+    assert AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4.get_path() == (
+        "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
+    )
+    assert AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV41.get_path() == (
+        "vllm.models.deepseek_v41.amd.rocm.DeepseekV41ROCMAiterMLASparseBackend"
+    )
+
+
+@pytest.mark.parametrize(
+    "backend_name, expect_warning",
+    [
+        ("ROCM_FLASHMLA_SPARSE_DSV4", True),
+        ("ROCM_FLASHMLA_SPARSE_DSV41", False),
+    ],
+    ids=["legacy", "canonical"],
+)
+def test_deepseek_v41_rocm_accepts_legacy_backend_alias(backend_name, expect_warning):
+    from vllm.models.deepseek_v41.amd import model as dsv41_model
+    from vllm.models.deepseek_v41.amd.rocm import (
+        DeepseekV41ROCMAiterMLAAttention,
+        DeepseekV41ROCMAiterMLASparseBackend,
+    )
+
+    config = SimpleNamespace(
+        attention_config=AttentionConfig(backend=backend_name),
+        parallel_config=ParallelConfig(),
+    )
+
+    with patch.object(dsv41_model.logger, "warning_once") as warning_once:
+        selected = dsv41_model._select_dsv4_attn_cls(config)
+
+    assert selected is DeepseekV41ROCMAiterMLAAttention
+    if expect_warning:
+        warning_once.assert_called_once()
+    else:
+        warning_once.assert_not_called()
+    assert (
+        DeepseekV41ROCMAiterMLASparseBackend.get_name() == "ROCM_FLASHMLA_SPARSE_DSV41"
+    )
+
+
 def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionBackend,
@@ -58,6 +102,31 @@ def test_aiter_unified_attention_uses_dedicated_metadata_builder():
     assert (
         RocmAiterUnifiedAttentionBackend.get_builder_cls()
         is RocmAiterUnifiedAttentionMetadataBuilder
+    )
+
+
+def test_rocm_backends_do_not_support_mm_prefix():
+    """Regression test: ROCm backends must not claim mm_prefix support.
+
+    If they do, prefix-LM multimodal models that attend vision tokens
+    bidirectionally (e.g. Gemma3 4B) will use bidirectional attention
+    via the ROCm backend instead of falling back to Triton, producing
+    incorrect results. Remove this test only if support is properly added.
+    """
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    assert not RocmAttentionBackend.supports_mm_prefix(), (
+        "RocmAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/vllm-project/vllm/issues/48172"
+    )
+    assert not RocmAiterUnifiedAttentionBackend.supports_mm_prefix(), (
+        "RocmAiterUnifiedAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
+        "See https://github.com/ROCm/aiter/issues/4168"
     )
 
 
@@ -181,7 +250,9 @@ def test_segmented_triton_cache_survives_standalone_compilation(
         RocmSegmentedAttentionImpl(8, 128, 128**-0.5, 2, None, None, "auto")
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
         assert expected.is_dir()
-        InductorStandaloneAdaptor("binary").initialize_cache(str(tmp_path / model))
+        InductorStandaloneAdaptor(
+            use_aot_compile=True, save_format="binary"
+        ).initialize_cache(str(tmp_path / model))
         assert os.environ["TRITON_CACHE_DIR"] == str(expected)
 
 
@@ -250,7 +321,6 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     output = torch.empty_like(query)
     kv_cache = torch.empty(2, 2, 16, 256, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
-        use_cascade=False,
         num_actual_tokens=3,
         block_table=torch.zeros(1, 1, dtype=torch.int32),
         query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
@@ -271,7 +341,9 @@ def test_segmented_attention_forward_uses_dedicated_dispatch(monkeypatch):
     assert dispatch.call_args.kwargs["key_cache"].shape == (2, 16, 2, 128)
 
 
-def test_aiter_unified_attention_capture_preserves_query_start_locations():
+def test_aiter_unified_attention_capture_preserves_query_start_locations(
+    monkeypatch: pytest.MonkeyPatch,
+):
     from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
         RocmAiterUnifiedAttentionMetadataBuilder,
     )
@@ -279,7 +351,8 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
     builder = object.__new__(RocmAiterUnifiedAttentionMetadataBuilder)
     metadata = MagicMock()
     metadata.seq_lens = torch.tensor([1048576, 524288], dtype=torch.int32)
-    builder.build = MagicMock(return_value=metadata)
+    build = MagicMock(return_value=metadata)
+    monkeypatch.setattr(builder, "build", build)
     common = MagicMock()
     expected_query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
     common.query_start_loc = expected_query_start_loc.clone()
@@ -287,7 +360,7 @@ def test_aiter_unified_attention_capture_preserves_query_start_locations():
 
     actual = builder.build_for_cudagraph_capture(common)
 
-    builder.build.assert_called_once_with(0, common)
+    build.assert_called_once_with(0, common)
     assert actual is metadata
     assert torch.equal(actual.seq_lens, torch.ones_like(actual.seq_lens))
     assert actual.query_start_loc is common.query_start_loc

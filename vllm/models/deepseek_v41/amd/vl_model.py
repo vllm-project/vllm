@@ -49,8 +49,10 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
@@ -156,7 +158,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -263,6 +265,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -299,6 +308,10 @@ class DeepseekV41ForCausalLM(
     def token_lookback_depth(self) -> int:
         return self.language_model.token_lookback_depth
 
+    @property
+    def decoder_replay_layers(self) -> DecoderReplayLayers | None:
+        return self.language_model.decoder_replay_layers
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -330,22 +343,5 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
-
-    def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
-        self.language_model.process_weights_after_loading()
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
