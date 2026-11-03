@@ -65,6 +65,9 @@ class KVTransferLedger:
         self._entries: dict[tuple[str, TransferDirection], TransferEntry] = {}
         self._num_exports = 0
         self._num_finished_imports = 0
+        # Imports that are PENDING or OPEN: the remote still holds or writes
+        # KV for us, so the engine must keep stepping (renewals, completions).
+        self._num_live_imports = 0
 
     # ---- open ------------------------------------------------------------
 
@@ -87,6 +90,7 @@ class KVTransferLedger:
                 request, TransferDirection.IMPORT, TransferState.PENDING
             )
             self._entries[key] = entry
+            self._num_live_imports += 1
         return entry
 
     def import_started(self, request: Request) -> TransferEntry:
@@ -105,6 +109,13 @@ class KVTransferLedger:
         entry = self._entries.get((request_id, direction))
         if entry is None:
             return None
+        if (
+            direction == TransferDirection.IMPORT
+            and entry.state != TransferState.CLOSING
+        ):
+            # Received: the blocks are the request's own now; nothing is left
+            # to drive until the scheduler promotes it.
+            self._num_live_imports -= 1
         entry.state = TransferState.CLOSING
         entry.outcome = outcome
         return entry
@@ -119,9 +130,18 @@ class KVTransferLedger:
             return None
         if direction == TransferDirection.EXPORT:
             self._num_exports -= 1
-        elif entry.request_finished:
-            self._num_finished_imports -= 1
+        else:
+            if entry.state != TransferState.CLOSING:
+                self._num_live_imports -= 1
+            if entry.request_finished:
+                self._num_finished_imports -= 1
         return entry
+
+    def drop_exports(self) -> list[TransferEntry]:
+        """Forget every export: the engine stops holding blocks for remote
+        readers (abort). The caller frees the blocks."""
+        keys = [k for k in self._entries if k[1] == TransferDirection.EXPORT]
+        return [e for k in keys if (e := self.close(*k)) is not None]
 
     def mark_finished(self, request: Request) -> None:
         """The request finished while entries may still be open."""
@@ -170,8 +190,10 @@ class KVTransferLedger:
 
     def needs_driving(self) -> bool:
         """Some transfer needs the engine to keep stepping: to collect its
-        completion, renew its lease, or start it."""
-        return bool(self._entries)
+        completion, renew its lease, or start it. A received import that only
+        awaits promotion does not: the scheduler promotes it when it next
+        schedules, and a paused scheduler must not wait for that."""
+        return self._num_exports > 0 or self._num_live_imports > 0
 
     def is_empty(self) -> bool:
         return not self._entries

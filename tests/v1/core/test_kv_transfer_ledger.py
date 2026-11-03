@@ -85,3 +85,28 @@ def test_complete_unknown_is_none():
     ledger = KVTransferLedger()
     assert ledger.complete("zzz", EXPORT) is None
     assert ledger.close("zzz", IMPORT) is None
+
+
+def test_received_import_does_not_need_driving():
+    ledger = KVTransferLedger()
+    r = _req("f")
+    ledger.open_import(r)
+    assert ledger.needs_driving()           # pending: renewals
+    ledger.import_started(r)
+    assert ledger.needs_driving()           # open: completion
+    ledger.complete("f", IMPORT)
+    assert not ledger.needs_driving()       # closing: only promotion is left
+    assert not ledger.is_empty()
+    ledger.close("f", IMPORT)
+    assert ledger.is_empty() and not ledger.needs_driving()
+
+
+def test_drop_exports_keeps_imports():
+    ledger = KVTransferLedger()
+    ledger.open_export(_req("g"))
+    ledger.open_export(_req("h"))
+    ledger.import_started(_req("i"))
+    dropped = ledger.drop_exports()
+    assert sorted(e.request_id for e in dropped) == ["g", "h"]
+    assert not ledger.has_exports() and ledger.needs_driving()
+    assert ledger.is_referenced("i") and not ledger.is_referenced("g")
