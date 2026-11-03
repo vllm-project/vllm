@@ -661,7 +661,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One TP4 engine on a 4-GPU GB300 tray with the seven-token DSpark draft on FLASHINFER_TS; GPU-resident KV, with per-concurrency scheduling and CUDA graph settings."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     tp: 4
     select:
@@ -939,7 +939,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One data-parallel, expert-parallel engine across the four GPUs of a GB300 tray behind vllm-router with session affinity. Three-token DSpark draft on FLASHINFER_TS."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     select:
       features: { text_only: true }
@@ -956,10 +956,8 @@ presets:
       "--speculative-config": { num_speculative_tokens: 3 }
     points:
       c64: { label: "64", concurrency: 64, args: ["--max-num-seqs", "32"] }
-      c96: { label: "96", concurrency: 96, args: ["--max-num-seqs", "48"] }
-      c128: { label: "128", concurrency: 128, args: ["--max-num-seqs", "64"] }
     runbook: |
-      The DEP4 points of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) run one engine with `--data-parallel-size 4` and `--enable-expert-parallel`; `--max-num-seqs` is the per-rank limit.
+      The DEP4 point of the GB300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`minimaxm31flash-fp4-gb300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4662](https://github.com/SemiAnalysisAI/InferenceX/pull/4662)) runs one engine with `--data-parallel-size 4` and `--enable-expert-parallel`; `--max-num-seqs` is the per-rank limit.
 
       The router uses the `consistent_hash` policy so a conversation stays on the rank that holds its prefix. The lane also runs it with `--request-timeout-secs 14400` and `--disable-retries`.
 
@@ -970,7 +968,7 @@ presets:
     variants: [default]
     workload: "Agentic (InferenceX AgentX)"
     description: "One TP2 engine on two of the tray's four GB300 GPUs with the seven-token DSpark draft on FLASHINFER_TS and host-DRAM KV offload (482 GB per engine)."
-    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 85956a00e240c2b7428e1e9406f25c731ddb0470 }
+    source: { label: "InferenceX #4662", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4662", key: "minimaxm31flash-fp4-gb300-vllm-agentic-dspark", revision: 0733706344df53aa9a48b22af0e2e7070d68a298 }
     image: "vllm/vllm-openai:minimax-m31-flash-arm64-cu134@sha256:5d76347628973fb80519a919a2f2740b6645b62cba3fe2bd87b25f111bd0e948"
     tp: 2
     select:
