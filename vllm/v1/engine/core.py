@@ -95,6 +95,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.lora_admission import GroupLoRAAdmission, gather_metadata
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -128,6 +129,14 @@ _R = TypeVar("_R")  # Return type for collective_rpc
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
+
+    group_lora_admission: GroupLoRAAdmission | None = None
+
+    # Class-level defaults so tests can build an EngineCore with
+    # object.__new__.
+    _checkpoint_state = CheckpointState.RUNNING
+    _checkpoint_error: str | None = None
+    _kv_cache_reclaimable = False
 
     def __init__(
         self,
@@ -1218,16 +1227,23 @@ class EngineCore:
         return self.collective_rpc("compute_weight_checksums")
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
+        self._check_lora_update_mode()
         return self.model_executor.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
+        self._check_lora_update_mode()
         return self.model_executor.remove_lora(lora_id)
 
     def list_loras(self) -> set[int]:
         return self.model_executor.list_loras()
 
     def pin_lora(self, lora_id: int) -> bool:
+        self._check_lora_update_mode()
         return self.model_executor.pin_lora(lora_id)
+
+    def _check_lora_update_mode(self) -> None:
+        if self.group_lora_admission is not None:
+            raise ValueError("Group LoRA updates must use the coordinated async client")
 
     def save_sharded_state(
         self,
@@ -1288,6 +1304,31 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )
+        if (
+            self.vllm_config.lora_config
+            and self.vllm_config.lora_config.enable_group_admission
+            and (req.resumable or req.use_structured_output)
+        ):
+            raise VLLMValidationError(
+                "Group LoRA admission does not yet support streaming inputs "
+                "or structured-output requests"
+            )
+        if (
+            self.vllm_config.lora_config
+            and self.vllm_config.lora_config.enable_group_admission
+            and req.lora_request is not None
+        ):
+            admission = self.group_lora_admission
+            registered = (
+                admission.identities.get(req.lora_request.lora_int_id)
+                if admission is not None
+                else None
+            )
+            if registered != msgspec.msgpack.encode(req.lora_request):
+                raise VLLMValidationError(
+                    "Register this adapter with add_lora before submitting "
+                    "group-admitted requests"
+                )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -2610,6 +2651,59 @@ class DPEngineCoreProc(EngineCoreProc):
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
         )
+        self.group_lora_admission: GroupLoRAAdmission | None = None
+        if vllm_config.lora_config and vllm_config.lora_config.enable_group_admission:
+            from vllm.v1.core.sched.scheduler import Scheduler
+
+            if not isinstance(self.scheduler, Scheduler):
+                raise ValueError("Group LoRA admission requires the standard scheduler")
+            self.group_lora_scheduler = self.scheduler
+            self.group_lora_admission = GroupLoRAAdmission(
+                vllm_config.lora_config.max_loras,
+                priority=scheduler_config.policy == "priority",
+            )
+            self.scheduler.admitted_lora_ids = frozenset()
+
+    def queue_lora_update(self, operation: str, method: str, argument: Any) -> Future:
+        admission = self.group_lora_admission
+        if admission is None:
+            raise ValueError("Group LoRA admission is disabled")
+        future = admission.enqueue(operation, method, argument)
+        if not self.engines_running:
+            self.engines_running = True
+            if self.has_coordinator:
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
+        return future
+
+    def _process_engine_step(self) -> bool:
+        admission = self.group_lora_admission
+        if admission is not None and self.has_work():
+            scheduler = self.group_lora_scheduler
+            frames = gather_metadata(
+                self.dp_group, admission.snapshot(scheduler.running)
+            )
+            action = admission.plan(frames)
+            if action is not None:
+                local = self.model_executor.collective_rpc(
+                    "update_lora_group", args=action
+                )
+                reports = [
+                    report
+                    for rank in gather_metadata(self.dp_group, local)
+                    for report in rank
+                ]
+                expected = (
+                    self.dp_size * self.vllm_config.parallel_config.tensor_parallel_size
+                )
+                if len(reports) != expected:
+                    raise RuntimeError(
+                        "Missing worker acknowledgement for LoRA admission"
+                    )
+                admission.publish(action, reports)
+            scheduler.admitted_lora_ids = admission.admitted
+        return super()._process_engine_step()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2652,6 +2746,8 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
+        if self.group_lora_admission is not None:
+            self.group_lora_admission.track(request)
         if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -2838,6 +2934,8 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
+        if self.group_lora_admission is not None:
+            local_unfinished |= bool(self.group_lora_admission.pending)
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
         if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
