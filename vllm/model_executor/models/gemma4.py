@@ -37,6 +37,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import unified_kv_cache_update
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -63,7 +64,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 from .interfaces import (
     EagleModelMixin,
@@ -539,6 +542,42 @@ class Gemma4Attention(nn.Module):
             mm_prefix_clamp_sliding_window=self.is_sliding,
             prefix=f"{prefix}.attn",
         )
+        # Set by Gemma4Model when this layer's K/V are cached by
+        # `forward_kv_only` and its attention only runs on the logits rows.
+        self.kv_reader: Attention | None = None
+
+    def forward_kv_only(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute K/V and write them to the KV cache, without attention.
+
+        Returns:
+            The dummy dependency of the cache update, which keeps torch.compile
+            from eliminating it when this layer's attention does not run.
+
+        """
+        qkv, _ = self.qkv_proj(hidden_states)
+        k, v = qkv[..., self.q_size :].split([self.kv_size, self.kv_size], dim=-1)
+
+        k = k.unflatten(-1, (self.num_kv_heads, self.head_dim))
+        k = self.k_norm(k)
+        k = k.flatten(-2, -1)
+        k, _ = self.rotary_emb(positions, k, None)
+
+        v = v.unflatten(-1, (self.num_kv_heads, self.head_dim))
+        v = self.v_norm(v)
+        v = v.flatten(-2, -1)
+
+        attn = self.attn
+        k = k.view(-1, attn.num_kv_heads, attn.head_size)
+        v = v.view(-1, attn.num_kv_heads, attn.head_size_v)
+        if attn.use_direct_call:
+            return unified_kv_cache_update(k, v, attn.layer_name)
+        return torch.ops.vllm.unified_kv_cache_update(
+            k, v, _encode_layer_name(attn.layer_name)
+        )
 
     def forward(
         self,
@@ -554,6 +593,16 @@ class Gemma4Attention(nn.Module):
             q = q.flatten(-2, -1)
             q, _ = self.rotary_emb(positions, q, None)
             attn_output = self.attn(q, None, None)
+        elif self.kv_reader is not None:
+            # K/V were cached by `forward_kv_only`: only Q is needed, and
+            # attention goes through a KV-shared layer reading this cache.
+            qkv, _ = self.qkv_proj(hidden_states)
+            q = qkv[..., : self.q_size]
+            q = q.unflatten(-1, (self.num_heads, self.head_dim))
+            q = self.q_norm(q)
+            q = q.flatten(-2, -1)
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.kv_reader(q, None, None)
         else:
             # For k_eq_v, K weights are loaded into both K and V slots of
             # qkv_proj, so V == K automatically.
@@ -840,6 +889,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         prefix: str = "",
         decoder_layers: list[Gemma4DecoderLayer],
         layer_idx_start: int,
+        kv_only_layer: Gemma4DecoderLayer | None,
         embed_tokens: VocabParallelEmbedding,
         normalizer: torch.Tensor,
         embed_tokens_per_layer: VocabParallelEmbedding | None,
@@ -852,6 +902,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         super().__init__()
         self.decoder_layers = decoder_layers
         self.layer_idx_start = layer_idx_start
+        self.kv_only_layer = kv_only_layer
 
         config = _get_text_config(vllm_config.model_config.hf_config)
         self.config = config
@@ -946,7 +997,7 @@ class Gemma4SelfDecoderLayers(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
             per_layer_inputs = self.project_per_layer_inputs(
@@ -967,14 +1018,23 @@ class Gemma4SelfDecoderLayers(nn.Module):
             per_layer_inputs,
             **kwargs,
         )
-        return hidden_states, per_layer_inputs
+        kv_cache_dep = None
+        if self.kv_only_layer is not None:
+            kv_cache_dep = self.kv_only_layer.self_attn.forward_kv_only(
+                positions, self.kv_only_layer.input_layernorm(hidden_states)
+            )
+        return hidden_states, per_layer_inputs, kv_cache_dep
 
 
 @support_torch_compile(
     enable_if=lambda vllm_config: vllm_config.cache_config.kv_sharing_fast_prefill
 )
 class Gemma4CrossDecoderLayers(nn.Module):
-    """Cross-decoder layers (YOCO second half, KV-shared)."""
+    """Cross-decoder layers (YOCO second half, KV-shared).
+
+    Starts with the last self-decoder layer when it is split (see
+    `_get_kv_reader`).
+    """
 
     def __init__(
         self,
@@ -1003,6 +1063,43 @@ class Gemma4CrossDecoderLayers(nn.Module):
             per_layer_inputs,
             **kwargs,
         )
+
+
+def _get_kv_reader(
+    vllm_config: VllmConfig,
+    layers: nn.ModuleList,
+    first_kv_shared_layer_idx: int,
+) -> Attention | None:
+    """Attention of a KV-shared layer that reads the last KV-producing layer.
+
+    With fast prefill, that layer only has to cache K/V for all tokens; the rest
+    of it runs in the cross-decoder on the logits rows, attending through the
+    returned layer. Returns None if the layer cannot be split this way.
+    """
+    # The cross-decoder runs on gathered rows, which the per-token LoRA mapping
+    # and pipeline stages do not support.
+    if (
+        not vllm_config.cache_config.kv_sharing_fast_prefill
+        or first_kv_shared_layer_idx == 0
+        or vllm_config.lora_config is not None
+        or vllm_config.parallel_config.pipeline_parallel_size > 1
+    ):
+        return None
+    attn = layers[first_kv_shared_layer_idx - 1].self_attn.attn
+    # K/V are cached without the attention forward, and read with the reader's
+    # KV cache scales.
+    if attn.attn_backend.forward_includes_kv_cache_update or is_quantized_kv_cache(
+        attn.kv_cache_dtype
+    ):
+        return None
+    return next(
+        (
+            layer.self_attn.attn
+            for layer in layers[first_kv_shared_layer_idx:]
+            if layer.self_attn.attn.kv_sharing_target_layer_name == attn.layer_name
+        ),
+        None,
+    )
 
 
 @support_torch_compile(
@@ -1126,13 +1223,25 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 
         from vllm.compilation.backends import set_model_tag
 
+        # Under fast prefill, the last self-decoder layer only needs to cache
+        # K/V for all tokens: the rest of it runs in the cross-decoder.
+        split_idx = first_kv_shared_layer_idx
+        kv_only_layer = None
+        kv_reader = _get_kv_reader(vllm_config, self.layers, split_idx)
+        if kv_reader is not None:
+            split_idx -= 1
+            kv_only_layer = self.layers[split_idx]
+            # Not a submodule: the reader is owned by its own layer.
+            object.__setattr__(kv_only_layer.self_attn, "kv_reader", kv_reader)
+
         # Layers 0..(K-1) are self-decoder layers in YOCO
         with set_model_tag("self_decoder"):
             self.self_decoder = Gemma4SelfDecoderLayers(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.self_decoder",
-                decoder_layers=self.layers[:first_kv_shared_layer_idx],
+                decoder_layers=self.layers[:split_idx],
                 layer_idx_start=0,
+                kv_only_layer=kv_only_layer,
                 embed_tokens=self.embed_tokens,
                 normalizer=self.normalizer,
                 embed_tokens_per_layer=getattr(self, "embed_tokens_per_layer", None),
@@ -1153,8 +1262,8 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
             self.cross_decoder = Gemma4CrossDecoderLayers(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.cross_decoder",
-                decoder_layers=self.layers[first_kv_shared_layer_idx:],
-                layer_idx_start=first_kv_shared_layer_idx,
+                decoder_layers=self.layers[split_idx:],
+                layer_idx_start=split_idx,
             )
 
         self.fast_prefill_enabled = cache_config.kv_sharing_fast_prefill
@@ -1270,7 +1379,7 @@ class Gemma4Model(nn.Module, EagleModelMixin, SupportsQuant):
 
         batch_size = positions.size(0)
         self.positions[:batch_size].copy_(positions)
-        self_decoder_hidden_states, per_layer_inputs = self.self_decoder(
+        self_decoder_hidden_states, per_layer_inputs, _ = self.self_decoder(
             input_ids=input_ids,
             positions=self.positions[:batch_size],
             inputs_embeds=inputs_embeds,

@@ -4,9 +4,12 @@
 import random
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode
+from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.models.gemma4 import Gemma4SelfDecoderLayers
 from vllm.platforms import current_platform
 
 from ....utils import check_answers, fork_new_process_for_each_test, prep_prompts
@@ -120,3 +123,139 @@ def test_kv_sharing_fast_prefill(
             [response.outputs[0].text for response in responses],
             accept_rate=1.0,
         )
+
+
+GEMMA4_MODEL = "google/gemma-4-E2B-it"
+
+
+def _tiny_gemma4(hf_config):
+    """10 layers, the last 5 share the KV cache of layers 3 and 4. Layer 4, the
+    last KV-producing layer, uses full attention as in the real model."""
+    hf_config.get_text_config().update(
+        {
+            "num_hidden_layers": 10,
+            "num_kv_shared_layers": 5,
+            "hidden_size": 256,
+            "intermediate_size": 512,
+            "hidden_size_per_layer_input": 32,
+        }
+    )
+    return hf_config
+
+
+def _random_dummy_weights(seed: int):
+    """Dummy weights that make the layers of a random model matter. The default
+    ones are tiny, and identical for all tensors of the same shape."""
+    generator = None
+
+    @torch.no_grad()
+    def init(param: torch.Tensor, *args, **kwargs) -> None:
+        nonlocal generator
+        if param.device.type == "meta" or not torch.is_floating_point(param):
+            return
+        if (value := getattr(param, "dummy_weight_value", None)) is not None:
+            param.fill_(value)
+            return
+        if generator is None:
+            generator = torch.Generator(device=param.device).manual_seed(seed)
+        values = torch.randn(param.shape, generator=generator, device=param.device)
+        if param.ndim < 2:  # norm weights and scalars
+            param.copy_(1 + 0.1 * values)
+        else:
+            param.copy_(values * param.shape[-1] ** -0.5)
+
+    return init
+
+
+def _gemma4_first_token_logprobs(
+    monkeypatch: pytest.MonkeyPatch,
+    prompts: list[list[int]],
+    *,
+    kv_sharing_fast_prefill: bool,
+    quantization: str | None,
+) -> tuple[bool, list[dict[int, float]]]:
+    """Whether the last KV-producing layer is split, and the top logprobs of
+    the first generated token of each prompt."""
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.dummy_loader.initialize_single_dummy_weight",
+        _random_dummy_weights(SEED),
+    )
+    llm = LLM(
+        model=GEMMA4_MODEL,
+        hf_overrides=_tiny_gemma4,
+        load_format="dummy",
+        language_model_only=True,
+        quantization=quantization,
+        kv_sharing_fast_prefill=kv_sharing_fast_prefill,
+        max_model_len=256,
+        max_num_batched_tokens=128,
+        max_num_seqs=16,
+        gpu_memory_utilization=0.3,
+        seed=SEED,
+    )
+    is_split = any(
+        llm.apply_model(
+            lambda model: any(
+                isinstance(m, Gemma4SelfDecoderLayers) and m.kv_only_layer is not None
+                for m in model.modules()
+            )
+        )
+    )
+    outputs = llm.generate(
+        [{"prompt_token_ids": prompt} for prompt in prompts],
+        SamplingParams(temperature=0.0, max_tokens=1, logprobs=8),
+    )
+    logprobs = [
+        {token: lp.logprob for token, lp in output.outputs[0].logprobs[0].items()}
+        for output in outputs
+    ]
+    del llm
+    cleanup_dist_env_and_memory()
+    return is_split, logprobs
+
+
+@use_fork_for_test
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only test")
+@pytest.mark.parametrize(
+    "quantization,min_shared,atol",
+    [
+        # bf16: rounding noise of fast prefill on a random-weight model. Without
+        # the K/V cache write of the split layer the top tokens share nothing.
+        (None, 5, 0.25),
+        # Online FP8 scales activations per tensor, i.e. by the rows of the
+        # batch, which fast prefill changes: only check the outputs correlate.
+        ("fp8", 1, None),
+    ],
+)
+def test_gemma4_kv_sharing_fast_prefill_split_last_layer(
+    monkeypatch: pytest.MonkeyPatch,
+    quantization: str | None,
+    min_shared: int,
+    atol: float | None,
+):
+    """Under fast prefill, the last KV-producing layer only caches K/V for all
+    tokens and runs the rest on the logits rows: the logprobs do not change."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    rng = random.Random(SEED)
+    # More tokens than max_num_batched_tokens, so that prefills are chunked.
+    prompts = [
+        [rng.randrange(1000, 20000) for _ in range(rng.randrange(20, 100))]
+        for _ in range(8)
+    ]
+
+    is_split, expected = _gemma4_first_token_logprobs(
+        monkeypatch, prompts, kv_sharing_fast_prefill=False, quantization=quantization
+    )
+    assert not is_split
+    is_split, actual = _gemma4_first_token_logprobs(
+        monkeypatch, prompts, kv_sharing_fast_prefill=True, quantization=quantization
+    )
+    assert is_split, "fast prefill did not split the last KV-producing layer"
+
+    for expected_lps, actual_lps in zip(expected, actual):
+        shared = expected_lps.keys() & actual_lps.keys()
+        assert len(shared) >= min_shared
+        if atol is not None:
+            for token in shared:
+                assert actual_lps[token] == pytest.approx(expected_lps[token], abs=atol)
