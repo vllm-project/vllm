@@ -909,7 +909,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 and self._plans_replayssm_decode
             ):
                 # Triton decode appends to the ring that prefill leaves empty.
-                ring_start[state_indices_tensor_p] = 0
+                ring_start.index_fill_(0, state_indices_tensor_p.long(), 0)
 
         # Process decode requests
         if has_decode:

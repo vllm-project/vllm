@@ -150,7 +150,10 @@ def test_replayssm_decode_matches_baseline(vllm_runner, model_name, v2_runner):
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
-def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
+def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name, monkeypatch):
+    # Collection can initialize CUDA before the tensor-parallel workers start.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    envs.disable_envs_cache()
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)

@@ -937,6 +937,7 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     )
 
     state = object.__new__(MambaHybridModelState)
+    state.cache_config = CacheConfig(mamba_cache_mode="align")
     state._align_mode = True
     state._use_flashinfer_replayssm = False
     state._mamba_group_ids = []
