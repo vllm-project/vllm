@@ -249,6 +249,7 @@ steps:
 
 - label: ":amd: (MI355) UMBP Connector TP2 Integration"
   key: amd-umbp-connector-tp2-integration-mi355
+  automatic_shard: true
   dind: false
   device: mi355_2
   num_devices: 2
