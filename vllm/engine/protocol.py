@@ -201,16 +201,13 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def sleep(
-        self,
-        level: int = 1,
-        mode: "PauseMode" = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: "PauseMode" = "abort", reset_connector: bool = True
     ) -> None:
         """Sleep the engine."""
         ...
 
     @abstractmethod
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         """Discard KV cache physical GPU memory. Requires a completed pause."""
         ...
 
@@ -251,7 +248,6 @@ class EngineClient(ABC):
         *,
         mode: "PauseMode" = "abort",
         clear_cache: bool = True,
-        clear_connector_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
 
@@ -264,7 +260,6 @@ class EngineClient(ABC):
                   :meth:`resume_generation`.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
-            clear_connector_cache: Evict the KV tier too; unsafe if weights change.
 
         """
         ...

@@ -544,6 +544,43 @@ def test_cpu_offloading_metrics() -> None:
         del llm
 
 
+@pytest.mark.parametrize("reset_connector", [True, False])
+def test_sleep_keeps_offloaded_blocks_unless_reset(reset_connector: bool) -> None:
+    """After a sleep that keeps the connector, the prompt loads from CPU."""
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 256 << 20,
+            "block_size": CPU_BLOCK_SIZES,
+        },
+    )
+    # A prefix of whole offloaded blocks, plus the token to recompute.
+    prefix = [100 + i for i in range(4 * CPU_BLOCK_SIZES)]
+    prompt = TokensPrompt(prompt_token_ids=prefix + [7])
+    sampling_params = SamplingParams(max_tokens=1)
+
+    llm = LLM(
+        model="facebook/opt-125m",
+        max_model_len=2048,
+        gpu_memory_utilization=0.2,
+        enable_sleep_mode=True,
+        kv_transfer_config=kv_transfer_config,
+    )
+    try:
+        llm.generate(prompt, sampling_params, use_tqdm=False)
+        # Let the store to CPU finish before the sleep discards the GPU blocks.
+        _wait_for_prefix_cache_reset(llm)
+
+        llm.sleep(level=1, reset_connector=reset_connector)
+        llm.wake_up()
+
+        output = llm.generate(prompt, sampling_params, use_tqdm=False)[0]
+        assert output.num_cached_tokens == (0 if reset_connector else len(prefix))
+    finally:
+        del llm
+
+
 def test_tiering_offloading() -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
     extra_config: dict = {

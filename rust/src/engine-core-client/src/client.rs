@@ -1042,25 +1042,19 @@ impl EngineCoreClient {
         &self,
         level: SleepLevel,
         mode: PauseMode,
-        clear_connector_cache: bool,
+        reset_connector: bool,
     ) -> Result<()> {
         let recheck = self.inner.readiness().withdraw_until_recheck();
-        // Only the opt-out sends the third argument, so a default call still
-        // drives an engine that predates it.
-        if clear_connector_cache {
-            self.inner.call_utility::<(), _>("sleep", (level, mode), Some(recheck)).await?;
-        } else {
-            self.inner
-                .call_utility::<(), _>("sleep", (level, mode, false), Some(recheck))
-                .await?;
-        }
+        self.inner
+            .call_utility::<(), _>("sleep", (level, mode, reset_connector), Some(recheck))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
-    pub async fn release_kv_cache_memory(&self) -> Result<()> {
-        self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+    pub async fn release_kv_cache_memory(&self, reset_connector: bool) -> Result<()> {
+        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,)).await?;
         self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
@@ -1084,26 +1078,11 @@ impl EngineCoreClient {
 
     /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
     /// the engine rejects new requests with a retryable error until resume.
-    pub async fn pause_generation(
-        &self,
-        mode: PauseMode,
-        clear_cache: bool,
-        clear_connector_cache: bool,
-    ) -> Result<()> {
+    pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
         let recheck = self.inner.readiness().withdraw_until_recheck();
-        if clear_connector_cache {
-            self.inner
-                .call_utility::<(), _>("pause_generation", (mode, clear_cache), Some(recheck))
-                .await?;
-        } else {
-            self.inner
-                .call_utility::<(), _>(
-                    "pause_generation",
-                    (mode, clear_cache, false),
-                    Some(recheck),
-                )
-                .await?;
-        }
+        self.inner
+            .call_utility::<(), _>("pause_generation", (mode, clear_cache), Some(recheck))
+            .await?;
         Ok(())
     }
 

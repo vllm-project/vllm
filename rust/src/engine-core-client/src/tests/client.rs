@@ -3144,7 +3144,7 @@ async fn readiness_follows_engine_answers_around_pause() {
     let mut readiness = client.subscribe_readiness();
     assert!(*readiness.borrow());
 
-    client.pause_generation(PauseMode::Abort, false, true).await.unwrap();
+    client.pause_generation(PauseMode::Abort, false).await.unwrap();
     assert!(!*readiness.borrow());
     client.resume_scheduler().await.unwrap();
     wait_until_ready(&mut readiness).await;
@@ -3229,7 +3229,7 @@ async fn cancelled_pause_rechecks_only_after_the_engine_replies() {
     let readiness = client.subscribe_readiness();
 
     tokio::select! {
-        _ = client.pause_generation(PauseMode::Wait, false, true) => {
+        _ = client.pause_generation(PauseMode::Wait, false) => {
             panic!("the pause returned before the engine replied")
         }
         _ = pause_seen_rx => {}
@@ -3344,7 +3344,7 @@ async fn sleep_and_wake_calls_record_engine_sleep_state() {
     series.push(("partial wake", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     series.push(("full wake", engine_sleep_state_series(MODEL)));
-    client.release_kv_cache_memory().await.unwrap();
+    client.release_kv_cache_memory(true).await.unwrap();
     series.push(("release kv cache", engine_sleep_state_series(MODEL)));
     assert!(client.wake_up(None).await.unwrap());
     client.sleep(SleepLevel::DiscardAll, PauseMode::default(), true).await.unwrap();

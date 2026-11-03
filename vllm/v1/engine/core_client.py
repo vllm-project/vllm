@@ -207,14 +207,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def sleep(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
         raise NotImplementedError
 
-    def release_kv_cache_memory(self) -> None:
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
@@ -320,14 +317,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def sleep_async(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
         raise NotImplementedError
 
-    async def release_kv_cache_memory_async(self) -> None:
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
@@ -467,18 +461,15 @@ class InprocClient(EngineCoreClient):
         self.engine_core.reset_encoder_cache()
 
     def sleep(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
         if mode == "wait":
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
-        result = self.engine_core.sleep(level, mode, clear_connector_cache)
+        result = self.engine_core.sleep(level, mode, reset_connector)
         assert result is None
 
-    def release_kv_cache_memory(self) -> None:
-        self.engine_core.release_kv_cache_memory()
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.engine_core.release_kv_cache_memory(reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.engine_core.wake_up(tags)
@@ -1138,17 +1129,12 @@ class SyncMPClient(MPClient):
         return self.call_utility("pin_lora", lora_id)
 
     def sleep(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
-        # Unconditional, unlike the Rust client: client and engine ship in the
-        # same package, so they cannot disagree about the signature.
-        self.call_utility("sleep", level, mode, clear_connector_cache)
+        self.call_utility("sleep", level, mode, reset_connector)
 
-    def release_kv_cache_memory(self) -> None:
-        self.call_utility("release_kv_cache_memory")
+    def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
+        self.call_utility("release_kv_cache_memory", reset_connector)
 
     def wake_up(self, tags: list[str] | None = None) -> bool:
         return self.call_utility("wake_up", tags)
@@ -1380,24 +1366,14 @@ class AsyncMPClient(MPClient):
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
     async def pause_scheduler_async(
-        self,
-        mode: PauseMode = "abort",
-        clear_cache: bool = True,
-        clear_connector_cache: bool = True,
+        self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> None:
-        await self.call_utility_async(
-            "pause_scheduler", mode, clear_cache, clear_connector_cache
-        )
+        await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
     async def pause_generation_async(
-        self,
-        mode: PauseMode = "abort",
-        clear_cache: bool = True,
-        clear_connector_cache: bool = True,
+        self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> None:
-        await self.call_utility_async(
-            "pause_generation", mode, clear_cache, clear_connector_cache
-        )
+        await self.call_utility_async("pause_generation", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
         await self.call_utility_async("resume_scheduler")
@@ -1438,15 +1414,12 @@ class AsyncMPClient(MPClient):
         await self.call_utility_async("reset_encoder_cache")
 
     async def sleep_async(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
-        await self.call_utility_async("sleep", level, mode, clear_connector_cache)
+        await self.call_utility_async("sleep", level, mode, reset_connector)
 
-    async def release_kv_cache_memory_async(self) -> None:
-        await self.call_utility_async("release_kv_cache_memory")
+    async def release_kv_cache_memory_async(self, reset_connector: bool = True) -> None:
+        await self.call_utility_async("release_kv_cache_memory", reset_connector)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> bool:
         return all(await self.call_utility_all_async("wake_up", tags))

@@ -19,8 +19,6 @@ pub(crate) struct PauseParams {
     mode: PauseMode,
     #[serde(default = "default_clear_cache")]
     clear_cache: bool,
-    #[serde(default = "default_clear_connector_cache")]
-    clear_connector_cache: bool,
 }
 
 #[derive(Serialize)]
@@ -37,10 +35,6 @@ const fn default_clear_cache() -> bool {
     true
 }
 
-const fn default_clear_connector_cache() -> bool {
-    true
-}
-
 fn invalid_query(error: QueryRejection) -> ApiError {
     ApiError::invalid_request(error.body_text(), Some("mode"))
 }
@@ -54,11 +48,7 @@ pub async fn pause(
 
     state
         .engine_core_client()
-        .pause_generation(
-            params.mode,
-            params.clear_cache,
-            params.clear_connector_cache,
-        )
+        .pause_generation(params.mode, params.clear_cache)
         .await
         .map_err(|error| utility_call_error("pause", error))?;
 

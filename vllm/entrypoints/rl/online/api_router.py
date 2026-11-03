@@ -33,7 +33,6 @@ async def pause_generation(
     raw_request: Request,
     mode: Annotated[PauseMode, Query()] = "abort",
     clear_cache: Annotated[bool, Query()] = True,
-    clear_connector_cache: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
 
@@ -48,8 +47,7 @@ async def pause_generation(
             - ``"wait"``: Wait for in-flight requests to complete.
             - ``"keep"``: Freeze requests in queue; they resume on /resume.
         clear_cache: DEPRECATED. Whether to clear KV/prefix caches after
-            draining. Applies to every mode, "keep" included.
-        clear_connector_cache: Evict the KV tier too; unsafe if weights change.
+            draining. Ignored when mode="keep".
 
     """
     engine = engine_client(raw_request)
@@ -58,7 +56,6 @@ async def pause_generation(
         await engine.pause_generation(
             mode=mode,
             clear_cache=clear_cache,
-            clear_connector_cache=clear_connector_cache,
         )
         return JSONResponse(
             content={"status": "paused"},

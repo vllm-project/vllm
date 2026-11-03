@@ -43,15 +43,21 @@ pub(crate) struct SleepParams {
     level: SleepLevel,
     #[serde(default)]
     mode: PauseMode,
-    #[serde(default = "default_clear_connector_cache")]
-    clear_connector_cache: bool,
+    #[serde(default = "default_reset_connector")]
+    reset_connector: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReleaseKvCacheMemoryParams {
+    #[serde(default = "default_reset_connector")]
+    reset_connector: bool,
 }
 
 const fn default_sleep_level() -> SleepLevel {
     SleepLevel::OffloadWeights
 }
 
-const fn default_clear_connector_cache() -> bool {
+const fn default_reset_connector() -> bool {
     true
 }
 
@@ -67,13 +73,13 @@ pub async fn sleep(
     let Query(SleepParams {
         level,
         mode,
-        clear_connector_cache,
+        reset_connector,
     }) = params.map_err(invalid_query)?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("sleep");
 
     state
         .engine_core_client()
-        .sleep(level, mode, clear_connector_cache)
+        .sleep(level, mode, reset_connector)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 
@@ -86,11 +92,13 @@ pub async fn sleep(
 /// Release KV cache memory while keeping model weights resident.
 pub async fn release_kv_cache_memory(
     State(state): State<Arc<AppState>>,
+    params: Result<Query<ReleaseKvCacheMemoryParams>, QueryRejection>,
 ) -> Result<Json<ReleaseKvCacheMemoryResponse>, ApiError> {
+    let Query(ReleaseKvCacheMemoryParams { reset_connector }) = params.map_err(invalid_query)?;
     let _recorder = METRICS.api_server.record_sleep_mode_operation("release_kv_cache_memory");
     state
         .engine_core_client()
-        .release_kv_cache_memory()
+        .release_kv_cache_memory(reset_connector)
         .await
         .map_err(|error| utility_call_error("release_kv_cache_memory", error))?;
 

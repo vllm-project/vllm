@@ -28,17 +28,20 @@ async def sleep(
     raw_request: Request,
     level: Annotated[int, Query(ge=0, le=2)] = 1,
     mode: Annotated[PauseMode, Query()] = "abort",
-    clear_connector_cache: Annotated[bool, Query()] = True,
+    reset_connector: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     with sleep_mode_operation_metrics().record("sleep"):
-        await engine_client(raw_request).sleep(level, mode, clear_connector_cache)
+        await engine_client(raw_request).sleep(level, mode, reset_connector)
     return JSONResponse(content={"status": "sleeping", "level": level})
 
 
 @router.post("/release_kv_cache_memory")
-async def release_kv_cache_memory(raw_request: Request) -> JSONResponse:
+async def release_kv_cache_memory(
+    raw_request: Request,
+    reset_connector: Annotated[bool, Query()] = True,
+) -> JSONResponse:
     with sleep_mode_operation_metrics().record("release_kv_cache_memory"):
-        await engine_client(raw_request).release_kv_cache_memory()
+        await engine_client(raw_request).release_kv_cache_memory(reset_connector)
     return JSONResponse(content={"status": "kv_cache_released"})
 
 

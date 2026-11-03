@@ -1005,7 +1005,6 @@ class AsyncLLM(EngineClient):
         *,
         mode: PauseMode = "abort",
         clear_cache: bool = True,
-        clear_connector_cache: bool = True,
     ) -> None:
         """Pause generation to allow model weight updates.
 
@@ -1023,20 +1022,12 @@ class AsyncLLM(EngineClient):
                   :meth:`resume_generation`.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
-            clear_connector_cache: Whether clearing also evicts an external KV
-                connector tier. Only applies when ``clear_cache`` is set. That
-                tier survives the pause, so a caller that does not replace the
-                weights can keep it and resume from the offloaded blocks;
-                block hashes do not cover the weights, so a caller that does
-                replace them must leave it at ``True``.
 
         """
         if clear_cache:
             await self.renderer.clear_mm_cache_async()
         await self.engine_core.pause_generation_async(
-            mode=mode,
-            clear_cache=clear_cache,
-            clear_connector_cache=clear_connector_cache,
+            mode=mode, clear_cache=clear_cache
         )
         # Small sleep to help ensure that final outputs from any in-flight requests are
         # returned prior to this method returning. These outputs come out of the engine
@@ -1219,21 +1210,18 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(
-        self,
-        level: int = 1,
-        mode: PauseMode = "abort",
-        clear_connector_cache: bool = True,
+        self, level: int = 1, mode: PauseMode = "abort", reset_connector: bool = True
     ) -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode, clear_connector_cache)
+        await self.engine_core.sleep_async(level, mode, reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def release_kv_cache_memory(self) -> None:
+    async def release_kv_cache_memory(self, reset_connector: bool = True) -> None:
         await self.renderer.clear_mm_cache_async()
-        await self.engine_core.release_kv_cache_memory_async()
+        await self.engine_core.release_kv_cache_memory_async(reset_connector)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, 0)

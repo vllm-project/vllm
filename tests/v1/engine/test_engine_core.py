@@ -919,44 +919,24 @@ def test_checkpoint_prepare_fails_on_drain_barrier_error(deferred: bool):
     assert core.reject_new_requests
 
 
-@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("entry", ["sleep", "release_kv_cache_memory"])
 @pytest.mark.parametrize(
-    "kwargs,expected", [({}, True), (dict(clear_connector_cache=False), False)]
+    "kwargs,expected", [({}, True), (dict(reset_connector=False), False)]
 )
-def test_pause_forwards_connector_flag(deferred: bool, kwargs, expected):
-    """Immediate and deferred pauses both forward it, and omitting it clears."""
+def test_kv_cache_discard_resets_connector_unless_kept(entry, kwargs, expected):
+    """Discarding the KV cache resets the connector unless the caller keeps it."""
     core = _pausable_engine_core_proc()
-    core.engines_running = deferred
-    seen: list[bool] = []
-    core._reset_caches = lambda reset_connector=True: seen.append(reset_connector)
+    core.model_executor.is_sleeping = False
+    reset_calls: list[bool] = []
+    core._reset_caches = lambda reset_connector: reset_calls.append(reset_connector)
 
-    result = EngineCoreProc.pause_scheduler(
-        core, mode="keep", clear_cache=True, **kwargs
-    )
-    if deferred:
-        assert seen == []
-        core.engines_running = False
-        core._notify_idle_state_callbacks()
-        assert result.result(timeout=0) is None
+    if entry == "sleep":
+        core.sleep(level=1, mode="keep", **kwargs)
+    else:
+        core.scheduler.pause_state = PauseState.PAUSED_ALL
+        core.release_kv_cache_memory(**kwargs)
 
-    assert seen == [expected]
-
-
-@pytest.mark.parametrize("level", [1, 2])
-def test_sleep_forwards_connector_flag(level: int):
-    """sleep() is the entry point RL callers use, not pause_scheduler."""
-    core = object.__new__(EngineCore)
-    core.model_executor = MagicMock()
-    core.scheduler = MagicMock()
-    core.scheduler.has_requests.return_value = False
-    core.batch_queue = None
-    seen: list[bool] = []
-    core._reset_caches = lambda reset_connector=True: seen.append(reset_connector)
-
-    EngineCore.sleep(core, level=level, clear_connector_cache=False)
-
-    assert seen == [False]
-    core.model_executor.sleep.assert_called_once_with(level)
+    assert reset_calls == [expected]
 
 
 @pytest.mark.parametrize("deferred", [False, True])

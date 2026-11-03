@@ -2424,7 +2424,7 @@ async fn control_sleep_rejects_unknown_level() {
         .sleep(pb::SleepRequest {
             level: Some(3),
             mode: pb::PauseMode::Unspecified.into(),
-            clear_connector_cache: None,
+            reset_connector: None,
         })
         .await
         .expect_err("level 3 should be rejected");
