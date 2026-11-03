@@ -11,6 +11,7 @@ import time
 import pytest
 
 import vllm.envs as envs
+from tests.utils import multi_gpu_marks
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm import SamplingParams, TokensPrompt
@@ -27,13 +28,14 @@ PARAMS = SamplingParams(temperature=0, max_tokens=16, logprobs=5, ignore_eos=Tru
 
 
 @pytest.fixture
-def umbp_llm(vllm_runner, socket_dir, monkeypatch):
+def umbp_llm(vllm_runner, socket_dir, monkeypatch, request):
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with vllm_runner(
         QWEN_MODEL,
         revision=_REVISIONS[QWEN_MODEL],
         enforce_eager=True,
+        tensor_parallel_size=getattr(request, "param", 1),
         block_size=BLOCK_SIZE,
         enable_prefix_caching=True,
         disable_log_stats=False,
@@ -92,6 +94,14 @@ def _assert_same_outputs(expected, actual) -> None:
         ]
 
 
+@pytest.mark.parametrize(
+    "umbp_llm",
+    [
+        pytest.param(1, id="tp1"),
+        pytest.param(2, id="tp2", marks=multi_gpu_marks(num_gpus=2)),
+    ],
+    indirect=True,
+)
 def test_restore_matches_recompute(umbp_llm):
     """A batch of prompts ending mid-block restores every full block exactly."""
     prompts = [

@@ -394,6 +394,23 @@ jobs:
               scheduler: {
                 keywords: [{ term: "scheduler", searchIn: "title" }],
               },
+              // Title-only: bodies often use VLLM_BATCH_INVARIANT=1 as a test
+              // control, and backend-selection logs print `use_batch_invariant`.
+              // Bare "deterministic" is left out: issues use it for crashes that
+              // always reproduce.
+              "batch-invariance": {
+                regexPatterns: [
+                  { pattern: "(?:batch|TP)[\\s_-]?invarian", searchIn: "title" },
+                  { pattern: "\\bBI\\b", flags: "g", searchIn: "title" },
+                  { pattern: "\\b(?:non-?)?determinism\\b|\\bnon-?deterministic", searchIn: "title" },
+                  { pattern: "\\bnon-?reproducible\\b|\\bnot reproducible\\b|\\brun-to-run\\b", searchIn: "title" },
+                  { pattern: "\\bbatch[\\s-]?(?:size[\\s-]?)?dependen", searchIn: "title" },
+                  {
+                    pattern: "\\b(?:identical|repeated|same)\\s+(?:greedy\\s+)?(?:runs?|requests?|calls?)\\b",
+                    searchIn: "title",
+                  },
+                ],
+              },
               "kv-cache-manager": {
                 substrings: [
                   { term: "kv cache manager", searchIn: "title" },
