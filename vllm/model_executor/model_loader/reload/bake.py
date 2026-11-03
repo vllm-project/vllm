@@ -216,9 +216,7 @@ class _PlanSink(TraceSink):
                 return o
             if id(o) in originals:  # in place: return the original argument
                 return originals[id(o)]
-            return TraceTensor(
-                first._name, o.shape, o.dtype, first.device, sink=self, lost=reason
-            )
+            return TraceTensor(first._name, o.shape, o.dtype, self, None, reason)
 
         return pytree.tree_map(wrap, out)
 
@@ -373,7 +371,7 @@ def _bake(
             meta = metas[name]
             sink.current = name
             shape = torch.Size(meta.shape)
-            yield name, TraceTensor(name, shape, meta.dtype, _META, sink=sink)
+            yield name, TraceTensor.checkpoint(name, shape, meta.dtype, sink)
 
     with stand_ins.swapped():
         snapshot = _Snapshot(model)

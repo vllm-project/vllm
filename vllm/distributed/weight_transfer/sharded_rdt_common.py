@@ -14,7 +14,6 @@ from typing import Any
 import torch
 
 # The op-chain contract, with two enforcers. The consumer's ``FakeRDTTensor``
-# (the reload core's ``TraceTensor``, whose ``VIEW_OPS`` must equal this table)
 # intercepts exactly these methods during the bake and records the string name;
 # anything else reaches ``__torch_dispatch__`` and raises, so a loader needing
 # real data fails at init rather than transferring wrong bytes. The producer

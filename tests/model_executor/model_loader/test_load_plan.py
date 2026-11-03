@@ -408,6 +408,21 @@ def test_noop_to_and_constant_fill_stay_direct():
     assert plan.get_dest("layer.weight") is not None
 
 
+@pytest.mark.parametrize(
+    "loader,shape,param_shape",
+    [
+        (lambda p, w: p.copy_(w.unflatten(0, (2, 3))), (6, 4), (2, 3, 4)),
+        (lambda p, w: p.copy_(w.split([2, 4])[1]), (6, 4), (4, 4)),
+        (lambda p, w: p.copy_(w.t().contiguous()[1:3]), (4, 6), (2, 4)),
+    ],
+    ids=["unflatten", "split", "contiguous"],
+)
+def test_view_ops_stay_direct(loader, shape, param_shape):
+    make, shapes = _single(loader, shape=shape, param_shape=param_shape)
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("layer.weight") is not None
+
+
 def _two_names(loader_a):
     """``a`` through ``loader_a``, ``b`` a plain copy."""
 

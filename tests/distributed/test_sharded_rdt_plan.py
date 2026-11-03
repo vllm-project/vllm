@@ -235,17 +235,6 @@ class TestFakeOpChains:
         keys = {self._fake().t()._key(), self._fake().t()._key()}
         assert len(keys) == 1, "equal chains must collapse — they dedup pull keys"
 
-    def test_traced_ops_are_the_ops_the_producer_replays(self):
-        from vllm.distributed.weight_transfer.sharded_rdt_common import SUPPORTED_OPS
-        from vllm.model_executor.model_loader.reload.trace import VIEW_OPS
-
-        assert VIEW_OPS == SUPPORTED_OPS
-
-    def test_to_without_a_change_is_not_recorded(self):
-        t = self._fake()
-        assert t.to(torch.bfloat16) is t
-        assert t.to(META) is t
-
 
 class TestFakeUnsupportedOps:
     """Anything that needs real data must fail loudly at bake time rather than
