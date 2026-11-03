@@ -24,6 +24,10 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+
+# Sent P worker -> D worker in place of the completion notif of a WRITE that
+# could not be posted: PUSH_FAIL_NOTIF_PREFIX + the completion notif body.
+PUSH_FAIL_NOTIF_PREFIX = b"PUSH_FAIL:"
 #
 # NIXL Connector Version
 #
