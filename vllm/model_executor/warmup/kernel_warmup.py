@@ -487,9 +487,10 @@ def _known_to_torch_distributed(group: "ProcessGroup | None") -> Iterator[None]:
     The autotuner calls ``dist.get_backend``, which raises for the stateless groups
     of Elastic EP. Those stay out of the map elsewhere: its absence marks them.
     """
+    from torch.distributed import ProcessGroup
     from torch.distributed.distributed_c10d import Backend, _world
 
-    if group is None or group in _world.pg_map:
+    if not isinstance(group, ProcessGroup) or group in _world.pg_map:
         yield
         return
     _world.pg_map[group] = (Backend(group.name()), None)
