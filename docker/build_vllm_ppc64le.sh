@@ -110,7 +110,7 @@ OPENSSL_DEVEL="openssl-devel-$(rpm -q --queryformat '%{VERSION}-%{RELEASE}' open
 
 microdnf install -y \
     "${OPENSSL_DEVEL}" \
-    python${PYTHON_VERSION} python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip gcc \
+    "python${PYTHON_VERSION}" "python${PYTHON_VERSION}-devel" "python${PYTHON_VERSION}-pip" gcc \
     git jq gcc-toolset-14 gcc-toolset-14-libatomic-devel \
     automake libtool clang-devel \
     harfbuzz-devel kmod lcms2-devel libimagequant-devel libjpeg-turbo-devel \
@@ -132,7 +132,7 @@ rpm -ivh --nodeps \
 # Python virtual environment
 ########################################
 
-python${PYTHON_VERSION} -m venv /opt/vllm
+"python${PYTHON_VERSION}" -m venv /opt/vllm
 source /opt/vllm/bin/activate
 
 export PATH=/opt/vllm/bin:$PATH
