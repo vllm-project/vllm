@@ -5,7 +5,7 @@
       "default": "13.0.3"
     },
     "PYTHON_VERSION": {
-      "default": "3.12"
+      "default": "3.14"
     },
     "UBUNTU_VERSION": {
       "default": "24.04"
