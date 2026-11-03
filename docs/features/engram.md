@@ -133,13 +133,15 @@ Costs and limits:
 
 ## Experimental remote table reader
 
-`--engram-config.rdma_provider` selects an external Python module that supplies
-an experimental remote-table reader. The module must expose `get_reader()` and
-`close_reader()`; its reader must implement the Engram lookup contract. A
-separately installed provider and its transport dependencies are required;
-vLLM does not ship a standalone RDMA transport or table owner.
-An [experimental adapter example](../../examples/disaggregated/engram_rdma/README.md)
-illustrates the contract and documents its experimental research dependencies.
+`--engram-config.rdma_provider` selects a Python module that supplies an
+experimental remote-table reader. vLLM includes a provider, checkpoint-backed
+owner and reader lifecycle control in `vllm.distributed.engram_rdma`; set
+`rdma_provider` to `vllm.distributed.engram_rdma.provider` to use them. The
+GPU GET transport remains a separately built NIXL dependency. The current
+prototype needs the experimental ABI-3 shim, not an ordinary NIXL wheel.
+See the [setup and verification example](../../examples/disaggregated/engram_rdma/README.md).
+An alternative provider must expose `get_reader()` and `close_reader()` and
+implement the Engram lookup contract.
 
 The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
 size 1.

@@ -33,11 +33,11 @@ class FakeRuntime:
         pass
 
 
-mock = ModuleType("shared_model_adapter")
+mock = ModuleType("vllm.distributed.engram_rdma.reader")
 mock.ReaderRuntime = FakeRuntime
 sys.modules[mock.__name__] = mock
 
-import vllm_rdma_provider  # noqa: E402
+from vllm.distributed.engram_rdma import provider as vllm_rdma_provider  # noqa: E402
 
 vllm_rdma_provider.verify_checkpoint_samples = lambda: None
 VllmRemoteReader = vllm_rdma_provider.VllmRemoteReader
@@ -63,6 +63,15 @@ def main():
     raw = ((selected.abs()[..., None] % 7) + 1 + col % 4).to(torch.float8_e4m3fn)
     scales = (127 + (selected.abs()[..., None] + block) % 3).to(torch.uint8)
     reader = VllmRemoteReader()
+    for dtype, width in ((torch.bfloat16, 255), (torch.uint8, 263)):
+        try:
+            reader.lookup(
+                table, ids, torch.empty((3, 2, width), dtype=dtype, device="cuda")
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid output row width was accepted")
     for dtype, width in ((torch.bfloat16, 256), (torch.uint8, 264)):
         backing = torch.full((3, 2, 2, width), 37, dtype=dtype, device="cuda")
         out = backing[:, 0]
