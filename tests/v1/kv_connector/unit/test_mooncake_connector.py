@@ -3085,7 +3085,8 @@ def test_pp_mismatch_rejects_opaque_row_in_both_directions():
     )
 
 
-def test_prepare_transfer_regions_reuses_success_and_error():
+@pytest.mark.asyncio
+async def test_prepare_transfer_regions_reuses_success_and_error():
     """A peer layout is built once. Re-registering drops the cache."""
     worker, _, _, _ = _register_sliced_packed_mla([0, 1])
     regions = worker._get_transfer_regions(
@@ -3105,6 +3106,7 @@ def test_prepare_transfer_regions_reuses_success_and_error():
         remote_port=1,
         remote_tp_size=worker.tp_size,
         remote_pp_size=worker.pp_size,
+        layout_id=1,
     )
     calls = 0
     original = worker._get_transfer_regions
@@ -3121,10 +3123,17 @@ def test_prepare_transfer_regions_reuses_success_and_error():
     assert worker._prepare_transfer_regions(meta) == prepared
     assert calls == 2
 
-    needs_draft = msgspec.structs.replace(meta, requires_draft_context_kv=True)
-    local, remote, err = worker._prepare_transfer_regions(needs_draft)
-    assert not local and not remote
-    assert err is not None and "Configure the same drafter on prefill" in err
+    needs_draft = msgspec.structs.replace(
+        meta, requires_draft_context_kv=True, kv_caches_base_addr=[]
+    )
+    sock = MagicMock()
+    sock.send_multipart = AsyncMock()
+    await worker.send_kv_to_decode(b"d", sock, needs_draft)
+    _, payload = sock.send_multipart.call_args[0][0]
+    response = worker._xfer_resp_decoder.decode(payload)
+    assert response.status == MooncakeXferResponseStatus.ERROR
+    assert response.err_msg is not None
+    assert "Configure the same drafter on prefill" in response.err_msg
 
     mismatch = _xfer_meta(
         [
