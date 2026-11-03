@@ -382,7 +382,7 @@ def test_sliding_window_cross_tp_store_load(
         name: torch.randint(
             -128,
             128,
-            (NUM_BLOCKS, 2, 4, total_heads, 64),
+            (2, 4, total_heads, 64),
             dtype=torch.int8,
             device="cpu",
             generator=generator,
@@ -397,39 +397,26 @@ def test_sliding_window_cross_tp_store_load(
         _sliding_window_mappings(reader_tp, rank, total_heads, hybrid)
         for rank in range(reader_tp)
     ]
-    writer_heads = total_heads // writer_tp
-    reader_heads = total_heads // reader_tp
-
     for layer_name, reference in references.items():
-        for block_id in range(NUM_BLOCKS):
-            expected_full = reference[block_id].numpy().tobytes()
-            pages = []
-            for rank in range(writer_tp):
-                start = rank * writer_heads
-                end = start + writer_heads
-                page = reference[block_id, :, :, start:end, :]
-                pages.append(page.numpy().tobytes())
+        expected_full = reference.numpy().tobytes()
+        pages = [page.numpy().tobytes() for page in reference.chunk(writer_tp, dim=2)]
+        stored = _store_all(
+            mappings=[m[layer_name] for m in writer_mappings],
+            pages=pages,
+            size=len(expected_full),
+        )
+        assert stored == expected_full, (
+            f"Store mismatch: layer={layer_name}, TP{writer_tp}->TP{reader_tp}"
+        )
 
-            stored = _store_all(
-                mappings=[m[layer_name] for m in writer_mappings],
-                pages=pages,
-                size=len(expected_full),
-                block_id=block_id,
+        expected_pages = reference.chunk(reader_tp, dim=2)
+        for rank, mappings in enumerate(reader_mappings):
+            loaded = _load_one(mappings[layer_name], stored)
+            expected = expected_pages[rank].numpy().tobytes()
+            assert loaded == expected, (
+                f"Load mismatch: layer={layer_name}, "
+                f"rank={rank}, TP{writer_tp}->TP{reader_tp}"
             )
-            assert stored == expected_full, (
-                f"Store mismatch: layer={layer_name}, block={block_id}, "
-                f"TP{writer_tp}->TP{reader_tp}"
-            )
-
-            for rank, mappings in enumerate(reader_mappings):
-                loaded = _load_one(mappings[layer_name], stored)
-                start = rank * reader_heads
-                end = start + reader_heads
-                expected = reference[block_id, :, :, start:end, :].numpy().tobytes()
-                assert loaded == expected, (
-                    f"Load mismatch: layer={layer_name}, block={block_id}, "
-                    f"rank={rank}, TP{writer_tp}->TP{reader_tp}"
-                )
 
 
 def test_cp_round_trip():
