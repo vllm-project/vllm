@@ -1686,7 +1686,7 @@ class TestBidirectionalManager:
                 try:
                     mgr = P2PSecondaryTierManager(
                         spec,
-                        memoryview(np.zeros((8, 1024), dtype=np.uint8)),
+                        _parent_ctx(memoryview(np.zeros((8, 1024), dtype=np.uint8))),
                         host="127.0.0.1",
                         port=port,
                     )
@@ -3321,7 +3321,7 @@ def drain_peers(monkeypatch, drain_transports):
     spec = CPUOffloadingSpec(make_offloading_config())
     peers = [
         P2PSecondaryTierManager(
-            spec, memoryview(bytearray(65536)), host=host, port=port
+            spec, _parent_ctx(memoryview(bytearray(65536))), host=host, port=port
         )
         for host, port in [("A", 1), ("B", 2)]
     ]

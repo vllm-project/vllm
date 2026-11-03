@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import functools
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -14,8 +16,10 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
-    TransferJob,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.tiering.manager import TieringTransferJob
 
 TierLabel = tuple[str]
 PRIMARY_TIER_LABEL: TierLabel = ("0:primary",)
@@ -23,7 +27,7 @@ PRIMARY_TIER_LABEL: TierLabel = ("0:primary",)
 
 class _JobMetadataLike(Protocol):
     @property
-    def transfer_job(self) -> TransferJob: ...
+    def transfer_job(self) -> TieringTransferJob: ...
 
     @property
     def tier_idx(self) -> int: ...
@@ -110,46 +114,29 @@ class TieringMetricsTracker:
             observed = state.observed_lookups.setdefault(tier_label, {})
             observed.setdefault(key, time.monotonic() - lookup_duration)
 
-    def on_job_registered(
-        self, job_metadata: _JobMetadataLike, *, is_job_materialized: bool
-    ) -> None:
+    def on_job_registered(self, job_metadata: _JobMetadataLike) -> None:
         """Record stats for a newly registered job.
 
         Args:
             job_metadata: The registered job.
-            is_job_materialized: Whether the job's transfer claim is already
-                materialized; unmaterialized jobs have no chunk stats yet.
 
         """
         transfer_job = job_metadata.transfer_job
         state = self._tier_states[job_metadata.tier_idx]
         if transfer_job.is_promotion:
             state.active_promotion_count += 1
-            assert not is_job_materialized, (
-                "Promotions jobs must be materialized lazily"
-            )
         else:
             state.active_cascade_count += 1
-            assert is_job_materialized, (
-                "Cascade jobs must be materialized at construction"
-            )
             state.primary_read_chunk_count += len(transfer_job.chunk_ids)
 
     def on_job_finished(
-        self,
-        job_metadata: _JobMetadataLike,
-        result: JobResult,
-        *,
-        is_job_materialized: bool,
+        self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
         """Record stats for a finished job.
 
         Args:
             job_metadata: The finished job.
             result: The tier-reported result.
-            is_job_materialized: Whether the job's transfer claim was
-                successfully materialized; unmaterialized jobs have no chunk
-                stats.
 
         """
         transfer_job = job_metadata.transfer_job
@@ -162,7 +149,7 @@ class TieringMetricsTracker:
             assert state.active_cascade_count > 0
             state.active_cascade_count -= 1
 
-        if not is_job_materialized:
+        if not transfer_job.is_materialized():
             # Job not materialized. No further stats to update
             return
 

@@ -627,9 +627,7 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TieringTransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
-        self._metrics.on_job_registered(
-            job_metadata, is_job_materialized=transfer_job.is_materialized()
-        )
+        self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
         return self._jobs.pop(job_id, None)
@@ -747,11 +745,7 @@ class TieringOffloadingManager(OffloadingManager):
                 assert (
                     transfer_job.is_promotion or completed_job.deferred_release is None
                 )
-                self._metrics.on_job_finished(
-                    job_metadata,
-                    completed_job,
-                    is_job_materialized=transfer_job.is_materialized(),
-                )
+                self._metrics.on_job_finished(job_metadata, completed_job)
 
                 if transfer_job.is_promotion:
                     # secondary→primary transfer (promotion) completed.

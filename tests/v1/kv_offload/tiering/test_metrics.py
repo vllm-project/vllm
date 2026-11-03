@@ -154,30 +154,24 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
         ),
     ]
     for job in jobs:
-        tracker.on_job_registered(
-            job, is_job_materialized=job.transfer_job.is_materialized()
-        )
+        tracker.on_job_registered(job)
         job.transfer_job.materialize()
 
     tracker.on_job_finished(
         jobs[0],
         JobResult(job_id=0, success=True, transfer_time=0.5),
-        is_job_materialized=jobs[0].transfer_job.is_materialized(),
     )
     tracker.on_job_finished(
         jobs[1],
         JobResult(job_id=1, success=True, transfer_time=0.25),
-        is_job_materialized=jobs[1].transfer_job.is_materialized(),
     )
     tracker.on_job_finished(
         jobs[2],
         JobResult(job_id=2, success=False),
-        is_job_materialized=jobs[2].transfer_job.is_materialized(),
     )
     tracker.on_job_finished(
         jobs[3],
         JobResult(job_id=3, success=False),
-        is_job_materialized=jobs[3].transfer_job.is_materialized(),
     )
 
     stats = tracker.take_stats()
@@ -203,9 +197,7 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
     job = JobMetadata(
         create_promotion_job(0, keys, [0, 1, 2], tracker=tracker, tier_idx=0), 0
     )
-    tracker.on_job_registered(
-        job, is_job_materialized=job.transfer_job.is_materialized()
-    )
+    tracker.on_job_registered(job)
     job.transfer_job.materialize()
 
     tracker.on_job_finished(
@@ -216,7 +208,6 @@ def test_tiering_metrics_tracker_records_partial_promotion_success_bytes():
             successful_keys=(keys[0], keys[2]),
             transfer_time=0.5,
         ),
-        is_job_materialized=job.transfer_job.is_materialized(),
     )
 
     stats = tracker.take_stats()
@@ -242,12 +233,8 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
         ),
         1,
     )
-    tracker.on_job_registered(
-        fs_job, is_job_materialized=fs_job.transfer_job.is_materialized()
-    )
-    tracker.on_job_registered(
-        p2p_job, is_job_materialized=p2p_job.transfer_job.is_materialized()
-    )
+    tracker.on_job_registered(fs_job)
+    tracker.on_job_registered(p2p_job)
     fs_job.transfer_job.materialize()
     p2p_job.transfer_job.materialize()
 
@@ -289,14 +276,12 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     promotion_job.transfer_job.submit_time = clock
     tracker.on_job_registered(
         promotion_job,
-        is_job_materialized=promotion_job.transfer_job.is_materialized(),
     )
     promotion_job.transfer_job.materialize()
     clock += 1.5
     tracker.on_job_finished(
         promotion_job,
         JobResult(job_id=0, success=True, transfer_time=0.42),
-        is_job_materialized=promotion_job.transfer_job.is_materialized(),
     )
 
     stats = tracker.take_stats()
@@ -305,14 +290,11 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     assert observations == {("2:p2p", "success"): [1.5]}
 
     cascade_job = JobMetadata(create_cascade_job(1, to_keys([2]), [2]), 1)
-    tracker.on_job_registered(
-        cascade_job, is_job_materialized=cascade_job.transfer_job.is_materialized()
-    )
+    tracker.on_job_registered(cascade_job)
     clock += 0.1
     tracker.on_job_finished(
         cascade_job,
         JobResult(job_id=1, success=True, transfer_time=0.10),
-        is_job_materialized=cascade_job.transfer_job.is_materialized(),
     )
 
     stats = tracker.take_stats()
@@ -326,14 +308,12 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     failed_promotion_job.transfer_job.submit_time = clock
     tracker.on_job_registered(
         failed_promotion_job,
-        is_job_materialized=failed_promotion_job.transfer_job.is_materialized(),
     )
     failed_promotion_job.transfer_job.materialize()
     clock += 0.2
     tracker.on_job_finished(
         failed_promotion_job,
         JobResult(job_id=2, success=False, transfer_time=0.42),
-        is_job_materialized=failed_promotion_job.transfer_job.is_materialized(),
     )
 
     stats = tracker.take_stats()
@@ -357,13 +337,11 @@ def test_tiering_metrics_tracker_records_promotion_latency_without_transfer_time
     )
     tracker.on_job_registered(
         promotion_job,
-        is_job_materialized=promotion_job.transfer_job.is_materialized(),
     )
     promotion_job.transfer_job.materialize()
     tracker.on_job_finished(
         promotion_job,
         JobResult(job_id=0, success=True),
-        is_job_materialized=promotion_job.transfer_job.is_materialized(),
     )
     tracker.assert_idle()
 
@@ -400,9 +378,7 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     )
 
     # Registration records only the active-job count.
-    tracker.on_job_registered(
-        job, is_job_materialized=job.transfer_job.is_materialized()
-    )
+    tracker.on_job_registered(job)
     state = tracker._tier_states[0]
     assert state.active_promotion_count == 1
     assert state.primary_write_chunk_count == 0
@@ -416,7 +392,6 @@ def test_metrics_promotion_chunk_count_at_acquisition():
     tracker.on_job_finished(
         job,
         JobResult(job_id=1, success=True, transfer_time=0.1),
-        is_job_materialized=job.transfer_job.is_materialized(),
     )
     tracker.assert_idle()
 
@@ -432,9 +407,7 @@ def test_promotion_chunk_count_nets_to_zero_after_finish():
     job = JobMetadata(
         create_promotion_job(1, keys, [0, 1, 2], tracker=tracker, tier_idx=0), 0
     )
-    tracker.on_job_registered(
-        job, is_job_materialized=job.transfer_job.is_materialized()
-    )
+    tracker.on_job_registered(job)
     job.transfer_job.materialize()
     assert job.transfer_job.is_materialized()
     assert tracker._tier_states[0].primary_write_chunk_count == 3
@@ -442,6 +415,5 @@ def test_promotion_chunk_count_nets_to_zero_after_finish():
     tracker.on_job_finished(
         job,
         JobResult(job_id=1, success=True),
-        is_job_materialized=job.transfer_job.is_materialized(),
     )
     tracker.assert_idle()
