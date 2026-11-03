@@ -3431,8 +3431,11 @@ async fn non_stream_chat_returns_json_response() {
             "expected explicit null `{key}`: {json}"
         );
     }
-    // ...except `tool_calls`, which Python pops from the payload when empty.
-    assert!(!message.contains_key("tool_calls"), "{json}");
+    // ...except `tool_calls`, which Python pops from the payload when empty,
+    // and the fields the OpenAI spec types as non-nullable.
+    for (object, key) in [(message, "tool_calls"), (usage, "prompt_tokens_details")] {
+        assert!(!object.contains_key(key), "expected no `{key}`: {json}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5163,6 +5166,8 @@ async fn non_stream_completions_return_json_response() {
             "expected explicit null `{key}`: {json}"
         );
     }
+    // The OpenAI spec types prompt token details as an object, not nullable.
+    assert!(!usage.contains_key("prompt_tokens_details"), "{json}");
 }
 
 /// With `--enable-prompt-tokens-details`, chat and completions report the
