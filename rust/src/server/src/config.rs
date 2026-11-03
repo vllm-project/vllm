@@ -81,6 +81,9 @@ pub struct ApiServerOptions {
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
     pub enable_tokenizer_info_endpoint: bool,
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
@@ -136,6 +139,26 @@ impl OutputLogConfig {
     /// Whether each streamed delta is logged.
     pub fn logs_deltas(self) -> bool {
         self.outputs.logs_deltas()
+    }
+}
+
+/// HTTP access log settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccessLogConfig {
+    /// Whether to log one line per HTTP response (`--disable-access-log`
+    /// turns it off).
+    pub enabled: bool,
+    /// Request paths whose responses are not logged, matched exactly against
+    /// the path without its query string (`--disable-access-log-for-endpoints`).
+    pub excluded_paths: Vec<String>,
+}
+
+impl Default for AccessLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            excluded_paths: Vec::new(),
+        }
     }
 }
 
@@ -357,9 +380,14 @@ pub struct Config {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// HTTP access log settings.
+    pub access_log: AccessLogConfig,
     /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
     /// listener.
     pub tls: Option<TlsConfig>,
+    /// Path prefix (`--root-path`) under which every route is also served,
+    /// for a server behind a path-based routing proxy. Never empty.
+    pub root_path: Option<String>,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
