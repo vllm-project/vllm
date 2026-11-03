@@ -415,15 +415,17 @@ def msa_cutlass_sparse_decode(
     v_scale_float: float,
     k_scale: torch.Tensor | None = None,
     v_scale: torch.Tensor | None = None,
+    kv_slots: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Run CUTLASS sparse decode with metadata prepared by the MSA builder.
 
     NVFP4 caches are uint8 head-slot pages (see `nvfp4_kv_cache_views`) and
-    take the device global scales `k_scale`/`v_scale`.
+    take the device global scales `k_scale`/`v_scale`; `kv_slots` may
+    pass their `nvfp4_kv_cache_slots` precomputed.
     """
     if kv_cache.dtype == torch.uint8:
         assert k_scale is not None and v_scale is not None
-        key, value = nvfp4_kv_cache_slots(kv_cache)
+        key, value = nvfp4_kv_cache_slots(kv_cache) if kv_slots is None else kv_slots
         k_scale_arg: float | torch.Tensor = k_scale
         v_scale_arg: float | torch.Tensor = v_scale
     else:

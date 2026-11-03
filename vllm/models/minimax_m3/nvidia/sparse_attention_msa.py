@@ -42,7 +42,7 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     MSACutlassDecodeMetadata,
     MSACutlassDecodePlanCache,
     msa_cutlass_sparse_decode,
-    nvfp4_kv_cache_views,
+    nvfp4_kv_cache_slots,
     prepare_decode_metadata,
     should_prepare_decode_metadata,
     supports_cutlass_sparse_decode,
@@ -512,6 +512,23 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
             get_current_vllm_config().scheduler_config.max_num_batched_tokens,
             self.num_heads,
         )
+        # (kv_cache, K/V slots, data/scale views): the layer's cache tensor is
+        # fixed, so its views are built once instead of on every forward.
+        self._kv_views: tuple | None = None
+
+    def _kv_cache_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor],
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    ]:
+        cached = self._kv_views
+        if cached is None or cached[0] is not kv_cache:
+            from vllm.third_party.fmha_sm100.nvfp4_kv import nvfp4_head_slot_views
+
+            slots = nvfp4_kv_cache_slots(kv_cache)
+            cached = self._kv_views = (kv_cache, slots, nvfp4_head_slot_views(*slots))
+        return cached[1], cached[2]
 
     def forward(
         self,
@@ -570,6 +587,7 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
                 v_scale_float=getattr(layer, "_v_scale_float", 1.0),
                 k_scale=k_scale,
                 v_scale=v_scale,
+                kv_slots=self._kv_cache_views(kv_cache)[0],
             )
 
         if main_md.num_prefills > 0:
@@ -578,7 +596,7 @@ class MiniMaxM3SparseMSANvfp4Impl(MiniMaxM3SparseMSABaseImpl):
             p = main_md.prefill
             assert p is not None
             k2q_row_ptr, _, schedule = self._build_prefill_csr(topk, nd, num_tokens, p)
-            k_data, k_sf, v_data, v_sf = nvfp4_kv_cache_views(kv_cache)
+            k_data, k_sf, v_data, v_sf = self._kv_cache_views(kv_cache)[1]
             run_prefill(
                 q_fp8[nd:],
                 (k_data, v_data),
