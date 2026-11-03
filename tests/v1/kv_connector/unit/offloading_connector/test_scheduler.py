@@ -13,6 +13,7 @@ from tests.v1.kv_connector.unit.offloading_connector.test_config import (
     _make_vllm_config,
 )
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
+    MockLoadStoreSpec,
     MockOffloadingSpec,
     generate_store_output,
     to_keys,
@@ -1203,6 +1204,7 @@ def test_partial_lookup_anchor_loads_only_verified_chunks():
         num_external_tokens=28,
     )
     [load_job] = scheduler._current_batch_load_jobs.values()
+    assert isinstance(load_job.src_spec, MockLoadStoreSpec)
     assert [
         (get_offload_group_idx(key), get_offload_block_hash(key))
         for key in load_job.src_spec.offload_keys
@@ -1250,6 +1252,7 @@ def test_partial_lookup_defers_while_anchor_chunk_is_loading():
     _, req_status = _make_anchored_partial_tail_request(
         scheduler, {0: {b"h3", b"h6"}, 1: {b"h6"}}
     )
+    assert scheduler._chunks_being_loaded is not None
     scheduler._chunks_being_loaded.add(req_status.group_states[0].offload_keys[0])
     assert scheduler._lookup(req_status) is None
     assert req_status.partial_tail_boundary is None
@@ -1263,14 +1266,14 @@ def test_partial_lookup_does_not_defer_on_pending_anchor_chunk():
     _, req_status = _make_anchored_partial_tail_request(
         scheduler, {0: {b"h6"}, 1: {b"h6"}}
     )
-    resident = scheduler.manager.lookup.side_effect
+    resident = _as_mock(scheduler.manager.lookup).side_effect
 
     def lookup(key, req_context):
         if get_offload_group_idx(key) == 0 and get_offload_block_hash(key) == b"h3":
             return LookupResult.HIT_PENDING
         return resident(key, req_context)
 
-    scheduler.manager.lookup.side_effect = lookup
+    _as_mock(scheduler.manager.lookup).side_effect = lookup
     assert scheduler._lookup(req_status) == 0
     assert req_status.partial_tail_boundary is None
 
@@ -6851,6 +6854,7 @@ def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
     caches.prefix_cache_retention_interval = 16
     caches.kv_cache_groups[0].is_eagle_group = eagle
     group = caches.kv_cache_groups[1]
+    assert isinstance(group.kv_cache_spec, MambaSpec)
     group.kv_cache_spec = replace(
         group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
     )
@@ -6873,7 +6877,7 @@ def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    connector.scheduler.manager.lookup.return_value = LookupResult.HIT
+    _as_mock(connector.scheduler.manager.lookup).return_value = LookupResult.HIT
     assert connector.get_num_new_matched_tokens(request, 0) == (
         min(40, len(request.block_hashes) * 4),
         True,
@@ -6895,7 +6899,7 @@ def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
         block_hasher=get_request_block_hasher(4, sha256, lookahead),
     )
     engine.add_request(request)
-    scheduler.manager.prepare_store.side_effect = (
+    _as_mock(scheduler.manager.prepare_store).side_effect = (
         lambda keys, ctx: generate_store_output(keys)
     )
     offered = set()

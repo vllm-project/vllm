@@ -21,6 +21,7 @@ from tests.v1.simple_kv_offload.test_scheduler import (
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -118,10 +119,16 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
     connector = KVConnectorFactory.create_connector(
         config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
     )
-    child = connector.sub_connectors[0].sub_connectors[0]
+    assert isinstance(connector, MultiConnector)
+    nested = connector.sub_connectors[0]
+    assert isinstance(nested, MultiConnector)
+    child = nested.sub_connectors[0]
+    assert isinstance(child, SimpleCPUOffloadConnector)
     expected = num_lookahead if supported else 0
     assert config.num_hash_lookahead_tokens == expected
+    assert config.speculative_config is not None
     assert not config.speculative_config.disable_lookahead_block_hashes
+    assert child.scheduler_manager is not None
     coord = child.scheduler_manager.cpu_coordinator
     assert coord.block_pool.num_hash_lookahead_tokens == expected
     assert coord.drop_eagle_group_ids == (set() if supported else {0})
