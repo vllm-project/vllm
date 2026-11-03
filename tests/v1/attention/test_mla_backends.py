@@ -355,6 +355,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
@@ -362,7 +363,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -371,7 +372,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
