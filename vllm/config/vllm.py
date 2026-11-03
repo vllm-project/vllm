@@ -825,31 +825,27 @@ class VllmConfig:
         return any(shape in table for shape in shapes)
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        if (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and self._uses_breakable_cudagraph_by_default()
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+        if "VLLM_USE_BREAKABLE_CUDAGRAPH" in os.environ:
+            enabled = envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        elif self._uses_breakable_cudagraph_by_default():
+            enabled = True
             logger.info_once(
                 "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
         elif (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and envs.VLLM_BATCH_INVARIANT
+            envs.VLLM_BATCH_INVARIANT
             and self._uses_breakable_cudagraph_for_batch_invariance()
         ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            enabled = True
             logger.info_once(
                 "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
+        else:
+            enabled = False
 
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
-
-        enabled = is_breakable_cudagraph_enabled()
+        self.compilation_config.use_breakable_cudagraph = enabled
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
@@ -2217,7 +2213,7 @@ class VllmConfig:
         ):
             assert (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                or self.compilation_config.use_breakable_cudagraph
             ), (
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "

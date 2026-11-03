@@ -196,7 +196,7 @@ class CudaGraphManager:
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
-            is_breakable_cudagraph_enabled()
+            is_breakable_cudagraph_enabled(self.compilation_config)
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None

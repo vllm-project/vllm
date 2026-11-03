@@ -100,7 +100,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         # Compiled piecewise graphs do not specialize the Python module index.
         if (
             cudagraph_mode.has_piecewise_cudagraphs()
-            and not is_breakable_cudagraph_enabled()
+            and not is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
         ):
             cudagraph_mode = (
                 CUDAGraphMode.FULL_DECODE_ONLY
