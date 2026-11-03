@@ -1198,11 +1198,13 @@ class SupportsFP32LogitsGather(Protocol):
     """The interface for models whose `compute_logits` returns the output of
     their `LogitsProcessor` unchanged.
 
-    On a step whose logits the sampler would cast to FP32 anyway, the TP
-    gather of such a model may write FP32 directly (exact, and the sampler
-    skips its copy). A model that post-processes the processor's output
-    (e.g. a soft cap or multiplier in `compute_logits`) must not opt in: those
-    ops would then run on FP32 rather than head-dtype logits.
+    The Model Runner V2 gathers such a model's vocab-parallel logits with one
+    fused pass (see `ForwardContext.logits_gather_dtype`), which writes FP32
+    directly on a step whose sampler would copy them to FP32 anyway (exact,
+    and the sampler skips its copy). A model that post-processes the
+    processor's output (e.g. a soft cap or multiplier in `compute_logits`)
+    must not opt in: those ops would then run on FP32 rather than head-dtype
+    logits.
     """
 
     supports_fp32_logits_gather: ClassVar[Literal[True]] = True

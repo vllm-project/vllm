@@ -167,6 +167,13 @@ class ForwardContext:
     # If True, bypass the compiled model call, e.g. by using .forward() directly
     skip_compiled: bool = False
 
+    # Set by the model runner around the logits of a model that opts in with
+    # SupportsFP32LogitsGather: LogitsProcessor then gathers vocab-parallel
+    # logits with one fused pass, in FP32 if this is torch.float32 (and
+    # nothing runs on them after the gather), else in the head's dtype.
+    # None keeps the unfused gather.
+    logits_gather_dtype: torch.dtype | None = None
+
     # For torch.compile cold start times, we need to avoid hard-coding
     # any strings into the graph. Right now, the vllm.moe_forward
     # and vllm.moe_forward_shared custom operators hard-code strings into
@@ -238,6 +245,7 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    logits_gather_dtype: torch.dtype | None = None,
 ):
     if vllm_config.compilation_config.fast_moe_cold_start:
         all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
@@ -256,6 +264,7 @@ def create_forward_context(
         skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
         is_padding=is_padding,
+        logits_gather_dtype=logits_gather_dtype,
     )
 
 
@@ -286,6 +295,7 @@ def set_forward_context(
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
     is_padding: torch.Tensor | None = None,
+    logits_gather_dtype: torch.dtype | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -353,6 +363,7 @@ def set_forward_context(
         additional_kwargs,
         skip_compiled,
         is_padding=is_padding,
+        logits_gather_dtype=logits_gather_dtype,
     )
 
     try:

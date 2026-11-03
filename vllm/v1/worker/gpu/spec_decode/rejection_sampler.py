@@ -444,7 +444,7 @@ class RejectionSampler:
         logits_writable: bool = False,
     ) -> SamplerOutput:
         """``logits_writable``: verification may process ``logits`` in place
-        (see ``Sampler.can_process_logits_in_place``)."""
+        (see ``wants_fp32_logits``)."""
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
