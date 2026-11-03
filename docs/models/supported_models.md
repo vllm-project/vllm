@@ -199,6 +199,7 @@ Some model architectures are supported via vLLM plugins. These plugins extend vL
 | ------------ | ------ | ----------------- |
 | `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
 | `Florence2ForConditionalGeneration` | Florence-2 | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+| `Nemotron3DiarizationForAudioFrameClassification` | NVIDIA Nemotron-3-Diarization | [vllm-nemotron-diarization-plugin](https://github.com/Alex-Wengg/vllm-nemotron-diarization-plugin) |
 | `Nemotron3_5AsrForRNNT` | NVIDIA Nemotron 3.5 ASR | [vllm-nemotron-asr-plugin](https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin) |
 | `ParakeetForTDT` | NVIDIA Parakeet TDT | [vllm-parakeet-plugin](https://github.com/Alex-Wengg/vllm-parakeet-plugin) |
 
