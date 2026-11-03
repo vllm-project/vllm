@@ -862,8 +862,9 @@ def test_mamba_ssd_dispatch_preserves_outputs_cache_and_checkpoint_resume(
             cache[1:2].double(), expected_final, atol=0.05, rtol=0.05
         )
 
-    # A smaller batch with no cached state, written into occupied cache slots.
-    cold_lengths = (129, 5)
+    # A batch shorter than one 128-token chunk with no cached state, written
+    # into occupied cache slots.
+    cold_lengths = (90, 5)
     cold_tokens = sum(cold_lengths)
     cold_slots = indices.new_tensor([3, 6])
     attn_metadata = metadata(cold_lengths, cold_slots, has_initial.new_zeros(2), [0, 0])
