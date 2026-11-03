@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     unpack_cols,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -83,9 +84,8 @@ class MarlinLinearKernel(MPLinearKernel):
 
         if c.act_type == torch.float8_e4m3fn:
             ops.marlin_int4_fp8_preprocess(getattr(layer, self.w_q_name), inplace=True)
-            getattr(layer, self.w_s_name).data = (
-                getattr(layer, self.w_s_name).data * 512
-            )
+            # in place: a new tensor would move the scales on a direct reload
+            getattr(layer, self.w_s_name).data.mul_(512)
 
         size_k, size_n = c.partition_weight_shape
         padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
@@ -134,10 +134,7 @@ class MarlinLinearKernel(MPLinearKernel):
 
             if c.act_type == torch.int8 and num_groups > 1:
                 x.data, input_global_scale = marlin_act_int8_process_scales(x.data)
-                layer.register_parameter(
-                    "input_global_scale",
-                    torch.nn.Parameter(input_global_scale, requires_grad=False),
-                )
+                replace_parameter(layer, "input_global_scale", input_global_scale)
             else:
                 layer.input_global_scale = None
             return x
@@ -169,13 +166,18 @@ class MarlinLinearKernel(MPLinearKernel):
                 ),
             )
         else:
-            setattr(layer, self.w_zp_name, marlin_make_empty(device))
+            # Marlin takes an empty zp; a loaded unused one keeps its data.
+            self._retire_unused_zp(layer)
+            self.w_zp_name = "w_zp"
+            replace_parameter(layer, self.w_zp_name, marlin_make_empty(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
         if hasattr(layer, "bias") and layer.bias is not None:
-            layer.bias.data = marlin_permute_bias(
-                marlin_pad_dim(layer.bias, size_n, padded_n)
+            replace_parameter(
+                layer,
+                "bias",
+                marlin_permute_bias(marlin_pad_dim(layer.bias, size_n, padded_n)),
             )
 
     def apply_weights(
