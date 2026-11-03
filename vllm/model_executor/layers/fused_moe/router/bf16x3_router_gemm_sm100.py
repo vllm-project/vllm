@@ -527,8 +527,12 @@ _TILE_CONFIG_OVERRIDES = {
 }
 
 
+@cache
 def _pick_tile_config(N: int, K: int, M: int, num_sms: int) -> tuple[int, int]:
-    """Return (BN, split_k): tuned table mid-range, generic rule otherwise."""
+    """Return (BN, split_k): tuned table mid-range, generic rule otherwise.
+
+    Cached: it runs on every router call and N takes at most
+    max_num_batched_tokens values."""
     k_tiles = math_utils.cdiv(K, 64)
 
     if 32 < N <= 512:
@@ -606,15 +610,18 @@ def warmup_bf16x3_router_gemm(
     return configs
 
 
+@cache
+def _num_sms(device_index: int | None) -> int:
+    return torch.cuda.get_device_properties(device_index).multi_processor_count
+
+
 def _bf16x3_router_gemm(X: torch.Tensor, W: torch.Tensor) -> torch.Tensor:
     """Return ``X @ W.T`` using the SM100 BF16x3 router GEMM kernel."""
     N, K = X.shape
     M, _ = W.shape
     if N == 0:
         return X.new_empty((N, M), dtype=torch.float32)
-    num_sms = torch.cuda.get_device_properties(X.device).multi_processor_count
-
-    BN, split_k = _pick_tile_config(N, K, M, num_sms)
+    BN, split_k = _pick_tile_config(N, K, M, _num_sms(X.device.index))
 
     partials = X.new_empty(split_k, N, M, dtype=torch.float32)
     Sm100BF16x3RouterGemm.compile(K, BN)(X, W, partials, split_k)
