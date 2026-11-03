@@ -79,6 +79,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_model_config.hf_config, "dspark_draft_topk", None
         )
         self._markov_candidate_ids: torch.Tensor | None = None
+        self._markov_candidate_biases: torch.Tensor | None = None
 
         self.use_confidence_head: bool = False
 
@@ -120,7 +121,7 @@ class DSparkSpeculator(DFlashSpeculator):
     def _init_markov_candidates(
         self, model: torch.nn.Module, chunk_size: int = 512
     ) -> None:
-        """Build a target-token to draft-candidate table with bounded scratch space."""
+        """Cache candidate IDs and scaled biases with bounded scratch space."""
         assert self._draft_topk is not None
         if self._draft_topk == model.logits_processor.org_vocab_size:
             self._draft_topk = None
@@ -132,9 +133,14 @@ class DSparkSpeculator(DFlashSpeculator):
             end = min(start + chunk_size, self.vocab_size)
             token_ids = torch.arange(start, end, device=self.device)
             bias = model.markov_bias(model.markov_embed(token_ids))
-            self._markov_candidate_ids[start:end] = bias.topk(
-                self._draft_topk, dim=-1
-            ).indices
+            values, indices = bias.topk(self._draft_topk, dim=-1)
+            if start == 0:
+                self._markov_candidate_biases = values.new_empty(
+                    self._markov_candidate_ids.shape
+                )
+            assert self._markov_candidate_biases is not None
+            self._markov_candidate_ids[start:end] = indices
+            self._markov_candidate_biases[start:end] = values
 
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
@@ -255,6 +261,7 @@ class DSparkSpeculator(DFlashSpeculator):
         """
         assert self._draft_topk is not None
         assert self._markov_candidate_ids is not None
+        assert self._markov_candidate_biases is not None
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
@@ -280,9 +287,9 @@ class DSparkSpeculator(DFlashSpeculator):
                 base_values[:, i],
                 draft_indices[:, i],
             )
-            # Separate scatters avoid concurrent writes for overlapping IDs.
-            logits_i = self.model.apply_markov_bias_gathered(
-                markov_embed, logits_i, bias_values, bias_indices
+            # Cached biases already include the logits processor's scale.
+            logits_i.scatter_(
+                1, bias_indices, bias_values + self._markov_candidate_biases[prev]
             )
             draft_sampled_i = self._sample_logits(
                 logits_i, idx_map[:, i], sample_pos[:, i], i

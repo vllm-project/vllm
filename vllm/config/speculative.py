@@ -642,7 +642,8 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection on the union
     of the top-k base-logit and top-k Markov-bias candidates. Markov candidate
-    IDs are computed once at model load, storing k IDs per target token.
+    IDs and biases are computed once at model load, storing k IDs and bias
+    values per target token.
     Unset keeps the full vocabulary.
     Requires draft tensor parallel size 1."""
 
