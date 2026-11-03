@@ -218,6 +218,9 @@ def uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.
     view is destroyed, which can be after this module's globals are cleared at
     interpreter exit. Its deleter is NULL, so nothing calls back into Python.
     """
+    driver = get_vmm_driver()
+    if (tensor := driver.uint8_tensor(ptr, num_bytes, device_index)) is not None:
+        return tensor
     managed_size = ctypes.sizeof(_DLManagedTensor)
     addr = _malloc(managed_size + ctypes.sizeof(ctypes.c_int64))
     if not addr:
@@ -228,7 +231,7 @@ def uint8_tensor_from_ptr(ptr: int, num_bytes: int, device_index: int) -> torch.
 
     managed = _DLManagedTensor.from_address(addr)
     managed.dl_tensor.data = ctypes.c_void_p(ptr)
-    device_type = get_vmm_driver().dlpack_device_type
+    device_type = driver.dlpack_device_type
     managed.dl_tensor.device = _DLDevice(device_type, device_index)
     managed.dl_tensor.ndim = 1
     managed.dl_tensor.dtype = _DLDataType(_K_DL_UINT, _UINT8_BITS, 1)
@@ -275,8 +278,11 @@ class ExtensibleTensor:
         if device is None:
             device = torch.accelerator.current_device_index()
         dev = device if isinstance(device, torch.device) else torch.device(device)
-        if dev.type != "cuda":
-            raise ValueError(f"ExtensibleTensor requires a cuda device, got {dev}.")
+        if dev.type not in ("cuda", "xpu"):
+            raise ValueError(
+                f"ExtensibleTensor requires a cuda or xpu device, got {dev}."
+            )
+        self._device_type: str = dev.type
         self._device_index: int = (
             dev.index
             if dev.index is not None
@@ -413,7 +419,7 @@ class ExtensibleTensor:
 
     @property
     def device(self) -> torch.device:
-        return torch.device("cuda", self._device_index)
+        return torch.device(self._device_type, self._device_index)
 
     def free(self) -> None:
         self._buffer.free()

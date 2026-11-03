@@ -391,7 +391,7 @@ class CacheConfig:
     """Reserve the KV cache address range with device virtual memory and commit
     physical pages after warmup, so the cache is sized from the memory actually
     free after CUDA graph capture rather than from a profiling estimate. If
-    unspecified, enabled on CUDA and ROCm with the V2 model runner unless
+    unspecified, enabled on CUDA, ROCm and XPU with the V2 model runner unless
     kv_cache_memory_bytes is set; falls back to estimate-based sizing where the
     driver lacks VMM support. Explicitly requesting it where unsupported is an
     error."""

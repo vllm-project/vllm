@@ -12,8 +12,12 @@ from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 
 # Each test runs in its own process: touching the driver here would initialize
-# CUDA in the pytest parent and break later fork-based tests in the shard.
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+# the device in the pytest parent and break later fork-based tests in the shard.
+DEVICE = "xpu" if torch.xpu.is_available() else "cuda"
+pytestmark = pytest.mark.skipif(
+    not (torch.cuda.is_available() or torch.xpu.is_available()),
+    reason="requires CUDA or XPU",
+)
 
 
 def _skip_unless_vmm() -> None:
@@ -24,7 +28,7 @@ def _skip_unless_vmm() -> None:
 @create_new_process_for_each_test("spawn")
 def test_extensible_tensor_grows_without_moving() -> None:
     _skip_unless_vmm()
-    buffer = ExtensibleTensor(4096, device="cuda")
+    buffer = ExtensibleTensor(4096, device=DEVICE)
     try:
         base_ptr = buffer.base_ptr
         buffer.resize_per_segment_(1024)
@@ -65,7 +69,7 @@ def test_views_survive_shared_pycapsule_new_restype_change() -> None:
 @create_new_process_for_each_test("spawn")
 def test_extensible_tensor_rejects_shrink_and_overflow() -> None:
     _skip_unless_vmm()
-    buffer = ExtensibleTensor(1024, device="cuda")
+    buffer = ExtensibleTensor(1024, device=DEVICE)
     try:
         buffer.resize_per_segment_(512)
         with pytest.raises(ValueError, match="grow-only"):
@@ -85,7 +89,7 @@ def test_segments_grow_in_lockstep_and_zero_new() -> None:
     committed range of each segment is zeroed with `zero_new=True` while old
     bytes are preserved.
     """
-    et = ExtensibleTensor(max_num_bytes=8192, device="cuda", num_segments=2)
+    et = ExtensibleTensor(max_num_bytes=8192, device=DEVICE, num_segments=2)
     try:
         assert et.num_segments == 2
         assert et.segment_capacity_bytes == 4096
@@ -98,7 +102,7 @@ def test_segments_grow_in_lockstep_and_zero_new() -> None:
         assert torch.count_nonzero(fv[:256]) == 0
         assert torch.count_nonzero(fv[4096 : 4096 + 256]) == 0
 
-        pattern_a = torch.arange(256, device="cuda", dtype=torch.uint8)
+        pattern_a = torch.arange(256, device=DEVICE, dtype=torch.uint8)
         pattern_b = 255 - pattern_a
         fv[:256].copy_(pattern_a)
         fv[4096 : 4096 + 256].copy_(pattern_b)
@@ -129,12 +133,12 @@ def test_segments_at_granularity_scale() -> None:
     the first commit of one segment and a later commit of the other -- it must
     be mapped exactly once.
     """
-    probe = ExtensibleTensor(max_num_bytes=1, device="cuda")
+    probe = ExtensibleTensor(max_num_bytes=1, device=DEVICE)
     granularity = probe.granularity
     assert probe.capacity_bytes == granularity
     probe.free()
     max_num_bytes = 3 * granularity
-    et = ExtensibleTensor(max_num_bytes=max_num_bytes, device="cuda", num_segments=2)
+    et = ExtensibleTensor(max_num_bytes=max_num_bytes, device=DEVICE, num_segments=2)
     try:
         seg = et.segment_capacity_bytes
         assert seg == max_num_bytes // 2
@@ -162,7 +166,7 @@ def test_unequal_segments_grow_independently() -> None:
     """Segments of different capacities commit different byte counts, each a
     prefix of its own range, and expose their own views."""
     et = ExtensibleTensor(
-        max_num_bytes=12288, device="cuda", segment_capacities=[4096, 8192]
+        max_num_bytes=12288, device=DEVICE, segment_capacities=[4096, 8192]
     )
     try:
         assert et.num_segments == 2
@@ -184,16 +188,16 @@ def test_unequal_segments_grow_independently() -> None:
         et.free()
 
     with pytest.raises(ValueError, match="sum to"):
-        ExtensibleTensor(max_num_bytes=100, device="cuda", segment_capacities=[50])
+        ExtensibleTensor(max_num_bytes=100, device=DEVICE, segment_capacities=[50])
 
 
 @create_new_process_for_each_test("spawn")
 def test_invalid_usage_raises() -> None:
     _skip_unless_vmm()
     with pytest.raises(ValueError):
-        ExtensibleTensor(max_num_bytes=100, device="cuda", num_segments=3)
+        ExtensibleTensor(max_num_bytes=100, device=DEVICE, num_segments=3)
 
-    et = ExtensibleTensor(max_num_bytes=8192, device="cuda", num_segments=2)
+    et = ExtensibleTensor(max_num_bytes=8192, device=DEVICE, num_segments=2)
     try:
         with pytest.raises(IndexError):
             et.segment_view(2)
@@ -211,7 +215,7 @@ def test_release_physical_keeps_addresses() -> None:
     _skip_unless_vmm()
     """Releasing physical pages keeps the reservation; recommitting maps fresh
     zeroed pages under the same addresses (the sleep/wake contract)."""
-    et = ExtensibleTensor(max_num_bytes=8192, device="cuda", num_segments=2)
+    et = ExtensibleTensor(max_num_bytes=8192, device=DEVICE, num_segments=2)
     try:
         et.resize_per_segment_(1024, zero_new=True)
         fv = et.full_view()
@@ -263,10 +267,10 @@ def test_failed_commit_leaves_no_inaccessible_granules() -> None:
     """A commit that maps several runs and fails part-way must have granted
     access to every run it did map; later commits skip mapped granules, so an
     unmapped-but-recorded or mapped-but-inaccessible granule would fault."""
-    et = ExtensibleTensor(max_num_bytes=1, device="cuda")
+    et = ExtensibleTensor(max_num_bytes=1, device=DEVICE)
     g = et.granularity
     et.free()
-    et = ExtensibleTensor(max_num_bytes=4 * g, device="cuda")
+    et = ExtensibleTensor(max_num_bytes=4 * g, device=DEVICE)
     try:
         buffer = et._buffer
         buffer.ensure_committed_range(g, 2 * g)
@@ -296,10 +300,10 @@ def test_views_survive_interpreter_teardown() -> None:
     _skip_unless_vmm()
     """Views handed to torch through DLPack may be destroyed after this
     module's globals are cleared at exit; that must not call freed memory."""
-    script = """
+    script = f"""
 import sys, torch
 from vllm.utils.extensible_tensor import ExtensibleTensor
-et = ExtensibleTensor(4096, device="cuda")
+et = ExtensibleTensor(4096, device={DEVICE!r})
 et.resize_per_segment_(1024)
 # Held by modules imported before the library, so destroyed after it.
 torch._extkv_test_view = et.full_view()
