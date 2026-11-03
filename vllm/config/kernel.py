@@ -305,8 +305,10 @@ class KernelConfig:
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
     parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
-    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
-    deployment that cannot run it is refused at startup."""
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4;
+    Qwen3.5 / Qwen3.6 MoE 35B-A3B at TP2 on two Xe2 GPUs, for decode steps of
+    1 / 2 / 4 / 8 requests). A deployment that cannot run it is refused at
+    startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:

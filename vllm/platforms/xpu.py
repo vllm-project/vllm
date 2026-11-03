@@ -458,6 +458,20 @@ class XPUPlatform(Platform):
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
+        # Mono decode (--monokernel, vllm/models/qwen3_5/xpu/specialized_decode):
+        # the small H2D input copies of the next step are issued while the
+        # decode graph still runs. Level Zero performs such copies on the CPU
+        # through a locked pointer and first waits for the in-order queue to
+        # drain, which serializes host input preparation with the whole
+        # forward. Keep them on the GPU copy path (inherited by the worker
+        # processes; an explicit setting wins). Fixed upstream in
+        # intel/compute-runtime eb81cf6 (NEO-19860, "gate cpu copy on in-order
+        # counter completion"), which is not in a release yet; drop these debug
+        # keys once the installed driver contains that commit.
+        if vllm_config.kernel_config.monokernel:
+            os.environ.setdefault("NEOReadDebugKeys", "1")
+            os.environ.setdefault("ExperimentalCopyThroughLock", "0")
+
         # spawn is the only supported multiprocessing method on XPU
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
