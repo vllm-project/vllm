@@ -37,39 +37,6 @@ memory consumption is therefore topology- and implementation-dependent. The
 realized capacity may be slightly smaller because the budget is rounded down
 to complete host blocks.
 
-Large pools can instead be backed by huge pages by setting `host_pool_dir` on
-`HiSparseConnector` to a hugetlbfs mount (for example a Kubernetes
-`medium: HugePages-1Gi` emptyDir). This cuts the number of pages that CUDA and
-RDMA registration must pin by orders of magnitude. The huge pages must be
-reserved up front (`vm.nr_hugepages` or the pod's `hugepages-<size>`
-resource); startup fails with a clear error if they are not.
-
-For transparent huge pages (THP), point `host_pool_dir` at a dedicated tmpfs
-mounted with `huge=always,mpol=interleave`. Prepare it through the container
-runtime or, with Linux mount permissions, before starting vLLM:
-
-```bash
-mkdir -p /run/vllm-hisparse
-mount -t tmpfs -o size=1100G,huge=always,mpol=interleave,mode=0700 \
-    tmpfs /run/vllm-hisparse
-```
-
-Configure the connector, including when nested in `MultiConnector`:
-
-```json
-{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":1024,"host_pool_dir":"/run/vllm-hisparse"}}
-```
-
-HiSparse requests THP before populating the mapping and aligns shared-pool
-prefault shards to the kernel's THP size. The logical capacity and CUDA
-registration boundaries stay unchanged. THP allocation is best effort; it
-does not require reserved hugetlb pages. Tmpfs capacity, ordinary RAM and
-cgroup headroom checks still apply. Leave room for weights and other engine
-allocations, and make the same directory available to every local TP worker.
-Shared pools default to `/dev/shm`; private pools keep their existing
-allocation. No launcher or engine mount operation is needed. See Linux's
-[tmpfs mount policies](https://docs.kernel.org/filesystems/tmpfs.html).
-
 Startup logs report two concurrency bounds at `max_model_len`. The generic
 `Maximum concurrency` line charges each request its full admission footprint,
 including the in-flight window of every resident group. The `HiSparse
@@ -110,6 +77,28 @@ reading it. Other executor and parallel layouts retain private per-rank pools.
 The shared layout backs the per-replica logical capacity with one physical pool;
 the private layout allocates one physical pool per rank. Physical pool size
 includes block-stride alignment.
+
+### Transparent huge pages for shared host pools
+
+Large shared host pools can take a long time to register and unregister with
+CUDA in every TP worker. To reduce this cost, configure the deployment's
+`/dev/shm` tmpfs to use transparent huge pages (THP) before starting vLLM.
+For example, with mount permissions inside the container's mount namespace:
+
+```bash
+mount -o remount,size=1100G,huge=always,mpol=interleave /dev/shm
+```
+
+This example leaves tmpfs headroom for a 1024 GiB host pool. Provision enough
+RAM and container memory for the pool, weights, and other engine allocations.
+The existing shared-pool allocator uses this mount directly; no connector
+configuration change or reserved hugetlb pages are needed. Private per-rank
+pools do not use `/dev/shm` and do not benefit from this setting.
+
+The mount policy applies to all files on that `/dev/shm` mount. THP allocation
+is best effort, and a system-wide `shmem_enabled=deny` overrides it. Faster
+unregistration can still exceed the default worker shutdown grace period.
+See Linux's [tmpfs mount policies](https://docs.kernel.org/filesystems/tmpfs.html).
 
 ## Code boundary
 
