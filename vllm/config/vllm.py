@@ -3386,8 +3386,8 @@ class VllmConfig:
             else self.kv_transfer_config.kv_cache_access()
         )
         unsupported = None
-        if not current_platform.is_cuda_alike():
-            unsupported = "it is only supported on CUDA and ROCm"
+        if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            unsupported = "it is only supported on CUDA, ROCm and XPU"
         elif cache_config.kv_cache_memory_bytes is not None:
             unsupported = (
                 "it sizes the KV cache from measured memory, which "
@@ -3416,13 +3416,16 @@ class VllmConfig:
                 "custom_mem_pool allocates the KV cache from a connector's "
                 "memory pool, which a driver-mapped cache cannot use"
             )
-        elif current_platform.is_rocm() and KVCacheAccess.REGISTERS in kv_cache_access:
-            # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
-            # hsa_amd_portable_export_dmabuf accepts VMM ranges.
+        elif (
+            current_platform.is_rocm() or current_platform.is_xpu()
+        ) and KVCacheAccess.REGISTERS in kv_cache_access:
+            # TODO: drop for ROCm once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM
+            # and hsa_amd_portable_export_dmabuf accepts VMM ranges.
+            platform_name = "ROCm" if current_platform.is_rocm() else "XPU"
             unsupported = (
-                "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which connectors that register the KV cache (e.g. NIXL, Mooncake, "
-                "MoRIIO, UMBP) require"
+                f"on {platform_name}, UCX and RDMA cannot yet register "
+                "driver-mapped memory, which connectors that register the KV "
+                "cache (e.g. NIXL, Mooncake, MoRIIO, UMBP) require"
             )
         exports_fd = KVCacheAccess.EXPORTS_FD in kv_cache_access
         if exports_fd and (requested is False or unsupported is not None):
