@@ -51,7 +51,8 @@ class CPUWorker(Worker):
         # after fix
         if cpu_core.numa_node not in allowed_memory_nodes:
             logger.warning(
-                "Node %s is not in available memory nodes %s. Checking the full cpu set ...",
+                "Node %s is not in available memory nodes %s."
+                "Checking the full cpu set ...",
                 cpu_core.numa_node,
                 allowed_memory_nodes,
             )

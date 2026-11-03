@@ -370,7 +370,8 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         lscpu_output, object_hook=LogicalCPUInfo.json_decoder
     )["cpus"]
 
-    # Using hwloc output instead when memory nodes are specified by the env var CPU_VISIBLE_MEMORY_NODES
+    # Using hwloc output instead when memory nodes are specified by
+    # the env var CPU_VISIBLE_MEMORY_NODES
     if (
         "VLLM_CPU_SIM_MULTI_NUMA" not in os.environ
         and os.environ.get(DEVICE_CONTROL_ENV_VAR)
@@ -380,11 +381,13 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         root = ET.fromstring(lstopo_output)
         cpu_list = parse_hwloc_to_cpu_list(root)
         if cpu_list["cpus"]:
-            cpu_list = json.dumps(cpu_list)
-            # Overriding lscpu output when lstopo is available and env var is specified.
-            # A worker around for NUMA systems where some numa nodes don't have cpu cores assigned
+            cpu_list_json = json.dumps(cpu_list)
+            # Overriding lscpu output when hwloc-ls (same as lstopo)
+            # is available and env var is specified.
+            # A workaround for NUMA systems where some numa nodes
+            # don't have assigned cpu_cores.
             logical_cpu_list = json.loads(
-                cpu_list, object_hook=LogicalCPUInfo.json_decoder
+                cpu_list_json, object_hook=LogicalCPUInfo.json_decoder
             )["cpus"]
 
     # Filter CPUs with invalid attributes (only require id, core, node)
@@ -400,7 +403,7 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
     return logical_cpu_list
 
 
-def parse_hwloc_to_cpu_list(root_element):
+def parse_hwloc_to_cpu_list(root_element: ET.Element) -> dict:
     cpu_list = []
     parents = {
         child: obj
