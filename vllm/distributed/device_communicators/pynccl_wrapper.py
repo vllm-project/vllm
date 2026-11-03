@@ -160,7 +160,9 @@ class ncclRedOpTypeEnum:
 
     @classmethod
     def from_torch(cls, op: ReduceOp) -> int:
-        if op == ReduceOp.SUM:
+        # SUM first, by identity: it is every all-reduce's op, and the
+        # equality checks below go through pybind on each call.
+        if op is ReduceOp.SUM or op == ReduceOp.SUM:
             return cls.ncclSum
         if op == ReduceOp.PRODUCT:
             return cls.ncclProd

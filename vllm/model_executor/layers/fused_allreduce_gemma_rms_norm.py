@@ -14,6 +14,8 @@ oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
 numerically identical to the unfused model path.
 """
 
+import functools
+
 import torch
 
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -53,16 +55,19 @@ except (ImportError, AttributeError):
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 
+@functools.cache
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
-    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
+    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``.
+
+    Cached: it runs before every all-reduce + norm, and the budget depends only
+    on the arguments and the device."""
     from vllm.config.compilation import PassConfig
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
     if not max_size_mb:
         return None
-    element_size = torch.tensor([], dtype=dtype).element_size()
-    return int(max_size_mb * MiB) // (hidden_size * element_size)
+    return int(max_size_mb * MiB) // (hidden_size * dtype.itemsize)
 
 
 def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
