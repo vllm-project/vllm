@@ -44,7 +44,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
@@ -320,7 +320,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             "AMXMLAImpl only supports an unquantized (bf16) KV cache; fp8 "
             "KV cache for CPU MLA is not yet implemented."
         )
-        ops.amx_mla_concat_and_cache(
+        cpu_ops.amx_mla_concat_and_cache(
             kv_c_normed, k_pe.squeeze(1), kv_cache, slot_mapping.flatten()
         )
 
@@ -365,7 +365,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             device=q.device,
         )
 
-        ops.cpu_mla_decode(
+        cpu_ops.cpu_mla_decode(
             q,
             kv_cache_flat,
             v_buffer,
@@ -418,7 +418,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ql_nope = torch.empty(
             num_tokens, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
-        ops.bmm_cpu(
+        cpu_ops.bmm_cpu(
             ql_nope.transpose(0, 1), q_nope_t, self._w_uk_packed, True, self._w_scale
         )
         mqa_q = torch.cat([ql_nope, q_pe], dim=-1)
@@ -446,7 +446,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_out = torch.empty(
             num_tokens, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
-        ops.cpu_mla_extend(
+        cpu_ops.cpu_mla_extend(
             mqa_q,
             k_extend,
             v_extend,
@@ -474,4 +474,4 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         output_view = output.view(num_tokens, num_heads, self.v_head_dim).transpose(
             0, 1
         )
-        ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, self._w_scale)
+        cpu_ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, self._w_scale)

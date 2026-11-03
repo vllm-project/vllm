@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm._custom_ops import (
+from vllm._cpu_ops import (
     cpu_fused_moe,
     cpu_fused_moe_int8,
     cpu_prepack_moe_weight,

@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     _upcast_e8m0_to_fp32,
@@ -133,7 +133,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             )
 
         weight = getattr(layer, w_q_name)
-        self.dnnl_handler = ops.create_onednn_scaled_mm(
+        self.dnnl_handler = cpu_ops.create_onednn_scaled_mm(
             weight,
             getattr(layer, w_s_name),
             torch.get_default_dtype(),
@@ -198,14 +198,14 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
-        x_q, x_s, x_zp = ops.onednn_scaled_int8_quant(
+        x_q, x_s, x_zp = cpu_ops.onednn_scaled_int8_quant(
             x, i_s, i_zp, self.config.input_symmetric
         )
 
         m = x.size(0)
         n = self.dnnl_handler.n
         out = torch.empty((m, n), dtype=x.dtype)
-        ops.onednn_scaled_mm(self.dnnl_handler, x_q, out, x_s, x_zp, azp_adj, bias)
+        cpu_ops.onednn_scaled_mm(self.dnnl_handler, x_q, out, x_s, x_zp, azp_adj, bias)
         out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
         return out
 
@@ -244,7 +244,7 @@ class CPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "requires CPU platform."
         if not torch.cpu._is_amx_tile_supported():
             return False, "requires AMX tile support (Sapphire Rapids or newer)."
-        if not ops._supports_cpu_fp8_w8a16:
+        if not cpu_ops._supports_cpu_fp8_w8a16:
             return False, "fp8_scaled_mm_cpu op not available."
         return True, None
 
@@ -361,7 +361,7 @@ class CPUFp8PerTensorScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires CPU platform."
         if not torch.cpu._is_amx_tile_supported():
             return False, "requires AMX tile support (Sapphire Rapids or newer)."
-        if not ops._supports_cpu_fp8_w8a16:
+        if not cpu_ops._supports_cpu_fp8_w8a16:
             return False, "fp8_scaled_mm_cpu op not available."
         return True, None
 
@@ -517,7 +517,7 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "requires CPU platform."
         if not torch.cpu._is_amx_tile_supported():
             return False, "requires AMX tile support (Sapphire Rapids or newer)."
-        if not ops.cpu_has_amx_fp8():
+        if not cpu_ops.cpu_has_amx_fp8():
             return False, (
                 "requires native AMX-FP8 hardware; falls back "
                 "to CPUFp8BlockScaledMMKernel (W8A16) otherwise."
@@ -640,7 +640,7 @@ class CPUFp8W8A8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return out.reshape(x.shape[:-1] + (out.size(-1),)) if x.dim() > 2 else out
 
         # act_scales=None + channelwise=True → dynamic per-token activation quant
-        out = ops.fp8_scaled_mm_with_quant(
+        out = cpu_ops.fp8_scaled_mm_with_quant(
             x_2d,
             None,
             True,
@@ -674,7 +674,7 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "requires CPU platform."
         if not torch.cpu._is_amx_tile_supported():
             return False, "requires AMX tile support (Sapphire Rapids or newer)."
-        if not ops.cpu_has_amx_fp8():
+        if not cpu_ops.cpu_has_amx_fp8():
             return False, (
                 "requires native AMX-FP8 hardware (Diamond Rapids); falls back "
                 "to the Torch FP8 kernels otherwise."
@@ -776,7 +776,7 @@ class CPUFP8W8A8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # channelwise=True: per-token (per-row) quantization when act_scales is None
         # channelwise=False: per-tensor quantization when act_scales is provided
         channelwise = act_scales is None
-        out = ops.fp8_scaled_mm_with_quant(
+        out = cpu_ops.fp8_scaled_mm_with_quant(
             x_2d,
             act_scales,
             channelwise,

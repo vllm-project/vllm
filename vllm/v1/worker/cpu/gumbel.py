@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 
 
 def gumbel_sample(
@@ -28,7 +28,7 @@ def gumbel_sample(
             "CPU Gumbel sampling does not yet support the draft-logits cache."
         )
 
-    return ops.gumbel_sample_cpu(
+    return cpu_ops.gumbel_sample_cpu(
         logits,
         expanded_idx_mapping.contiguous(),
         temperature,

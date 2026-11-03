@@ -701,7 +701,7 @@ def fused_indexer_q_rope_quant(
             index_weights_out,
         )
     elif current_platform.is_cpu():
-        from vllm._custom_ops import fused_indexer_q_rope_quant_cpu
+        from vllm._cpu_ops import fused_indexer_q_rope_quant_cpu
 
         fused_indexer_q_rope_quant_cpu(
             positions.contiguous(),
