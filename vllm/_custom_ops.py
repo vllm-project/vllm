@@ -1734,6 +1734,11 @@ def silu_and_mul_scaled_fp4_experts_quant(
     return output, output_scales
 
 
+def _mxfp4_scale_buffer_rows(num_rows: int, n_experts: int) -> int:
+    """Bound scale rows when each active expert's segment is padded to 128."""
+    return num_rows + 127 * min(n_experts, num_rows)
+
+
 def mxfp4_experts_quant(
     input_tensor: torch.Tensor,
     expert_offsets: torch.Tensor,
@@ -1794,7 +1799,7 @@ def mxfp4_experts_quant(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.empty(
-        MAX_TOKENS_PER_EXPERT * topk,
+        _mxfp4_scale_buffer_rows(m_numtopk, n_experts),
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,
@@ -1822,8 +1827,6 @@ def mxfp4_experts_quantize_once_fanout(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
     n_experts: int,
-    vectors_per_token_tile: int = 8,
-    optimization_variant: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize each token once and write packed rows in expert order."""
     assert not current_platform.is_rocm()
@@ -1846,7 +1849,7 @@ def mxfp4_experts_quantize_once_fanout(
         num_routes, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.empty(
-        MAX_TOKENS_PER_EXPERT * topk,
+        _mxfp4_scale_buffer_rows(num_routes, n_experts),
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,
@@ -1860,8 +1863,6 @@ def mxfp4_experts_quantize_once_fanout(
         expert_offsets,
         blockscale_offsets,
         n_experts,
-        vectors_per_token_tile,
-        optimization_variant,
     )
     return output, output_scales.view(torch.uint8)
 
@@ -1907,7 +1908,7 @@ def silu_and_mul_mxfp4_experts_quant(
         m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
     )
     output_scales = torch.empty(
-        MAX_TOKENS_PER_EXPERT * topk,
+        _mxfp4_scale_buffer_rows(m_numtopk, n_experts),
         padded_k,
         dtype=torch.int32,
         device=input_tensor.device,

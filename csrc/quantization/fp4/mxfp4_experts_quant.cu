@@ -275,13 +275,15 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
   }
 }
 
-template <class Type, int VECTORS_PER_TOKEN_TILE, bool PACK_SCALE_STORES,
-          bool SHARE_ROUTE_METADATA>
+constexpr int MXFP4_FANOUT_TOKEN_TILE = 4;
+constexpr int MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE = 8;
+
+template <class Type>
 __device__ __forceinline__ void mxfp4_quantize_once_fanout_store_route(
-    int32_t route_idx, int32_t token, int32_t lane_in_token, int32_t colIdx,
-    int32_t topk, int32_t n_experts, int32_t numRoutes, int32_t numCols,
-    int32_t colsPerRow, int32_t const* topk_ids,
-    int32_t const* output_permutation, uint32_t const* input_offset_by_experts,
+    int32_t route_idx, int32_t token, int32_t colIdx, int32_t topk,
+    int32_t n_experts, int32_t numRoutes, int32_t numCols, int32_t colsPerRow,
+    int32_t const* topk_ids, int32_t const* output_permutation,
+    uint32_t const* input_offset_by_experts,
     uint32_t const* output_scale_offset_by_experts,
     Fp4QuantizedVec<Type> quantized, fp4_packed_t* out, uint32_t* SFout) {
   if (colIdx >= colsPerRow) {
@@ -296,43 +298,16 @@ __device__ __forceinline__ void mxfp4_quantize_once_fanout_store_route(
   int32_t const numKTiles = (numCols + 127) / 128;
   int32_t const route = token * topk + route_idx;
 
-  if constexpr (SHARE_ROUTE_METADATA) {
-    if (lane_in_token == 0) {
-      expert_idx = __ldca(&topk_ids[route]);
-      row_idx = __ldca(&output_permutation[route]);
-      if (expert_idx >= 0 && expert_idx < n_experts && row_idx >= 0 &&
-          row_idx < numRoutes) {
-        expert_start = __ldca(&input_offset_by_experts[expert_idx]);
-        expert_end = __ldca(&input_offset_by_experts[expert_idx + 1]);
-        scale_base =
-            __ldca(&output_scale_offset_by_experts[expert_idx]) * numKTiles;
-      }
-    }
-    uint32_t const active_mask = __activemask();
-    expert_idx =
-        __shfl_sync(active_mask, expert_idx, 0, VECTORS_PER_TOKEN_TILE);
-    row_idx = __shfl_sync(active_mask, row_idx, 0, VECTORS_PER_TOKEN_TILE);
-    expert_start =
-        __shfl_sync(active_mask, expert_start, 0, VECTORS_PER_TOKEN_TILE);
-    expert_end =
-        __shfl_sync(active_mask, expert_end, 0, VECTORS_PER_TOKEN_TILE);
-    scale_base =
-        __shfl_sync(active_mask, scale_base, 0, VECTORS_PER_TOKEN_TILE);
-  } else {
-    expert_idx = __ldca(&topk_ids[route]);
-    row_idx = __ldca(&output_permutation[route]);
-  }
+  expert_idx = __ldca(&topk_ids[route]);
+  row_idx = __ldca(&output_permutation[route]);
 
   if (expert_idx < 0 || expert_idx >= n_experts || row_idx < 0 ||
       row_idx >= numRoutes) {
     return;
   }
-  if constexpr (!SHARE_ROUTE_METADATA) {
-    expert_start = __ldca(&input_offset_by_experts[expert_idx]);
-    expert_end = __ldca(&input_offset_by_experts[expert_idx + 1]);
-    scale_base =
-        __ldca(&output_scale_offset_by_experts[expert_idx]) * numKTiles;
-  }
+  expert_start = __ldca(&input_offset_by_experts[expert_idx]);
+  expert_end = __ldca(&input_offset_by_experts[expert_idx + 1]);
+  scale_base = __ldca(&output_scale_offset_by_experts[expert_idx]) * numKTiles;
 
   int32_t const row_idx_in_expert = row_idx - expert_start;
   if (row_idx_in_expert < 0 || row_idx >= expert_end) {
@@ -346,36 +321,14 @@ __device__ __forceinline__ void mxfp4_quantize_once_fanout_store_route(
   auto sf_out =
       cvt_quant_to_fp4_get_sf_out_offset<uint32_t, MXFP4_NUM_THREADS_PER_SF>(
           row_idx_in_expert, colIdx, numKTiles, SFout_in_expert);
-  if constexpr (PACK_SCALE_STORES) {
-    static_assert(VECTORS_PER_TOKEN_TILE == 8);
-    if (numCols % 128 != 0 && colIdx >= (numCols / 128) * 8) {
-      if (sf_out != nullptr) {
-        *sf_out = quantized.scale;
-      }
-    } else {
-      uint32_t const active_mask = __activemask();
-      uint32_t const scale0 = __shfl_sync(
-          active_mask, static_cast<uint32_t>(quantized.scale), 0, 8);
-      uint32_t const scale1 = __shfl_sync(
-          active_mask, static_cast<uint32_t>(quantized.scale), 2, 8);
-      uint32_t const scale2 = __shfl_sync(
-          active_mask, static_cast<uint32_t>(quantized.scale), 4, 8);
-      uint32_t const scale3 = __shfl_sync(
-          active_mask, static_cast<uint32_t>(quantized.scale), 6, 8);
-      if (lane_in_token == 0 && sf_out != nullptr) {
-        *reinterpret_cast<uint32_t*>(sf_out) =
-            scale0 | (scale1 << 8) | (scale2 << 16) | (scale3 << 24);
-      }
-    }
-  } else if (sf_out != nullptr) {
+  if (sf_out != nullptr) {
     *sf_out = quantized.scale;
   }
 }
 
-template <class Type, int TOKEN_TILE, int VECTORS_PER_TOKEN_TILE,
-          bool PACK_SCALE_STORES, bool SHARE_ROUTE_METADATA,
-          bool EARLY_RETURN_PADDED_TOKENS, int STATIC_TOPK>
-__global__ void __launch_bounds__(TOKEN_TILE* VECTORS_PER_TOKEN_TILE)
+template <class Type>
+__global__ void __launch_bounds__(
+    MXFP4_FANOUT_TOKEN_TILE* MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE)
     mxfp4_quantize_once_fanout_kernel(
         int32_t numTokens, int32_t numCols, int32_t topk, int32_t n_experts,
         Type const* in, int32_t const* topk_ids,
@@ -387,16 +340,13 @@ __global__ void __launch_bounds__(TOKEN_TILE* VECTORS_PER_TOKEN_TILE)
                 "Vec size is not matched.");
 
   int const lane = threadIdx.x;
-  int const lane_in_token = lane % VECTORS_PER_TOKEN_TILE;
-  int const token = blockIdx.y * TOKEN_TILE + lane / VECTORS_PER_TOKEN_TILE;
-  int const colIdx = blockIdx.x * VECTORS_PER_TOKEN_TILE + lane_in_token;
+  int const lane_in_token = lane % MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE;
+  int const token = blockIdx.y * MXFP4_FANOUT_TOKEN_TILE +
+                    lane / MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE;
+  int const colIdx =
+      blockIdx.x * MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE + lane_in_token;
   int const colsPerRow = numCols / CVT_FP4_ELTS_PER_THREAD;
 
-  if constexpr (EARLY_RETURN_PADDED_TOKENS) {
-    if (token >= numTokens) {
-      return;
-    }
-  }
   int const inputToken = token < numTokens ? token : 0;
   int const inputColIdx = colIdx < colsPerRow ? colIdx : 0;
   PackedVec in_vec = reinterpret_cast<PackedVec const*>(
@@ -410,27 +360,11 @@ __global__ void __launch_bounds__(TOKEN_TILE* VECTORS_PER_TOKEN_TILE)
   }
 
   int32_t const numRoutes = numTokens * topk;
-  if constexpr (STATIC_TOPK != 0) {
-  #pragma unroll
-    for (int route_idx = 0; route_idx < STATIC_TOPK; ++route_idx) {
-      mxfp4_quantize_once_fanout_store_route<Type, VECTORS_PER_TOKEN_TILE,
-                                             PACK_SCALE_STORES,
-                                             SHARE_ROUTE_METADATA>(
-          route_idx, token, lane_in_token, colIdx, topk, n_experts, numRoutes,
-          numCols, colsPerRow, topk_ids, output_permutation,
-          input_offset_by_experts, output_scale_offset_by_experts, quantized,
-          out, SFout);
-    }
-  } else {
-    for (int route_idx = 0; route_idx < topk; ++route_idx) {
-      mxfp4_quantize_once_fanout_store_route<Type, VECTORS_PER_TOKEN_TILE,
-                                             PACK_SCALE_STORES,
-                                             SHARE_ROUTE_METADATA>(
-          route_idx, token, lane_in_token, colIdx, topk, n_experts, numRoutes,
-          numCols, colsPerRow, topk_ids, output_permutation,
-          input_offset_by_experts, output_scale_offset_by_experts, quantized,
-          out, SFout);
-    }
+  for (int route_idx = 0; route_idx < topk; ++route_idx) {
+    mxfp4_quantize_once_fanout_store_route(
+        route_idx, token, colIdx, topk, n_experts, numRoutes, numCols,
+        colsPerRow, topk_ids, output_permutation, input_offset_by_experts,
+        output_scale_offset_by_experts, quantized, out, SFout);
   }
 }
 
@@ -587,6 +521,12 @@ static void validate_mxfp4_experts_quant_inputs(
   int padded_k = (scales_k + (4 - 1)) / 4 * 4;
   // 4 = 4 E8M0 values packed into one int32
   STD_TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
+  int64_t const required_scale_rows =
+      m_topk + 127 * std::min(n_experts, m_topk);
+  STD_TORCH_CHECK(output_scale.size(0) >= required_scale_rows,
+                  "output_scale must have at least ", required_scale_rows,
+                  " rows to cover per-expert 128-row padding; got ",
+                  output_scale.size(0));
 }
 
 #endif  // VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
@@ -672,8 +612,7 @@ void mxfp4_experts_quantize_once_fanout(
     torch::stable::Tensor const& output_permutation,
     torch::stable::Tensor const& input_offset_by_experts,
     torch::stable::Tensor const& output_scale_offset_by_experts,
-    int64_t n_experts, int64_t vectors_per_token_tile,
-    int64_t optimization_variant) {
+    int64_t n_experts) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
   STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
@@ -712,9 +651,6 @@ void mxfp4_experts_quantize_once_fanout(
   STD_TORCH_CHECK(k > 0);
   STD_TORCH_CHECK(n_experts > 0 && n_experts <= INT32_MAX);
   STD_TORCH_CHECK(num_routes <= INT32_MAX);
-  STD_TORCH_CHECK(vectors_per_token_tile == 2 || vectors_per_token_tile == 4 ||
-                  vectors_per_token_tile == 8);
-  STD_TORCH_CHECK(optimization_variant >= 0 && optimization_variant <= 16);
   STD_TORCH_CHECK(topk_ids.size(0) == num_tokens);
   STD_TORCH_CHECK(topk > 0);
   STD_TORCH_CHECK(output_permutation.size(0) == num_routes);
@@ -724,9 +660,12 @@ void mxfp4_experts_quantize_once_fanout(
   STD_TORCH_CHECK(output.size(0) == num_routes);
   STD_TORCH_CHECK(output.size(1) == k / 2);
   STD_TORCH_CHECK(output_scale.size(1) == (k + 127) / 128);
-  STD_TORCH_CHECK(
-      optimization_variant != 6 && optimization_variant != 7 || topk == 8,
-      "unrolled fanout variants require topk=8");
+  int64_t const required_scale_rows =
+      num_routes + 127 * std::min(n_experts, num_routes);
+  STD_TORCH_CHECK(output_scale.size(0) >= required_scale_rows,
+                  "output_scale must have at least ", required_scale_rows,
+                  " rows to cover per-expert 128-row padding; got ",
+                  output_scale.size(0));
 
   int64_t const device = input.get_device_index();
   STD_TORCH_CHECK(topk_ids.get_device_index() == device);
@@ -742,87 +681,25 @@ void mxfp4_experts_quantize_once_fanout(
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "mxfp4_quantize_once_fanout_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-        auto launch = [&]<int TOKEN_TILE, int VECTORS_PER_TOKEN_TILE,
-                          bool PACK_SCALE_STORES, bool SHARE_ROUTE_METADATA,
-                          bool EARLY_RETURN_PADDED_TOKENS, int STATIC_TOPK>() {
-          dim3 const grid(
-              ((k / CVT_FP4_ELTS_PER_THREAD) + VECTORS_PER_TOKEN_TILE - 1) /
-                  VECTORS_PER_TOKEN_TILE,
-              (num_tokens + TOKEN_TILE - 1) / TOKEN_TILE);
-          dim3 const block(TOKEN_TILE * VECTORS_PER_TOKEN_TILE);
-          vllm::mxfp4_quantize_once_fanout_kernel<
-              cuda_type, TOKEN_TILE, VECTORS_PER_TOKEN_TILE, PACK_SCALE_STORES,
-              SHARE_ROUTE_METADATA, EARLY_RETURN_PADDED_TOKENS, STATIC_TOPK>
-              <<<grid, block, 0, stream>>>(
-                  static_cast<int32_t>(num_tokens), static_cast<int32_t>(k),
-                  static_cast<int32_t>(topk), static_cast<int32_t>(n_experts),
-                  static_cast<cuda_type const*>(input.data_ptr()),
-                  static_cast<int32_t const*>(topk_ids.data_ptr()),
-                  static_cast<int32_t const*>(output_permutation.data_ptr()),
-                  static_cast<vllm::fp4_packed_t*>(output.data_ptr()),
-                  static_cast<uint32_t*>(output_scale.data_ptr()),
-                  static_cast<uint32_t*>(input_offset_by_experts.data_ptr()),
-                  static_cast<uint32_t*>(
-                      output_scale_offset_by_experts.data_ptr()));
-        };
-        switch (optimization_variant) {
-          case 1:
-            launch.template operator()<4, 8, false, false, true, 0>();
-            break;
-          case 2:
-            launch.template operator()<4, 8, true, false, false, 0>();
-            break;
-          case 3:
-            launch.template operator()<4, 8, false, true, false, 0>();
-            break;
-          case 4:
-            launch.template operator()<8, 4, false, false, true, 0>();
-            break;
-          case 5:
-            launch.template operator()<16, 2, false, false, true, 0>();
-            break;
-          case 6:
-            launch.template operator()<4, 8, false, false, false, 8>();
-            break;
-          case 7:
-            launch.template operator()<4, 8, true, true, true, 8>();
-            break;
-          case 8:
-            launch.template operator()<8, 8, false, false, false, 0>();
-            break;
-          case 9:
-            launch.template operator()<16, 8, false, false, false, 0>();
-            break;
-          case 10:
-            launch.template operator()<32, 8, false, false, false, 0>();
-            break;
-          case 11:
-            launch.template operator()<8, 8, true, false, false, 0>();
-            break;
-          case 12:
-            launch.template operator()<16, 8, true, false, false, 0>();
-            break;
-          case 13:
-            launch.template operator()<32, 8, true, false, false, 0>();
-            break;
-          case 14:
-            launch.template operator()<8, 8, false, false, true, 0>();
-            break;
-          case 15:
-            launch.template operator()<16, 8, false, false, true, 0>();
-            break;
-          case 16:
-            launch.template operator()<32, 8, false, false, true, 0>();
-            break;
-          default:
-            if (vectors_per_token_tile == 2) {
-              launch.template operator()<4, 2, false, false, false, 0>();
-            } else if (vectors_per_token_tile == 4) {
-              launch.template operator()<4, 4, false, false, false, 0>();
-            } else {
-              launch.template operator()<4, 8, false, false, false, 0>();
-            }
-        }
+        dim3 const grid(((k / CVT_FP4_ELTS_PER_THREAD) +
+                         vllm::MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE - 1) /
+                            vllm::MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE,
+                        (num_tokens + vllm::MXFP4_FANOUT_TOKEN_TILE - 1) /
+                            vllm::MXFP4_FANOUT_TOKEN_TILE);
+        dim3 const block(vllm::MXFP4_FANOUT_TOKEN_TILE *
+                         vllm::MXFP4_FANOUT_VECTORS_PER_TOKEN_TILE);
+        vllm::mxfp4_quantize_once_fanout_kernel<cuda_type>
+            <<<grid, block, 0, stream>>>(
+                static_cast<int32_t>(num_tokens), static_cast<int32_t>(k),
+                static_cast<int32_t>(topk), static_cast<int32_t>(n_experts),
+                static_cast<cuda_type const*>(input.data_ptr()),
+                static_cast<int32_t const*>(topk_ids.data_ptr()),
+                static_cast<int32_t const*>(output_permutation.data_ptr()),
+                static_cast<vllm::fp4_packed_t*>(output.data_ptr()),
+                static_cast<uint32_t*>(output_scale.data_ptr()),
+                static_cast<uint32_t*>(input_offset_by_experts.data_ptr()),
+                static_cast<uint32_t*>(
+                    output_scale_offset_by_experts.data_ptr()));
       });
 #else
   STD_TORCH_CHECK_NOT_IMPLEMENTED(false,
