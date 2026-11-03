@@ -1049,7 +1049,7 @@ def build(key: Build):
             gw[1],
             p64(kw, 0),
             p64(kw, 1),
-            A["slots"],
+            p64(ld_vec(A["slot_tab"], 2 * layer, 2), 0),  # the layer's slot_mapping
             gw[2],
             A["pos"],
             tl,
@@ -1142,7 +1142,7 @@ def build(key: Build):
         wtab: Int64,
         dtab: Int64,
         pos: Int64,
-        slots: Int64,
+        slot_tab: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -1166,7 +1166,7 @@ def build(key: Build):
             "wtab": wtab,
             "dtab": dtab,
             "pos": pos,
-            "slots": slots,
+            "slot_tab": slot_tab,
             "rsl": ml.rs.ptr,
             "so": sl.o_.peek(),
             "sq": sl.q_.peek(),
@@ -1219,7 +1219,7 @@ def build(key: Build):
         wtab: Int64,
         dtab: Int64,
         pos: Int64,
-        slots: Int64,
+        slot_tab: Int64,
         scratch: Int64,
         epoch: Int64,
         health: Int64,
@@ -1227,9 +1227,9 @@ def build(key: Build):
         stream: fx.Stream = fx.Stream(None),
     ):
         _ = _KEYSTR
-        dspark(x_in, out, wtab, dtab, pos, slots, scratch, epoch, health, rank).launch(
-            grid=(BLOCKS,), block=(THREADS,), stream=stream
-        )
+        dspark(
+            x_in, out, wtab, dtab, pos, slot_tab, scratch, epoch, health, rank
+        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
 
     _BUILDS[key] = launch
     return launch

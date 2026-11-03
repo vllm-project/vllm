@@ -262,10 +262,14 @@ def test_layer_guards_accept_the_tiny_draft(tiny_draft) -> None:
 
 
 class DraftStep:
-    """One draft step: the draft group's real attention metadata, KV caches with
-    random context keys, and the query rows of DSpark (7 a request)."""
+    """One draft step: real attention metadata of the draft layers' KV cache
+    groups (``groups``: the layers split in that many groups, each with its own
+    block table and slot mapping, as vLLM's hybrid allocator can place them), KV
+    caches with random context keys, and the query rows of DSpark (7 a request)."""
 
-    def __init__(self, tiny: TinyDraft, query_lens: list[int], seed: int) -> None:
+    def __init__(
+        self, tiny: TinyDraft, query_lens: list[int], seed: int, groups: int = 1
+    ) -> None:
         from tests.v1.attention.utils import (
             BatchSpec,
             create_common_attn_metadata,
@@ -282,29 +286,38 @@ class DraftStep:
             int(torch.randint(40, 2600, (), generator=generator)) + q
             for q in query_lens
         ]
-        self.common = create_common_attn_metadata(
-            BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
-            16,
-            device,
-            arange_block_indices=True,
-        )
         self.positions = torch.cat(
             [torch.arange(s - q, s) for s, q in zip(seq_lens, query_lens)]
         ).to(device)
-        # the draft group's slots of the query rows (vLLM: block_table[pos // 16])
         req = torch.repeat_interleave(
             torch.arange(num_reqs, device=device),
             torch.tensor(query_lens, device=device),
         )
-        bt = self.common.block_table_tensor
-        self.common.slot_mapping.copy_(
-            bt[req, self.positions // 16].long() * 16 + self.positions % 16
-        )
-        num_blocks = int(bt.max()) + 1
-        builder = AiterFlashAttentionBackend.get_builder_cls()(
-            tiny.spec, tiny.names, tiny.vllm_config, device
-        )
-        self.metadata = builder.build(0, self.common)
+        self.metadata: dict[str, Any] = {}
+        self.slots: dict[str, torch.Tensor] = {}
+        num_blocks = 0
+        for gi in range(groups):
+            names = tiny.names[gi::groups]
+            common = create_common_attn_metadata(
+                BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+                16,
+                device,
+                arange_block_indices=True,
+            )
+            bt = common.block_table_tensor
+            bt.add_(gi * bt.numel())  # the groups' own blocks
+            # the group's slots of the query rows (vLLM: block_table[pos // 16])
+            common.slot_mapping.copy_(
+                bt[req, self.positions // 16].long() * 16 + self.positions % 16
+            )
+            num_blocks = max(num_blocks, int(bt.max()) + 1)
+            builder = AiterFlashAttentionBackend.get_builder_cls()(
+                tiny.spec, names, tiny.vllm_config, device
+            )
+            md = builder.build(0, common)
+            for name in names:
+                self.metadata[name] = md
+                self.slots[name] = common.slot_mapping
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.kv_init: dict[str, torch.Tensor] = {}
         for name in tiny.names:
@@ -336,11 +349,11 @@ class DraftStep:
         with (
             set_current_vllm_config(tiny.vllm_config),
             set_forward_context(
-                dict.fromkeys(tiny.names, self.metadata),
+                self.metadata,
                 tiny.vllm_config,
                 num_tokens=self.tokens,
                 cudagraph_runtime_mode=mode,
-                slot_mapping=dict.fromkeys(tiny.names, self.common.slot_mapping),
+                slot_mapping=self.slots,
             ),
         ):
             hidden = tiny.lm(self.input_ids, self.positions, None)
@@ -348,7 +361,7 @@ class DraftStep:
         return hidden.clone(), kv
 
 
-_DRAFT_PARAMS = "x_in out wtab dtab pos slots scratch epoch health rank"
+_DRAFT_PARAMS = "x_in out wtab dtab pos slot_tab scratch epoch health rank"
 _DESC_WORDS = 10
 
 
@@ -421,8 +434,8 @@ class _StockDraftKernel:
                 assert torch.equal(
                     f32(tab[i][2]), effective_norm_weight_fp32(prev.post_ffn_norm)
                 )
-        md, _, _, slots = get_attention_context(names[0])
-        assert a["slots"] == slots.data_ptr()
+        slot_tab = _device_view(a["slot_tab"], (self.LAYERS,), torch.int64).tolist()
+        assert slot_tab == [get_attention_context(n)[3].data_ptr() for n in names]
         q = tab[self.T_G][self.G_Q]
         for i, layer in enumerate(layers):
             attn, mlp = layer.self_attn, layer.feed_forward
@@ -437,7 +450,7 @@ class _StockDraftKernel:
             assert torch.equal(
                 f32(tab[i][8]), effective_norm_weight_fp32(layer.pre_ffn_norm)
             )
-            _, _, kv_cache, _ = get_attention_context(names[i])
+            md, _, kv_cache, _ = get_attention_context(names[i])
             assert desc[i][:5] == [
                 q,
                 kv_cache.data_ptr(),
@@ -488,13 +501,14 @@ def _assert_same_step(stock, mono) -> None:
 
 
 @requires_gfx950
+@pytest.mark.parametrize("groups", [1, 2])
 @pytest.mark.parametrize("num_reqs", [1, 2])
-def test_draft_step_matches_the_stock_layers(tiny_draft, num_reqs) -> None:
+def test_draft_step_matches_the_stock_layers(tiny_draft, num_reqs, groups) -> None:
     """7 / 14 rows: one launch (S = 8 / 16) a step, the same draft hidden states
     and draft KV caches as the stock draft layers; the KV insert of the 7 query
-    rows lands in the draft group's slots."""
+    rows lands in each layer's KV cache group's slots."""
     pytest.importorskip("flydsl")
-    step = DraftStep(tiny_draft, [QUERY_ROWS] * num_reqs, seed=num_reqs)
+    step = DraftStep(tiny_draft, [QUERY_ROWS] * num_reqs, seed=num_reqs, groups=groups)
     stock = step.run(tiny_draft)
     for name in tiny_draft.names:  # the step wrote the query rows' keys
         assert not torch.equal(stock[1][name], step.kv_init[name])
@@ -525,6 +539,7 @@ def test_second_step_reuses_the_descriptor_table(tiny_draft) -> None:
         b = tiny_draft.lm.mono.builds[8]
         assert len(b.fa.tables) == 1
         assert kernel.calls[0]["dtab"] == kernel.calls[1]["dtab"]
+        assert kernel.calls[0]["slot_tab"] == kernel.calls[1]["slot_tab"]
         assert kernel.calls[0]["wtab"] == b.table.data_ptr()
         assert int(b.epoch[0]) == 2
     finally:

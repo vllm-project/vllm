@@ -258,6 +258,12 @@ class DSparkDrafter:
             for S, b in self.builds.items()
         }
         self._health_event: torch.cuda.Event | None = None
+        self.device = device
+        self._slot_tables: dict[tuple[int, ...], torch.Tensor] = {}
+        self._pinned = [
+            torch.zeros(DRAFT_LAYERS, dtype=torch.int64, pin_memory=True)
+            for _ in range(8)
+        ]
 
     def _weight_table(self, model: nn.Module, device: torch.device) -> torch.Tensor:
         """The launch table rows of kernels/draft.py (weights as views of the
@@ -334,57 +340,44 @@ class DSparkDrafter:
         metadata = context.attn_metadata
         if not isinstance(metadata, dict) or not metadata:
             return "attn-metadata"
-        md0, slots0 = None, None
+        nreq = rows // QUERY_ROWS
         for name in self.layer_names:
-            md = metadata.get(name)
+            # the layers' KV cache groups can differ: each its own metadata and slots
+            md: Any = metadata.get(name)
             if md is None:
                 return "attn-metadata"
             _, _, kv_cache, slots = get_attention_context(name)
-            if md0 is None:
-                md0, slots0 = md, slots
-            # one KV cache group: one block table, seq_lens and slot mapping
-            if slots is None or (
-                md.block_table.data_ptr(),
-                md.seq_lens.data_ptr(),
-                slots.data_ptr(),
-            ) != (
-                md0.block_table.data_ptr(),
-                md0.seq_lens.data_ptr(),
-                slots0.data_ptr(),
-            ):
-                return "kv-groups"
             reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
             if reason is not None:
                 return reason
-        # uniform causal decodes of QUERY_ROWS rows (host counts of the metadata)
-        decode = getattr(md0, "decode_metadata", None)
-        if (
-            getattr(md0, "num_prefills", None) != 0
-            or getattr(md0, "num_extends", None) != 0
-            or decode is None
-            or decode.max_query_len != QUERY_ROWS
-            or md0.num_decodes * QUERY_ROWS != rows
-            or not getattr(md0, "causal", False)
-        ):
-            return "not-uniform-causal"
-        nreq = rows // QUERY_ROWS
-        bt, seq_lens = md0.block_table, md0.seq_lens
-        if (
-            bt.dtype != torch.int32
-            or bt.stride(-1) != 1
-            or bt.shape[0] < nreq
-            or seq_lens.dtype != torch.int32
-            or not seq_lens.is_contiguous()
-            or seq_lens.shape[0] < nreq
-        ):
-            return "block-table"
-        if (
-            slots0 is None
-            or slots0.dtype != torch.int64
-            or slots0.shape[0] < rows
-            or slots0.stride(-1) != 1
-        ):
-            return "slot-mapping"
+            # uniform causal decodes of QUERY_ROWS rows (host counts of the metadata)
+            decode = getattr(md, "decode_metadata", None)
+            if (
+                getattr(md, "num_prefills", None) != 0
+                or getattr(md, "num_extends", None) != 0
+                or decode is None
+                or decode.max_query_len != QUERY_ROWS
+                or md.num_decodes != nreq
+                or not getattr(md, "causal", False)
+            ):
+                return "not-uniform-causal"
+            bt, seq_lens = md.block_table, md.seq_lens
+            if (
+                bt.dtype != torch.int32
+                or bt.stride(-1) != 1
+                or bt.shape[0] < nreq
+                or seq_lens.dtype != torch.int32
+                or not seq_lens.is_contiguous()
+                or seq_lens.shape[0] < nreq
+            ):
+                return "block-table"
+            if (
+                slots is None
+                or slots.dtype != torch.int64
+                or slots.shape[0] < rows
+                or slots.stride(-1) != 1
+            ):
+                return "slot-mapping"
         return None
 
     def try_forward(
@@ -412,7 +405,9 @@ class DSparkDrafter:
         out = torch.empty_like(x)
         layers = model.layers
         table = b.fa.table(layers, lambda i: b.q, rows // QUERY_ROWS)
-        _, _, _, slots = get_attention_context(self.layer_names[0])
+        slots = self._slot_table(
+            [get_attention_context(n)[3].data_ptr() for n in self.layer_names]
+        )
         b.launch(
             x.data_ptr(),
             out.data_ptr(),
@@ -427,6 +422,25 @@ class DSparkDrafter:
             stream=torch.cuda.current_stream(),
         )
         return out
+
+    def _slot_table(self, ptrs: list[int]) -> torch.Tensor:
+        """The layers' slot_mapping pointers as a device table (int64 [layers]),
+        keyed by its contents and written once (as _FusedAttention.table)."""
+        key = tuple(ptrs)
+        table = self._slot_tables.get(key)
+        if table is None:
+            host = torch.tensor(key, dtype=torch.int64)
+            table = torch.empty_like(host, device=self.device)
+            if torch.cuda.is_current_stream_capturing():
+                # no pinned allocation while a stream captures
+                pinned = self._pinned.pop()
+                pinned.copy_(host)
+                self._keep.append(pinned)
+                table.copy_(pinned, non_blocking=True)
+            else:
+                table.copy_(host)
+            self._slot_tables[key] = table
+        return table
 
     def poll_health(self) -> None:
         """Raise if a draft launch timed out waiting for a peer rank (an asynchronous
