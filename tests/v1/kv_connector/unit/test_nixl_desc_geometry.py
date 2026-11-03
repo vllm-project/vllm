@@ -809,6 +809,7 @@ def test_nixl_compressed_kernel_split(layout, kernel_block_size, raises):
     kv_cache_config = KVCacheConfig(2, [], [KVCacheGroupSpec(["summary"], spec)])
     vllm_config = create_vllm_config(block_size=384)
     vllm_config.cache_config.kv_cache_layout = layout.name
+    assert vllm_config.kv_transfer_config is not None
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     backend = MagicMock()
     backend.get_name.return_value = "TEST"
@@ -983,12 +984,13 @@ def test_mla_hybrid_peer_with_other_cache_groups_is_refused():
     """A hybrid layer in another cache group on P would be read at the wrong
     group's blocks, and region-mapped reads cannot serve SSM state, so the
     handshake refuses the peer before any transfer."""
-    worker = _make_mla_hybrid_worker(
+    fixture = _make_mla_hybrid_worker(
         local_block_size=16,
         kernel_block_size=16,
         num_logical_blocks=4,
         kda_only_tensor=True,
     )
+    worker = fixture.worker
     layer_groups = dict(worker.kv_cache_config.transfer_group_index_by_layer)
     remote_groups = list(worker.region_group_ids)
     # The KDA-only region holds kda_a.2 alone, in group 1; P puts it in 2.
