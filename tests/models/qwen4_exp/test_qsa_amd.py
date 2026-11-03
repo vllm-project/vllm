@@ -690,7 +690,9 @@ def test_qsa_indexer_flags_single_row_decode(
     "num_rows,num_query_heads,num_kv_heads,page_size",
     [
         # The >512-program profile is tuned per CDNA version; each shape has
-        # cases on both sides of that boundary (rows x KV heads).
+        # cases on both sides of that boundary (rows x KV heads). BF16 on
+        # CDNA3/4 pads BLOCK_M to 16 and picks splits from the program count,
+        # reaching one split (direct output write) only from 2048 programs.
         pytest.param(1, 24, 2, 1792, id="tp1_split64"),
         pytest.param(256, 24, 2, 1792, id="tp1_split4"),
         pytest.param(257, 24, 2, 1792, id="tp1_split1"),
@@ -701,6 +703,7 @@ def test_qsa_indexer_flags_single_row_decode(
         pytest.param(257, 6, 1, 1024, id="tp4_split4"),
         pytest.param(512, 6, 1, 1024, id="tp4_split4_edge"),
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
+        pytest.param(2048, 6, 1, 1024, id="tp4_rows2048"),
         pytest.param(512, 3, 1, 1024, id="tp8_split4"),
         pytest.param(513, 3, 1, 1024, id="tp8_split1"),
     ],
