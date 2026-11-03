@@ -1523,7 +1523,7 @@ class DeepseekV4Indexer(nn.Module):
         self.max_total_seq_len = (
             k_cache.get_attn_backend()
             .get_builder_cls()
-            .get_prefill_buffer_size(vllm_config, self.compress_ratio)
+            .get_prefill_buffer_size(vllm_config, k_cache.compress_ratio)
         )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"

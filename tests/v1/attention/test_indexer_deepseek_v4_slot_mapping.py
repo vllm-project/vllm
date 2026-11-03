@@ -762,11 +762,14 @@ def test_indexer_expanded_block_table_sized_by_decode_tokens():
     assert builder.expanded_block_table_buffer.shape == (8, block_table_width)
 
 
+@pytest.mark.parametrize("fused_mqa_topk_eligible", [False, True])
 @pytest.mark.parametrize("max_model_len", [1 << 17, 1 << 20])
 @pytest.mark.parametrize("compress_ratio", [1, 2])
-def test_dsv41_indexer_prefill_buffer_holds_every_chunk(max_model_len, compress_ratio):
+def test_dsv41_indexer_prefill_buffer_holds_every_chunk(
+    max_model_len, compress_ratio, fused_mqa_topk_eligible
+):
     """DeepSeek-V4.1's smaller reservation splits the densest batch exactly as the
-    generic one does, and holds every chunk."""
+    generic one does, dense or fused MQA+top-k, and holds every chunk."""
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(max_model_len=max_model_len),
         attention_config=SimpleNamespace(
@@ -780,7 +783,19 @@ def test_dsv41_indexer_prefill_buffer_holds_every_chunk(max_model_len, compress_
     query_lens = torch.ones(256, dtype=torch.int64)
     max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
     split = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks
-    chunks = split(seq_lens, query_lens, reserved, max_logits_bytes)
+    chunks = split(
+        seq_lens,
+        query_lens,
+        reserved,
+        max_logits_bytes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
+    )
     generic = get_max_prefill_buffer_size(vllm_config) // compress_ratio
-    assert chunks == split(seq_lens, query_lens, generic, max_logits_bytes)
+    assert chunks == split(
+        seq_lens,
+        query_lens,
+        generic,
+        max_logits_bytes,
+        fused_mqa_topk_eligible=fused_mqa_topk_eligible,
+    )
     assert max(seq_lens[reqs].sum().item() for reqs, _ in chunks) <= reserved
