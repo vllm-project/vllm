@@ -169,6 +169,13 @@ def test_init_weight_transfer_engine_calls_engine(vllm_runner):
             assert called, "init_transfer_engine should have been called"
             assert param == "hello", f"Expected 'hello', got {param}"
 
+        llm.shutdown_weight_transfer_engine()
+        assert all(
+            llm.collective_rpc(
+                lambda worker: worker.weight_transfer_engine.shutdown_called
+            )
+        )
+
 
 @create_new_process_for_each_test()
 def test_update_weights_calls_engine(vllm_runner):

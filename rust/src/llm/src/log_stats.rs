@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info};
+use vllm_engine_core_client::protocol::stats::KvFetchReqsByStage;
 use vllm_metrics::{
-    EngineLabels, F64Gauge, METRICS, PromptTokenSourceLabels, SchedulerLogStatsAccumulator,
-    SchedulerLogStatsInterval, U64Counter, U64Gauge, WaitingReasonLabels,
+    EngineLabels, F64Gauge, KvFetchStageLabels, METRICS, PromptTokenSourceLabels,
+    SchedulerLogStatsAccumulator, SchedulerLogStatsInterval, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
 
-const LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 const WAITING_REASON_DEFERRED: &str = "deferred";
 
 /// Cached, cloned metric handles for one engine. Each clone shares the same
@@ -38,6 +39,8 @@ struct EngineMetrics {
     scheduler_running: U64Gauge,
     scheduler_waiting: U64Gauge,
     scheduler_deferred: U64Gauge,
+    /// One handle per `KvFetchReqsByStage::STAGES` entry.
+    scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
 }
 
@@ -89,9 +92,9 @@ pub(crate) struct StatsLogger {
 
 impl StatsLogger {
     /// Start the background stats logging task.
-    pub(crate) fn start(model_name: String, engine_indices: Vec<u32>) -> Self {
+    pub(crate) fn start(model_name: String, engine_indices: Vec<u32>, interval: Duration) -> Self {
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
-            run_stats_logger(model_name, engine_indices).await;
+            run_stats_logger(model_name, engine_indices, interval).await;
         }));
         Self { _task: task }
     }
@@ -163,16 +166,26 @@ fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<Engin
                     .scheduler
                     .scheduler_waiting_by_reason
                     .get_or_create_owned(&deferred),
+                scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
+                    m.scheduler.scheduler_kv_fetch_by_stage.get_or_create_owned(
+                        &KvFetchStageLabels {
+                            model_name: model_name.to_string(),
+                            engine,
+                            stage,
+                        },
+                    )
+                }),
                 kv_cache_usage: m.scheduler.kv_cache_usage.get_or_create_owned(&el),
             }
         })
         .collect()
 }
 
-async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>) {
+async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>, interval: Duration) {
     let engines = resolve_engine_metrics(&model_name, &engine_indices);
 
-    let mut interval = tokio::time::interval(LOG_STATS_INTERVAL);
+    // A zero period panics, so round it up to the shortest one.
+    let mut interval = tokio::time::interval(interval.max(Duration::from_nanos(1)));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // The first tick fires immediately; skip it so the first log is after one full
     // interval.
@@ -221,6 +234,11 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>) {
         // Read scheduler gauges (aggregate across engines).
         let (num_running, num_waiting, kv_cache_usage) = read_scheduler_gauges(&engines);
         let num_deferred = read_deferred_waiting(&engines);
+        let [
+            kv_fetch_waiting_to_start,
+            kv_fetch_in_progress,
+            kv_fetch_completed_waiting,
+        ] = read_kv_fetch_by_stage(&engines);
         let delta_preemptions = curr.num_preemptions.wrapping_sub(prev.num_preemptions);
 
         // Compute prefix cache hit rate over this interval.
@@ -251,6 +269,15 @@ async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>) {
         .unwrap();
         if num_deferred > 0 {
             write!(msg, ", Deferred: {num_deferred} reqs").unwrap();
+        }
+        if kv_fetch_waiting_to_start + kv_fetch_in_progress + kv_fetch_completed_waiting > 0 {
+            write!(
+                msg,
+                ", KV fetch: {kv_fetch_waiting_to_start} waiting to start, \
+                 {kv_fetch_in_progress} in progress, \
+                 {kv_fetch_completed_waiting} completed waiting"
+            )
+            .unwrap();
         }
         if delta_preemptions > 0 {
             write!(msg, ", Preemptions: {delta_preemptions}").unwrap();
@@ -364,6 +391,18 @@ fn read_scheduler_gauges(engines: &[EngineMetrics]) -> (u64, u64, f64) {
 /// Read deferred waiting requests across all engines.
 fn read_deferred_waiting(engines: &[EngineMetrics]) -> u64 {
     engines.iter().map(|e| e.scheduler_deferred.get()).sum()
+}
+
+/// Read waiting requests per async KV load stage across all engines, in
+/// `KvFetchReqsByStage::STAGES` order.
+fn read_kv_fetch_by_stage(engines: &[EngineMetrics]) -> [u64; 3] {
+    let mut counts = [0u64; 3];
+    for e in engines {
+        for (count, gauge) in counts.iter_mut().zip(&e.scheduler_kv_fetch_by_stage) {
+            *count += gauge.get();
+        }
+    }
+    counts
 }
 
 /// Return the cache hit rate as a percentage for a counter delta.
@@ -485,6 +524,16 @@ fn format_position_rates(output: &mut String, rates: &[f64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stats_logger_runs_with_zero_interval() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            run_stats_logger("model".to_string(), Vec::new(), Duration::ZERO),
+        )
+        .await;
+        assert!(result.is_err(), "the stats logger runs until it is aborted");
+    }
 
     #[test]
     fn cache_hit_rate_returns_percent_for_non_empty_queries() {
