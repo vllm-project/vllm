@@ -108,6 +108,9 @@ class RoutedFc1(RoutedExpertGemm):
     linear scales are written into the layout the MMA reads by the B load
     warp."""
 
+    # Wait for the front before launching what follows: FC2 reads the routing
+    # record and the fused boundary kernel the routing weights before their own
+    # waits.
     route_before_wait = False
 
     def __init__(
