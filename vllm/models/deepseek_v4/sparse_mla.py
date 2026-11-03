@@ -9,7 +9,6 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed import get_pcp_group
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -28,7 +27,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_compressed_slot_mapping_with_pcp,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -153,10 +154,10 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
-            pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-            if pcp_size > 1:
+            self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+            if self.pcp_size > 1:
                 self.pcp_compressed_slot_mapping_buffer = torch.empty(
-                    max_num_batched_tokens * pcp_size,
+                    max_num_batched_tokens * self.pcp_size,
                     dtype=torch.int64,
                     device=device,
                 )
@@ -200,31 +201,14 @@ class DeepseekV4SparseMLAMetadataBuilder(
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
 
         slot_mapping = cm.slot_mapping
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        local_slots = slot_mapping
-        if pcp_size > 1:
-            local_slots = slot_mapping.chunk(pcp_size)[get_pcp_group().rank_in_group]
         if self.compress_ratio > 1:
-            slot_mapping = get_compressed_slot_mapping(
-                cm.num_actual_tokens,
-                local_slots,
-                cm.query_start_loc,
-                cm.seq_lens,
-                cm.block_table_tensor.clamp_(min=0),
+            slot_mapping = get_compressed_slot_mapping_with_pcp(
+                cm,
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
-                out=self.compressed_slot_mapping_buffer,
+                self.compressed_slot_mapping_buffer,
+                self.pcp_compressed_slot_mapping_buffer if self.pcp_size > 1 else None,
             )
-            if pcp_size > 1:
-                slot_mapping = self.pcp_compressed_slot_mapping_buffer[
-                    : local_slots.numel() * pcp_size
-                ]
-                slot_mapping.copy_(
-                    get_pcp_group().all_gather(
-                        self.compressed_slot_mapping_buffer[: local_slots.numel()],
-                        dim=0,
-                    )
-                )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}
         if self.compress_ratio == 128:

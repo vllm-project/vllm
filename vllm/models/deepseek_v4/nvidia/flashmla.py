@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
-from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -22,7 +21,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadataBuilder,
@@ -41,42 +40,6 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder)
     """SWA metadata for the FlashMLA decode path, which allows varlen decode."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if self.pcp_size > 1:
-            self.no_replay_start = self.no_replay_start.new_zeros(
-                2 * self.vllm_config.scheduler_config.max_num_seqs + 1
-            )
-            self.pcp_cache_positions = torch.empty(
-                self.vllm_config.scheduler_config.max_num_batched_tokens
-                * self.pcp_size,
-                dtype=torch.int64,
-                device=self.device,
-            )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-        replay_start: torch.Tensor | None = None,
-    ) -> "DeepseekSparseSWAMetadata":
-        cm = common_attn_metadata
-        if self.pcp_size > 1:
-            local_slots = cm.slot_mapping.chunk(self.pcp_size)[
-                get_pcp_group().rank_in_group
-            ]
-            cm = cm.replace(slot_mapping=local_slots)
-        metadata = super().build(common_prefix_len, cm, fast_build, replay_start)
-        if self.pcp_size > 1:
-            metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
-            assert cm.positions is not None
-            positions = self.pcp_cache_positions[: cm.positions.numel() * self.pcp_size]
-            positions.copy_(get_pcp_group().all_gather(cm.positions, dim=0))
-            metadata.cache_positions = positions
-        return metadata
 
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):

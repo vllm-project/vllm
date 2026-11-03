@@ -63,6 +63,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.v1.attention.ops.sparse_swa import insert_swa_kv
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -798,14 +799,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         cache_dtype = swa_kv_cache.dtype
         slot_mapping = swa_metadata.slot_mapping
         if self.use_pcp:
-            cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
-            torch.ops._C.fused_deepseek_v4_kv_rope_insert(
-                cache_kv,
+            insert_swa_kv(
+                kv,
                 swa_kv_cache,
-                swa_metadata.cache_slot_mapping,
-                swa_metadata.cache_positions,
+                swa_metadata,
+                positions,
                 cos_sin_cache,
-                swa_metadata.block_size,
+                pcp_group=get_pcp_group(),
             )
             slot_mapping = slot_mapping[:0]
 
