@@ -766,6 +766,8 @@ steps:
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
   - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/kernels/linear/mxfp8/flashinfer.py
+  - tests/kernels/quantization/test_flashinfer_mxfp8_linear.py
   - vllm/model_executor/layers/quantization/compressed_tensors/transform/
   commands:
     - nvidia-smi
@@ -784,6 +786,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_mxfp8_linear.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
