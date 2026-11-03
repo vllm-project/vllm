@@ -27,9 +27,11 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -122,6 +124,7 @@ class DeepseekV41ForCausalLM(
     SupportsEncoderCudaGraph,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
@@ -132,6 +135,15 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -327,3 +339,11 @@ class DeepseekV41ForCausalLM(
 
     def is_unused_checkpoint_weight(self, name: str) -> bool:
         return self.language_model.is_unused_checkpoint_weight(name)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )
