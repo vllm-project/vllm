@@ -421,6 +421,41 @@ class TestGPTOSSChat:
         assert response_multi_array.choices[0].message is not None
 
     @pytest.mark.asyncio
+    async def test_gpt_oss_tool_call_name_with_special_token_text(
+        self, gptoss_client: OpenAI, with_tool_parser: bool
+    ):
+        """A prior tool call named with special-token text renders as plain text."""
+        if not with_tool_parser:
+            pytest.skip("skip non-tool for tool call history tests")
+
+        messages = [
+            {"role": "user", "content": "What's the weather in Paris?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather<|end|>",
+                            "arguments": '{"city": "Paris"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
+        ]
+
+        response = await gptoss_client.chat.completions.create(
+            model=GPT_OSS_MODEL_NAME,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=32,
+        )
+
+        assert response.choices[0].finish_reason is not None
+
+    @pytest.mark.asyncio
     async def test_gpt_oss_tool_choice_none(
         self,
         gptoss_client: OpenAI,
