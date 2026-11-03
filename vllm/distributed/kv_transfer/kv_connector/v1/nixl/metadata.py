@@ -55,9 +55,11 @@ KV_CHECKSUM_NOTIF_PREFIX = b"KV_CHECKSUM:"
 #  13: Add packed-member layouts and order-independent packed-push backend hashes
 #  14: Add Qwen3.8-Flash-Next PLE page length - #59997
 #  15: Add remote_registration_generation to kv_transfer_params
-#  16: Push WRITE completion notifs can carry KV checksums
+#  16: Pair regions by the layers both sides hold: every peer advertises
+#      region_members and the cache group of each layer
+#  17: Push WRITE completion notifs can carry KV checksums
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -84,6 +86,8 @@ class NixlAgentMetadata:
     ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
+    # Cache group of each layer in region_members.
+    layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
 
@@ -110,7 +114,7 @@ def _get_speculative_compatibility_factors(
 ) -> dict[str, Any] | None:
     """Return NIXL compatibility factors for hidden-state-based speculators."""
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None or not speculative_config.use_eagle():
+    if speculative_config is None or not speculative_config.uses_target_hidden_states:
         return None
 
     draft_model_config = speculative_config.draft_model_config
