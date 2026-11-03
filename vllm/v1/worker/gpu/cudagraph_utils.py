@@ -77,8 +77,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
-    # the runner passes None for any batch with a prefill.
+    # uniform_token_count unset; the runner passes None for batches that are
+    # not decode-graph eligible, even if their queries fit within the bound.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -721,7 +721,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     input_batch,
                     input_block_tables,
                     block_tables.get_dummy_slot_mappings(num_tokens),
-                    cg_mode=CUDAGraphMode.FULL,
+                    desc,
                     for_capture=True,
                 )
                 # Capture with dummy rows marked as padding.

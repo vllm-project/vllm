@@ -16,7 +16,7 @@ from vllm.benchmarks.forward.capture import write_input_ids
 from vllm.benchmarks.forward.kv_init import touched_kv_views, zero_kv_blocks
 from vllm.benchmarks.forward.main import run_case
 from vllm.benchmarks.forward.profile import summarize
-from vllm.benchmarks.forward.routing import BalancedRouting
+from vllm.benchmarks.forward.routing import RoutingFixture, zipf_topk_ids
 from vllm.benchmarks.forward.shapes import jitter_kv_lens, parse_case
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.cpu_mla import CPUMLABackend
@@ -125,6 +125,8 @@ def test_bench_forward_muse_balanced_routing(tmp_path):
 
 def test_balanced_routing_restores_expert_bias(dist_init):
     """Fixture routes stay balanced despite selection bias, then restore it."""
+    from vllm.config import get_current_vllm_config
+    from vllm.forward_context import set_forward_context
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
     from vllm.models.muse_spark.common.moe import MuseSpark1xRouter
 
@@ -144,13 +146,14 @@ def test_balanced_routing_restores_expert_bias(dist_init):
     hidden = torch.zeros(64, 4, device=device)
     with torch.no_grad():
         gate.weight.zero_()
-    fixture = BalancedRouting(layer, 64, 0, 1, 4, 0, device)
+    fixture = RoutingFixture(layer, 64, 0, 1, 4, 0, device, mode="balanced")
     try:
-        logits, _ = gate(hidden)
-        _, ids = selector.select_experts(hidden, logits)
-        fixture.check_applied()
-        counts = torch.bincount((ids // 2).flatten(), minlength=4)
-        assert counts.min() == counts.max()
+        with set_forward_context(None, get_current_vllm_config(), num_tokens=64):
+            logits, _ = gate(hidden)
+            _, ids = selector.select_experts(hidden, logits)
+            fixture.check_applied()
+            counts = torch.bincount((ids // 2).flatten(), minlength=4)
+            assert counts.min() == counts.max()
     finally:
         fixture.remove()
     torch.testing.assert_close(layer.expert_bias, bias, rtol=0, atol=0)
@@ -163,7 +166,8 @@ def test_balanced_routing_restores_expert_bias(dist_init):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Forward graph timing requires CUDA."
 )
-def test_bench_forward_hybrid_verify(tmp_path):
+@pytest.mark.parametrize("routing", ["auto", "balanced"])
+def test_bench_forward_hybrid_verify(tmp_path, routing):
     """Repeated target verification starts from the same recurrent state."""
     config = dict(
         architectures=["Qwen3NextForCausalLM"],
@@ -204,6 +208,8 @@ def test_bench_forward_hybrid_verify(tmp_path):
             "--model",
             str(tmp_path),
             "--skip-tokenizer-init",
+            "--routing",
+            routing,
             "--exclude-drafter",
             "--speculative-config",
             '{"method":"ngram","num_speculative_tokens":5}',
@@ -239,9 +245,25 @@ def test_bench_forward_hybrid_verify(tmp_path):
     assert [row["case"] for row in rows] == ["verify", "mixed"]
     for row in rows:
         (rank,) = row["ranks"]
+        assert rank["routing"] == ("zipf" if routing == "auto" else routing)
         assert rank["finite"] and rank["graph_deterministic"]
         assert rank["timing_scope"] == "target_only"
         assert row["median_us"] > 0
+
+
+def test_zipf_expert_selection():
+    """Popularity follows Zipf, with distinct experts and reproducible rows."""
+    rng = np.random.default_rng(0)
+    ids = zipf_topk_ids(50000, 32, 1, rng)
+    frequencies = np.sort(np.bincount(ids.ravel(), minlength=32))[::-1] / len(ids)
+    expected = np.arange(1, 33, dtype=float) ** -1.25
+    expected /= expected.sum()
+    np.testing.assert_allclose(frequencies, expected, atol=0.005, rtol=0)
+
+    ids = zipf_topk_ids(2048, 384, 6, np.random.default_rng(0))
+    assert ((ids >= 0) & (ids < 384)).all()
+    assert (np.diff(np.sort(ids, axis=1), axis=1) > 0).all()
+    assert np.array_equal(ids[:6], zipf_topk_ids(6, 384, 6, np.random.default_rng(0)))
 
 
 @pytest.mark.benchmark

@@ -504,6 +504,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
                 f"MLAAttention: attn_backend must be an MLA backend, "
@@ -1239,7 +1240,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self._vllm_config.attention_config.sparse_mla_force_mqa
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self) -> None:
+        act_dtype = self.act_dtype
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
@@ -1382,9 +1384,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # ds_mla layouts pack NoPE + RoPE + scales into one opaque per-token
             # blob, so the size is not derivable from head_size.
-            # See flashmla_sparse.py.
-            state_content_bytes={"fp8_ds_mla": 656, "nvfp4_ds_mla": 352}.get(
-                self.kv_cache_dtype
+            state_content_bytes=(
+                cast(MLAAttentionImpl, self.impl).get_fp8_ds_mla_row_bytes()
+                if self.kv_cache_dtype == "fp8_ds_mla"
+                else {"nvfp4_ds_mla": 352}.get(self.kv_cache_dtype)
             ),
         )
         if self.sliding_window is not None:

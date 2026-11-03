@@ -255,7 +255,7 @@ for changing these defaults.
 
 This support does not include AWQ/GPTQ MoE, other linear backends, or Marlin
 INT8/FP8 activation overrides (`VLLM_MARLIN_INPUT_DTYPE`). Do not enable
-`VLLM_BATCH_INVARIANT` for the AWQ Marlin path: AWQ selects a different method
+`VLLM_BATCH_INVARIANT` for this path: AWQ and GPTQ select unpacked implementations
 in that mode. Marlin does not guarantee batch-invariant outputs.
 
 ## Limitations
@@ -310,10 +310,18 @@ threat model.
 
 - Each GPU's socket path is guarded by an exclusive lock file, so a second
   daemon for the same GPU fails fast instead of clobbering the live socket.
-- `vllm preload` reports readiness once every rank is serving; if any rank
-  dies during startup, the remaining ranks are terminated and the command
-  exits with that rank's exit code.
+- `vllm preload` reports readiness once every rank is serving. If any rank
+  exits during startup or serving, the launcher terminates and reaps the
+  remaining ranks, stops its health endpoint, and exits with a nonzero status.
+  The failing rank's nonzero exit code is preserved. Signal failures use
+  `128 + signal number` (for example, 137 for `SIGKILL`); an unexpected clean
+  rank exit is reported as status 1. Restart the entire preload group before
+  attaching new engines.
 - `SIGINT`/`SIGTERM` to the `vllm preload` process terminates all daemon
-  ranks, which unlinks their sockets and releases the GPU memory.
+  ranks and exits with status 130/143.
+- In either shutdown path, ranks that do not stop within ten seconds are
+  killed and reaped, releasing their GPU memory. A forcibly
+  terminated rank may leave a stale socket; the next daemon replaces it
+  after acquiring the per-GPU lock.
 
 See [vllm preload](../cli/preload.md) for the full CLI reference.
