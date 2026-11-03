@@ -340,12 +340,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -368,12 +368,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -424,7 +424,6 @@ async def test_function_calling_with_streaming_types(
         "response.output_text.done": "response.output_text.delta",
         "response.content_part.done": "response.content_part.added",
         "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
         "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
     }
 

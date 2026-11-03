@@ -5,6 +5,7 @@ from itertools import islice
 
 import torch
 import torch.nn as nn
+from transformers import Lfm2MoeConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
@@ -40,7 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.lfm2_moe import Lfm2MoeConfig
 
 from .interfaces import (
     HasInnerState,
@@ -573,13 +573,6 @@ class Lfm2MoeForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-
-        if cache_config.mamba_cache_mode == "all":
-            raise NotImplementedError(
-                "Lfm2Moe currently does not support 'all' prefix caching, "
-                "please use '--mamba-cache-mode=align' instead"
-            )
 
         super().__init__()
         self.config = config

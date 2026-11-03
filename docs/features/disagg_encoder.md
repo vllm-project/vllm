@@ -45,9 +45,10 @@ The following scripts demonstrate the workflow with **ExampleConnector**:
 ### ECMooncakeConnector
 
 **ECMooncakeConnector** transfers encoder outputs using the Mooncake TransferEngine.
-See the [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
-for a complete 1 Encoder instance + 1 PD instance setup, including the producer and
-consumer `--ec-transfer-config` settings and proxy configuration.
+See the [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md) for
+producer/consumer `--ec-transfer-config`, proxy `--ec-consumer-zmq-addrs`, and
+transport options. The [Mooncake integration example](../../tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh)
+is a complete 1 Encoder instance + 1 PD instance setup.
 
 With vLLM and Mooncake installed, run the example from the repository root:
 
@@ -71,8 +72,19 @@ lengths the model needs; the consumer uses them to reconstruct the audio
 placeholders and receives the embeddings through its EC connector without
 repeating audio preprocessing.
 
-This covers pure audio inputs, not video with an embedded audio track. It does
-not add `/v1/audio/transcriptions` or realtime routes to the example proxy.
+Qwen2.5-Omni and Qwen3-Omni also support videos with an embedded audio track
+using `mm_processor_kwargs={"use_audio_in_video": true}` in the request. Start
+both instances with `--trust-request-mm-kwargs` only for trusted clients.
+The proxy keeps one
+`video_embeds` content part per video, with an additional `audio_embeds` payload
+for its audio track. Both features share the source UUID but retain their own
+EC hashes and transfer handles. Audio lengths and video timing reconstruct the
+interleaved placeholders and M-RoPE positions without decoding the media again.
+If any item lacks metadata, the entire audio/video request falls back to raw
+media rather than mixing raw and metadata-only inputs.
+
+This does not add `/v1/audio/transcriptions` or realtime routes to the example
+proxy.
 
 ---
 
