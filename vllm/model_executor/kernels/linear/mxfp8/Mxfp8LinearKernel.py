@@ -48,6 +48,20 @@ class Mxfp8LinearKernel(ABC):
         return None
 
     @classmethod
+    def _supports_quant_scheme(cls, activation_quant_key: QuantKey | None) -> bool:
+        """Return whether this kernel can serve a request for *activation_quant_key*.
+
+        Consulted by ``init_mxfp8_linear_kernel`` only when the caller declares
+        the checkpoint's activation scheme. The default is permissive: kernels
+        that keep activations unquantized (Marlin, emulation) serve any request,
+        and callers that do not declare a scheme keep the historical selection.
+        Kernels that quantize activations themselves (W8A8) override this to
+        decline a weight-only (``None``) request, so a W8A16 checkpoint is not
+        silently clipped to FP8. See issue #65193.
+        """
+        return True
+
+    @classmethod
     @abstractmethod
     def is_supported(
         cls, compute_capability: int | None = None

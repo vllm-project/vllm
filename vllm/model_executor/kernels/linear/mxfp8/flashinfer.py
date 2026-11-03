@@ -72,6 +72,12 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
         return kMxfp8Dynamic
 
+    @classmethod
+    def _supports_quant_scheme(cls, activation_quant_key: QuantKey | None) -> bool:
+        # Self-quantizes activations to MXFP8 (W8A8); a weight-only (None)
+        # request must fall through to a W8A16 kernel instead. See #65193.
+        return activation_quant_key is not None
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
         N, K = weight.shape
@@ -148,6 +154,12 @@ class FlashInferCutedslMxfp8LinearKernel(Mxfp8LinearKernel):
     def input_quant_key(self) -> QuantKey:
         # Activations use FlashInfer's F8_128x4 swizzled scale layout.
         return kMxfp8Dynamic
+
+    @classmethod
+    def _supports_quant_scheme(cls, activation_quant_key: QuantKey | None) -> bool:
+        # Self-quantizes activations to MXFP8 (W8A8); a weight-only (None)
+        # request must fall through to a W8A16 kernel instead. See #65193.
+        return activation_quant_key is not None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight.data  # [N, K]
