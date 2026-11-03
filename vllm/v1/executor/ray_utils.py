@@ -8,7 +8,6 @@ from collections import defaultdict
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_ip
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
@@ -29,14 +28,6 @@ try:
     import ray
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
-
-    try:
-        from ray._private.state import available_resources_per_node
-    except ImportError:
-        # Ray 2.9.x doesn't expose `available_resources_per_node`
-        from ray._private.state import state as _state
-
-        available_resources_per_node = _state._available_resources_per_node
 
     ray_import_err = None
 
@@ -65,15 +56,8 @@ def _verify_bundles(
     placement_group: "PlacementGroup",
     parallel_config: ParallelConfig,
     device_str: str,
-    require_gpu_on_driver: bool = True,
 ):
-    """Verify a given placement group has bundles located in the right place.
-
-    There are 2 rules.
-    - Warn if all tensor parallel workers cannot fit in a single node.
-    - Fail if driver node is not included in a placement group
-      (only when require_gpu_on_driver is True).
-    """
+    """Warn if all tensor parallel workers cannot fit in a single node."""
     assert ray.is_initialized(), (
         "Ray is not initialized although distributed-executor-backend is ray."
     )
@@ -87,17 +71,6 @@ def _verify_bundles(
 
     for bundle_idx, node_id in bundle_to_node_ids.items():
         node_id_to_bundle[node_id].append(bundles[bundle_idx])
-    driver_node_id = ray.get_runtime_context().get_node_id()
-
-    if require_gpu_on_driver and driver_node_id not in node_id_to_bundle:
-        raise RuntimeError(
-            f"driver node id {driver_node_id} is not included in a placement "
-            f"group {placement_group.id}. Node id -> bundles "
-            f"{node_id_to_bundle}. "
-            "You don't have enough GPUs available in a current node. Check "
-            "`ray status` and `ray list nodes` to see if you have available "
-            "GPUs in a node `{driver_node_id}` before starting an vLLM engine."
-        )
 
     for node_id, bundles in node_id_to_bundle.items():
         if len(bundles) < parallel_config.tensor_parallel_size:
@@ -293,7 +266,6 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 def initialize_ray_cluster(
     parallel_config: ParallelConfig,
     ray_address: str | None = None,
-    require_gpu_on_driver: bool = True,
 ):
     """Initialize the distributed cluster with Ray.
 
@@ -305,10 +277,6 @@ def initialize_ray_cluster(
         parallel_config: The configurations for parallel execution.
         ray_address: The address of the Ray cluster. If None, uses
             the default Ray cluster address.
-        require_gpu_on_driver: If True (default), require at least one GPU
-            on the current (driver) node and pin the first PG bundle to it.
-            Set to False for executors like RayExecutorV2 where all GPU work
-            is delegated to remote Ray actors.
 
     """
     assert_ray_available()
@@ -404,25 +372,6 @@ def initialize_ray_cluster(
             {device_str: 1.0} for _ in range(parallel_config.world_size)
         ]
 
-        # vLLM engine is also a worker to execute model with an accelerator,
-        # so it requires to have the device in a current node. Check if
-        # the current node has at least one device.
-        current_ip = get_ip()
-        current_node_id = ray.get_runtime_context().get_node_id()
-        current_node_resource = available_resources_per_node()[current_node_id]
-        if require_gpu_on_driver:
-            if current_node_resource.get(device_str, 0) < 1:
-                raise ValueError(
-                    f"Current node has no {device_str} available. "
-                    f"{current_node_resource=}. vLLM engine cannot start "
-                    f"without {device_str}. Make sure you have at least 1 "
-                    f"{device_str} available in a node "
-                    f"{current_node_id=} {current_ip=}."
-                )
-            # This way, at least bundle is required to be created in a
-            # current node.
-            placement_group_specs[0][f"node:{current_ip}"] = 0.001
-
         # By default, Ray packs resources as much as possible.
         current_placement_group = ray.util.placement_group(
             placement_group_specs, strategy="PACK"
@@ -430,8 +379,6 @@ def initialize_ray_cluster(
         _wait_until_pg_ready(current_placement_group)
 
     assert current_placement_group is not None
-    _verify_bundles(
-        current_placement_group, parallel_config, device_str, require_gpu_on_driver
-    )
+    _verify_bundles(current_placement_group, parallel_config, device_str)
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group

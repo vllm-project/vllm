@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -785,6 +788,7 @@ def test_trtllm_fp8_swiglu_clamp_support(
 
     assert supported == expected, reason
     if not expected:
+        assert reason is not None
         assert "SwiGLU" in reason
 
 
@@ -808,16 +812,20 @@ def _make_mxfp8_moe_weights(
 
 
 @pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
+@pytest.mark.parametrize("transposed", [True, False], ids=["transposed", "row-major"])
 @pytest.mark.parametrize("m", [1, 16])
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
     reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
 )
 def test_trtllm_fp8_block_moe_deferred_finalize(
-    m: int, block_shape: list[int], workspace_init
+    m: int, block_shape: list[int], transposed: bool, workspace_init
 ):
     """TRTLLM-Gen block-FP8 and MXFP8 modular experts can leave the top-k
-    finalize to the caller."""
+    finalize to the caller. For fp8-block, ``transposed`` toggles the oracle's
+    is_scale_transposed column-major activation-scale layout."""
+    if block_shape != [128, 128] and transposed:
+        pytest.skip("column-major scales apply to fp8 [128, 128] block only")
     e, topk, n, k = 32, 4, 1024, 1024
     set_random_seed(7)
     with set_current_vllm_config(vllm_config):
@@ -851,6 +859,9 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
             a2_scale=None,
             block_shape=block_shape,
         )
+        is_block = block_shape == [128, 128]
+        if is_block and not transposed:
+            quant_config = replace(quant_config, is_scale_transposed=False)
         # One rank of a TP group, which deferral needs.
         moe_config = FusedMoEConfig(
             num_experts=e,
@@ -868,19 +879,27 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
         )
-        kernel = mk.FusedMoEKernel(
-            maybe_make_prepare_finalize(
-                moe=moe_config, quant_config=quant_config, allow_new_interface=True
-            ),
-            TrtLlmFp8ExpertsModular(moe_config=moe_config, quant_config=quant_config),
-        )
+
+        def make_kernel(quant_config: FusedMoEQuantConfig) -> mk.FusedMoEKernel:
+            return mk.FusedMoEKernel(
+                maybe_make_prepare_finalize(
+                    moe=moe_config,
+                    quant_config=quant_config,
+                    allow_new_interface=True,
+                ),
+                TrtLlmFp8ExpertsModular(
+                    moe_config=moe_config, quant_config=quant_config
+                ),
+            )
+
+        kernel = make_kernel(quant_config)
 
         a = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
-        check_deferred_moe_finalize(
-            moe_config,
-            lambda: kernel.apply(
+
+        def apply(k_: mk.FusedMoEKernel) -> torch.Tensor:
+            return k_.apply(
                 hidden_states=a,
                 w1=w1,
                 w2=w2,
@@ -890,7 +909,37 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
-            ),
+            )
+
+        if is_block and transposed:
+            # The oracle gates column-major scales on TRTLLM fp8-block.
+            assert quant_config.is_scale_transposed
+            assert not make_fp8_moe_quant_config(
+                Fp8MoeBackend.DEEPGEMM,
+                w1_scale,
+                w2_scale,
+                a1_scale=None,
+                a2_scale=None,
+                block_shape=block_shape,
+            ).is_scale_transposed
+            # no_dp_ep emits column-major [M, G] scales (physical [G, M]), so
+            # the experts' a1q_scale.t().contiguous() is a no-op.
+            prepare_finalize = kernel.prepare_finalize
+            assert isinstance(prepare_finalize, MoEPrepareAndFinalizeNoDPEPModular)
+            _, a1q_scale, _, _, _ = prepare_finalize.prepare(
+                a, topk_weights, topk_ids, e, None, False, quant_config
+            )
+            assert a1q_scale is not None
+            assert a1q_scale.t().is_contiguous()
+            # Bitwise-equal to running with row-major scales.
+            row_major = replace(quant_config, is_scale_transposed=False)
+            torch.testing.assert_close(
+                apply(kernel), apply(make_kernel(row_major)), atol=0, rtol=0
+            )
+
+        check_deferred_moe_finalize(
+            moe_config,
+            lambda: apply(kernel),
             router_weights=topk_weights,
         )
 
@@ -1094,7 +1143,9 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
             apply_router_weight_on_input=False,
             routed_scaling_factor=1.0,
             routing_sink=None,
-        )[:, :k]
+        )
+        assert isinstance(output, torch.Tensor)
+        output = output[:, :k]
         topk_weights, topk_ids, _ = fused_topk(a, logits, topk, renormalize=True)
         reference = fused_experts(
             a,
