@@ -57,7 +57,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
-from vllm.model_executor.layers.utils import default_unquantized_gemm
+from vllm.model_executor.layers.utils import cuda_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
@@ -174,7 +174,8 @@ def _resolve_gdn_prefill_backend(
 
     In-tree CuteDSL GDN prefill kernel is chosen when:
     * "cutedsl" is requested; (opt-in only)
-    * Blackwell (SM10.x) with ``head_k_dim == 128``;
+    * Blackwell (SM10.x or SM11.x) with ``head_k_dim == 128``,
+      ``cuda_runtime >= 13``;
 
     AITER FlyDSL GDN prefill kernels are chosen when:
     * "aiter_flydsl" is requested, or "auto" is requested on gfx942/gfx950;
@@ -265,11 +266,17 @@ def _resolve_gdn_prefill_backend(
         supports_flashinfer = True
         supports_cutedsl = True
     elif (
+        current_platform.is_device_capability_family(110)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_cutedsl = True
+    elif (
         current_platform.is_device_capability_family(120)
         and head_k_dim == 128
         and current_platform.get_cuda_runtime_major() >= 13
     ):
-        # The in-tree CuteDSL kernel targets SM100 only, so it stays off here.
+        # The in-tree CuteDSL kernel targets SM100/SM110 only, so it stays off here.
         supports_flashinfer = True
 
     if backend in ["flashinfer", "auto"] and supports_flashinfer:
@@ -653,7 +660,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             overlap_ba_proj
             and current_platform.is_cuda()
             and isinstance(ba_method, UnquantizedLinearMethod)
-            and ba_method._gemm_impl is default_unquantized_gemm
+            and ba_method._gemm_impl is cuda_unquantized_gemm
             and not vllm_config.parallel_config.use_ubatching
             and vllm_config.lora_config is None
         ):
