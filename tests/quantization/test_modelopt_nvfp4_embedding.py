@@ -18,7 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 
 def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
-    return ModelOptMixedPrecisionConfig.from_config(
+    config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
                 "quant_algo": "MIXED_PRECISION",
@@ -34,6 +34,8 @@ def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
             }
         }
     )
+    assert isinstance(config, ModelOptMixedPrecisionConfig)
+    return config
 
 
 def test_nvfp4_embedding_matches_reference_dequant(dist_init):
