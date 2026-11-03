@@ -14,6 +14,60 @@ from torch.multiprocessing.reductions import reduce_tensor
 # Default values for packed tensor transfer.
 DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
 DEFAULT_PACKED_NUM_BUFFERS = 2
+# Entry start alignment of the packed layout (`packed_alignment`, a must-agree
+# wire param). vLLM's trainer engines default to 16 bytes, which covers every
+# dtype's itemsize, so unpacking never copies. Everything else — the worker init
+# info and the helpers in this module — defaults to 1, the original unpadded
+# layout, so producers that do not send `packed_alignment` keep working.
+DEFAULT_PACKED_ALIGNMENT = 16
+LEGACY_PACKED_ALIGNMENT = 1
+
+
+def check_packed_alignment(alignment: int) -> None:
+    if not (isinstance(alignment, int) and alignment >= 1):
+        raise ValueError(f"packed_alignment must be a positive int, got {alignment!r}")
+    if alignment & (alignment - 1):
+        raise ValueError(f"packed_alignment must be a power of two, got {alignment}")
+
+
+def _round_up(n: int, alignment: int) -> int:
+    return (n + alignment - 1) // alignment * alignment
+
+
+def packed_offsets(tensor_sizes: list[int], alignment: int) -> tuple[list[int], int]:
+    """Start offsets and total length of the packed layout.
+
+    Each entry starts at the previous entry's end rounded up to ``alignment``
+    (the first at 0); the total is the last entry's end, with no trailing pad.
+    ``alignment=1`` is the unpadded layout. Every producer and consumer of a
+    packed buffer derives its layout from this.
+    """
+    offsets: list[int] = []
+    end = 0
+    for size in tensor_sizes:
+        start = _round_up(end, alignment)
+        offsets.append(start)
+        end = start + size
+    return offsets, end
+
+
+def _take_chunk(
+    items: Iterator[Any],
+    size_of: Callable[[Any], int],
+    buffer_size_bytes: int,
+    alignment: int,
+) -> list[Any]:
+    """Pull items for one NCCL pack: up to and including the first item whose
+    end crosses ``buffer_size_bytes``, or until ``items`` is exhausted. Shared
+    by producer and consumer so both cut the stream at the same boundaries."""
+    chunk: list[Any] = []
+    end = 0
+    for item in items:
+        chunk.append(item)
+        end = _round_up(end, alignment) + size_of(item)
+        if end > buffer_size_bytes:
+            break
+    return chunk
 
 
 # Streams are cached across calls: the caching allocator keys cached blocks by the
@@ -30,29 +84,44 @@ def unpack_tensor(
     shapes: list[list[int]],
     dtypes: list[torch.dtype],
     tensor_sizes: list[int],
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a packed uint8 tensor into a list of named tensors.
 
-    The returned tensors are **views** of ``packed_tensor`` (the
-    ``.contiguous()`` call is a no-op on already-contiguous row-slices).
-    If ``packed_tensor`` lives in storage that may be reused — e.g. a
+    Entries are located with ``packed_offsets(tensor_sizes, alignment)``. An
+    entry whose offset is a multiple of its dtype's itemsize is returned as a
+    **view** of ``packed_tensor``; otherwise (possible only when ``alignment``
+    is smaller than the itemsize, e.g. the unpadded legacy layout) it is
+    copied. If ``packed_tensor`` lives in storage that may be reused — e.g. a
     reused CUDA IPC buffer — callers must clone the results before the
     underlying storage is overwritten.
 
     Args:
-        packed_tensor: The packed torch.uint8 tensor to unpack
+        packed_tensor: The packed torch.uint8 tensor to unpack. May be longer
+            than the packed content.
         names: List of tensor names
         shapes: List of tensor shapes
         dtypes: List of tensor dtypes
-        tensor_sizes: List of tensor sizes in bytes
+        tensor_sizes: List of tensor sizes in bytes (unpadded)
+        alignment: Entry alignment the producer packed with
 
     """
-    unpacked_tensors = packed_tensor.split(tensor_sizes)
-
-    return [
-        (name, tensor.contiguous().view(dtype).view(shape))
-        for name, shape, dtype, tensor in zip(names, shapes, dtypes, unpacked_tensors)
-    ]
+    offsets, total = packed_offsets(tensor_sizes, alignment)
+    if total > packed_tensor.numel():
+        raise ValueError(
+            f"Packed layout needs {total} bytes but the buffer has "
+            f"{packed_tensor.numel()}; producer and consumer disagree on "
+            "tensor sizes or packed_alignment."
+        )
+    unpacked = []
+    for name, shape, dtype, offset, size in zip(
+        names, shapes, dtypes, offsets, tensor_sizes
+    ):
+        raw = packed_tensor[offset : offset + size]
+        if raw.storage_offset() % dtype.itemsize:
+            raw = raw.clone()
+        unpacked.append((name, raw.view(dtype).view(shape)))
+    return unpacked
 
 
 @dataclass
@@ -70,69 +139,63 @@ def pack_tensors(
     iterator: Iterator[tuple[str, torch.Tensor]],
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int,
-    tensor_list: list[torch.Tensor] | None = None,
-    current_size: int = 0,
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> PackedChunk | None:
     """Pack tensors from an iterator into a single contiguous uint8 buffer.
 
-    Consumes from the iterator until the accumulated size exceeds
+    Consumes from the iterator until the packed size exceeds
     buffer_size_bytes or the iterator is exhausted, then returns a
-    PackedChunk. Returns None if no tensors were consumed.
+    PackedChunk laid out per ``packed_offsets(tensor_sizes, alignment)``
+    (padding bytes are zero). Returns None if no tensors were consumed.
 
     Args:
         iterator: Iterator of (name, tensor) pairs
         post_iter_func: Applied to each item before linearizing to uint8
         buffer_size_bytes: Max bytes before flushing
-        tensor_list: Pre-existing tensor list to append to (for NCCL
-                    multi-buffer reuse). If None, a fresh list is created.
-        current_size: Byte count already accumulated in tensor_list
+        alignment: Entry start alignment in bytes
 
     """
-    if tensor_list is None:
-        tensor_list = []
 
-    names: list[str] = []
-    shapes: list[list[int]] = []
-    dtypes: list[torch.dtype] = []
-    tensor_sizes: list[int] = []
-    total_bytes = current_size
-
-    while True:
-        try:
-            item = next(iterator)
-        except StopIteration:
-            break
-
+    def linearize(item: tuple[str, torch.Tensor]):
         name, orig_tensor = item
-        # Apply post processing and convert to linearized uint8 tensor
-        tensor = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
-
-        if tensor.numel() > buffer_size_bytes:
+        flat = post_iter_func(item).contiguous().view(-1).view(torch.uint8)
+        if flat.numel() > buffer_size_bytes:
             import warnings
 
             warnings.warn(
-                f"Tensor '{name}' has size {tensor.numel()} bytes, which "
+                f"Tensor '{name}' has size {flat.numel()} bytes, which "
                 f"exceeds buffer_size_bytes={buffer_size_bytes}.",
-                stacklevel=2,
+                stacklevel=4,
             )
+        return name, orig_tensor, flat
 
-        tensor_list.append(tensor)
-        names.append(name)
-        shapes.append(list(orig_tensor.shape))
-        dtypes.append(orig_tensor.dtype)
-        tensor_sizes.append(tensor.numel())
-        total_bytes += tensor.numel()
-
-        if total_bytes > buffer_size_bytes:
-            break
-
-    if not tensor_list:
+    items = _take_chunk(
+        map(linearize, iterator),
+        lambda item: item[2].numel(),
+        buffer_size_bytes,
+        alignment,
+    )
+    if not items:
         return None
 
-    packed = torch.cat(tensor_list, dim=0)
-    del tensor_list
+    names = [name for name, _, _ in items]
+    shapes = [list(orig.shape) for _, orig, _ in items]
+    dtypes = [orig.dtype for _, orig, _ in items]
+    flats = [flat for _, _, flat in items]
+    tensor_sizes = [flat.numel() for flat in flats]
+
+    # One cat with zero pads between entries, rather than a copy per entry.
+    offsets, _ = packed_offsets(tensor_sizes, alignment)
+    zeros = flats[0].new_zeros(alignment - 1)
+    pieces: list[torch.Tensor] = []
+    end = 0
+    for offset, flat in zip(offsets, flats):
+        if offset > end:
+            pieces.append(zeros[: offset - end])
+        pieces.append(flat)
+        end = offset + flat.numel()
     return PackedChunk(
-        packed_tensor=packed,
+        packed_tensor=torch.cat(pieces),
         names=names,
         shapes=shapes,
         dtypes=dtypes,
@@ -150,6 +213,7 @@ def packed_nccl_broadcast_producer(
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
@@ -163,6 +227,8 @@ def packed_nccl_broadcast_producer(
                           Both producer and consumer must use the same value.
         num_buffers: Number of buffers for double/triple buffering.
                     Both producer and consumer must use the same value.
+        alignment: Entry start alignment of the packed layout.
+                  Both producer and consumer must use the same value.
 
     """
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
@@ -178,7 +244,7 @@ def packed_nccl_broadcast_producer(
         in_flight[buffer_idx] = None
         # Start tasks for the new buffer in a new stream
         with torch.cuda.stream(streams[buffer_idx]):
-            chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes)
+            chunk = pack_tensors(iterator, post_iter_func, buffer_size_bytes, alignment)
             if chunk is None:
                 break
             # Pack the tensors and call broadcast collective
@@ -201,6 +267,7 @@ def packed_nccl_broadcast_consumer(
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     device: torch.device | str = "cuda",
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -216,51 +283,51 @@ def packed_nccl_broadcast_consumer(
                     Both producer and consumer must use the same value.
         device: Device for the receive buffers. Must match the device the NCCL
                 communicator was created on (the worker's assigned device).
+        alignment: Entry start alignment of the packed layout.
+                  Both producer and consumer must use the same value.
 
     """
-    target_packed_tensor_size = buffer_size_bytes
-
     streams = _get_streams(torch.accelerator.current_device_index(), num_buffers)
-    buffer_idx = 0
-
-    packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [
-        [] for _ in range(num_buffers)
-    ]
-    packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
     caller_stream = torch.accelerator.current_stream()
     prev_received: torch.Event | None = None
     slot_done: list[torch.Event | None] = [None] * num_buffers
 
-    def receive_and_load(buffer_idx: int) -> None:
-        nonlocal prev_received
-        packed = torch.empty(
-            packing_tensor_sizes[buffer_idx], dtype=torch.uint8, device=device
-        )
-        group.broadcast(packed, src=src)
+    metas = (
+        (name, shape, dtype, math.prod(shape) * dtype.itemsize)
+        for name, (shape, dtype) in iterator
+    )
 
-        # post_unpack_func may keep the unpacked views and read them from a later
-        # pack's callback, on another slot stream. Chaining the ready events
+    def receive_and_load(buffer_idx: int, chunk: list) -> None:
+        nonlocal prev_received
+        names, shapes, dtypes, tensor_sizes = map(list, zip(*chunk))
+        _, total = packed_offsets(tensor_sizes, alignment)
+        packed = torch.empty(total, dtype=torch.uint8, device=device)
+        group.broadcast(packed, src=src)
+        # Misaligned entries (legacy layout only) are copied here, on this
+        # slot's stream, so the ready event below covers them too.
+        weights = unpack_tensor(packed, names, shapes, dtypes, tensor_sizes, alignment)
+
+        # post_unpack_func may keep the unpacked tensors and read them from a
+        # later pack's callback, on another slot stream. Chaining the ready events
         # orders every callback after all earlier receives, and record_stream
-        # keeps the allocator from reissuing this buffer once it is freed while
-        # the broadcast or such a read is still pending.
+        # keeps the allocator from reissuing this buffer (or a copy) once it is
+        # freed while the broadcast or such a read is still pending.
         if prev_received is not None:
             streams[buffer_idx].wait_event(prev_received)
         prev_received = torch.Event()
         prev_received.record(streams[buffer_idx])
-        for stream in (*streams, caller_stream):
-            packed.record_stream(stream)
+        copies = (t for _, t in weights if t._base is not packed and t.numel())
+        for tensor in (packed, *copies):
+            for stream in (*streams, caller_stream):
+                tensor.record_stream(stream)
 
-        names, shapes, dtypes, tensor_sizes = zip(*packing_tensor_meta_data[buffer_idx])
-        post_unpack_func(
-            unpack_tensor(
-                packed, list(names), list(shapes), list(dtypes), list(tensor_sizes)
-            )
-        )
+        post_unpack_func(weights)
         event = torch.Event()
         event.record(streams[buffer_idx])
         slot_done[buffer_idx] = event
 
-    while True:
+    buffer_idx = 0
+    while chunk := _take_chunk(metas, lambda m: m[3], buffer_size_bytes, alignment):
         # Wait for this slot's previous pack. Not streams[buffer_idx].synchronize():
         # on ROCm, streams can share a hardware queue, and synchronizing one
         # stream then also waits for work queued later on the others.
@@ -268,28 +335,8 @@ def packed_nccl_broadcast_consumer(
         if done is not None:
             done.synchronize()
         with torch.cuda.stream(streams[buffer_idx]):
-            # Initialize the packing tensor meta data
-            packing_tensor_meta_data[buffer_idx] = []
-            packing_tensor_sizes[buffer_idx] = 0
-            try:
-                # Form a packed tensor
-                while True:
-                    name, (shape, dtype) = next(iterator)
-                    tensor_size = math.prod(shape) * dtype.itemsize
-                    packing_tensor_meta_data[buffer_idx].append(
-                        (name, shape, dtype, tensor_size)
-                    )
-                    packing_tensor_sizes[buffer_idx] += tensor_size
-                    if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
-                        break
-                receive_and_load(buffer_idx)
-                # Move to the next buffer
-                buffer_idx = (buffer_idx + 1) % num_buffers
-            except StopIteration:
-                # Do the last broadcast if there are remaining tensors
-                if len(packing_tensor_meta_data[buffer_idx]) > 0:
-                    receive_and_load(buffer_idx)
-                break
+            receive_and_load(buffer_idx, chunk)
+        buffer_idx = (buffer_idx + 1) % num_buffers
 
     # Drain every slot before returning.
     for stream in streams:
@@ -315,6 +362,7 @@ def packed_ipc_producer(
     gpu_uuid: str,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
     buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> Iterator[PackedIpcChunk]:
     """Pack tensors into a reusable IPC buffer and yield handles.
 
@@ -334,6 +382,8 @@ def packed_ipc_producer(
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
             Every chunk is guaranteed to fit within this size.  A
             ``ValueError`` is raised if any single tensor exceeds it.
+        alignment: Entry start alignment of the packed layout; the consumer
+            must unpack with the same value.
 
     """
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="cuda")
@@ -343,7 +393,7 @@ def packed_ipc_producer(
     shapes: list[list[int]] = []
     dtypes: list[torch.dtype] = []
     tensor_sizes: list[int] = []
-    total_bytes = 0
+    end = 0
 
     for name, orig_tensor in iterator:
         flat = (
@@ -357,7 +407,8 @@ def packed_ipc_producer(
                 f"Increase buffer_size_bytes to at least {flat.numel()}."
             )
 
-        if total_bytes and total_bytes + flat.numel() > buffer_size_bytes:
+        start = _round_up(end, alignment)
+        if end and start + flat.numel() > buffer_size_bytes:
             # Drain queued copies so the consumer sees a fully-written buffer.
             torch.accelerator.current_stream().synchronize()
             yield PackedIpcChunk(
@@ -370,16 +421,16 @@ def packed_ipc_producer(
             # Rebind to fresh lists so the yielded chunk's metadata is
             # not mutated while the consumer is still reading.
             names, shapes, dtypes, tensor_sizes = [], [], [], []
-            total_bytes = 0
+            start = 0
 
-        ipc_buffer[total_bytes : total_bytes + flat.numel()].copy_(flat)
+        ipc_buffer[start : start + flat.numel()].copy_(flat)
         names.append(name)
         shapes.append(list(orig_tensor.shape))
         dtypes.append(orig_tensor.dtype)
         tensor_sizes.append(flat.numel())
-        total_bytes += flat.numel()
+        end = start + flat.numel()
 
-    if total_bytes:
+    if names:
         torch.accelerator.current_stream().synchronize()
         yield PackedIpcChunk(
             names=names,
@@ -437,6 +488,7 @@ def packed_ipc_consumer(
     tensor_sizes: list[int],
     device_index: int,
     importer: "PackedBufferImporter | None" = None,
+    alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> list[tuple[str, torch.Tensor]]:
     """Unpack a single packed IPC chunk into named tensors.
 
@@ -463,6 +515,7 @@ def packed_ipc_consumer(
             export so the buffer mapping is opened and released exactly once
             (see ``PackedBufferImporter``). ``None`` builds an ephemeral one,
             which is only safe for single-chunk consumption.
+        alignment: Entry start alignment the producer packed with.
 
     """
     props = torch.cuda.get_device_properties(device_index)
@@ -481,11 +534,10 @@ def packed_ipc_consumer(
         importer = PackedBufferImporter()
     packed = importer.rebuild(list_args)
 
-    content_size = sum(tensor_sizes)
-    packed = packed[:content_size]
-
     dtypes = [getattr(torch, dn) for dn in dtype_names]
     return [
         (name, t.clone())
-        for name, t in unpack_tensor(packed, names, shapes, dtypes, tensor_sizes)
+        for name, t in unpack_tensor(
+            packed, names, shapes, dtypes, tensor_sizes, alignment
+        )
     ]

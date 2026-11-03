@@ -25,8 +25,11 @@ from vllm.distributed.weight_transfer.base import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_ALIGNMENT,
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    LEGACY_PACKED_ALIGNMENT,
     PackedBufferImporter,
+    check_packed_alignment,
     packed_ipc_consumer,
     packed_ipc_producer,
 )
@@ -36,12 +39,18 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 class IPCWeightTransferInitInfo(WeightTransferInitInfo):
     """Worker-side init info for IPC weight transfer. No rendezvous needed.
 
-    `packed` is a must-agree wire param: the trainer ships it here at the init
-    handshake so the worker decodes with the same setting the trainer encoded
-    with. The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does
-    not need the buffer size (producer-only)."""
+    `packed` / `packed_alignment` are must-agree wire params: the trainer ships
+    them here at the init handshake so the worker decodes with the same settings
+    the trainer encoded with. `packed_alignment` defaults to 1, the unpadded
+    layout, for producers that do not send it; vLLM's trainer engine sends 16.
+    The consumer rebuilds from the IPC handle + `tensor_sizes`, so it does not
+    need the buffer size (producer-only)."""
 
     packed: bool = False
+    packed_alignment: int = LEGACY_PACKED_ALIGNMENT
+
+    def __post_init__(self) -> None:
+        check_packed_alignment(self.packed_alignment)
 
 
 @dataclass
@@ -50,13 +59,18 @@ class IPCTrainerInitInfo(TrainerInitInfo):
     `rank` (from `TrainerInitInfo`) identifies this trainer process — rank 0
     ships the merged IPC handles. All ranks still join the handle all-gather.
 
-    `packed` / `packed_buffer_size_bytes` are the transfer's wire params. The
-    trainer propagates `packed` to the worker at `trainer_init` so the two sides
-    cannot disagree. `backend` is the factory dispatch key."""
+    `packed` / `packed_buffer_size_bytes` / `packed_alignment` are the
+    transfer's wire params. The trainer propagates `packed` and
+    `packed_alignment` to the worker at `trainer_init` so the two sides cannot
+    disagree. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "ipc"
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_alignment: int = DEFAULT_PACKED_ALIGNMENT
+
+    def __post_init__(self) -> None:
+        check_packed_alignment(self.packed_alignment)
 
 
 @dataclass
@@ -142,6 +156,7 @@ class IPCWeightTransferEngine(
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.packed = False
+        self.packed_alignment = LEGACY_PACKED_ALIGNMENT
         # Shared across all chunks of every packed transfer this engine
         # receives; see PackedBufferImporter for the refcount contract.
         self._packed_importer = PackedBufferImporter()
@@ -152,10 +167,12 @@ class IPCWeightTransferEngine(
         worker decodes exactly as the trainer encoded.
 
         Args:
-            init_info: IPC initialization info (carries `packed`).
+            init_info: IPC initialization info (carries `packed` and
+                `packed_alignment`).
 
         """
         self.packed = init_info.packed
+        self.packed_alignment = init_info.packed_alignment
 
     def start_weight_update(self) -> None:
         """Begin reloading the incoming checkpoint weights."""
@@ -207,6 +224,7 @@ class IPCWeightTransferEngine(
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
                 importer=self._packed_importer,
+                alignment=self.packed_alignment,
             )
         else:
             assert isinstance(update_info.ipc_handles, list)
@@ -255,8 +273,9 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
     `update_weights` *is* the transfer, and it rides the client, so it no-ops
     on non-senders.
 
-    `packed` / `packed_buffer_size_bytes` come from `IPCTrainerInitInfo`; the
-    sender propagates `packed` to the worker at `trainer_init`.
+    `packed` / `packed_buffer_size_bytes` / `packed_alignment` come from
+    `IPCTrainerInitInfo`; the sender propagates `packed` and `packed_alignment`
+    to the worker at `trainer_init`.
     """
 
     init_info_cls = IPCTrainerInitInfo
@@ -269,10 +288,13 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
         is_sender: bool = True,
         packed: bool = False,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+        packed_alignment: int = DEFAULT_PACKED_ALIGNMENT,
     ) -> None:
         super().__init__(client=client, source=source, is_sender=is_sender)
+        check_packed_alignment(packed_alignment)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
+        self.packed_alignment = packed_alignment
         self.device_index = torch.accelerator.current_device_index()
         self.gpu_uuid = str(torch.cuda.get_device_properties(self.device_index).uuid)
 
@@ -304,11 +326,17 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             is_sender=init_info.is_sender,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
+            packed_alignment=init_info.packed_alignment,
         )
         # IPC needs no data-plane rendezvous. The sender ships the must-agree
-        # `packed` flag so the worker decodes exactly as this trainer encodes.
+        # wire params so the worker decodes exactly as this trainer encodes.
+        # `packed_alignment` rides only packed transfers, so unpacked ones keep
+        # working against workers that predate (and would reject) the field.
         if engine.is_sender:
-            engine.client.init_weight_transfer_engine({"packed": init_info.packed})
+            payload: dict[str, Any] = {"packed": init_info.packed}
+            if init_info.packed:
+                payload["packed_alignment"] = init_info.packed_alignment
+            engine.client.init_weight_transfer_engine(payload)
         return engine
 
     def send_weights(self) -> None:
@@ -423,6 +451,7 @@ class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitI
             gpu_uuid=self.gpu_uuid,
             post_iter_func=lambda item: item[1],
             buffer_size_bytes=self.packed_buffer_size_bytes,
+            alignment=self.packed_alignment,
         ):
             ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
             self._do_send(

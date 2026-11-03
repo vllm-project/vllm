@@ -85,9 +85,12 @@ once every transfer has drained.
 | `packed` | `True` | Use packed broadcasting |
 | `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
 | `packed_num_buffers` | 2 | Number of rotating buffers (double/triple buffering) |
+| `packed_alignment` | 16 | Byte alignment of each tensor in a packed buffer (power of two) |
 
 `packed` defaults to `True` here. The worker-side default is `False`, but it only
 applies when no trainer ships a value — which, on this path, never happens.
+Likewise `packed_alignment`: the worker default is 1, but this trainer always
+ships 16.
 
 ### Packed Tensor Broadcasting
 
@@ -96,7 +99,12 @@ before broadcasting. This cuts the number of NCCL operations and uses
 double/triple buffering with dedicated CUDA streams to overlap packing,
 broadcasting, and unpacking.
 
-You set `packed`, `packed_buffer_size_bytes`, and `packed_num_buffers` **only on
+Each tensor starts at an offset aligned to `packed_alignment`, so the worker
+unpacks every tensor as a zero-copy view of the received buffer. 16 covers every
+dtype; the padding it adds is at most 15 bytes per tensor and zero for models
+whose tensors are all multiples of 16 bytes.
+
+You set `packed`, `packed_buffer_size_bytes`, `packed_num_buffers`, and `packed_alignment` **only on
 `NCCLTrainerInitInfo`**. The trainer propagates them to the worker inside
 `trainer_init`, the worker records them at the handshake, and `receive_weights`
 decodes with exactly the values the trainer encoded with. They are not per-round
@@ -204,6 +212,7 @@ rank 0. Reference: [`rlhf_http_nccl_no_vllm.py`](../../../examples/rl/rlhf_http_
 | `packed` | `false` | Packed broadcasting |
 | `packed_buffer_size_bytes` | 1 GiB | Must match the trainer's chunking |
 | `packed_num_buffers` | 2 | Worker-side receive buffers |
+| `packed_alignment` | `1` | Packed layout alignment (power of two); must match the trainer's packing |
 
 - Worker rank = `rank_offset + dp_index * (TP * PP) + rank`.
 - `/init_weight_transfer_engine` returns only after all ranks join: send it in
@@ -225,10 +234,16 @@ that broadcasts that update, so one start/finish lifecycle can carry updates
 from several trainer ranks.
 
 - Unpacked: one broadcast per tensor.
-- Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
-  order; broadcast a chunk as soon as its size **exceeds**
-  `packed_buffer_size_bytes` (the crossing tensor stays in the chunk), then the
-  remainder.
+- Packed: lay out `t.contiguous().view(-1).view(torch.uint8)` in `names`
+  order, each starting at the previous tensor's end rounded up to
+  `packed_alignment` (the first at 0; no pad after the last). With the default
+  of 1 this is plain concatenation. Broadcast a chunk as soon as its end
+  **exceeds** `packed_buffer_size_bytes` (the crossing tensor stays in the
+  chunk), then the remainder.
+- With `packed_alignment=1`, a tensor whose offset is not a multiple of its
+  dtype's itemsize (e.g. after an odd-sized FP8 scale) is copied on the worker
+  instead of viewed. Send `packed_alignment: 16` and pad accordingly to avoid
+  those copies.
 
 Trainer-side communicators without vLLM:
 

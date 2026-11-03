@@ -33,8 +33,11 @@ from vllm.distributed.weight_transfer.nccl_common import (
     trainer_init as open_trainer_endpoint,
 )
 from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_ALIGNMENT,
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
+    LEGACY_PACKED_ALIGNMENT,
+    check_packed_alignment,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
@@ -64,10 +67,11 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     `init_weight_transfer_engine` (see `NCCLWeightTransferInitInfo`) rather than
     going through this engine.
 
-    `packed` / buffer sizes are the transfer's wire params. The trainer
-    propagates them to the worker at `trainer_init` so the two sides cannot
-    disagree. Note this defaults to packed, unlike the worker-side
-    `NCCLWeightTransferInitInfo`, whose default only applies when no trainer
+    `packed` / buffer sizes / `packed_alignment` are the transfer's wire
+    params. The trainer propagates them to the worker at `trainer_init` so the
+    two sides cannot disagree. Note this defaults to packed with 16-byte
+    alignment (zero-copy unpack), unlike the worker-side
+    `NCCLWeightTransferInitInfo`, whose defaults only apply when no trainer
     ships a value. `backend` is the factory dispatch key."""
 
     backend: ClassVar[str] = "nccl"
@@ -80,6 +84,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     packed: bool = True
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    packed_alignment: int = DEFAULT_PACKED_ALIGNMENT
+
+    def __post_init__(self) -> None:
+        check_packed_alignment(self.packed_alignment)
 
 
 @dataclass
@@ -140,6 +148,7 @@ class NCCLWeightTransferEngine(
         self.packed = False
         self.packed_buffer_size_bytes = DEFAULT_PACKED_BUFFER_SIZE_BYTES
         self.packed_num_buffers = DEFAULT_PACKED_NUM_BUFFERS
+        self.packed_alignment = LEGACY_PACKED_ALIGNMENT
         # Metadata of the last update per (model, src), reused by empty update info.
         self._last_update_info: dict[
             tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
@@ -159,6 +168,7 @@ class NCCLWeightTransferEngine(
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
+        self.packed_alignment = init_info.packed_alignment
         self._last_update_info.clear()
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
@@ -231,6 +241,7 @@ class NCCLWeightTransferEngine(
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
                     device=self.device,
+                    alignment=self.packed_alignment,
                 )
             else:
                 # Use simple one-by-one broadcasting
@@ -260,7 +271,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
     Other trainer ranks hold no communicator and only drive `iter_full()` to
     stay in the trainer-side gathers (e.g. FSDP `full_tensor()`).
 
-    `packed` / buffer sizes come from `NCCLTrainerInitInfo`; the sender
+    `packed` / buffer sizes / alignment come from `NCCLTrainerInitInfo`; the sender
     propagates them to the worker at `trainer_init` (on the worker-side init
     info), so per-round payloads carry only parameter metadata.
     """
@@ -277,11 +288,14 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         packed: bool = True,
         packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
         packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
+        packed_alignment: int = DEFAULT_PACKED_ALIGNMENT,
     ) -> None:
         super().__init__(client=client, source=source, is_sender=is_sender, rank=rank)
+        check_packed_alignment(packed_alignment)
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
+        self.packed_alignment = packed_alignment
         self.model_update_group: PyNcclCommunicator | None = None
         # This rank's rank in the transfer group, set by trainer_init.
         self._group_rank = 0
@@ -295,6 +309,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
+            packed_alignment=init_info.packed_alignment,
         )
 
     def _open_trainer_endpoint(self, init_info: NCCLTrainerInitInfo) -> None:
@@ -369,6 +384,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
+            packed_alignment=init_info.packed_alignment,
         )
         if engine.rank not in group_ranks:
             # Ranks that broadcast nothing stay out of the transfer group; they
@@ -476,6 +492,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 post_iter_func=lambda item: item[1],
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
+                alignment=self.packed_alignment,
             )
         else:
             stream = torch.cuda.current_stream()
@@ -500,6 +517,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 buffer_size_bytes=self.packed_buffer_size_bytes,
                 num_buffers=self.packed_num_buffers,
                 device=device,
+                alignment=self.packed_alignment,
             )
         else:
             stream = torch.cuda.current_stream()

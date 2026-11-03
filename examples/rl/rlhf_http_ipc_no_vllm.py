@@ -149,6 +149,8 @@ def main() -> None:
     prompts = ["The capital of France is", "def fibonacci(n):"]
     print("before:", generate(prompts))
 
+    # Packs back to back (the default `packed_alignment` of 1). Sending 16 and
+    # padding each tensor's start to 16 bytes lets the worker skip copies.
     post("/init_weight_transfer_engine", {"init_info": {"packed": args.packed}})
     post("/start_weight_update")
     if args.packed:

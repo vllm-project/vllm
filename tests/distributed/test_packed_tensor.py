@@ -6,15 +6,19 @@ Unit tests for packed_nccl_broadcast_producer and packed_nccl_broadcast_consumer
 These utilities enable efficient batched tensor transfer over NCCL.
 """
 
+import random
+
 import pytest
 import torch
 
 from vllm.distributed.weight_transfer.packed_tensor import (
+    _take_chunk,
     pack_tensors,
     packed_ipc_consumer,
     packed_ipc_producer,
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
+    packed_offsets,
     unpack_tensor,
 )
 
@@ -96,6 +100,52 @@ class TestPackedBroadcastProducer:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestPackedBroadcastRoundtrip:
     """Test producer-consumer roundtrip behavior."""
+
+    @pytest.mark.parametrize("alignment", [1, 16])
+    def test_roundtrip_odd_sized_prefix(self, alignment):
+        """An odd-sized entry ahead of wider dtypes (gh-64936) round-trips;
+        with 16-byte alignment every unpacked tensor is a view of its pack."""
+        params = [
+            (name, t.cuda())
+            for name, t in _mixed_params(torch.Generator().manual_seed(0))
+        ] * 3
+        params = [(f"{name}.{i}", t) for i, (name, t) in enumerate(params)]
+        buffer_size = 100
+
+        producer_group = MockCommunicationGroup()
+        packed_nccl_broadcast_producer(
+            iterator=iter(params),
+            group=producer_group,
+            src=0,
+            post_iter_func=lambda x: x[1],
+            buffer_size_bytes=buffer_size,
+            alignment=alignment,
+        )
+        assert producer_group.broadcast_count > 1
+
+        unpacked = {}
+        storages_per_pack = []
+
+        def post_unpack_func(tensor_list):
+            storages_per_pack.append(
+                {t.untyped_storage().data_ptr() for _, t in tensor_list if t.numel()}
+            )
+            for name, tensor in tensor_list:
+                unpacked[name] = tensor.clone()
+
+        packed_nccl_broadcast_consumer(
+            iterator=((n, (list(t.shape), t.dtype)) for n, t in params),
+            group=MockConsumerCommunicationGroup(producer_group.broadcasted_tensors),
+            src=0,
+            post_unpack_func=post_unpack_func,
+            buffer_size_bytes=buffer_size,
+            alignment=alignment,
+        )
+
+        assert len(storages_per_pack) == producer_group.broadcast_count
+        _assert_bitwise_equal(params, list(unpacked.items()))
+        if alignment == 16:
+            assert all(len(ptrs) == 1 for ptrs in storages_per_pack)
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_roundtrip_different_dtypes(self, dtype):
@@ -602,6 +652,28 @@ class TestPackTensors:
 class TestPackedIpcProducer:
     """Test the packed_ipc_producer generator."""
 
+    @pytest.mark.parametrize(
+        "alignment, expected", [(1, [["a", "b"]]), (16, [["a"], ["b"]])]
+    )
+    def test_padding_counts_toward_capacity(self, alignment, expected):
+        """An entry that fits raw but not after padding starts a new chunk, so
+        nothing is written past ``buffer_size_bytes``."""
+        params = [
+            ("a", torch.ones(10, dtype=torch.uint8, device="cuda")),
+            ("b", torch.ones(10, dtype=torch.uint8, device="cuda")),
+        ]
+        chunks = [
+            c.names
+            for c in packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid="uuid",
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=25,  # 10 + 10 fits; 16 + 10 does not
+                alignment=alignment,
+            )
+        ]
+        assert chunks == expected
+
     def test_producer_yields_chunks(self):
         """Test that the producer yields PackedIpcChunk objects."""
         params = [
@@ -690,6 +762,7 @@ def _ipc_consumer_worker(cmd_q, ack_q, result_q, done_event, device_index):
                 dtype_names=cd["dtype_names"],
                 tensor_sizes=cd["tensor_sizes"],
                 device_index=device_index,
+                alignment=cd.get("alignment", 1),
             )
             # .cpu() forces a GPU→CPU copy off the shared IPC buffer, so
             # the producer is free to overwrite it once we ack.
@@ -719,7 +792,7 @@ class TestPackedIpcRoundtrip:
         props = torch.cuda.get_device_properties(device_index)
         return str(props.uuid)
 
-    def _run_roundtrip(self, chunk_iter, device_index, timeout=30):
+    def _run_roundtrip(self, chunk_iter, device_index, timeout=30, alignment=1):
         """Stream chunks through a child consumer one at a time.
 
         ``packed_ipc_producer`` reuses a single IPC buffer for every
@@ -754,6 +827,7 @@ class TestPackedIpcRoundtrip:
                         "shapes": chunk.shapes,
                         "dtype_names": chunk.dtype_names,
                         "tensor_sizes": chunk.tensor_sizes,
+                        "alignment": alignment,
                     }
                 )
                 if ack_q.get(timeout=timeout) != "ack":
@@ -772,6 +846,30 @@ class TestPackedIpcRoundtrip:
         # Reclaim IPC-shared memory now that the child has released it
         torch.cuda.ipc_collect()
         return num_chunks, payload
+
+    @pytest.mark.parametrize("alignment", [1, 16])
+    def test_roundtrip_odd_sized_prefix(self, alignment):
+        """Odd-sized entries ahead of wider dtypes round-trip through the
+        reused IPC buffer at either alignment."""
+        params = [
+            (f"{name}.{i}", t.cuda())
+            for i, (name, t) in enumerate(
+                _mixed_params(torch.Generator().manual_seed(1)) * 3
+            )
+        ]
+        num_chunks, results = self._run_roundtrip(
+            packed_ipc_producer(
+                iterator=iter(params),
+                gpu_uuid=self._get_gpu_uuid(),
+                post_iter_func=lambda x: x[1],
+                buffer_size_bytes=128,
+                alignment=alignment,
+            ),
+            torch.cuda.current_device(),
+            alignment=alignment,
+        )
+        assert num_chunks > 1
+        _assert_bitwise_equal([(n, t.cpu()) for n, t in params], results)
 
     def test_roundtrip_basic(self):
         """Test basic IPC producer -> consumer roundtrip."""
@@ -932,3 +1030,158 @@ def test_pack_unpack_scalar(dtype):
         assert actual.shape == expected.shape
         assert actual.dtype == expected.dtype
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+# --- CPU tests: aligned packed layout ---
+
+
+def _mixed_params(gen: torch.Generator) -> list[tuple[str, torch.Tensor]]:
+    """Odd-sized narrow entries interleaved with wide dtypes (gh-64936)."""
+    return [
+        ("odd_u8", torch.randint(0, 255, (3,), dtype=torch.uint8, generator=gen)),
+        ("i64", torch.randint(-100, 100, (5,), dtype=torch.int64, generator=gen)),
+        ("fp8", torch.randn(7, generator=gen).to(torch.float8_e4m3fn)),
+        ("f64", torch.randn(2, 3, dtype=torch.float64, generator=gen)),
+        ("scalar_u8", torch.tensor(7, dtype=torch.uint8)),
+        ("bf16", torch.randn(3, generator=gen).to(torch.bfloat16)),
+        ("empty_f32", torch.empty(0, 4, dtype=torch.float32)),
+        ("c128", torch.randn(2, dtype=torch.complex128, generator=gen)),
+    ]
+
+
+def _assert_bitwise_equal(expected, actual):
+    assert [n for n, _ in actual] == [n for n, _ in expected]
+    for (name, exp), (_, act) in zip(expected, actual):
+        assert act.dtype == exp.dtype and act.shape == exp.shape, name
+        assert torch.equal(
+            act.contiguous().view(-1).view(torch.uint8),
+            exp.contiguous().view(-1).view(torch.uint8),
+        ), name
+
+
+def _round_trip(params, alignment):
+    chunk = pack_tensors(iter(params), lambda x: x[1], 1 << 20, alignment)
+    assert chunk is not None and chunk.names == [n for n, _ in params]
+    result = unpack_tensor(
+        chunk.packed_tensor,
+        chunk.names,
+        chunk.shapes,
+        chunk.dtypes,
+        chunk.tensor_sizes,
+        alignment,
+    )
+    return chunk, result
+
+
+def _is_view_of(tensor: torch.Tensor, packed: torch.Tensor) -> bool:
+    if not tensor.numel():
+        return True  # nothing to copy; torch reports a null data_ptr
+    start = packed.data_ptr()
+    return start <= tensor.data_ptr() <= start + packed.numel()
+
+
+def test_packed_offsets():
+    sizes = [3, 8, 0, 1, 16, 5]
+    offsets, total = packed_offsets(sizes, 1)
+    assert offsets == [0, 3, 11, 11, 12, 28] and total == 33
+
+    offsets, total = packed_offsets(sizes, 16)
+    assert offsets == [0, 16, 32, 32, 48, 64]
+    assert total == 69  # no trailing pad after the last entry
+
+    assert packed_offsets([], 16) == ([], 0)
+
+
+def test_aligned_round_trip_is_zero_copy():
+    params = _mixed_params(torch.Generator().manual_seed(0))
+    chunk, result = _round_trip(params, alignment=16)
+    _, total = packed_offsets(chunk.tensor_sizes, 16)
+    assert chunk.packed_tensor.numel() == total
+    _assert_bitwise_equal(params, result)
+    for name, tensor in result:
+        assert _is_view_of(tensor, chunk.packed_tensor), name
+
+
+def test_unaligned_legacy_round_trip_copies_misaligned_entries():
+    """The unpadded layout from gh-64936: a 3-byte entry shifts the int64
+    after it, which is copied instead of failing to view."""
+    params = [
+        ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8)),
+        ("ids", torch.arange(4, dtype=torch.int64)),
+    ]
+    chunk, result = _round_trip(params, alignment=1)
+    assert chunk.packed_tensor.numel() == 3 + 32
+    _assert_bitwise_equal(params, result)
+    assert _is_view_of(result[0][1], chunk.packed_tensor)
+    assert not _is_view_of(result[1][1], chunk.packed_tensor)
+
+
+def test_unpack_rejects_a_buffer_shorter_than_the_layout():
+    packed = torch.zeros(20, dtype=torch.uint8)
+    with pytest.raises(ValueError, match="packed_alignment"):
+        unpack_tensor(packed, ["a", "b"], [[3], [8]], [torch.uint8] * 2, [3, 8], 16)
+
+
+@pytest.mark.filterwarnings("ignore:Tensor .* exceeds buffer_size_bytes")
+@pytest.mark.parametrize("alignment", [1, 16])
+def test_nccl_chunk_boundaries_match_consumer(alignment):
+    """`pack_tensors` (producer) and the consumer's metadata-only chunking cut
+    the stream at the same tensors and size each pack identically."""
+    rng = random.Random(alignment)
+    for _ in range(50):
+        sizes = [
+            rng.choice([0, 1, 3, 7, 16, 33, 100]) for _ in range(rng.randint(1, 30))
+        ]
+        buffer_size = rng.choice([1, 16, 50, 128, 1000])
+        params = [
+            (f"t{i}", torch.zeros(n, dtype=torch.uint8)) for i, n in enumerate(sizes)
+        ]
+
+        producer, it = [], iter(params)
+        while chunk := pack_tensors(it, lambda x: x[1], buffer_size, alignment):
+            producer.append((chunk.names, chunk.packed_tensor.numel()))
+
+        consumer, metas = [], iter(enumerate(sizes))
+        while chunk := _take_chunk(metas, lambda m: m[1], buffer_size, alignment):
+            names = [f"t{i}" for i, _ in chunk]
+            consumer.append(
+                (names, packed_offsets([n for _, n in chunk], alignment)[1])
+            )
+
+        assert producer == consumer
+
+
+@pytest.mark.parametrize("alignment", [1, 16])
+def test_fuzz_round_trip(alignment):
+    """Random dtypes and shapes (scalars and empties included) round-trip
+    byte-exactly; with 16-byte alignment nothing is copied."""
+    dtypes = [
+        torch.uint8,
+        torch.int8,
+        torch.float8_e4m3fn,
+        torch.bfloat16,
+        torch.float16,
+        torch.int32,
+        torch.float32,
+        torch.int64,
+        torch.float64,
+        torch.complex128,
+    ]
+    rng = random.Random(0)
+    gen = torch.Generator().manual_seed(0)
+    for _ in range(20):
+        params = []
+        for i in range(rng.randint(1, 20)):
+            dtype = rng.choice(dtypes)
+            shape = [rng.randint(0, 5) for _ in range(rng.randint(0, 3))]
+            numel = 1
+            for d in shape:
+                numel *= d
+            raw = torch.randint(
+                0, 256, (numel * dtype.itemsize,), dtype=torch.uint8, generator=gen
+            )
+            params.append((f"t{i}", raw.view(dtype).view(shape)))
+        chunk, result = _round_trip(params, alignment)
+        _assert_bitwise_equal(params, result)
+        if alignment == 16:
+            assert all(_is_view_of(t, chunk.packed_tensor) for _, t in result)
