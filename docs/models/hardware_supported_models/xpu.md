@@ -80,9 +80,12 @@ this provider uses the existing MoE implementation. The model's
 `xpu/specialized_decode` modules qualify loaded weights and bind an executor
 after quantization, before graph capture. Runtime token-row eligibility is
 checked in vLLM before dispatching the fused operator.
+Failed static checks report a fallback reason once during initialization.
+Fusion is enabled by default when the provider and configuration qualify.
 
 Fusion applies to eligible calls with **1–8 input token rows**, contiguous,
-64-byte-aligned FP16/BF16 activations, FP8-e4m3 routed/shared weights with FP32
+64-byte-aligned FP16/BF16 activations, `rows * top_k <= 512`,
+FP8-e4m3 routed/shared weights with FP32
 per-expert/per-tensor scales, matching expert dimensions and a supported routing
 configuration. Both shared projections must use `XPUW8A16FP8LinearKernel`.
 Explicit `--linear-backend=xpu` selects W8A8 activation quantization and keeps
@@ -106,6 +109,13 @@ model implementation and eligible MoE fusion. The executor reads model-owned
 parameters directly, so in-place weight reloads/updates are visible to captured
 graphs without a worker refresh callback. Changes to weight storage, metadata
 or fusion eligibility require rebuilding the executor and recapturing graphs.
+
+`FULL_DECODE_ONLY` is a graph mode and can use the breakable XPU-graph capture
+mechanism. The post-load hook prepares necessary contiguous parameter layouts
+before binding the executor; forward does not initialize or prepare weights.
+The fused and stock paths can differ in accumulation order and intermediate
+rounding. This model integration uses standard post-load hooks and has no
+Model Runner V2-only dependency.
 
 ### Embedding and Reranker Language Models
 

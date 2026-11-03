@@ -8,8 +8,8 @@ import torch
 @torch.no_grad()
 def initialize_specialized_decode(model: torch.nn.Module) -> None:
     from ..model import Qwen3_5SparseMoeBlock
-    from .moe import MoEStep
+    from .moe import FusedMoeDecode
 
     for module in model.modules():
         if isinstance(module, Qwen3_5SparseMoeBlock):
-            module._decode = MoEStep(module)
+            module._decode = FusedMoeDecode(module)

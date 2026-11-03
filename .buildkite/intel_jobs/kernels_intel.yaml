@@ -48,6 +48,7 @@ steps:
     - vllm/v1/worker/xpu_worker.py
     - tests/kernels/moe/test_moe.py
     - tests/models/test_qwen3_5.py
+    - tests/models/qwen3_5/xpu_specialized_decode/
     - tests/v1/worker/test_gpu_worker_weight_transfer.py
     - requirements/xpu.txt
   commands:
@@ -72,7 +73,7 @@ steps:
       cd tests &&
       pytest -v -s
       kernels/moe/test_moe.py
-      models/test_qwen3_5.py
+      models/qwen3_5/xpu_specialized_decode/test_integration.py
       v1/worker/test_gpu_worker_weight_transfer.py
       -k xpu_qwen3_5'
 

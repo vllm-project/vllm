@@ -22,35 +22,56 @@ if TYPE_CHECKING:
 
 def get_weights(
     block: "Qwen3_5SparseMoeBlock",
-) -> tuple[torch.Tensor, ...] | None:
+) -> tuple[torch.Tensor, ...] | str:
+    """Return eligible parameters or the first static fallback reason."""
     runner, shared = block.experts, block.shared_expert
     if not isinstance(runner, MoERunner) or shared is None:
-        return None
+        return "requires MoERunner and a shared expert"
     config = runner.moe_config
     parallel = config.moe_parallel_config
-    if (
-        block.is_sequence_parallel
-        or block.replicate_shared_expert
-        or block.is_fused_shared_expert_enabled
-        or runner.routed_input_transform is not None
-        or runner.routed_output_transform is not None
-        or runner.enable_dbo
-        or isinstance(runner.router, ZeroExpertRouter)
-        or runner.activation != MoEActivation.SILU
-        or runner.routed_scaling_factor != 1.0
-        or runner.routed_experts.apply_router_weight_on_input
-        or config.has_bias
-        or config.is_lora_enabled
-        or parallel.enable_eplb
-        or parallel.use_ep
-        or parallel.ep_size != 1
-        or runner.expert_map is not None
-        or parallel.dp_size != 1
-        or parallel.pcp_size != 1
-        or parallel.is_sequence_parallel
-        or not isinstance(shared.act_fn, SiluAndMul)
-    ):
-        return None
+    checks = (
+        (
+            block.is_sequence_parallel or parallel.is_sequence_parallel,
+            "sequence parallelism is unsupported",
+        ),
+        (block.replicate_shared_expert, "replicated shared experts are unsupported"),
+        (
+            block.is_fused_shared_expert_enabled,
+            "shared expert fusion is already enabled",
+        ),
+        (
+            runner.routed_input_transform is not None
+            or runner.routed_output_transform is not None,
+            "routed input/output transforms are unsupported",
+        ),
+        (runner.enable_dbo, "dual batch overlap is unsupported"),
+        (
+            isinstance(runner.router, ZeroExpertRouter),
+            "zero-expert routing is unsupported",
+        ),
+        (
+            runner.activation != MoEActivation.SILU
+            or not isinstance(shared.act_fn, SiluAndMul),
+            "routed and shared experts require SiLU activation",
+        ),
+        (runner.routed_scaling_factor != 1.0, "routed scaling must be 1.0"),
+        (
+            runner.routed_experts.apply_router_weight_on_input,
+            "input router weighting is unsupported",
+        ),
+        (config.has_bias, "expert biases are unsupported"),
+        (config.is_lora_enabled, "LoRA is unsupported"),
+        (parallel.enable_eplb, "expert parallel load balancing is unsupported"),
+        (
+            parallel.use_ep or parallel.ep_size != 1 or runner.expert_map is not None,
+            "expert parallelism and expert maps are unsupported",
+        ),
+        (parallel.dp_size != 1, "data parallelism is unsupported"),
+        (parallel.pcp_size != 1, "prefill context parallelism is unsupported"),
+    )
+    reason = next((reason for failed, reason in checks if failed), None)
+    if reason is not None:
+        return reason
     if any(
         layer.bias is not None
         for layer in (
@@ -59,11 +80,11 @@ def get_weights(
             block.shared_expert_gate,
         )
     ):
-        return None
+        return "shared projection and gate biases are unsupported"
     kernel = runner.routed_experts.quant_method.moe_kernel
     experts = kernel.fused_experts if kernel is not None else None
     if not isinstance(experts, XPUExpertsFp8):
-        return None
+        return "routed experts require XPUExpertsFp8"
     gu, down, gate = (
         shared.gate_up_proj,
         shared.down_proj,
@@ -77,7 +98,7 @@ def get_weights(
         )
         for layer in (gu, down)
     ):
-        return None
+        return "shared projections require XPUW8A16FP8LinearKernel"
     tensors = (
         runner.routed_experts.w13_weight,
         runner.routed_experts.w2_weight,
@@ -90,12 +111,12 @@ def get_weights(
         gate.weight,
     )
     if not all(isinstance(t, torch.Tensor) for t in tensors):
-        return None
+        return "required weight or scale tensors are missing"
     w13, w2, shared_w13, shared_w2, s13, s2, shared_s13, shared_s2, gate_weight = cast(
         tuple[torch.Tensor, ...], tensors
     )
     if w13.ndim != 3 or w2.ndim != 3:
-        return None
+        return "routed weights must be rank three"
     if not (
         w13.dtype
         == w2.dtype
@@ -113,27 +134,28 @@ def get_weights(
         and 0 < runner.moe_config.experts_per_token <= w13.shape[0] <= 512
         and gate_weight.shape in ((w13.shape[1],), (1, w13.shape[1]))
     ):
-        return None
+        return "weight dtypes, dimensions or scale shapes are incompatible"
     matrices = (w13, w2, shared_w13, shared_w2)
     scales = (s13, s2, shared_s13, shared_s2)
     weights = (*matrices, *scales, gate_weight)
     if w13.device.type != "xpu" or not all(t.device == w13.device for t in weights):
-        return None
+        return "weights and scales must share one XPU device"
     # Reject offset views whose existing contiguous storage is unaligned.
     if any(t.is_contiguous() and t.data_ptr() % 64 for t in matrices):
-        return None
-    if (gate_weight.is_contiguous() and gate_weight.data_ptr() % 32) or any(
-        t.dtype != torch.float32 for t in scales
-    ):
-        return None
+        return "contiguous weight matrices must be 64-byte aligned"
+    if gate_weight.is_contiguous() and gate_weight.data_ptr() % 32:
+        return "contiguous shared gate weights must be 32-byte aligned"
+    if any(t.dtype != torch.float32 for t in scales):
+        return "weight scales must be FP32"
     return weights
 
 
 @torch.no_grad()
-def prepare_weights(block: "Qwen3_5SparseMoeBlock") -> tuple[torch.Tensor, ...] | None:
-    """Use model-owned contiguous parameters, preserved by in-place reload."""
-    if get_weights(block) is None:
-        return None
+def prepare_weights(block: "Qwen3_5SparseMoeBlock") -> tuple[torch.Tensor, ...] | str:
+    """Finalize model-owned layouts before binding an executor or capturing graphs."""
+    weights = get_weights(block)
+    if isinstance(weights, str):
+        return weights
     shared = block.shared_expert
     assert shared is not None
     routed = block.experts.routed_experts

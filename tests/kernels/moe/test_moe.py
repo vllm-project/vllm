@@ -81,6 +81,7 @@ def _xpu_qwen3_5_moe(
     reduce_results=True,
     *,
     linear_backend="auto",
+    initialize_decode=True,
 ):
     """Construct and quantize the model's real MoE block and shared linears."""
     from transformers import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
@@ -94,6 +95,9 @@ def _xpu_qwen3_5_moe(
     from vllm.model_executor.layers.quantization.fp8 import Fp8Config
     from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
     from vllm.models.qwen3_5.xpu.model import Qwen3_5SparseMoeBlock
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
     from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.v1.worker.workspace import init_workspace_manager, reset_workspace_manager
 
@@ -156,6 +160,8 @@ def _xpu_qwen3_5_moe(
                     method = getattr(layer, "quant_method", None)
                     if method is not None:
                         method.process_weights_after_loading(layer)
+                if initialize_decode:
+                    initialize_specialized_decode(block)
             yield block, config, quantized
     finally:
         reset_workspace_manager()
@@ -213,6 +219,21 @@ def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+def test_xpu_qwen3_5_forward_requires_post_load_initialization(tmp_path):
+    """Forward uses stock until the post-load hook binds native fused weights."""
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+
+    with _xpu_qwen3_5_moe(
+        tmp_path, torch.float16, True, initialize_decode=False
+    ) as state:
+        _check_xpu_qwen3_5_decode(state, 1, should_fuse=False)
+        initialize_specialized_decode(state[0])
+        _check_xpu_qwen3_5_decode(state, 1, should_fuse=True)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
 @pytest.mark.parametrize(
     "xpu_qwen3_5_moe,num_tokens",
     [
@@ -247,9 +268,14 @@ def test_xpu_qwen3_5_a8_shared_expert_fallback(tmp_path, dtype, num_tokens):
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
 def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
     """Missing provider falls back even when native operators are installed."""
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+
     monkeypatch.setitem(
         sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
     )
+    initialize_specialized_decode(xpu_qwen3_5_moe[0])
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
 
 
@@ -257,8 +283,13 @@ def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
 def test_xpu_qwen3_5_unsupported_device_fallback(xpu_qwen3_5_moe, monkeypatch):
     """An installed fused provider must fall back on unsupported architectures."""
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+
     monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: False)
     monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: False)
+    initialize_specialized_decode(xpu_qwen3_5_moe[0])
     _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
 
 
@@ -266,7 +297,10 @@ def test_xpu_qwen3_5_unsupported_device_fallback(xpu_qwen3_5_moe, monkeypatch):
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
 def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch):
     """Repeated eligible decode falls back without repeated import failures."""
-    from vllm.models.qwen3_5.xpu.specialized_decode.moe import MoEStep
+    from vllm.models.qwen3_5.xpu.specialized_decode.hooks import (
+        initialize_specialized_decode,
+    )
+    from vllm.models.qwen3_5.xpu.specialized_decode.moe import FusedMoeDecode
 
     monkeypatch.setitem(
         sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
@@ -275,7 +309,7 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
 
     def trace(frame, event, arg):
         nonlocal failures
-        if frame.f_code is not MoEStep.__init__.__code__:
+        if frame.f_code is not FusedMoeDecode.__init__.__code__:
             return None
         if event == "exception" and issubclass(arg[0], ImportError):
             failures += 1
@@ -284,6 +318,7 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
     previous = sys.gettrace()
     try:
         sys.settrace(trace)
+        initialize_specialized_decode(xpu_qwen3_5_moe[0])
         _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
         _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 2, should_fuse=False)
     finally:

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from . import MAX_DECODE_ROWS, MAX_ROUTED_ROWS
@@ -18,22 +19,27 @@ if TYPE_CHECKING:
     from ..model import Qwen3_5SparseMoeBlock
 
 
-class MoEStep:
+logger = init_logger(__name__)
+
+
+class FusedMoeDecode:
     """A native MoE executor bound to one block's loaded parameters."""
 
     def __init__(self, block: "Qwen3_5SparseMoeBlock"):
         self.block = block
         self.plan: XpuFusedMoeWithSharedExpert | None = None
-        self._weights = get_weights(block)
+        self._weights: tuple[torch.Tensor, ...] | None = None
         self.dtype: torch.dtype | None = None
         self.hidden_dim = self.top_k = 0
-        if self._weights is not None:
-            config = cast(MoERunner, block.experts).moe_config
-            self.dtype = config.in_dtype
-            self.hidden_dim = config.hidden_dim
-            self.top_k = config.experts_per_token
-        if self._weights is None:
+        weights = get_weights(block)
+        if isinstance(weights, str):
+            logger.info_once("Qwen3.5 XPU fused MoE disabled: %s", weights)
             return
+        self._weights = weights
+        config = cast(MoERunner, block.experts).moe_config
+        self.dtype = config.in_dtype
+        self.hidden_dim = config.hidden_dim
+        self.top_k = config.experts_per_token
         try:
             from vllm_xpu_kernels.moe_shared_fused_interface import (
                 XpuFusedMoeWithSharedExpert as FusedMoe,
@@ -42,6 +48,7 @@ class MoEStep:
                 supports,
             )
         except ImportError:
+            logger.info_once("Qwen3.5 XPU fused MoE disabled: provider unavailable")
             self._weights = None
             return
         if not supports(
@@ -52,10 +59,16 @@ class MoEStep:
             self._weights[1].shape[1],
             device=self._weights[0].device,
         ):
+            logger.info_once(
+                "Qwen3.5 XPU fused MoE disabled: native provider does not support "
+                "the weight device, dtype or dimensions"
+            )
             return
-        self._weights = prepare_weights(self.block)
-        if self._weights is None:
+        weights = prepare_weights(self.block)
+        if isinstance(weights, str):
+            logger.info_once("Qwen3.5 XPU fused MoE disabled: %s", weights)
             return
+        self._weights = weights
         w13, w2, shared_w13, shared_w2, s13, s2, shared_s13, shared_s2, gate = (
             self._weights
         )

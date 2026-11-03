@@ -108,7 +108,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .specialized_decode.hooks import initialize_specialized_decode
-from .specialized_decode.moe import MoEStep
+from .specialized_decode.moe import FusedMoeDecode
 
 if TYPE_CHECKING:
     from vllm_xpu_kernels.moe_shared_fused_interface import XpuFusedMoeWithSharedExpert
@@ -117,7 +117,7 @@ logger = init_logger(__name__)
 
 
 class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
-    _decode: MoEStep | None = None
+    _decode: FusedMoeDecode | None = None
 
     @property
     def _xpu_moe_shared_fused_plan(self) -> "XpuFusedMoeWithSharedExpert | None":
@@ -128,10 +128,8 @@ class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
-        if already_sequence_parallel:
+        if already_sequence_parallel or self._decode is None:
             return super().forward(hidden_states, already_sequence_parallel)
-        if self._decode is None:
-            self._decode = MoEStep(self)
         output = self._decode.run(hidden_states)
         if output is None:
             return super().forward(hidden_states, already_sequence_parallel)
