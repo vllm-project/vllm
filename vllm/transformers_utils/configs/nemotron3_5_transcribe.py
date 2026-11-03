@@ -279,6 +279,10 @@ class Nemotron3_5TranscribeConfig(PreTrainedConfig):
         pe_encoder_config: dict[str, Any] | None = None,
         text_config: dict[str, Any] | PreTrainedConfig | None = None,
         audio_config: dict[str, Any] | None = None,
+        enable_ctc_timestamps: bool = False,
+        ctc_timestamps: dict[str, Any] | None = None,
+        ctc_timestamp_language: str = "auto",
+        ctc_timestamp_max_cpu_bytes: int = 16 * 1024**3,
         **kwargs: Any,
     ) -> None:
         # Transformers may read the text config while the base class
@@ -296,6 +300,21 @@ class Nemotron3_5TranscribeConfig(PreTrainedConfig):
                 f"got architectures={self.architectures!r}. "
                 + _other_architecture_hint(pe_encoder_config, self.text_config)
             )
+
+        if not isinstance(enable_ctc_timestamps, bool):
+            raise ValueError("enable_ctc_timestamps must be a boolean")
+        self.enable_ctc_timestamps = enable_ctc_timestamps
+        self.ctc_timestamps = ctc_timestamps or {}
+        self.ctc_timestamp_language = ctc_timestamp_language
+        if (
+            isinstance(ctc_timestamp_max_cpu_bytes, bool)
+            or not isinstance(ctc_timestamp_max_cpu_bytes, int)
+            or ctc_timestamp_max_cpu_bytes <= 0
+        ):
+            raise ValueError("ctc_timestamp_max_cpu_bytes must be a positive integer")
+        self.ctc_timestamp_max_cpu_bytes = ctc_timestamp_max_cpu_bytes
+        if enable_ctc_timestamps and not self.ctc_timestamps.get("decoder_config"):
+            raise ValueError("CTC timestamps require the bundled decoder_config")
 
         self.llm_config = llm_config
         self.perception = perception or {}

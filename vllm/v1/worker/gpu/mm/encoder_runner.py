@@ -10,7 +10,12 @@ import numpy as np
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    supports_audio_alignment,
+    supports_realtime,
+)
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import (
@@ -148,11 +153,17 @@ class EncoderRunner:
 
     @torch.inference_mode()
     def execute_mm_encoder(
-        self, mm_kwargs: list[tuple[str, MultiModalKwargsItem]]
+        self,
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
+        mm_hashes: list[str] | None = None,
     ) -> list[torch.Tensor]:
         # Stable-sort items by modality so each modality is encoded in as few
         # batches as possible. The returned outputs are restored to input order.
         order = sorted(range(len(mm_kwargs)), key=lambda i: mm_kwargs[i][0])
+        if mm_hashes is not None and len(mm_hashes) != len(mm_kwargs):
+            raise ValueError("Encoder hashes must match the multimodal input count")
+        sorted_hashes = [mm_hashes[i] for i in order] if mm_hashes is not None else None
+        item_offset = 0
         encoder_outputs: list[torch.Tensor] = []
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             [mm_kwargs[i] for i in order], device=self.device, pin_memory=PIN_MEMORY
@@ -165,13 +176,19 @@ class EncoderRunner:
                 and cg_manager.supports_modality(modality)
                 else None
             )
-            batch_outputs = (
-                cudagraph_output
-                if cudagraph_output is not None
-                else self.model.embed_multimodal(**mm_kwargs_batch)
-            )
+            batch_outputs: MultiModalEmbeddings
+            if cudagraph_output is not None:
+                batch_outputs = cudagraph_output
+            elif sorted_hashes is not None and supports_audio_alignment(self.model):
+                batch_outputs = self.model.embed_multimodal_with_alignment(
+                    sorted_hashes[item_offset : item_offset + num_items],
+                    **mm_kwargs_batch,
+                )
+            else:
+                batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
+            item_offset += num_items
         return [encoder_outputs[i] for i in np.argsort(order)]
 
     @contextmanager
