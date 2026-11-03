@@ -1251,3 +1251,122 @@ def test_softcap_does_not_overflow_on_large_scores() -> None:
     ref = soft_cap * torch.tanh(scores / soft_cap)
     assert torch.isfinite(out).all(), out
     torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+
+
+@pytest.mark.parametrize("sliding_window", [64, 1024])
+def test_splitk_sliding_window_long_context_matches_reference(
+    monkeypatch, sliding_window
+):
+    """Split-K over a window much shorter than the sequence."""
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    test_triton_unified_attn(
+        seq_lens=[(8, 8), (8, 1100), (8, 4097), (1, 3000)],
+        num_heads=(8, 2),
+        head_size=128,
+        sliding_window=sliding_window,
+        dtype=torch.bfloat16,
+        block_size=16,
+        soft_cap=None,
+        num_blocks=1024,
+        q_dtype=None,
+        seq_threshold_3D=32,
+    )
+    assert len(reduce_grids) == 1
+
+
+@triton.jit
+def _compute_window_segment_bounds(
+    output_ptr,
+    seq_len,
+    context_len,
+    SLIDING_WINDOW: tl.constexpr,
+    NUM_SEGMENTS: tl.constexpr,
+):
+    TILE_SIZE: tl.constexpr = 32
+    segm_idx = tl.program_id(0)
+    tiles_per_segment = tl.cdiv(seq_len, NUM_SEGMENTS * TILE_SIZE)
+    loop_lo, loop_hi, _ = compute_tile_loop_bounds(
+        context_len,
+        seq_len,
+        seq_len - context_len,  # cur_batch_query_len
+        0,  # q_block_local_idx
+        segm_idx,
+        tiles_per_segment,
+        TILE_SIZE,
+        16,  # BLOCK_M
+        8,  # BLOCK_Q
+        2,  # num_queries_per_kv
+        SLIDING_WINDOW,
+        False,  # USE_MM_PREFIX
+        True,  # IS_3D
+    )
+    tl.store(output_ptr + 2 * segm_idx, loop_lo)
+    tl.store(output_ptr + 2 * segm_idx + 1, loop_hi)
+
+
+@pytest.mark.parametrize("seq_len", [40, 600, 4096, 4103, 32768, 150000])
+@pytest.mark.parametrize("window", [64, 1024, 4096])
+def test_splitk_segments_split_sliding_window(seq_len: int, window: int) -> None:
+    """3D segments tile the pruned window exactly (no gap, no overlap), using
+    only the segments that reduce_segments reads."""
+    num_segments, tile_size, query_len = 16, 32, 8
+    bounds = torch.empty(2 * num_segments, dtype=torch.int32, device=DEVICE_TYPE)
+    _compute_window_segment_bounds[(num_segments,)](
+        bounds,
+        seq_len,
+        seq_len - query_len,
+        SLIDING_WINDOW=window,
+        NUM_SEGMENTS=num_segments,
+    )
+    bounds = bounds.view(num_segments, 2).tolist()
+
+    tiles_per_segment = triton.cdiv(seq_len, num_segments * tile_size)
+    read_segments = triton.cdiv(seq_len, tiles_per_segment * tile_size)
+    first_key = max(seq_len - query_len - window + 1, 0)
+    want = list(range(first_key // tile_size, (seq_len - 1) // tile_size + 1))
+    got = [t for lo, hi in bounds[:read_segments] for t in range(lo, hi)]
+    assert got == want
+    # The window is spread over the segments, not walked by one or two.
+    longest = max(hi - lo for lo, hi in bounds[:read_segments])
+    assert longest <= triton.cdiv(len(want), read_segments)
+
+
+# The shape one TP4 rank runs for the MiniMax-M3.1 DSpark draft: 16 query heads
+# sharing 1 KV head, head size 128, causal sliding window 4096, a block of 7 (8)
+# draft query rows per request.
+@pytest.mark.parametrize(
+    ("num_reqs", "context"),
+    [
+        (1, 1024),
+        (1, 4103),
+        (1, 30000),
+        (1, 150000),
+        (3, 150000),
+        (8, 30000),
+        (24, 5000),
+        (24, 30000),
+    ],
+)
+@pytest.mark.parametrize("query_len", [7, 8])
+@pytest.mark.parametrize("block_size", [16, 128])
+@pytest.mark.parametrize("q_dtype", QDTYPES, ids=["bf16", "fp8"])
+def test_splitk_draft_sliding_window_shape_matches_reference(
+    monkeypatch, num_reqs, context, query_len, block_size, q_dtype
+):
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    # Distinct, uneven lengths so segments see different window offsets.
+    seq_lens = [(query_len, context + 37 * i) for i in range(num_reqs)]
+    test_triton_unified_attn(
+        seq_lens=seq_lens,
+        num_heads=(16, 1),
+        head_size=128,
+        sliding_window=4096,
+        dtype=torch.bfloat16,
+        block_size=block_size,
+        soft_cap=None,
+        num_blocks=min(2048, (context // block_size) + 8),
+        q_dtype=q_dtype,
+        # BLOCK_Q is 1 for 16 query heads per KV head.
+        seq_threshold_3D=num_reqs * query_len,
+    )
+    assert len(reduce_grids) == 1, "expected the split-K launch"
