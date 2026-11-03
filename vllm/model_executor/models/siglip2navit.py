@@ -3,7 +3,7 @@
 """Implementation of SiglipVisionModel intended to be only used
 within a vision language model."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 
 import torch
 from torch import nn
@@ -27,6 +27,7 @@ from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import is_vit_use_data_parallel
@@ -81,10 +82,49 @@ class Siglip2VisionEmbeddings(nn.Module):
                 self.position_embedding_size = self.image_size // self.patch_size
                 self.position_embedding = nn.Embedding(self.num_patches, self.embed_dim)
 
+    def get_position_embeddings(
+        self,
+        grid_thws: Sequence[Sequence[int]],
+    ) -> torch.Tensor:
+        """Interpolate the learned position embeddings to each item's grid.
+
+        Returns a tensor of shape (sum(t * h * w), embed_dim), ordered the
+        same way as the patchified pixel values.
+        """
+        positional_embeddings = (
+            self.position_embedding.weight.reshape(
+                self.position_embedding_size, self.position_embedding_size, -1
+            )
+            .unsqueeze(0)
+            .permute(0, 3, 1, 2)
+        )
+        pos_embeds = []
+        for t, h, w in grid_thws:
+            t, h, w = int(t), int(h), int(w)
+            pe = F.interpolate(
+                positional_embeddings,
+                size=(h, w),
+                mode="bicubic",
+                align_corners=False,
+            )
+            pe = pe.permute(0, 2, 3, 1).reshape(1, h * w, -1)
+            pe = pe[0].repeat(t, 1)
+            pe = pe.reshape(
+                t,
+                h // self.hidden_stride,
+                self.hidden_stride,
+                w // self.hidden_stride,
+                self.hidden_stride,
+                -1,
+            )
+            pos_embeds.append(pe.permute(0, 1, 3, 2, 4, 5).reshape(t * h * w, -1))
+        return torch.cat(pos_embeds)
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor | None = None,
+        grid_thws: Sequence[Sequence[int]] | None = None,
+        pos_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Args:
         pixel_values (`torch.FloatTensor`):
@@ -92,8 +132,11 @@ class Siglip2VisionEmbeddings(nn.Module):
                 num_patches,
                 num_channels * temporal_patch_size * patch_size * patch_size
             )
-        grid_thws: (`torch.LongTensor`):
-            grid shape (num_patches, 3)
+        grid_thws:
+            grid shape (num_items, 3)
+        pos_embeds:
+            Precomputed position embeddings from `get_position_embeddings`.
+            If None, they are computed from `grid_thws`.
 
         """
         # Apply patch embeddings to already patchified pixel values
@@ -111,38 +154,10 @@ class Siglip2VisionEmbeddings(nn.Module):
             patch_embeds = patch_embeds.reshape(-1, self.embed_dim)
 
         if self.preserve_original_pe:
-            assert grid_thws is not None
-            pos_embed_new = torch.zeros_like(patch_embeds)
-            positional_embeddings = (
-                self.position_embedding.weight.reshape(
-                    self.position_embedding_size, self.position_embedding_size, -1
-                )
-                .unsqueeze(0)
-                .permute(0, 3, 1, 2)
-            )
-            cnt = 0
-            for t, h, w in grid_thws:
-                volume = t * h * w
-                pe = F.interpolate(
-                    positional_embeddings,
-                    size=(h, w),
-                    mode="bicubic",
-                    align_corners=False,
-                )
-                pe = pe.permute(0, 2, 3, 1).reshape(1, h * w, -1)
-                pe = pe[0].repeat(t, 1)
-                pe = pe.reshape(
-                    t,
-                    h // self.hidden_stride,
-                    self.hidden_stride,
-                    w // self.hidden_stride,
-                    self.hidden_stride,
-                    -1,
-                )
-                pe = pe.permute(0, 1, 3, 2, 4, 5).reshape(volume, -1)
-                pos_embed_new[cnt : cnt + volume] = pe
-                cnt += volume
-            patch_embeds = patch_embeds + pos_embed_new
+            if pos_embeds is None:
+                assert grid_thws is not None
+                pos_embeds = self.get_position_embeddings(grid_thws)
+            patch_embeds = patch_embeds + pos_embeds
 
         return patch_embeds
 
@@ -234,6 +249,7 @@ class Siglip2Attention(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Input shape: Batch x Time x Channel."""
         seq_length, embed_dim = hidden_states.shape
@@ -259,7 +275,8 @@ class Siglip2Attention(nn.Module):
             queries = queries.squeeze(0)
             keys = keys.squeeze(0)
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        if max_seqlen is None:
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         attn_output = self.attn(
             query=queries.unsqueeze(0),
             key=keys.unsqueeze(0),
@@ -335,11 +352,14 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: torch.Tensor,
+        max_seqlen: torch.Tensor | None = None,
     ) -> tuple[torch.FloatTensor]:
         """Args:
         hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
         cu_seqlens: Cumulative sequence lengths tensor.
         position_embeddings: Position embeddings tensor.
+        max_seqlen: Maximum sequence length in `cu_seqlens`. Computed from
+            `cu_seqlens` if None.
 
         """
         residual = hidden_states
@@ -349,6 +369,7 @@ class Siglip2EncoderLayer(nn.Module):
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
             position_embeddings=position_embeddings,
+            max_seqlen=max_seqlen,
         )
         hidden_states = residual + hidden_states
 
@@ -401,8 +422,16 @@ class Siglip2Encoder(nn.Module):
                 int(i) for i in config.fullatt_block_indexes.split("|")
             ]
 
+    @staticmethod
+    def _grid_thws_to_list(
+        grid_thws: torch.Tensor | Sequence[Sequence[int]],
+    ) -> list[tuple[int, int, int]]:
+        if isinstance(grid_thws, torch.Tensor):
+            grid_thws = grid_thws.tolist()
+        return [(int(t), int(h), int(w)) for t, h, w in grid_thws]
+
     # copied from qwen2.5_vl
-    def rot_pos_emb(self, grid_thw):
+    def rot_pos_emb(self, grid_thw: Sequence[Sequence[int]]) -> torch.Tensor:
         pos_ids = []
         for t, h, w in grid_thw:
             hpos_ids = torch.arange(h).unsqueeze(1).expand(-1, w)
@@ -426,12 +455,15 @@ class Siglip2Encoder(nn.Module):
             wpos_ids = wpos_ids.flatten()
             pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
         pos_ids = torch.cat(pos_ids, dim=0)
-        max_grid_size = grid_thw[:, 1:].max()
+        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        pos_ids = async_tensor_h2d(pos_ids, rotary_pos_emb_full.device)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def get_window_index(self, grid_thw):
+    def get_window_index(
+        self, grid_thw: Sequence[Sequence[int]]
+    ) -> tuple[torch.Tensor, list[int]]:
         window_index: list = []
         cu_window_seqlens: list = [0]
         window_index_id = 0
@@ -474,34 +506,149 @@ class Siglip2Encoder(nn.Module):
                 seqlens.cumsum(0) * self.spatial_merge_unit + cu_window_seqlens[-1]
             )
             cu_window_seqlens.extend(cu_seqlens_tmp.tolist())
-            window_index_id += (grid_t * llm_grid_h * llm_grid_w).item()
+            window_index_id += grid_t * llm_grid_h * llm_grid_w
         window_index = torch.cat(window_index, dim=0)
 
         return window_index, cu_window_seqlens
 
+    def get_encoder_cudagraph_max_window_seqs(
+        self,
+        token_budget: int,
+        max_num_seqs: int,
+    ) -> int:
+        """Upper bound on the number of window-attention sequences for
+        `token_budget` merged tokens split over at most `max_num_seqs`
+        attention sequences (images or video frames).
+
+        Mirrors the bound used by Qwen2.5-VL: the most non-empty windows for a
+        fixed token budget come from a thin strip along one axis, plus one
+        extra partial window per sequence.
+        """
+        vit_merger_window_size = (
+            self.window_size // self.hidden_stride // self.patch_size
+        )
+        max_strip_windows = (
+            token_budget + vit_merger_window_size - 1
+        ) // vit_merger_window_size
+        return min(token_budget, max_num_seqs + max_strip_windows)
+
+    @staticmethod
+    def _pad_cu_seqlens(cu_seqlens: torch.Tensor, num_seqs: int) -> torch.Tensor:
+        """Pad `cu_seqlens` to `num_seqs + 1` entries by repeating the last
+        offset, so the padded entries represent empty sequences."""
+        num_pad = num_seqs + 1 - cu_seqlens.shape[0]
+        if num_pad <= 0:
+            return cu_seqlens
+        return torch.cat([cu_seqlens, cu_seqlens[-1:].expand(num_pad)])
+
+    def prepare_encoder_metadata(
+        self,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]],
+        *,
+        max_num_seqs: int | None = None,
+        max_num_window_seqs: int | None = None,
+        max_seqlen_override: int | None = None,
+        max_seqlen_window_override: int | None = None,
+        device: torch.device | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Compute all grid-dependent encoder inputs.
+
+        Shared by the eager forward path, CUDA graph capture and CUDA graph
+        replay so that all of them run the exact same computation.
+
+        Args:
+            grid_thws: Grid configurations as a list of [t, h, w].
+            max_num_seqs: If set, pad `cu_seqlens` to this many sequences
+                (needed for a stable shape under CUDA graph capture/replay).
+            max_num_window_seqs: If set, pad `cu_window_seqlens` to this many
+                window sequences.
+            max_seqlen_override: If set, use this value as the full-attention
+                max_seqlen instead of computing it from `cu_seqlens`.
+            max_seqlen_window_override: Same as `max_seqlen_override`, for
+                window attention.
+            device: Device to place the tensors on.
+
+        """
+        grid_thws = self._grid_thws_to_list(grid_thws)
+        if device is None:
+            device = self.rotary_pos_emb.inv_freq.device
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thws)
+        window_index, cu_window_seqlens_list = self.get_window_index(grid_thws)
+        cu_window_seqlens = torch.unique_consecutive(
+            torch.tensor(cu_window_seqlens_list, dtype=torch.int32)
+        )
+
+        seq_len = rotary_pos_emb.shape[0]
+        rotary_pos_emb = rotary_pos_emb.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        window_index_dev = async_tensor_h2d(window_index, rotary_pos_emb.device)
+        rotary_pos_emb = rotary_pos_emb[window_index_dev, :, :]
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+
+        seqlens = [h * w for t, h, w in grid_thws for _ in range(t)]
+        cu_seqlens = torch.zeros(len(seqlens) + 1, dtype=torch.int32)
+        cu_seqlens[1:] = torch.tensor(seqlens, dtype=torch.int32).cumsum(0)
+
+        reverse_indices = torch.argsort(window_index)
+
+        if max_seqlen_override is None:
+            max_seqlen_override = max(seqlens)
+        if max_seqlen_window_override is None:
+            max_seqlen_window_override = int(
+                (cu_window_seqlens[1:] - cu_window_seqlens[:-1]).max()
+            )
+
+        if max_num_seqs is not None:
+            cu_seqlens = self._pad_cu_seqlens(cu_seqlens, max_num_seqs)
+        if max_num_window_seqs is not None:
+            cu_window_seqlens = self._pad_cu_seqlens(
+                cu_window_seqlens, max_num_window_seqs
+            )
+
+        return {
+            "rotary_pos_emb_cos": emb.cos().to(device=device),
+            "rotary_pos_emb_sin": emb.sin().to(device=device),
+            "window_index": async_tensor_h2d(window_index, device),
+            "reverse_indices": async_tensor_h2d(reverse_indices, device),
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
+            "cu_window_seqlens": async_tensor_h2d(cu_window_seqlens, device),
+            # Kept on CPU: attention wrappers call `.item()` on these, and
+            # under CUDA graph capture the value is baked into the graph.
+            "max_seqlen_full": torch.tensor(max_seqlen_override, dtype=torch.int32),
+            "max_seqlen_window": torch.tensor(
+                max_seqlen_window_override, dtype=torch.int32
+            ),
+        }
+
     def forward(
         self,
         inputs_embeds: torch.Tensor,
-        grid_thws: torch.Tensor,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]] | None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         r"""Args:
         inputs_embeds: Input tensor of shape
-            (batch_size, sequence_length, hidden_size).
+            (sequence_length, hidden_size).
             Embedded representation of the input tokens.
-        grid_thws: Grid tensor of shape (num_patches, 3)
+        grid_thws: Grid tensor of shape (num_items, 3)
             containing grid dimensions.
-            Whether or not to return a [`~utils.ModelOutput`] instead of
-            a plain tuple.
+        encoder_metadata: Precomputed output of `prepare_encoder_metadata`.
+            If None, it is computed from `grid_thws`.
 
         """
-        rotary_pos_emb = self.rot_pos_emb(grid_thws)
-        window_index, cu_window_seqlens = self.get_window_index(grid_thws)
-        cu_window_seqlens = torch.tensor(
-            cu_window_seqlens,
-            device=inputs_embeds.device,
-            dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
+        if encoder_metadata is None:
+            assert grid_thws is not None
+            encoder_metadata = self.prepare_encoder_metadata(grid_thws)
+
+        window_index = encoder_metadata["window_index"]
+        reverse_indices = encoder_metadata["reverse_indices"]
+        position_embeddings = (
+            encoder_metadata["rotary_pos_emb_cos"],
+            encoder_metadata["rotary_pos_emb_sin"],
         )
-        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
         seq_len, _ = inputs_embeds.size()
         inputs_embeds = inputs_embeds.reshape(
@@ -509,37 +656,18 @@ class Siglip2Encoder(nn.Module):
         )
         inputs_embeds = inputs_embeds[window_index, :, :]
         inputs_embeds = inputs_embeds.reshape(seq_len, -1)
-        rotary_pos_emb = rotary_pos_emb.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        rotary_pos_emb = rotary_pos_emb[window_index, :, :]
-        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
-        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        position_embeddings = (emb.cos(), emb.sin())
-
-        cu_seqlens = torch.repeat_interleave(
-            grid_thws[:, 1] * grid_thws[:, 2], grid_thws[:, 0]
-        ).cumsum(
-            dim=0,
-            # Select dtype based on the following factors:
-            #  - FA2 requires that cu_seqlens_q must have dtype int32
-            #  - torch.onnx.export requires that cu_seqlens_q must have
-            #    same dtype as grid_thw
-            # See https://github.com/huggingface/transformers/pull/34852
-            # for more information
-            dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
-
-        reverse_indices = torch.argsort(window_index)
 
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
             if not self.fullatt_block_indexes or index in self.fullatt_block_indexes:
-                cu_seqlens_tmp = cu_seqlens
+                cu_seqlens_tmp = encoder_metadata["cu_seqlens"]
+                max_seqlen_tmp = encoder_metadata["max_seqlen_full"]
             else:
-                cu_seqlens_tmp = cu_window_seqlens
-            hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
+                cu_seqlens_tmp = encoder_metadata["cu_window_seqlens"]
+                max_seqlen_tmp = encoder_metadata["max_seqlen_window"]
+            hidden_states = block(
+                hidden_states, cu_seqlens_tmp, position_embeddings, max_seqlen_tmp
+            )
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
@@ -568,18 +696,40 @@ class Siglip2VisionTransformer(nn.Module):
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
+    def prepare_encoder_metadata(
+        self,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]],
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        """See `Siglip2Encoder.prepare_encoder_metadata`. Additionally
+        precomputes the interpolated position embeddings, if used."""
+        grid_thws = Siglip2Encoder._grid_thws_to_list(grid_thws)
+        metadata = self.encoder.prepare_encoder_metadata(grid_thws, **kwargs)
+        if self.embeddings.preserve_original_pe:
+            metadata["pos_embeds"] = self.embeddings.get_position_embeddings(grid_thws)
+        return metadata
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]] | None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
         Tensor containing the spatial dimensions (height, width)
         of the input images.
         """
-        hidden_states = self.embeddings(pixel_values, grid_thws)
+        if encoder_metadata is None:
+            assert grid_thws is not None
+            encoder_metadata = self.prepare_encoder_metadata(grid_thws)
 
-        last_hidden_state = self.encoder(hidden_states, grid_thws)
+        hidden_states = self.embeddings(
+            pixel_values, pos_embeds=encoder_metadata.get("pos_embeds")
+        )
+
+        last_hidden_state = self.encoder(
+            hidden_states, None, encoder_metadata=encoder_metadata
+        )
 
         return last_hidden_state
 
@@ -607,14 +757,23 @@ class Siglip2NavitModel(torch.nn.Module):
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 
+    def prepare_encoder_metadata(
+        self,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]],
+        **kwargs,
+    ) -> dict[str, torch.Tensor]:
+        return self.vision_model.prepare_encoder_metadata(grid_thws, **kwargs)
+
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        grid_thws: torch.LongTensor,
+        grid_thws: torch.Tensor | Sequence[Sequence[int]] | None,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         return self.vision_model(
             pixel_values=pixel_values,
             grid_thws=grid_thws,
+            encoder_metadata=encoder_metadata,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
