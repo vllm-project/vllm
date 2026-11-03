@@ -19,7 +19,7 @@ if not current_platform.is_rocm():
 
 pytest.importorskip("triton")
 
-from vllm.platforms.rocm import on_gfx1x, on_gfx115x  # noqa: E402
+from vllm.platforms.rocm import on_gfx1x, on_gfx115x, on_gfx1151  # noqa: E402
 
 device = "cuda"
 
@@ -547,12 +547,14 @@ def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_in
     torch.testing.assert_close(w_q_i32, expected_packed)
 
 
-def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(dist_init):
-    """Layerwise reload rebuilds the carrier from the new scales and zero-points
+@pytest.mark.skipif(not on_gfx1151(), reason="The carrier is gfx1151 only")
+@pytest.mark.parametrize("reload_mode", ["layerwise", "direct"])
+def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(
+    reload_mode, default_vllm_config, dist_init, monkeypatch
+):
+    """A weight reload rebuilds the carrier from the new scales and zero-points
     in its original storage, which captured graphs point at."""
-    if not hybrid_module._on_gfx1151():
-        pytest.skip("The scale/zero-point carrier is gfx1151 only")
-
+    from vllm.config.model import ModelConfig
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
@@ -561,6 +563,11 @@ def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(dist_init):
         initialize_layerwise_reload,
         record_metadata_for_reloading,
     )
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        finish_direct_reload,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
     class KernelMethod(QuantizeMethodBase):
@@ -576,6 +583,8 @@ def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(dist_init):
         def process_weights_after_loading(self, layer):
             self.kernel.process_weights_after_loading(layer)
 
+    monkeypatch.setenv("VLLM_RELOAD_MODE", reload_mode)
+    model_config = ModelConfig()
     set_random_seed(0)
     K, N, G = 256, 128, 128
     layer, kernel, *_ = _build_prefill_dequant_case(K, N, G, has_zp=True)
@@ -587,15 +596,21 @@ def test_rdna_hybrid_w4a16_reload_rebuilds_scale_zp_carrier(dist_init):
 
     with torch.device(device):
         record_metadata_for_reloading(layer)
-    kernel.process_weights_after_loading(layer)
+    process_weights_after_loading(layer, model_config, torch.device(device))
     carrier = layer._hybrid_w_scale_zp_carrier
     old_carrier = carrier.clone()
 
-    initialize_layerwise_reload(layer)
+    if reload_mode == "direct":
+        begin_direct_reload(layer)
+    else:
+        initialize_layerwise_reload(layer)
     for name, value in new_ckpt.items():
         param = getattr(layer, name)
         param.weight_loader(param, value)
-    finalize_layerwise_reload(layer, model_config=None)
+    if reload_mode == "direct":
+        finish_direct_reload(layer, model_config, torch.device(device))
+    else:
+        finalize_layerwise_reload(layer, model_config)
 
     assert layer._hybrid_w_scale_zp_carrier.data_ptr() == carrier.data_ptr()
     expected = pack_scale_zp_carrier(layer.weight_scale, layer.weight_zero_point)
