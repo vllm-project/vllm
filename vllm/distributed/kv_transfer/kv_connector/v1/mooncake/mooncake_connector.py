@@ -1501,42 +1501,12 @@ class MooncakeConnectorWorker:
         # instead of waiting for a prefill that already happened.
         self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
 
-        # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
-            # Background threads for sending kvcaches to D.
-            # Each pool thread must be bound to the correct CUDA device
-            # because CUDA device selection is thread-local.
-            self._sender_executor = ThreadPoolExecutor(
-                max_workers=self.num_sender_workers,
-                thread_name_prefix="vllm-mooncake-sender",
-                initializer=self._bind_sender_thread_device,
-            )
-            logger.debug(
-                "Mooncake Prefiller: use %d workers to send kvcaches",
-                self.num_sender_workers,
-            )
-            # An asyncio queue to buffer incoming requests for the sender
+            # The send pool, its event loop and the bootstrap server are
+            # started at the end of this constructor: everything below can
+            # raise, and threads started here would outlive a half-built
+            # worker.
             self.sender_worker_queue = asyncio.Queue[tuple[bytes, bytes]]()
-            self.sender_loop = asyncio.new_event_loop()
-            # Background thread for processing new sending requests.
-            self._sender_listener_t = threading.Thread(
-                target=_async_loop, args=(self.sender_loop,), daemon=True
-            )
-            self._sender_listener_t.start()
-
-            # Start bootstrap server on global rank 0.
-            if should_launch_bootstrap_server(vllm_config):
-                _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
-                self.bootstrap_server.start()
-
-        if not self.is_kv_producer:
-            self.receiver_loop = asyncio.new_event_loop()
-            self._mooncake_receiver_t = threading.Thread(
-                target=_async_loop, args=(self.receiver_loop,), daemon=True
-            )
-            self._mooncake_receiver_t.start()
-            logger.debug("Mooncake Decoder: start receiver thread")
 
         self.finished_sending_reqs: set[ReqId] = set()
         self.finished_recving_reqs: set[ReqId] = set()
@@ -1589,6 +1559,42 @@ class MooncakeConnectorWorker:
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
         self._heartbeat_decoder = msgspec.msgpack.Decoder(MooncakeLeaseHeartbeat)
 
+        # Threads come last: nothing above may leave them running on an object
+        # that never finished construction.
+        if not self.is_kv_consumer:
+            # Background threads for sending kvcaches to D.
+            # Each pool thread must be bound to the correct CUDA device
+            # because CUDA device selection is thread-local.
+            self._sender_executor = ThreadPoolExecutor(
+                max_workers=self.num_sender_workers,
+                thread_name_prefix="vllm-mooncake-sender",
+                initializer=self._bind_sender_thread_device,
+            )
+            logger.debug(
+                "Mooncake Prefiller: use %d workers to send kvcaches",
+                self.num_sender_workers,
+            )
+            self.sender_loop = asyncio.new_event_loop()
+            # Background thread for processing new sending requests.
+            self._sender_listener_t = threading.Thread(
+                target=_async_loop, args=(self.sender_loop,), daemon=True
+            )
+            self._sender_listener_t.start()
+
+            # Start bootstrap server on global rank 0.
+            if should_launch_bootstrap_server(vllm_config):
+                _, port = get_mooncake_bootstrap_addr(vllm_config)
+                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
+                self.bootstrap_server.start()
+
+        if not self.is_kv_producer:
+            self.receiver_loop = asyncio.new_event_loop()
+            self._mooncake_receiver_t = threading.Thread(
+                target=_async_loop, args=(self.receiver_loop,), daemon=True
+            )
+            self._mooncake_receiver_t.start()
+            logger.debug("Mooncake Decoder: start receiver thread")
+
     def _sync_block_size_with_kernel(self) -> None:
         # When speculative decoding (e.g. Eagle) is enabled, the main model
         # and draft model may use different attention backends with different
@@ -1624,26 +1630,33 @@ class MooncakeConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        # A constructor that raised before the ZeroMQ context existed still
-        # reaches this hook, so only a worker that got that far is torn down.
+        # A constructor that raised part way through leaves the object with
+        # only some of these attributes, so each step is guarded: leaking a
+        # thread or a transfer engine is worse than stopping here.
         context = getattr(self, "async_zmq_ctx", None)
-        if context is None:
-            return
-        context.term()
-        if not self.is_kv_consumer:
-            self._sender_executor.shutdown(wait=False)
-            if self.sender_loop.is_running():
-                self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
-                self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
-                self, "bootstrap_server"
-            ):
-                self.bootstrap_server.shutdown()
-        if not self.is_kv_producer and self.receiver_loop.is_running():
-            self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
-            self._mooncake_receiver_t.join()
-        if hasattr(self, "transfer_backend"):
-            self.transfer_backend.shutdown()
+        if context is not None:
+            context.term()
+        executor = getattr(self, "_sender_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False)
+        sender_loop = getattr(self, "sender_loop", None)
+        if sender_loop is not None and sender_loop.is_running():
+            sender_loop.call_soon_threadsafe(sender_loop.stop)
+            listener = getattr(self, "_sender_listener_t", None)
+            if listener is not None:
+                listener.join()
+        bootstrap_server = getattr(self, "bootstrap_server", None)
+        if bootstrap_server is not None:
+            bootstrap_server.shutdown()
+        receiver_loop = getattr(self, "receiver_loop", None)
+        if receiver_loop is not None and receiver_loop.is_running():
+            receiver_loop.call_soon_threadsafe(receiver_loop.stop)
+            receiver_thread = getattr(self, "_mooncake_receiver_t", None)
+            if receiver_thread is not None:
+                receiver_thread.join()
+        transfer_backend = getattr(self, "transfer_backend", None)
+        if transfer_backend is not None:
+            transfer_backend.shutdown()
 
     async def register_worker_with_bootstrap(self):
         host, port = get_mooncake_bootstrap_addr(self.vllm_config)
@@ -2036,6 +2049,15 @@ class MooncakeConnectorWorker:
                     unresolved_reqs = []
                     transfer_err_msg = f"Mooncake transfer failed: {error}"
                 unresolved_set = set(unresolved_reqs)
+                if unresolved_set:
+                    # The engine may still be writing these blocks, so the
+                    # response cannot list them as completed: the decoder would
+                    # release them and hand the memory to the next request.
+                    ok_ready_reqs = [
+                        (d_req_id, send_meta)
+                        for d_req_id, send_meta in ok_ready_reqs
+                        if d_req_id not in unresolved_set
+                    ]
                 if transfer_err_msg is not None:
                     err_msg = (
                         transfer_err_msg

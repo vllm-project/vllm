@@ -822,6 +822,44 @@ def test_a_free_failure_is_retried_by_the_next_poll():
     assert ("free", 1) in backend._engine.calls
 
 
+def test_a_batch_the_engine_neither_submits_nor_frees_is_retried_by_shutdown():
+    _install_fake_tent(
+        submit_error=RuntimeError("submit refused"), free_error=RuntimeError("busy")
+    )
+    backend = _build()
+
+    events = backend.transfer("10.0.0.2:9100", TransferOp.WRITE, _ranges(1))
+
+    # The submission never reached the registry, so the batch id is kept for
+    # `shutdown` instead of being dropped with the failed call.
+    assert events[0].state is TransferState.FAILED
+    assert "submit refused" in (events[0].error or "")
+    assert list(backend._pending_free) == [1]
+
+    _CONTROL.free_error = None
+    backend.shutdown()
+
+    assert backend._pending_free == {}
+    assert ("free", 1) in backend._engine.calls
+
+
+def test_a_failure_cannot_close_a_segment_a_submission_is_about_to_use():
+    _install_fake_tent(polls=[[_StatusEnum.COMPLETED]])
+    backend = _build()
+
+    handle = backend._acquire_segment("10.0.0.2:9100")
+    backend._forget_segment("10.0.0.2:9100")
+
+    # The submission holds a count, so the failed peer's handle stays open.
+    assert [call for call in backend._engine.calls if call[0] == "close"] == []
+
+    backend._release_segment_use("10.0.0.2:9100")
+
+    assert [call for call in backend._engine.calls if call[0] == "close"] == [
+        ("close", handle)
+    ]
+
+
 def test_a_failed_segment_close_is_retried_by_the_next_shutdown(monkeypatch):
     monkeypatch.setattr(
         "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent."

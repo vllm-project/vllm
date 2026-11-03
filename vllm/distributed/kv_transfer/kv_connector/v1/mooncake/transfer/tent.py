@@ -169,6 +169,9 @@ class TentTransferBackend(TransferBackend):
         self._peers: dict[str, _PeerSegment] = {}
         self._segment_lock = threading.Lock()
         self._batches: dict[int, _Submission] = {}
+        # Batches a failed submission allocated and the engine would not free.
+        # They never reach the registry, so `shutdown` is the one that retries.
+        self._pending_free: dict[int, str] = {}
         self._batches_lock = threading.Lock()
         # Guards the closed flag together with the batch registry, so a
         # submission either lands before shutdown takes its snapshot or is
@@ -290,11 +293,7 @@ class TentTransferBackend(TransferBackend):
                 requests,
             )
         except BaseException:
-            self._engine_call(
-                "freeing a transfer batch",
-                self._engine.free_transfer_batch,
-                batch_id,
-            )
+            self._free_refused_batch(batch_id)
             raise
         finally:
             self._return_requests(requests)
@@ -424,6 +423,26 @@ class TentTransferBackend(TransferBackend):
         self._retry_free(batch_id, submission)
         return events
 
+    def _free_refused_batch(self, batch_id: int) -> None:
+        """Frees a batch the engine refused to accept.
+
+        The submission raised, so this batch never reaches the registry. When
+        the engine will not free it either, it is remembered for `shutdown`:
+        losing the id here would leak the native batch for good.
+        """
+        try:
+            self._engine_call(
+                "freeing a transfer batch", self._engine.free_transfer_batch, batch_id
+            )
+        except _EngineFailure as error:
+            logger.warning(
+                "TENT cannot free refused batch %d (%s); shutdown will retry.",
+                batch_id,
+                error,
+            )
+            with self._batches_lock:
+                self._pending_free[batch_id] = str(error)
+
     def _retry_free(self, batch_id: int, submission: _Submission) -> bool:
         """Frees a settled batch, logging rather than hiding a problem.
 
@@ -483,6 +502,8 @@ class TentTransferBackend(TransferBackend):
             for index in indices:
                 if not self._cancel(batch_id, index):
                     break
+        # A refused batch never reaches the registry, so nothing else retries it.
+        refused = self._free_refused_batches()
         try:
             # Settled batches stay in the registry when the engine refused to
             # free them, so the drain has to cover every registered batch, not
@@ -535,6 +556,40 @@ class TentTransferBackend(TransferBackend):
                 f"TENT could not close the segments for {sorted(failures)}, so "
                 "their handles stay registered for the next shutdown."
             )
+        if refused:
+            raise RuntimeError(
+                f"TENT still holds {len(refused)} batches it refused to submit, so "
+                "the memory behind them stays reserved."
+            )
+
+    def _free_refused_batches(self) -> list[int]:
+        """Retries the batches a failed submission left behind.
+
+        Returns the ones the engine still will not free, so `shutdown` can
+        report them instead of leaking them silently.
+        """
+        with self._batches_lock:
+            pending = dict(self._pending_free)
+        still_refused: list[int] = []
+        for batch_id, reason in pending.items():
+            try:
+                self._engine_call(
+                    "freeing a refused transfer batch",
+                    self._engine.free_transfer_batch,
+                    batch_id,
+                )
+            except _EngineFailure as error:
+                logger.warning(
+                    "TENT still cannot free refused batch %d (%s after %s).",
+                    batch_id,
+                    error,
+                    reason,
+                )
+                still_refused.append(batch_id)
+                continue
+            with self._batches_lock:
+                self._pending_free.pop(batch_id, None)
+        return still_refused
 
     def _cancel(self, batch_id: int, index: int) -> bool:
         """Cancels one task.
@@ -635,9 +690,9 @@ class TentTransferBackend(TransferBackend):
                     state.users += 1
                     return state.handle
                 if not state.users:
-                    self._reopen_segment(peer, state)
+                    handle = self._reopen_segment(peer, state)
                     state.users += 1
-                    return state.handle
+                    return handle
                 users = state.users
             if time.monotonic() > deadline:
                 raise _EngineFailure(
@@ -653,7 +708,7 @@ class TentTransferBackend(TransferBackend):
             )
         )
 
-    def _reopen_segment(self, peer: str, state: _PeerSegment) -> None:
+    def _reopen_segment(self, peer: str, state: _PeerSegment) -> int:
         """Replaces a stale handle with a fresh one. Caller holds the lock."""
         if state.handle is not None:
             if not self._close_segment(peer, state.handle):
@@ -663,6 +718,7 @@ class TentTransferBackend(TransferBackend):
             state.handle = None
         state.stale = False
         state.handle = self._open_segment(peer)
+        return state.handle
 
     def _forget_segment(self, peer: str) -> None:
         """Marks a peer's handle stale after a failure.

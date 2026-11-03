@@ -1697,6 +1697,78 @@ async def test_a_backend_exception_fails_every_request_in_the_submission(monkeyp
         prefill_worker.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_an_unresolved_request_is_not_reported_as_completed(monkeypatch):
+    """A range the engine may still write must not finish on either side.
+
+    Listing the request as completed would let the decoder release blocks the
+    engine is still writing to.
+    """
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "5")
+    vllm_config = _make_worker_vllm_config("kv_producer")
+
+    with set_current_vllm_config(vllm_config), patch_worker_dependencies():
+        prefill_connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        prefill_worker = prefill_connector.connector_worker
+        prefill_worker.kv_caches_base_addr = [0x1000]
+        block_len = 4096
+        prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [block_len]
+        prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
+        prefill_worker.registered_layer_indices = [0]
+        origin_sender_loop = prefill_worker.sender_loop
+        prefill_worker.sender_loop = asyncio.get_event_loop()
+
+        transfer_id = "xfer-req-1"
+        send_meta = SendBlockMeta(
+            p_req_id="p-req-1",
+            transfer_id=transfer_id,
+            local_block_ids=[[10, 11]],
+            ready=asyncio.Event(),
+        )
+        send_meta.ready.set()
+        prefill_worker.reqs_need_send[transfer_id] = send_meta
+        xfer_meta = _xfer_meta(
+            [
+                _region(
+                    0x2000,
+                    block_len=block_len,
+                    row_offset=-1,
+                    layer_name="model.layers.0.self_attn",
+                    layer_index=0,
+                )
+            ],
+            {"d-req-1": (transfer_id, [[20, 21]])},
+        )
+        mock_socket = AsyncMock(spec=zmq.asyncio.Socket)
+        mock_socket.send_multipart = AsyncMock()
+
+        with patch.object(
+            prefill_worker,
+            "_send_blocks",
+            return_value=([], ["d-req-1"], None),
+        ):
+            await prefill_worker.send_kv_to_decode(
+                b"consumer-id", mock_socket, xfer_meta
+            )
+
+        _, sent_payload = mock_socket.send_multipart.call_args[0][0]
+        response = prefill_worker._xfer_resp_decoder.decode(sent_payload)
+        assert response.ok_reqs is None
+        assert response.unresolved_reqs == ["d-req-1"]
+        assert response.err_reqs is None
+        # The request stays counted as sending, so its blocks never expire.
+        assert send_meta.sending == 1
+        assert "p-req-1" not in prefill_worker.finished_sending_reqs
+
+        prefill_worker.sender_loop = origin_sender_loop
+        prefill_worker.shutdown()
+
+
 @pytest.mark.parametrize(
     ("local_block_ids", "expected_finished"),
     [
@@ -1777,6 +1849,19 @@ def test_shutdown_is_quiet_when_the_constructor_did_not_finish():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
 
     worker.shutdown()
+
+
+def test_shutdown_releases_what_a_failed_constructor_created():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._sender_executor = MagicMock()
+    worker.bootstrap_server = MagicMock()
+    worker.transfer_backend = MagicMock()
+
+    worker.shutdown()
+
+    worker._sender_executor.shutdown.assert_called_once_with(wait=False)
+    worker.bootstrap_server.shutdown.assert_called_once()
+    worker.transfer_backend.shutdown.assert_called_once()
 
 
 @pytest.mark.asyncio
