@@ -232,6 +232,7 @@ from .utils import (
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
     prepare_kernel_block_sizes,
+    reserve_encoder_cache_residency,
     sanity_check_mm_encoder_outputs,
 )
 
@@ -6109,6 +6110,20 @@ class GPUModelRunner(
                         )
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
+
+                        cache_bytes = reserve_encoder_cache_residency(
+                            self.encoder_cache,
+                            dummy_encoder_outputs,
+                            mm_budget.encoder_cache_size,
+                        )
+                        logger.info_once(
+                            "Encoder cache can hold %s tokens of %s embeddings "
+                            "across requests (%s GiB, taken from the KV "
+                            "cache).",
+                            mm_budget.encoder_cache_size,
+                            dummy_modality,
+                            format_gib(cache_bytes),
+                        )
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(

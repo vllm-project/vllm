@@ -373,9 +373,18 @@ def compute_mm_encoder_budget(
     encoder_compute_budget = max(
         scheduler_config.max_num_encoder_input_tokens, max_tokens_per_mm_item
     )
-    encoder_cache_size = max(
-        scheduler_config.encoder_cache_size, max_tokens_per_mm_item
+    # None when a config was built without `__post_init__` resolution.
+    requested_cache_size = (
+        scheduler_config.encoder_cache_size or scheduler_config.max_num_batched_tokens
     )
+    encoder_cache_size = max(requested_cache_size, max_tokens_per_mm_item)
+    if encoder_cache_size > requested_cache_size:
+        logger.warning(
+            "Raising encoder_cache_size from %d to %d tokens so one %s item fits.",
+            requested_cache_size,
+            encoder_cache_size,
+            max(mm_max_toks_per_item, key=lambda m: mm_max_toks_per_item[m]),
+        )
 
     return encoder_compute_budget, encoder_cache_size
 
