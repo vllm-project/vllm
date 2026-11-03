@@ -14,6 +14,7 @@ import pytest
 import torch
 
 from vllm.models.common.ops.fused_qk_rmsnorm import (
+    fused_kv_rmsnorm,
     fused_q_kv_rmsnorm,
 )
 from vllm.platforms import current_platform
@@ -31,6 +32,43 @@ def _ref_rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     variance = x_f32.pow(2).mean(dim=-1, keepdim=True)
     y = x_f32 * torch.rsqrt(variance + eps) * w.to(torch.float32)
     return y.to(x.dtype)
+
+
+def _assert_kv_output(actual: torch.Tensor, expected: torch.Tensor) -> None:
+    if expected.shape[1] != 512 or not current_platform.is_cuda():
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        return
+    rtol, atol = {
+        torch.bfloat16: (1e-2, 1e-3),
+        torch.float16: (1e-3, 1e-4),
+        torch.float32: (1e-5, 1e-6),
+    }[expected.dtype]
+    torch.testing.assert_close(actual, expected, rtol=rtol, atol=atol)
+    if expected.numel():
+        error = (actual.float() - expected.float()).square().mean().sqrt()
+        assert error <= 1e-4 * expected.float().square().mean().sqrt()
+
+
+@pytest.mark.parametrize("num_tokens", [0, 1, 3, 4, 5, 127, 128, 129, 2048, 65536])
+@pytest.mark.parametrize("sizes", [(192, 576), (1280, 512)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@torch.inference_mode()
+def test_kv_only_norm_matches_fused_projection_norm(num_tokens, sizes, dtype):
+    """Check the 512-column fast path and unchanged fallback on strided inputs."""
+    torch.manual_seed(0)
+    q_size, kv_size = sizes
+    fused = torch.randn(num_tokens, q_size + kv_size + 1, device=DEVICE, dtype=dtype)
+    qr, kv = fused[:, 1:].split([q_size, kv_size], dim=-1)
+    kv[:1] = 0
+    kv[1:2] *= 1e-5
+    kv[2:3] *= 32
+    qw = torch.randn(q_size, device=DEVICE, dtype=dtype)
+    kvw = torch.randn(kv_size, device=DEVICE, dtype=dtype)
+    _, expected = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-20)
+    for source in (kv, kv.contiguous()):
+        result = fused_kv_rmsnorm(source, kvw, 1e-20, q_size=q_size)
+        assert result.stride() == (kv_size, 1)
+        _assert_kv_output(result, expected)
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 1024, 8192])
@@ -128,6 +166,9 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
         mxfp8_e4m3_quantize,
     )
     from vllm.models.deepseek_v41.common.ops.query_quant import (
+        fused_kv_rmsnorm as fused_quant_kv_rmsnorm,
+    )
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
         fused_q_kv_rmsnorm_quant,
     )
 
@@ -141,6 +182,9 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
     kvw = torch.randn(kv_size, device=DEVICE, dtype=x.dtype)
     eps = 1e-20
     result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
+    kv_only = fused_quant_kv_rmsnorm(kv, kvw, eps, q_size=q_size)
+    _assert_kv_output(kv_only, result[1])
+    assert kv_only.stride() == (kv_size, 1)
     assert result[0].orig_dtype == dtype
     assert result[0].orig_shape == qr.shape
     if not num_tokens:
@@ -155,12 +199,35 @@ def test_fused_q_kv_rmsnorm_quant_matches_separate(num_tokens, q_size, dtype):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 result = fused_q_kv_rmsnorm_quant(qr, kv, qw, kvw, eps)
+                kv_only = fused_quant_kv_rmsnorm(kv, kvw, eps, q_size=q_size)
             graph.replay()
+        _assert_kv_output(kv_only, result[1])
         torch.testing.assert_close(
             result[0].data.view(torch.uint8), q_ref.view(torch.uint8), rtol=0, atol=0
         )
         torch.testing.assert_close(result[0].scale, scale_ref, rtol=0, atol=0)
         torch.testing.assert_close(result[1], kv_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("num_tokens", [129, 65536])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("kv_size", [512, 576])
+def test_quant_kv_only_norm_matches_fused_with_offset_input(num_tokens, dtype, kv_size):
+    """The KV task needs no MXFP8 support and preserves offset/packed KV rows."""
+    from vllm.models.deepseek_v41.common.ops.query_quant import (
+        fused_kv_rmsnorm as fused_quant_kv_rmsnorm,
+    )
+
+    torch.manual_seed(0)
+    q_size = 1280
+    fused = torch.randn(num_tokens, q_size + kv_size + 1, device=DEVICE, dtype=dtype)
+    qr, kv = fused[:, 1:].split([q_size, kv_size], dim=-1)
+    qw = torch.randn(q_size, device=DEVICE, dtype=dtype)
+    kvw = torch.randn(kv_size, device=DEVICE, dtype=dtype)
+    _, expected = fused_q_kv_rmsnorm(qr, kv, qw, kvw, 1e-20)
+    for source in (kv, kv.contiguous()):
+        result = fused_quant_kv_rmsnorm(source, kvw, 1e-20, q_size=q_size)
+        _assert_kv_output(result, expected)
 
 
 @pytest.mark.skipif(

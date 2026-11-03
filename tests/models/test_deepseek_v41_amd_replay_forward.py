@@ -68,6 +68,7 @@ class _RocmKvInsert:
         )
         self.attn = SimpleNamespace(
             use_pcp=False,
+            replay_wkv=None,
             kv_mxfp8=self.kv_mxfp8,
             compressor=None,
             indexer=None,

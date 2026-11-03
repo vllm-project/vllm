@@ -8,6 +8,9 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
+from vllm.models.common.ops.fused_qk_rmsnorm import (
+    fused_kv_rmsnorm as common_kv_rmsnorm,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -50,13 +53,14 @@ def _q_kv_norm_quant_kernel(
     KV_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
     LAUNCH_PDL: tl.constexpr,
+    KV_ONLY: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     if LAUNCH_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
-    if tl.program_id(1) == 0:
+    if not KV_ONLY and tl.program_id(1) == 0:
         groups = tl.arange(0, BLOCK // 32)
         if row < num_tokens:
             y = _norm_row(q, qw, row, q_stride, eps, Q_SIZE, BLOCK)
@@ -130,6 +134,55 @@ def fused_q_kv_rmsnorm_quant(
             launch_pdl=launch_pdl,
         )
     return QuantizedActivation(qo, scales, qr.dtype, qr.shape, kMxfp8Dynamic), kvo
+
+
+def fused_kv_rmsnorm(
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    eps: float,
+    *,
+    q_size: int,
+) -> torch.Tensor:
+    """Run the quantized Q/KV kernel's KV task without Q or scale buffers.
+
+    Args:
+        kv: KV projection with contiguous columns.
+        kv_weight: RMSNorm weight.
+        eps: RMSNorm epsilon.
+        q_size: Original Q width for the generic fused-kernel fallback.
+
+    """
+    assert kv.ndim == 2 and kv.stride(-1) == 1
+    assert kv_weight.is_contiguous()
+    tokens, kv_size = kv.shape
+    if kv_size == 512 and current_platform.is_cuda():
+        return common_kv_rmsnorm(kv, kv_weight, eps, q_size=q_size)
+    kvo = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+    if tokens:
+        block = triton.next_power_of_2(max(q_size, kv_size))
+        launch_pdl = current_platform.is_arch_support_pdl()
+        launch_kwargs = {"launch_pdl": launch_pdl} if current_platform.is_cuda() else {}
+        _q_kv_norm_quant_kernel[(tokens, 1)](
+            None,
+            kv,
+            None,
+            kv_weight,
+            None,
+            kvo,
+            None,
+            tokens,
+            0,
+            kv.stride(0),
+            eps,
+            q_size,
+            kv_size,
+            block,
+            launch_pdl,
+            KV_ONLY=True,
+            num_warps=8 if block >= 2048 else 4,
+            **launch_kwargs,
+        )
+    return kvo
 
 
 def can_fuse_query_quant(linears: list[torch.nn.Module]) -> bool:
