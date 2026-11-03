@@ -674,9 +674,7 @@ def test_plan_runs_the_kernels_of_its_width(monkeypatch):
     assert step.layer(0) is None and step.layer(3) is None
 
 
-@pytest.mark.parametrize(
-    "mla_prefix", ["", "mla"], ids=["vllm-mla-ops", "m1"]
-)
+@pytest.mark.parametrize("mla_prefix", ["", "mla"], ids=["vllm-mla-ops", "m1"])
 def test_plan_runs_regular_decode(monkeypatch, mla_prefix):
     md = _kda_metadata(
         spec_sequence_masks=None,
@@ -692,9 +690,9 @@ def test_plan_runs_regular_decode(monkeypatch, mla_prefix):
             num_prefills=0,
             num_decode_tokens=4,
         )
-    step = _decode(
-        monkeypatch, md=md, q=1, mla_prefix=mla_prefix
-    ).plan(torch.zeros(4), None)
+    step = _decode(monkeypatch, md=md, q=1, mla_prefix=mla_prefix).plan(
+        torch.zeros(4), None
+    )
     assert step is not None and step.width == 4
 
 
