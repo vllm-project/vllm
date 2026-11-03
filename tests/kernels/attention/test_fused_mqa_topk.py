@@ -51,7 +51,7 @@ def _dense(q, k, scales, weights, starts, ends, topk=TOPK):
     step = max(1, LOGITS_BUDGET // (4 * max_len))
     for i in range(0, rows, step):
         j = min(rows, i + step)
-        q_scale, w = mqa_logits_mx_inputs(q[i:j], None, weights[i:j])
+        q_scale, w = mqa_logits_mx_inputs(q[i:j], None, weights[i:j], torch.float32)
         logits = as_fp32_logits(
             fp8_fp4_mqa_logits(
                 (q[i:j], q_scale), (k, k_scale), w, starts[i:j], ends[i:j], max_len
@@ -496,7 +496,7 @@ def test_kpool_indexer_dense_fallback_splits_rows(monkeypatch):
     # identical dense runs differ too), so compare the selected scores.
     q, k, scales, weights, starts, ends, _ = inputs
     lens = ends - starts
-    q_scale, w = mqa_logits_mx_inputs(q, None, weights)
+    q_scale, w = mqa_logits_mx_inputs(q, None, weights, torch.float32)
     logits = as_fp32_logits(
         fp8_fp4_mqa_logits(
             (q, q_scale),

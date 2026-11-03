@@ -509,6 +509,7 @@ class DeepseekV32Attention(MLAAttention):
                 ),
                 skip_topk_buffer_clear=True,
                 topk_backend=self.indexer.indexer_op.topk_backend,
+                logits_dtype=self.indexer.indexer_op.logits_dtype,
             )
         self.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
 
