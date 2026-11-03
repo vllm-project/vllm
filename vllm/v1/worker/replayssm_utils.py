@@ -10,6 +10,7 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -21,14 +22,15 @@ def initialize_replayssm_ring_trackers(
 ) -> None:
     """Allocate and bind one tracker pair per ReplaySSM cache group."""
     for group in kv_cache_config.kv_cache_groups:
-        layers = [
-            layer
+        names = [
+            name
             for name in group.layer_names
             if isinstance(layer := forward_context.get(name), MambaBase)
-            and layer.use_flashinfer_replayssm
+            and layer.use_replayssm
         ]
-        if not layers:
+        if not names:
             continue
+        layers = [forward_context[name] for name in names]
         state = layers[0].kv_cache[0]
         num_blocks, device = state.shape[0], state.device
         trackers = (
@@ -50,6 +52,10 @@ def initialize_replayssm_ring_trackers(
         for layer in layers:
             layer._replayssm_ring_start = ring_start
             layer._replayssm_prev_num_accepted = num_committed
+            layer._plans_replayssm_decode = False
+        # Triton plans each decode step in the group's first executed layer.
+        planner = min(names, key=extract_layer_index)
+        forward_context[planner]._plans_replayssm_decode = True
 
 
 def get_replayssm_block_copy_tensors(

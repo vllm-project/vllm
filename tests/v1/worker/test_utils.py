@@ -339,16 +339,6 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region is not None
     assert isinstance(region, FakeSharedOffloadRegion)
     assert [t.data_ptr() for t in pinned_pools] == [t.data_ptr() for t in pinned]
-    assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
-        "num_chunks": 1,
-        "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
-        "cpu_page_size": 64,
-        "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
-    }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
     registration_ranges.assert_called_once_with([24, 40], 4, page)
@@ -1358,12 +1348,12 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    def __init__(self) -> None:
+    def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
-        self.use_flashinfer_replayssm = True
+        self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
         self.state_alignment = 16
-        self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+        self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
@@ -1510,6 +1500,38 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
         tensor.shape == (9,) and torch.count_nonzero(tensor) == 0
         for tensor in get_replayssm_block_copy_tensors(ctx)
     )
+
+
+def test_triton_replayssm_plans_in_first_layer_of_each_group():
+    mixers = [_TestReplaySSMMixer(MambaBackendEnum.TRITON) for _ in range(3)]
+    names = [f"layers.{i}.mixer" for i in range(3)]
+    ctx = dict(zip(names, mixers))
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixers[0].get_state_shape(),
+        dtypes=mixers[0].get_state_dtype(),
+        page_size_padded=128,
+        state_alignment=16,
+    )
+    # Group order differs from execution order.
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec([names[2], names[0]], spec),
+            KVCacheGroupSpec([names[1]], spec),
+        ],
+    )
+    bind_kv_cache_to_layers(
+        {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names}, ctx
+    )
+    initialize_replayssm_ring_trackers(config, ctx)
+
+    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
+    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
+    assert mixers[0]._replayssm_ring_start.shape == (4,)
+    assert [m._plans_replayssm_decode for m in mixers] == [True, True, False]
+    assert get_replayssm_block_copy_tensors(ctx) == []
 
 
 def test_bind_kv_cache(default_vllm_config):

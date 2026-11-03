@@ -86,11 +86,21 @@ requires_flashinfer_replayssm_materialization = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True)
 def _use_v1_model_runner_by_default(monkeypatch):
-    # Triton ReplaySSM is V1-only. FlashInfer V2 tests override this locally.
+    # Tests not parametrized over the model runner use V1; the others
+    # override this locally.
     with monkeypatch.context() as patch:
         patch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
         envs.disable_envs_cache()
         yield
+    envs.disable_envs_cache()
+
+
+@pytest.fixture(params=[False, True], ids=["v1", "v2"])
+def v2_runner(request, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(request.param)))
+        envs.disable_envs_cache()
+        yield request.param
     envs.disable_envs_cache()
 
 
@@ -134,8 +144,8 @@ def _check_replayssm_parity(
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_decode_matches_baseline(vllm_runner, model_name):
-    _check_replayssm_parity(vllm_runner, model_name)
+def test_replayssm_decode_matches_baseline(vllm_runner, model_name, v2_runner):
+    _check_replayssm_parity(vllm_runner, model_name, expected_v2=v2_runner)
 
 
 @multi_gpu_test(num_gpus=2)
@@ -423,14 +433,15 @@ def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypa
 
 
 @pytest.mark.parametrize("model_name", MODELS)
-def test_triton_replayssm_align_prefix_cache_matches_baseline_v1(
-    vllm_runner, model_name, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("use_v2", [False, True], ids=["v1", "v2"])
+def test_triton_replayssm_align_prefix_cache_matches_baseline(
+    vllm_runner, model_name, monkeypatch: pytest.MonkeyPatch, use_v2: bool
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,
         monkeypatch,
-        use_v2=False,
+        use_v2=use_v2,
         mamba_backend="triton",
     )
 

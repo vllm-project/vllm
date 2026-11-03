@@ -46,6 +46,7 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    plan_replayssm_decode,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
 )
@@ -547,6 +548,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        # Triton plans each decode step in one layer per cache group.
+        self._plans_replayssm_decode = True
 
         self.num_spec = vllm_config.num_speculative_tokens
 
@@ -757,8 +760,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             ssm_state = self.kv_cache[1]
             if self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:5]
+                ring_start = self._replayssm_ring_start
                 if self.use_flashinfer_replayssm:
-                    ring_start = self._replayssm_ring_start
                     prev_num_accepted = self._replayssm_prev_num_accepted
             else:
                 x_cache = dt_cache = B_cache = None
@@ -900,6 +903,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     state_len=self.conv_kernel_size - 1,
                 )
                 ssm_state[state_indices_tensor_p] = final_states
+            if (
+                ring_start is not None
+                and not self.use_flashinfer_replayssm
+                and self._plans_replayssm_decode
+            ):
+                # Triton decode appends to the ring that prefill leaves empty.
+                ring_start[state_indices_tensor_p] = 0
 
         # Process decode requests
         if has_decode:
@@ -1014,6 +1024,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         enable_pdl=False,
                     )
                 else:
+                    assert ring_start is not None
+                    assert attn_metadata.write_pos_d is not None
+                    assert attn_metadata.is_flush_d is not None
+                    if self._plans_replayssm_decode:
+                        # Plan this step once per cache group: every layer of
+                        # the group reads the same write_pos/is_flush rows.
+                        plan_replayssm_decode(
+                            ring_start,
+                            state_indices_tensor_d,
+                            attn_metadata.write_pos_d,
+                            attn_metadata.is_flush_d,
+                            buffer_len=self.replayssm_buffer_len,
+                            seq_lens=attn_metadata.replayssm_seq_lens_d,
+                            align_block_size=attn_metadata.replayssm_align_block_size,
+                        )
                     selective_state_update_replayssm_output_only(
                         ssm_state,
                         hidden_states_d,
