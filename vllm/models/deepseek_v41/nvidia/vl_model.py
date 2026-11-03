@@ -338,3 +338,10 @@ class DeepseekV41ForCausalLM(
             connector="aligner",
             tower_model="vision.",
         )
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
+    @property
+    def filter_unused_checkpoint_weights(self) -> bool:
+        return self.language_model.filter_unused_checkpoint_weights

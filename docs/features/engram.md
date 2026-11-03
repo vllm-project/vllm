@@ -131,6 +131,41 @@ Costs and limits:
   `instanttensor`, or `--safetensors-load-strategy eager`);
   `--load-format dummy` serves zeros.
 
+## Experimental remote table reader
+
+`--engram-config.rdma_provider` selects a Python module that supplies an
+experimental remote-table reader. vLLM includes a provider, checkpoint-backed
+owner and reader lifecycle control in `vllm.distributed.engram_share.rdma`; set
+`rdma_provider` to `vllm.distributed.engram_share.rdma.provider` to use them. The
+GPU GET transport remains a separately built NIXL dependency. The current
+prototype needs the experimental ABI-3 shim, not an ordinary NIXL wheel.
+See the [setup and verification example](../../examples/disaggregated/engram_rdma/README.md).
+An alternative provider must expose `get_reader()` and `close_reader()` and
+implement the Engram lookup contract.
+
+The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
+size 1.
+It requires `--load-format safetensors --safetensors-load-strategy lazy` and
+single-threaded loading. The research provider accepts `--enforce-eager` or
+breakable `PIECEWISE` CUDA graphs; `FULL` capture is not supported. Remote
+KV-producer processes use the same bounded decoder replay as local tables by
+default. Set `rdma_keep_prefill_rows` to `true` to retain all producer rows as
+a conservative comparison mode. Prefill batches whose
+token counts would be padded for a graph run eagerly. DP table sharing,
+`embedding_across_dp`, and `use_thp` cannot be combined with it. The provider is
+responsible for checkpoint identity, remote memory registration, completion
+visibility and safe lifetime.
+
+Remote lookups use the existing per-layer prefetch stream by default. Set
+`rdma_prefetch` to `false` in the Engram configuration to issue them inline
+for comparison or troubleshooting.
+The ordinary local-table path remains the default.
+
+Use a nonzero `--shutdown-timeout` to allow worker cleanup. A forced shutdown
+can leave an owner lease outstanding; the owner must retain the backing until
+the affected consumers are confirmed stopped. Automatic recovery is not part of
+this prototype.
+
 ## Data-parallel topologies (DeepSeek V4.1)
 
 By default (`embedding_across_dp: false`), each DP replica keeps its own
