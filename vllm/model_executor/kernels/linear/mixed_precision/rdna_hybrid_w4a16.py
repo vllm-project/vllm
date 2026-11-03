@@ -30,6 +30,7 @@ from vllm.model_executor.layers.utils import rocm_unquantized_gemm_impl
 from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
@@ -958,12 +959,10 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
             and _on_gfx1151()
         ):
             assert self.w_zp_name is not None
-            layer.register_parameter(
+            replace_parameter(
+                layer,
                 "_hybrid_w_scale_zp_carrier",
-                torch.nn.Parameter(
-                    pack_scale_zp_carrier(w_s, getattr(layer, self.w_zp_name).data),
-                    requires_grad=False,
-                ),
+                pack_scale_zp_carrier(w_s, getattr(layer, self.w_zp_name).data),
             )
 
     def apply_weights(
