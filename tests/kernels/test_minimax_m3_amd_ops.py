@@ -336,6 +336,7 @@ def test_mlp_prequant_handoff():
     mlp.swiglu_alpha, mlp.swiglu_beta, mlp.swiglu_limit = 1.702, 1.0, 7.0
 
     x = torch.randn(4, 8, device=DEVICE, dtype=torch.bfloat16)
+    other = x.clone()  # a different tensor than the one that was quantized
     qa = QuantizedActivation(
         x.to(torch.float8_e4m3fn),
         torch.zeros(4, 1, device=DEVICE, dtype=torch.uint8),
@@ -349,7 +350,6 @@ def test_mlp_prequant_handoff():
     mlp(x)  # consumed by the first forward
     assert seen[-1] is x
     mlp.set_prequant(x, qa)
-    other = x.clone()  # a different tensor than the one that was quantized
     mlp(other)
     assert seen[-1] is other
     mlp(qa)  # a quantized input passes through untouched
