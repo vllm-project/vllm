@@ -2,7 +2,7 @@
 # This script tests if the python only compilation works correctly
 # for users who do not have any compilers installed on their system
 #
-# Set PYTHON_ONLY_COMPILE_PYTHON (e.g. 3.14) to install into a fresh uv venv
+# Set PYTHON_ONLY_COMPILE_PYTHON (e.g. 3.12) to install into a fresh uv venv
 # with that interpreter and run a short generation, as a smoke test for
 # Python versions other than the one the CI image is built with.
 

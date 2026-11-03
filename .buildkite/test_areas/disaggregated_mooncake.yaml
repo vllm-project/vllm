@@ -95,7 +95,7 @@ steps:
     LOG_PATH: "/tmp/mooncake-ec-e2e"
     BASELINE_FILE: "/tmp/mooncake-ec-e2e/baseline.json"
   commands:
-    - uv venv --system-site-packages --python 3.12 .venv
+    - uv venv --system-site-packages --python python3 .venv
     - |
       uv pip install --python .venv/bin/python "$(.venv/bin/python - <<'PY'
       from pathlib import Path

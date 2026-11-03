@@ -614,8 +614,8 @@ steps:
       - setup.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.14 Smoke"
-  key: python-314-smoke-nightly
+- label: ":nvidia: (H200 MIG 18GB) [Nightly] Python 3.12 Smoke"
+  key: python-312-smoke-nightly
   depends_on: ~
   optional: true
   timeout_in_minutes: 30
@@ -623,7 +623,7 @@ steps:
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   commands:
-  - PYTHON_ONLY_COMPILE_PYTHON=3.14 bash standalone_tests/python_only_compile.sh
+  - PYTHON_ONLY_COMPILE_PYTHON=3.12 bash standalone_tests/python_only_compile.sh
 
 - label: ":nvidia: (H200 MIG 35GB) Async Engine, Inputs, Utils, Worker"
   device: h200_35gb

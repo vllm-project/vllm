@@ -42,7 +42,7 @@ ARG TRITON_KERNEL_REPO="https://github.com/jpvillam-amd/triton.git"
 # Required for RCCL in ROCm7.1
 ENV HSA_NO_SCRATCH_RECLAIM=1
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.14
 ENV PYTHON_VERSION=${PYTHON_VERSION}
 
 RUN mkdir -p /app
@@ -57,8 +57,9 @@ RUN apt-get update -y \
     { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
+    # lib2to3 was removed in Python 3.13.
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-    python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+    $([ "${PYTHON_VERSION#3.}" -lt 13 ] && echo python${PYTHON_VERSION}-lib2to3) python-is-python3  \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \

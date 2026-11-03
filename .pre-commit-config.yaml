@@ -51,7 +51,7 @@ repos:
         --index-strategy, unsafe-best-match,
         --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
@@ -63,7 +63,7 @@ repos:
         -o, requirements/test/rocm.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
         # Exclude torch and CUDA/NVIDIA packages
         --no-emit-package, torch,
         --no-emit-package, torchvision,
@@ -133,7 +133,7 @@ repos:
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_39,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
     - id: pip-compile
@@ -145,7 +145,7 @@ repos:
         --index-strategy, unsafe-best-match,
         --torch-backend, cpu,
         --python-platform, x86_64-manylinux_2_28,
-        --python-version, "3.12",
+        --python-version, "3.14",
       ]
       files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
       exclude: ^requirements/test/cuda\.txt$
