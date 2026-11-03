@@ -36,6 +36,7 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -52,7 +53,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
 from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -267,6 +273,7 @@ class EXAONE4_5_VisionTransformer(Qwen2_5_VisionTransformer):
         vision_config: Exaone4_5_VisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -274,6 +281,7 @@ class EXAONE4_5_VisionTransformer(Qwen2_5_VisionTransformer):
             vision_config=vision_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
+            input_norm=input_norm,
             prefix=prefix,
         )
         depth = vision_config.depth
@@ -306,7 +314,6 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> Exaone4_5_Processor:
         return self.ctx.get_hf_processor(
             Exaone4_5_Processor,
-            use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
 
@@ -317,16 +324,23 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
     dummy_inputs=Exaone4_5_DummyInputsBuilder,
 )
 class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
+    hf_to_vllm_mapper = Qwen2_5_VLForConditionalGeneration.hf_to_vllm_mapper | (
+        WeightsMapper(orig_to_new_prefix={"mtp.": None})
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
         config: Exaone4_5_Config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
+        self.video_pruning_rate = multimodal_config.video_pruning_rate
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -336,6 +350,7 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
@@ -353,10 +368,7 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["mtp."]),
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod

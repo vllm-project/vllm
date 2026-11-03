@@ -10,6 +10,29 @@ use crate::error::Result;
 use crate::metrics::{BenchmarkMetrics, MultiTurnMetrics};
 use crate::multi_turn::ConversationOutput;
 
+fn insert_server_metrics(
+    result: &mut serde_json::Map<String, Value>,
+    outputs: &[RequestFuncOutput],
+) {
+    if !outputs
+        .iter()
+        .any(|output| output.server_queue_time.is_some() || output.server_ttft.is_some())
+    {
+        return;
+    }
+
+    result.insert(
+        "server_queue_times".into(),
+        serde_json::json!(
+            outputs.iter().map(|output| output.server_queue_time).collect::<Vec<_>>()
+        ),
+    );
+    result.insert(
+        "server_ttfts".into(),
+        serde_json::json!(outputs.iter().map(|output| output.server_ttft).collect::<Vec<_>>()),
+    );
+}
+
 /// Build the result JSON object matching the Python output schema exactly.
 ///
 /// Mirrors serve.py:1801-1947 result_json construction.
@@ -98,6 +121,16 @@ pub fn build_result_json(
         "request_throughput".into(),
         serde_json::json!(metrics.request_throughput),
     );
+    if is_pooling {
+        result.insert(
+            "total_input_sequences".into(),
+            serde_json::json!(metrics.total_input_sequences),
+        );
+        result.insert(
+            "input_sequence_throughput".into(),
+            serde_json::json!(metrics.input_sequence_throughput),
+        );
+    }
     if config.goodput.is_empty() {
         result.insert("request_goodput".into(), Value::Null);
     } else {
@@ -192,6 +225,7 @@ pub fn build_result_json(
             "start_times".into(),
             serde_json::json!(outputs.iter().map(|o| o.start_time).collect::<Vec<_>>()),
         );
+        insert_server_metrics(&mut result, outputs);
     }
 
     // Speculative decoding stats
@@ -772,5 +806,37 @@ mod tests {
         assert_eq!(failed[1]["ttft"], 0.5);
         assert_eq!(failed[1]["output_tokens"], 3);
         assert_eq!(failed[1]["itl"], serde_json::json!([0.1, 0.12]));
+    }
+
+    #[test]
+    fn test_insert_server_metrics_preserves_alignment() {
+        let outputs = vec![
+            RequestFuncOutput {
+                server_queue_time: Some(0.0),
+                server_ttft: Some(0.2),
+                ..Default::default()
+            },
+            RequestFuncOutput::default(),
+            RequestFuncOutput {
+                server_ttft: Some(0.3),
+                ..Default::default()
+            },
+        ];
+        let mut result = serde_json::Map::new();
+
+        insert_server_metrics(&mut result, &outputs);
+
+        assert_eq!(
+            result["server_queue_times"],
+            serde_json::json!([0.0, null, null])
+        );
+        assert_eq!(result["server_ttfts"], serde_json::json!([0.2, null, 0.3]));
+    }
+
+    #[test]
+    fn test_insert_server_metrics_omits_unavailable() {
+        let mut result = serde_json::Map::new();
+        insert_server_metrics(&mut result, &[RequestFuncOutput::default()]);
+        assert!(result.is_empty());
     }
 }

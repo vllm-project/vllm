@@ -3,13 +3,14 @@
 
 //! Shared tracing subscriber and log formatting for vLLM Rust binaries.
 
+pub mod timing;
+
 use std::{env, fmt, process};
 
 use time::UtcOffset;
 use time::macros::format_description;
 use tracing::level_filters::LevelFilter;
 use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::Layer as _;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::fmt::format::{FormatEvent, FormatFields, Writer};
 use tracing_subscriber::fmt::time::FormatTime;
@@ -17,6 +18,7 @@ use tracing_subscriber::fmt::{FmtContext, FormattedFields};
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{Layer, Registry};
 
 const CYAN: &str = "\x1b[0;36m";
 const GREY: &str = "\x1b[90m";
@@ -30,20 +32,36 @@ const VLLM_TIME_FORMAT: &[time::format_description::FormatItem<'static>] =
 
 /// Install the process-wide vLLM-style tracing subscriber.
 pub fn init_tracing(process_label: &str) {
+    let _ = tracing_subscriber::registry().with(vllm_fmt_layer(process_label)).try_init();
+}
+
+/// Install the process-wide vLLM-style tracing subscriber, with an
+/// additional layer (e.g. the multimodal preprocessing timing collector).
+pub fn init_tracing_with<L>(process_label: &str, layer: L)
+where
+    L: Layer<Registry> + Send + Sync + 'static,
+{
+    let _ = tracing_subscriber::registry()
+        .with(layer)
+        .with(vllm_fmt_layer(process_label))
+        .try_init();
+}
+
+/// The vLLM-style fmt layer filtered by `VLLM_LOGGING_LEVEL` / `RUST_LOG`.
+fn vllm_fmt_layer<S>(process_label: &str) -> impl Layer<S> + Send + Sync + 'static + use<S>
+where
+    S: Subscriber + for<'lookup> LookupSpan<'lookup>,
+{
     let filter = build_targets_filter(
         env::var("VLLM_LOGGING_LEVEL").ok().as_deref(),
         env::var("RUST_LOG").ok().as_deref(),
     );
     let formatter = VllmEventFormatter::new(process_label);
 
-    let _ = tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .event_format(formatter)
-                .with_writer(std::io::stderr)
-                .with_filter(filter),
-        )
-        .try_init();
+    tracing_subscriber::fmt::layer()
+        .event_format(formatter)
+        .with_writer(std::io::stderr)
+        .with_filter(filter)
 }
 
 /// Build the CLI log filter by merging the vLLM-style default level with

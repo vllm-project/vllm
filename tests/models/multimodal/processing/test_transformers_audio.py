@@ -4,6 +4,9 @@ import numpy as np
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.transformers.multimodal import (
+    MultiModalProcessor as TransformersMultiModalProcessor,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 AUDIO_MODEL_SETTINGS = {
@@ -61,12 +64,12 @@ AUDIO_MODEL_SETTINGS = {
         pytest.param(
             "mistralai/Voxtral-Mini-3B-2507",
             marks=pytest.mark.xfail(
-                reason="MistralCommonBackend.encode does not produce the audio "
-                "placeholder token (ID 24) from raw text. apply_chat_template "
-                "yields token IDs with placeholders, but MultiModalProcessor."
-                "apply() decodes the prompt back to text and re-tokenizes, at "
-                "which point the placeholders are lost. Fix belongs in "
-                "mistral_common or in the Voxtral-specific path.",
+                reason="Voxtral's mistral_common processor does not compose with "
+                "the Transformers modelling backend. Loading it currently fails "
+                "outright, because MistralCommonBackend.from_pretrained rejects "
+                "the kwargs vLLM passes, and it implements no "
+                "`replace_audio_token`, so it would report no replacement "
+                "offsets. Both fixes belong in mistral_common or transformers.",
                 strict=False,
             ),
         ),
@@ -77,12 +80,9 @@ AUDIO_MODEL_SETTINGS = {
 def test_audio_multimodal_processor(model_id):
     settings = AUDIO_MODEL_SETTINGS[model_id]
 
-    model_config = ModelConfig(
-        model=model_id,
-        model_impl="transformers",
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
     )
-
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
 
     audio = np.zeros(16000, dtype=np.float32)
     mm_data = {"audio": (audio, 16000)}
@@ -106,6 +106,7 @@ def test_audio_multimodal_processor(model_id):
 
     audio_items = result.get("mm_kwargs", {}).get("audio", [])
     assert len(audio_items) == 1, f"Expected 1 audio item, got {len(audio_items)}"
+    assert audio_items[0] is not None
     item_keys = list(audio_items[0].keys())
     has_features = "input_features" in item_keys or "input_values" in item_keys
     assert has_features, (
@@ -113,18 +114,20 @@ def test_audio_multimodal_processor(model_id):
     )
 
 
-def test_audio_multiple_inputs():
+@pytest.mark.parametrize("separator", [" and ", ""])
+def test_audio_multiple_inputs(separator):
     """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers backend."""
+    and multi-modal item by the Transformers modelling backend."""
     model_id = "ibm-granite/granite-speech-3.3-2b"
-    model_config = ModelConfig(model=model_id, model_impl="transformers")
-    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model=model_id, model_impl="transformers")
+    )
 
     audio_token = mm_processor.info.get_hf_processor().audio_token
     # One token per audio; the processor expands each to its placeholder run.
     prompt = (
         "<|start_of_role|>user<|end_of_role|>"
-        f"{audio_token} and {audio_token} transcribe<|end_of_text|>\n"
+        f"{audio_token}{separator}{audio_token} transcribe<|end_of_text|>\n"
     )
     audios = [np.zeros(16000, dtype=np.float32), np.zeros(24000, dtype=np.float32)]
 
@@ -136,3 +139,32 @@ def test_audio_multiple_inputs():
 
     assert len(result["mm_placeholders"]["audio"]) == 2
     assert len(result["mm_kwargs"]["audio"]) == 2
+
+
+def test_audio_fields_not_claimed_by_image():
+    """Audio fields survive when the image branch is also active."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    assert isinstance(mm_processor, TransformersMultiModalProcessor)
+
+    audio_keys = ["input_features", "input_features_mask"]
+    owned = mm_processor._partition_keys_by_modality(audio_keys, ["audio", "image"])
+
+    assert owned["audio"] == audio_keys
+    assert owned["image"] == []
+
+
+def test_unclaimed_fields_warn_rather_than_raise():
+    """Keys no sub-processor declares are dropped with a warning, not an error."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+    assert isinstance(mm_processor, TransformersMultiModalProcessor)
+
+    owned = mm_processor._partition_keys_by_modality(
+        ["input_features", "surprise_field"], ["audio", "image"]
+    )
+
+    assert owned["audio"] == ["input_features"]
+    assert owned["image"] == []

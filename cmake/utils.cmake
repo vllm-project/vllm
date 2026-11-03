@@ -113,11 +113,14 @@ function (vllm_finalize_hipify_target)
   list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
 
   set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  set(HIPIFY_MANIFEST ${CMAKE_CURRENT_BINARY_DIR}/hipify-source-map.json)
   add_custom_target(
     hipify_all
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} --manifest ${HIPIFY_MANIFEST} ${ALL_SRCS}
     DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
-    BYPRODUCTS ${ALL_BYPRODUCTS}
+    BYPRODUCTS ${ALL_BYPRODUCTS} ${HIPIFY_MANIFEST}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    VERBATIM
     COMMENT "Running hipify on all extension source files.")
 endfunction()
 
@@ -220,11 +223,11 @@ endmacro()
 #
 # Example:
 #   CMAKE_CUDA_FLAGS="-Wall -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75"
-#   clear_cuda_arches(CUDA_ARCH_FLAGS)
+#   clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
 #   CUDA_ARCH_FLAGS="-gencode arch=compute_70,code=sm_70;-gencode arch=compute_75,code=sm_75"
 #   CMAKE_CUDA_FLAGS="-Wall"
 #
-macro(clear_cuda_arches CUDA_ARCH_FLAGS)
+macro(clear_cuda_gencode_flags CUDA_ARCH_FLAGS)
     # Extract all `-gencode` flags from `CMAKE_CUDA_FLAGS`
     string(REGEX MATCHALL "-gencode arch=[^ ]+" CUDA_ARCH_FLAGS
       ${CMAKE_CUDA_FLAGS})
@@ -234,6 +237,26 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
     string(REGEX REPLACE "-gencode arch=[^ ]+ *" "" CMAKE_CUDA_FLAGS
       ${CMAKE_CUDA_FLAGS})
 endmacro()
+
+#
+# Warn when a caller requested PTX code generation through global CUDA arch
+# flags. vLLM removes those flags and reapplies per-source gencode flags, so the
+# user's global PTX request will not be preserved.
+#
+function(warn_if_ptx_arch_requested CUDA_ARCH_FLAGS)
+  foreach(_ARCH_FLAG ${CUDA_ARCH_FLAGS})
+    if(_ARCH_FLAG MATCHES "code=.*compute_[0-9]+[af]?")
+      message(WARNING
+        "PTX code generation requested in CUDA architecture flags "
+        "(${_ARCH_FLAG}), but vLLM does not preserve global PTX requests "
+        "when normalizing per-source CUDA architectures. Remove '+PTX' from "
+        "TORCH_CUDA_ARCH_LIST or rely on vLLM's built-in per-kernel PTX "
+        "selection.")
+      return()
+    endif()
+  endforeach()
+endfunction()
+
 
 #
 # Extract unique CUDA architectures from a list of compute capabilities codes in 
@@ -405,6 +428,7 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a" "${_base}f")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
@@ -444,8 +468,10 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
-        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
+        if (NOT "${_base}" IN_LIST _TGT_CUDA_ARCHS)
+          list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
+        endif()
       endif()
     endif()
   endforeach()

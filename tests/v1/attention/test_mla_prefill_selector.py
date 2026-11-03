@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend selector."""
 
+from contextlib import suppress
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -9,13 +10,12 @@ import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
 from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
+from vllm.platforms.interface import DeviceCapability, Platform
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
-    _get_mla_prefill_backend_priorities,
     get_mla_prefill_backend,
 )
 
@@ -55,14 +55,180 @@ def _make_vllm_config(
     return mock_vllm_config
 
 
+class TestPlatformMLAPrefillHooks:
+    """Tests for the Platform.get_mla_prefill_backend_cls hook itself."""
+
+    def _get_tried_backends(self, capability, mla_dimensions):
+        """Run the default hook, returning the backend order tried."""
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=mla_dimensions,
+        )
+        tried: list[MLAPrefillBackendEnum] = []
+
+        def mock_get_class(backend_enum):
+            tried.append(backend_enum)
+            cls = MagicMock()
+            cls.validate_configuration.return_value = ["not available"]
+            return cls
+
+        with (
+            patch.object(Platform, "get_device_capability", return_value=capability),
+            patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class),
+            suppress(ValueError),
+        ):
+            Platform.get_mla_prefill_backend_cls(selector_config)
+        return tried
+
+    def test_priorities_no_capability(self):
+        tried = self._get_tried_backends(
+            None,
+            MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128),
+        )
+        assert tried == [MLAPrefillBackendEnum.FLASH_ATTN]
+
+    def test_priorities_blackwell_glm_dimensions(self):
+        tried = self._get_tried_backends(
+            DeviceCapability(major=10, minor=0),
+            MLADimensions(qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=256),
+        )
+        assert tried == [
+            MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+            MLAPrefillBackendEnum.FLASHINFER,
+            MLAPrefillBackendEnum.TOKENSPEED_MLA,
+        ]
+
+    def test_priorities_blackwell_deepseek_dimensions(self):
+        tried = self._get_tried_backends(
+            DeviceCapability(major=10, minor=0),
+            MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128),
+        )
+        assert tried == [
+            MLAPrefillBackendEnum.FLASH_ATTN,
+            MLAPrefillBackendEnum.TRTLLM_RAGGED,
+            MLAPrefillBackendEnum.FLASHINFER,
+            MLAPrefillBackendEnum.TOKENSPEED_MLA,
+        ]
+
+    def test_priorities_hopper(self):
+        tried = self._get_tried_backends(
+            DeviceCapability(major=9, minor=0),
+            MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128),
+        )
+        assert tried == [MLAPrefillBackendEnum.FLASH_ATTN]
+
+    def test_skips_import_error_backends(self):
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ),
+        )
+        valid = MagicMock()
+        valid.validate_configuration.return_value = []
+
+        def mock_get_class(backend_enum):
+            if backend_enum is MLAPrefillBackendEnum.FLASH_ATTN:
+                return valid
+            raise ImportError("not installed")
+
+        with (
+            patch.object(
+                Platform,
+                "get_device_capability",
+                return_value=DeviceCapability(major=10, minor=0),
+            ),
+            patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class),
+        ):
+            selected = Platform.get_mla_prefill_backend_cls(selector_config)
+        assert selected is valid
+
+    def test_all_invalid_raises_error(self):
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
+
+        invalid = MagicMock()
+        invalid.validate_configuration.return_value = ["not available"]
+
+        with (
+            patch.object(
+                Platform,
+                "get_device_capability",
+                return_value=DeviceCapability(major=10, minor=0),
+            ),
+            patch.object(MLAPrefillBackendEnum, "get_class", return_value=invalid),
+            pytest.raises(ValueError, match="No valid MLA"),
+        ):
+            Platform.get_mla_prefill_backend_cls(selector_config)
+
+    def test_cpu_platform_returns_fixed_backend(self):
+        """CPU backends are returned via the fixed-backend hook."""
+        try:
+            cpu_cls = MLAPrefillBackendEnum.CPU.get_class()
+            zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+        except ImportError:
+            pytest.skip("CPU MLA prefill backend not available")
+            return
+
+        from vllm.platforms.cpu import CpuPlatform
+
+        expected = zen_cls if zen_cls.is_available() else cpu_cls
+        assert (
+            CpuPlatform.get_mla_prefill_backend_cls(
+                MLAPrefillSelectorConfig(dtype=torch.bfloat16)
+            )
+            is expected
+        )
+
+
 class TestGetMLAPrefillBackend:
     """Tests for get_mla_prefill_backend (public API)."""
+
+    def test_cpu_uses_sdpa_prefill(self):
+        vllm_config = _make_vllm_config()
+
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_mla_prefill_backend_cls.return_value = (
+                MLAPrefillBackendEnum.CPU.get_class()
+            )
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is MLAPrefillBackendEnum.CPU.get_class()
+
+    def test_zen_cpu_prefers_zentorch_prefill(self):
+        from vllm.platforms.cpu import CpuPlatform
+
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with patch.object(zen_cls, "is_available", return_value=True):
+            backend = CpuPlatform.get_mla_prefill_backend_cls(
+                MLAPrefillSelectorConfig(dtype=torch.bfloat16)
+            )
+        assert backend is zen_cls
+
+    def test_zen_cpu_falls_back_when_zentorch_unavailable(self):
+        from vllm.platforms.cpu import CpuPlatform
+
+        zen_cls = MLAPrefillBackendEnum.ZEN_CPU.get_class()
+
+        with patch.object(zen_cls, "is_available", return_value=False):
+            backend = CpuPlatform.get_mla_prefill_backend_cls(
+                MLAPrefillSelectorConfig(dtype=torch.bfloat16)
+            )
+        assert backend is MLAPrefillBackendEnum.CPU.get_class()
 
     def test_no_device_capability_returns_flash_attn(self):
         vllm_config = _make_vllm_config()
 
+        class FlashAttnBackend:
+            @staticmethod
+            def get_name():
+                return "FLASH_ATTN"
+
         with patch("vllm.platforms.current_platform") as mock_platform:
-            mock_platform.get_device_capability.return_value = None
+            mock_platform.get_mla_prefill_backend_cls.return_value = FlashAttnBackend
 
             backend = get_mla_prefill_backend(vllm_config)
             assert backend.get_name() == "FLASH_ATTN"
@@ -79,6 +245,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -97,6 +264,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -110,6 +278,7 @@ class TestGetMLAPrefillBackend:
         )
 
         with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=10, minor=0
             )
@@ -152,10 +321,11 @@ class TestGetMLAPrefillBackend:
                 return_value=3,
             ),
         ):
+            mock_platform.is_cpu.return_value = False
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
-            mock_platform.is_rocm.return_value = False
+            mock_platform.get_mla_prefill_backend_cls.return_value = flash_attn_cls
 
             backend = get_mla_prefill_backend(vllm_config)
             assert backend.get_name() == "FLASH_ATTN"
@@ -165,7 +335,6 @@ class TestAutoSelectMLAPrefillBackend:
     """Tests for fallback and error paths in auto-selection."""
 
     def test_blackwell_glm_dimensions_use_trtllm(self):
-        capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             mla_dimensions=MLADimensions(
@@ -176,7 +345,6 @@ class TestAutoSelectMLAPrefillBackend:
         )
 
         try:
-            flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
             trtllm_cls = MLAPrefillBackendEnum.TRTLLM_RAGGED.get_class()
         except ImportError:
             pytest.skip("MLA prefill backend not available")
@@ -184,19 +352,13 @@ class TestAutoSelectMLAPrefillBackend:
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
-            patch.object(flash_attn_cls, "is_available", return_value=True),
             patch.object(trtllm_cls, "validate_configuration", return_value=[]),
         ):
-            # Force the non-ROCm priority on the Blackwell.
-            mock_platform.is_rocm.return_value = False
-            backend = _auto_select_mla_prefill_backend(
-                capability,
-                selector_config,
-            )
+            mock_platform.get_mla_prefill_backend_cls.return_value = trtllm_cls
+            backend = _auto_select_mla_prefill_backend(selector_config)
             assert backend.get_name() == "TRTLLM_RAGGED"
 
-    def test_all_fail_raises_error(self):
-        capability = DeviceCapability(major=10, minor=0)
+    def test_platform_hook_raises_propagates(self):
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             mla_dimensions=MLADimensions(
@@ -206,18 +368,14 @@ class TestAutoSelectMLAPrefillBackend:
             ),
         )
 
-        def mock_get_class(backend_enum):  # noqa: ARG001
-            cls = MagicMock()
-            cls.validate_configuration.return_value = ["not available"]
-            return cls
-
-        with patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class):
-            _auto_select_mla_prefill_backend.cache_clear()
-            with pytest.raises(ValueError, match="No valid MLA"):
-                _auto_select_mla_prefill_backend(
-                    capability,
-                    selector_config,
-                )
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            pytest.raises(ValueError, match="No valid MLA"),
+        ):
+            mock_platform.get_mla_prefill_backend_cls.side_effect = ValueError(
+                "No valid MLA prefill backend found"
+            )
+            _auto_select_mla_prefill_backend(selector_config)
 
 
 class TestBackendValidation:
@@ -287,6 +445,40 @@ class TestBackendValidation:
             )
             assert invalid_reasons == []
 
+    def test_flash_attn_accepts_glm53_flash_nope_dimensions(self):
+        """(256, 0, 256) runs the same FA kernels as GLM-5's (192, 64, 256); a
+        RoPE-carrying 320-wide query does not."""
+        try:
+            from vllm.v1.attention.backends.mla.prefill.flash_attn import (
+                FlashAttnPrefillBackend,
+            )
+        except ImportError:
+            pytest.skip("MLA prefill backend not available")
+            return
+
+        capability = DeviceCapability(major=10, minor=0)
+
+        def validate(qk_rope_head_dim: int) -> list[str]:
+            selector_config = MLAPrefillSelectorConfig(
+                dtype=torch.bfloat16,
+                mla_dimensions=MLADimensions(
+                    qk_nope_head_dim=256,
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    v_head_dim=256,
+                ),
+            )
+            with patch.object(
+                FlashAttnPrefillBackend, "is_available", return_value=True
+            ):
+                return FlashAttnPrefillBackend.validate_configuration(
+                    capability, selector_config
+                )
+
+        assert validate(qk_rope_head_dim=0) == []
+        invalid_reasons = validate(qk_rope_head_dim=64)
+        assert len(invalid_reasons) == 1
+        assert "supported MLA dimensions" in invalid_reasons[0]
+
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
@@ -298,18 +490,29 @@ class TestROCmAiterFAPrefillSelection:
 
     def test_rocm_priorities_prefer_aiter_fa(self):
         """On ROCm, ROCM_AITER_FA is tried first, FLASH_ATTN as fallback."""
-        with patch("vllm.platforms.current_platform") as mock_platform:
-            mock_platform.is_rocm.return_value = True
-            priorities = _get_mla_prefill_backend_priorities(
-                DeviceCapability(major=9, minor=5),
-                MLADimensions(
-                    qk_nope_head_dim=128,
-                    qk_rope_head_dim=64,
-                    v_head_dim=128,
-                ),
-            )
+        from vllm.platforms.rocm import RocmPlatform
 
-        assert priorities == [
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
+        tried: list[MLAPrefillBackendEnum] = []
+
+        def mock_get_class(backend_enum):
+            tried.append(backend_enum)
+            cls = MagicMock()
+            cls.validate_configuration.return_value = ["not available"]
+            return cls
+
+        with (
+            patch.object(
+                RocmPlatform,
+                "get_device_capability",
+                return_value=MagicMock(),
+            ),
+            patch.object(MLAPrefillBackendEnum, "get_class", mock_get_class),
+            suppress(ValueError),
+        ):
+            RocmPlatform.get_mla_prefill_backend_cls(selector_config)
+
+        assert tried == [
             MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,
         ]
@@ -366,50 +569,29 @@ class TestROCmAiterFAPrefillSelection:
             AiterFlashAttnPrefillBackend,
         )
 
-        # gfx gating is simulated via the mocked validate_configuration,
-        # not the capability.
-        capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
-        with (
-            patch("vllm.platforms.current_platform") as mock_platform,
-            patch.object(
-                AiterFlashAttnPrefillBackend,
-                "validate_configuration",
-                return_value=[],
-            ),
-        ):
-            mock_platform.is_rocm.return_value = True
-            backend = _auto_select_mla_prefill_backend(capability, selector_config)
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_mla_prefill_backend_cls.return_value = (
+                AiterFlashAttnPrefillBackend
+            )
+            backend = _auto_select_mla_prefill_backend(selector_config)
             assert backend.get_name() == "ROCM_AITER_FA"
 
     def test_auto_select_falls_back_to_flash_attn_when_aiter_invalid(self):
-        from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
-            AiterFlashAttnPrefillBackend,
-        )
-
         try:
             flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:
             pytest.skip("FLASH_ATTN backend not available")
             return
 
-        # the fallback is forced by the mocked validate_configuration,
+        # the fallback is forced by the mocked get_mla_prefill_backend_cls,
         # not the capability.
-        capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
-        with (
-            patch("vllm.platforms.current_platform") as mock_platform,
-            patch.object(
-                AiterFlashAttnPrefillBackend,
-                "validate_configuration",
-                return_value=["compute capability not supported"],
-            ),
-            patch.object(flash_attn_cls, "validate_configuration", return_value=[]),
-        ):
-            mock_platform.is_rocm.return_value = True
-            backend = _auto_select_mla_prefill_backend(capability, selector_config)
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.get_mla_prefill_backend_cls.return_value = flash_attn_cls
+            backend = _auto_select_mla_prefill_backend(selector_config)
             assert backend.get_name() == "FLASH_ATTN"
 
 
@@ -418,14 +600,14 @@ class TestMLAPrefillBackendParsing:
 
     def test_valid_string_parses_to_enum(self):
         config = AttentionConfig(
-            mla_prefill_backend="FLASH_ATTN",  # type: ignore[arg-type]
+            mla_prefill_backend="FLASH_ATTN",
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
     def test_invalid_string_raises_error(self):
         with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
             AttentionConfig(
-                mla_prefill_backend="NONEXISTENT",  # type: ignore[arg-type]
+                mla_prefill_backend="NONEXISTENT",
             )
 
 

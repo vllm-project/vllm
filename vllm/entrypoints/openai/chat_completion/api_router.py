@@ -12,15 +12,18 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ChatCompletionStreamResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
+    json_or_sse_responses,
     load_aware_call,
     validate_json_request,
     with_cancellation,
 )
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
+from vllm.entrypoints.serve.utils.sse_keep_alive import with_sse_keep_alive
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -40,13 +43,16 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 @router.post(
     "/v1/chat/completions",
     dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
+    **json_or_sse_responses(
+        ChatCompletionResponse,
+        ChatCompletionStreamResponse,
+        {
+            HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+            HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+            HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        },
+    ),
 )
 @with_cancellation
 @load_aware_call
@@ -71,7 +77,12 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
             headers=metrics_header(metrics_header_format),
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    args = getattr(raw_request.app.state, "args", None)
+    keep_alive_interval = getattr(args, "sse_keep_alive_interval", 0)
+    return StreamingResponse(
+        content=with_sse_keep_alive(generator, float(keep_alive_interval)),
+        media_type="text/event-stream",
+    )
 
 
 @router.post(

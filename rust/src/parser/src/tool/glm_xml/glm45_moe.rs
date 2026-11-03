@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
+
 use super::{GlmXmlToolParser, Separator};
 use crate::tool::{Result, Tool, ToolParser, ToolParserOutput};
 
@@ -26,14 +28,14 @@ impl Glm45MoeToolParser {
 }
 
 impl ToolParser for Glm45MoeToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
 
@@ -43,5 +45,19 @@ impl ToolParser for Glm45MoeToolParser {
 
     fn reset(&mut self) -> String {
         self.0.reset()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Glm45MoeToolParser;
+    use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
+
+    #[test]
+    fn tool_framing_preserves_body_whitespace_across_chunk_boundaries() {
+        assert_tool_framing_preserves_body_whitespace::<Glm45MoeToolParser>(
+            "\n",
+            "<tool_call>get_weather\n</tool_call>",
+        );
     }
 }

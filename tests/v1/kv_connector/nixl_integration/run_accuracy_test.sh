@@ -36,7 +36,9 @@ if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
   echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
 
-DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
+# Empty leaves the layout to the backends, for models that constrain it.
+PREFILLER_KV_LAYOUT=${PREFILLER_KV_LAYOUT-"HND"}
+DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
   KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
 else
@@ -44,9 +46,9 @@ else
 fi
 
 if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
-  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
-else
-  KV_EXTRA_CONFIG=''
+  # Cross-layer blocks are exercised via the block-outermost layout.
+  PREFILLER_KV_LAYOUT="BLHNC"
+  DECODER_KV_LAYOUT="BLHNC"
 fi
 
 # Connector: default pull NixlConnector; NixlPushConnector enables PP prefill.
@@ -54,11 +56,11 @@ KV_CONNECTOR=${KV_CONNECTOR:-NixlConnector}
 
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG_D='{"kv_connector":"'"$KV_CONNECTOR"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"$KV_CONNECTOR\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
+  KV_CONFIG_D="{\"kv_connector\":\"${KV_CONNECTOR}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${KV_BUFFER_DEVICE}\"${KV_CONFIG_HETERO_LAYOUT}}"
 fi
 
 # Models to run
@@ -83,6 +85,12 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Set to 1 to put every instance to sleep and wake it up before the eval.
+SLEEP_WAKE=${SLEEP_WAKE:-0}
+if [[ "$SLEEP_WAKE" == "1" ]]; then
+  export VLLM_SERVER_DEV_MODE=1
+  VLLM_SERVE_EXTRA_ARGS="${VLLM_SERVE_EXTRA_ARGS:+${VLLM_SERVE_EXTRA_ARGS},}--enable-sleep-mode"
+fi
 # Pin concurrent prefiller and non-DP decoder engines to separate internal
 # port windows. DP decoder ranks retain their existing internal port selection.
 PREFILLER_INTERNAL_PORT_BASE=${PREFILLER_INTERNAL_PORT_BASE:-20000}
@@ -112,7 +120,7 @@ wait_for_server() {
 # Function to clean up previous instances
 wait_for_gpu_memory_release() {
   if [[ "$SMI_BIN" == *"rocm"* ]]; then
-    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
   fi
 }
 
@@ -176,7 +184,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT='HND' \
+    ${PREFILLER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$PREFILLER_KV_LAYOUT} \
     VLLM_PORT=$INTERNAL_PORT \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -211,6 +219,17 @@ run_tests_for_model() {
     PREFILL_PORTS+=("$PORT")
   done
 
+  # When decoders wrap onto the prefillers' GPUs, start them only after the
+  # prefillers are up: an instance that profiles memory while another loads
+  # weights on the same GPU counts those weights against its own budget.
+  GPUS_NEEDED=$((NUM_PREFILL_INSTANCES * PREFILLER_WORLD_SIZE + NUM_DECODE_INSTANCES * DECODER_TP_SIZE))
+  if (( GPUS_NEEDED > $(get_num_gpus) )); then
+    for PORT in "${PREFILL_PORTS[@]}"; do
+      echo "Waiting for prefill instance on port $PORT before starting decoders on shared GPUs..."
+      wait_for_server "$PORT"
+    done
+  fi
+
   # Start decode instances
   for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
@@ -239,7 +258,7 @@ run_tests_for_model() {
 
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
-    VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
+    ${DECODER_KV_LAYOUT:+VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT} \
     $DECODER_INTERNAL_PORT_ENV \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
@@ -311,9 +330,17 @@ run_tests_for_model() {
   # Wait for the proxy to start
   sleep 5
 
+  SLEEP_WAKE_URLS=""
+  if [[ "$SLEEP_WAKE" == "1" ]]; then
+    for PORT in "${PREFILL_PORTS[@]}" "${DECODE_PORTS[@]}"; do
+      SLEEP_WAKE_URLS="${SLEEP_WAKE_URLS:+${SLEEP_WAKE_URLS},}http://localhost:${PORT}"
+    done
+  fi
+
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name SLEEP_WAKE_URLS=$SLEEP_WAKE_URLS \
+    python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances
