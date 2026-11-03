@@ -26,8 +26,9 @@ new requests are admitted while paused:
 | `"abort"` | Aborted immediately, returning partial results (default) | Rejected with HTTP 503 until resume |
 | `"wait"` | Running requests finish before the pause completes; queued ones run after resume | Rejected with HTTP 503 until resume |
 | `"keep"` | Frozen in the queue; they resume when `resume_generation` is called | Accepted and queued |
+| `"migrate"` | Finished once no step is in flight, returning partial results with `kv_transfer_params` so another engine can continue them (see [Migrating In-Flight Requests](../features/nixl_connector_usage.md#migrating-in-flight-requests)) | Rejected with HTTP 503 until resume |
 
-`"abort"` and `"wait"` treat the pause as a generation boundary: from the moment
+`"abort"`, `"wait"` and `"migrate"` treat the pause as a generation boundary: from the moment
 the pause starts (for `"wait"`, including while in-flight requests drain) until
 `resume_generation` returns, the engine rejects new requests from every API server
 rather than carrying them across the boundary. Clients should retry on 503. A
