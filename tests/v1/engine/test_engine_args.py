@@ -425,6 +425,7 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
         ("MooncakeStoreConnector", "cuda", True),
         ("MoRIIOConnector", "cuda", True),
         ("UMBPStoreConnector", "cuda", True),
+        ("LMCacheMPConnector", "cuda", True),
         ("OffloadingConnector", "cuda", False),
         ("LMCacheConnectorV1", "cuda", False),
     ],
@@ -497,18 +498,26 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
     assert config.cache_config.enable_extensible_kv_cache is not rocm
 
 
+@pytest.mark.parametrize("use_vmm_api", [False, True])
 @pytest.mark.parametrize("multi", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
-def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
+def test_extensible_kv_cache_with_lmcache_mp(
+    monkeypatch, multi, requested, use_vmm_api
+):
     """LMCacheMPConnector shares the KV cache through legacy CUDA IPC, which
-    cannot export driver-mapped memory on any platform."""
+    cannot export driver-mapped memory on any platform, unless
+    `lmcache.mp.use_vmm_api` makes it share VMM handles instead."""
     from types import SimpleNamespace
 
     import vllm.platforms
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.config.vllm import VllmConfig
 
-    lmcache = {"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both"}
+    lmcache = {
+        "kv_connector": "LMCacheMPConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": {"lmcache.mp.use_vmm_api": use_vmm_api},
+    }
     transfer = (
         KVTransferConfig(
             kv_connector="MultiConnector",
@@ -535,7 +544,11 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
         parallel_config=SimpleNamespace(enable_elastic_ep=False),
         kv_transfer_config=transfer,
     )
-    if requested:
+    # Only a direct LMCacheMPConnector's extra config is consulted.
+    if use_vmm_api and not multi:
+        VllmConfig._resolve_extensible_kv_cache(config)
+        assert config.cache_config.enable_extensible_kv_cache is True
+    elif requested:
         with pytest.raises(ValueError, match="legacy CUDA IPC"):
             VllmConfig._resolve_extensible_kv_cache(config)
     else:

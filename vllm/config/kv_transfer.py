@@ -55,6 +55,7 @@ _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
         "MooncakeStoreConnector",
         "MoRIIOConnector",
         "UMBPStoreConnector",
+        "LMCacheMPConnector",
     }
 )
 
@@ -176,8 +177,9 @@ class KVTransferConfig:
 
     def registers_kv_cache_memory(self) -> bool:
         """Whether a connector registers the device KV cache itself with UCX or
-        RDMA (NIXL, Mooncake, MoRIIO, UMBP), directly or in MultiConnector. NIXL with
-        a CPU kv_buffer_device registers only its host staging buffers."""
+        RDMA (NIXL, Mooncake, MoRIIO, UMBP) or with another process (LMCache MP),
+        directly or in MultiConnector. NIXL with a CPU kv_buffer_device registers
+        only its host staging buffers."""
         children = [{"kv_connector": self.kv_connector}]
         if self.kv_connector == "MultiConnector":
             children = self.kv_connector_extra_config.get("connectors", [])

@@ -18,6 +18,7 @@ _MEM_LOCATION_TYPE_DEVICE = 1
 _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
+_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
 
 DevicePtr = ctypes.c_ulonglong
@@ -282,6 +283,7 @@ class CudaVmmDriver(VmmDriver):
             capable = result == _SUCCESS and bool(flag.value)
             self._rdma_capable[device_index] = capable
         prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        prop.requestedHandleTypes = _MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR
         return prop
 
     def error_string(self, code: int) -> str:

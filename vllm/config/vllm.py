@@ -3218,10 +3218,14 @@ class VllmConfig:
         elif (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+            and not self.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.use_vmm_api", False
+            )
         ):
             unsupported = (
                 "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
-                "which cannot export driver-mapped memory"
+                "which cannot export driver-mapped memory; set "
+                '"lmcache.mp.use_vmm_api": true to share it through VMM handles'
             )
         elif (
             self.kv_transfer_config is not None
