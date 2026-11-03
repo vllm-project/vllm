@@ -47,6 +47,7 @@ from vllm.model_executor.models.gemma4_mm import (
     Gemma4MultiModalProcessor,
     Gemma4ProcessingInfo,
     _get_max_soft_tokens,
+    _tower_lora_enabled,
 )
 from vllm.model_executor.models.gemma4_vision import Gemma4VisionModel
 from vllm.model_executor.models.interfaces import SupportsMultiModal
@@ -1012,6 +1013,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
     _parse_and_validate_multimodal_inputs = (
         Gemma4ForConditionalGeneration._parse_and_validate_multimodal_inputs
     )
+    _encode_vision = Gemma4ForConditionalGeneration._encode_vision
     _pack_vision = Gemma4ForConditionalGeneration._pack_vision
     _embed_vision = Gemma4ForConditionalGeneration._embed_vision
     _process_image_input = Gemma4ForConditionalGeneration._process_image_input_local
@@ -1036,6 +1038,7 @@ class EmbeddingGemma2Model(nn.Module, SupportsMultiModal, VllmModelForPooling):
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
         self.hf_to_vllm_mapper = _embedding_gemma2_weights_mapper(config)
+        self._tower_lora = _tower_lora_enabled(vllm_config)
 
         tower_quant: QuantizationConfig | None
         if quant_config and quant_config.get_name() in [

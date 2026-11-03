@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     build_mm_input_norm,
 )
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models import gemma4_mm
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
@@ -463,6 +464,39 @@ def _padded_image(
     positions = torch.full((max_patches, 2), -1, dtype=torch.long)
     positions[: columns * rows] = torch.stack(grid, -1).reshape(-1, 2)
     return torch.zeros(max_patches, 768), positions
+
+
+@pytest.mark.parametrize(
+    ("tower_lora", "expected_calls"), [(False, [200, 106]), (True, [306])]
+)
+def test_eager_vision_calls_are_bounded(
+    monkeypatch, tower_lora: bool, expected_calls: list[int]
+):
+    """Packed eager calls are capped in soft tokens, bounding the tower's peak
+    memory, except with tower LoRA: its mapping covers the whole batch."""
+    monkeypatch.setattr(gemma4_mm, "_MAX_SOFT_TOKENS_PER_CALL", 250)
+    model = _gemma4_for_encoder_cudagraph()
+    model._tower_lora = tower_lora
+    calls: list[int] = []
+
+    def embed_vision(pixel_values, metadata):
+        calls.append(pixel_values.shape[0] // 9)
+        return torch.full((calls[-1], 8), float(len(calls)))
+
+    model._embed_vision = embed_vision  # type: ignore[method-assign]
+    images = [_padded_image(30, 30)] * 3 + [_padded_image(9, 6)]
+    out = model._process_image_input_local(
+        {
+            "pixel_values": [pixel_values for pixel_values, _ in images],
+            "pixel_position_ids": [positions for _, positions in images],
+        }  # type: ignore[arg-type]
+    )
+
+    assert calls == expected_calls
+    assert [o.shape[0] for o in out] == [100, 100, 100, 6]
+    # Outputs keep the input order across calls.
+    expected_call_index = [1, 1, 2, 2] if not tower_lora else [1, 1, 1, 1]
+    assert [int(o[0, 0]) for o in out] == expected_call_index
 
 
 @pytest.mark.parametrize("token_budget", [70, 4480])
