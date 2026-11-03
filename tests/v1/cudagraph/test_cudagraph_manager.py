@@ -438,8 +438,8 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
 
 def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     """A varlen decode graph replays any decode batch within its query-length
-    bound. The runner passes no bound for a batch with a prefill, which must not
-    replay one however short the prefill is."""
+    bound. The runner passes no bound for a batch that is not decode-eligible,
+    which must not replay one however short the prefill is."""
     manager = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
 
     def dispatch(max_query_len):
@@ -517,7 +517,7 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         max_query_len if decode_eligible else None,
         dp_size=dp_size,
         dp_rank=0,
-        max_query_len=None if has_prefill else max_query_len,
+        max_query_len=max_query_len if decode_eligible else None,
     )
     hidden_states = torch.zeros(target_desc.num_tokens, 1)
     speculator = SimpleNamespace(
