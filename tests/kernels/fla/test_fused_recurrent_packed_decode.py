@@ -9,6 +9,9 @@ from vllm.third_party.flash_linear_attention.ops import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
+)
 
 DEVICE = current_platform.device_type
 
@@ -133,6 +136,67 @@ def test_fused_recurrent_packed_decode_matches_reference(
     valid = ssm_state_indices > 0
     torch.testing.assert_close(out_packed[valid], out_ref[valid], rtol=rtol, atol=atol)
     torch.testing.assert_close(state_packed, state_ref, rtol=rtol, atol=atol)
+
+
+def test_packed_decode_matches_serial_speculative_recurrence():
+    """Packed decode must match the recurrent kernel used for verification."""
+    torch.manual_seed(0)
+    device = torch.device(DEVICE)
+    dtype = torch.bfloat16
+    num_tokens, H, HV, K, V = 8, 16, 48, 128, 128
+    q = torch.randn(1, num_tokens, H, K, device=device, dtype=dtype)
+    k = torch.randn_like(q)
+    v = torch.randn(1, num_tokens, HV, V, device=device, dtype=dtype)
+    a = torch.randn(num_tokens, HV, device=device, dtype=dtype)
+    b = torch.randn_like(a)
+    A_log = torch.randn(HV, device=device) * 0.1
+    dt_bias = torch.randn(HV, device=device) * 0.1
+    initial_state = torch.randn(2, HV, V, K, device=device) * 0.05
+    state_spec = initial_state.clone()
+    state_packed = initial_state.clone()
+    state_indices = torch.ones(1, device=device, dtype=torch.int32)
+    out_spec = []
+    out_packed = []
+
+    for token in range(num_tokens):
+        out, _ = fused_sigmoid_gating_delta_rule_update(
+            A_log=A_log,
+            a=a[token : token + 1],
+            b=b[token : token + 1],
+            dt_bias=dt_bias,
+            q=q[:, token : token + 1],
+            k=k[:, token : token + 1],
+            v=v[:, token : token + 1],
+            scale=K**-0.5,
+            initial_state=state_spec,
+            inplace_final_state=True,
+            ssm_state_indices=state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        out_spec.append(out)
+
+        mixed_qkv = torch.cat(
+            (q[0, token].flatten(), k[0, token].flatten(), v[0, token].flatten())
+        ).unsqueeze(0)
+        out = torch.empty(1, 1, HV, V, device=device, dtype=dtype)
+        fused_recurrent_gated_delta_rule_packed_decode(
+            mixed_qkv=mixed_qkv,
+            a=a[token : token + 1],
+            b=b[token : token + 1],
+            A_log=A_log,
+            dt_bias=dt_bias,
+            scale=K**-0.5,
+            initial_state=state_packed,
+            out=out,
+            ssm_state_indices=state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+        out_packed.append(out)
+
+    torch.testing.assert_close(
+        torch.cat(out_packed, dim=1), torch.cat(out_spec, dim=1), rtol=0, atol=0
+    )
+    torch.testing.assert_close(state_packed[1], state_spec[1], rtol=0, atol=0)
 
 
 def test_packed_decode_keeps_beta_in_fp32():

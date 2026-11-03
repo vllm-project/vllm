@@ -316,8 +316,8 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     b_v = tl.load(p_mixed + v_off, mask=mask_v, other=0).to(tl.float32)
 
     if USE_QK_L2NORM_IN_KERNEL:
-        b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
-        b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        b_q = b_q * tl.rsqrt(tl.sum(b_q * b_q) + 1e-6)
+        b_k = b_k * tl.rsqrt(tl.sum(b_k * b_k) + 1e-6)
     b_q = b_q * scale
 
     a_val = tl.load(a + i_n * stride_a_tok + i_hv).to(tl.float32)
@@ -461,7 +461,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         # No BF16-state tile wins everywhere on SM90, so BF16 keeps 32.
         BV = 4
     num_stages = 3
-    num_warps = 1
+    num_warps = 4
 
     stride_mixed_qkv_tok = mixed_qkv.stride(0)
     stride_a_tok = a.stride(0)
