@@ -1104,8 +1104,7 @@ class GroupCoordinator:
             `all_gather_group` is provided. By default, this optimization is
             on for any tensor whose size is divisible by the
             `all_gather_group`'s world size. However, it should be disabled
-            for tensors that are not fully replicated across the group (e.g.,
-            the residual tensor when sequence parallelism is enabled). This
+            for tensors that are not fully replicated across the group. This
             dictionary allows overriding the default behavior on a per-tensor
             basis.
         """
@@ -1268,8 +1267,7 @@ class GroupCoordinator:
             `all_gather_group` is provided. By default, this optimization is
             on for any tensor whose size is divisible by the
             `all_gather_group`'s world size. However, it should be disabled
-            for tensors that are not fully replicated across the group (e.g.,
-            the residual tensor when sequence parallelism is enabled). This
+            for tensors that are not fully replicated across the group. This
             dictionary allows overriding the default behavior on a per-tensor
             basis.
         """
