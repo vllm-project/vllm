@@ -29,7 +29,7 @@ def _normalize_messages(
     messages: list[ChatCompletionMessageParam],
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
-    # and ValueError (400) instead of the reference's asserts.
+    # tool_reference, and ValueError (400) instead of the reference's asserts.
     result = [dict(message) for message in copy.deepcopy(messages)]
     image_idx = 0
     for message in result:
@@ -50,16 +50,27 @@ def _normalize_messages(
                 if part_type in ("text", "input_text", "output_text"):
                     _reject_image_placeholder(block.get("text"))
                     parts.append(block.get("text", ""))
-                elif part_type in ("image_url", "input_image", "image_pil"):
+                elif part_type in (
+                    "image_url",
+                    "input_image",
+                    "image_pil",
+                    "image_embeds",
+                ):
                     parts.append(IMAGE_PLACEHOLDER)
                     image_indices.append(image_idx)
                     image_idx += 1
+                elif part_type == "tool_reference":
+                    # The system prompt already lists every tool, deferred
+                    # ones included, so the name is all the model needs.
+                    _reject_image_placeholder(block.get("name"))
+                    parts.append(block.get("name", ""))
                 else:
                     raise ValueError(
                         "DeepSeek V4.1 supports text and image content only; "
                         f"got {part_type!r}"
                     )
             message["content"] = "\n\n".join(parts)
+
     return result
 
 
@@ -136,6 +147,6 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
 
 class DeepseekV41Tokenizer(TokenizerLike):
     @classmethod
-    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:
+    def from_pretrained(cls, *args, **kwargs) -> HfTokenizer:  # type: ignore[override]
         tokenizer = TokenizersBackend.from_pretrained(*args, **kwargs)
         return get_cached_tokenizer(get_deepseek_v41_tokenizer(tokenizer))
