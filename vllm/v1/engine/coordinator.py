@@ -3,6 +3,7 @@
 import copy
 import multiprocessing
 import multiprocessing.connection
+import os
 import time
 import weakref
 
@@ -15,7 +16,7 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import get_mp_context, set_process_title
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from vllm.v1.serial_utils import MsgpackDecoder
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import _run_owned_process, get_engine_client_zmq_addr, shutdown
 
 logger = init_logger(__name__)
 
@@ -99,7 +100,8 @@ class DPCoordinator:
         context = get_mp_context()
         parent_zmq_addr_pipe, child_zmq_addr_pipe = context.Pipe(duplex=False)
         self.proc: multiprocessing.Process = context.Process(
-            target=DPCoordinatorProc.run_coordinator,
+            target=_run_owned_process,
+            args=(DPCoordinatorProc.run_coordinator, os.getpid()),
             name="VLLM_DP_Coordinator",
             kwargs={
                 "engine_count": parallel_config.data_parallel_size,
