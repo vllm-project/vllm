@@ -34,6 +34,14 @@ initialize, or load table replicas.
 
 ## Start the owner
 
+The complete single-host P TP2 + D TP2 NIXL example, including owner,
+consumer launch commands and a routed request, is in
+`examples/disaggregated/shared_engram/`. SGLang consumers can use the same
+provider with their own launch recipe in
+[SGLang #47478](https://github.com/sgl-project/sglang/pull/47478). The two
+engines use separate KV-transfer paths; the shared contract is the Engram
+owner generation and FABRIC handles.
+
 Create a private random token file, then start the owner on a host whose GPUs
 can access both Grace NUMA nodes. Keep it running while workers use its
 generation. The owner prints `ENGRAM_OWNER_READY` after both real tables and
