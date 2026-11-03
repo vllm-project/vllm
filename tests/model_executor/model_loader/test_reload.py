@@ -1510,20 +1510,7 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     assert after == before
 
 
-@pytest.mark.parametrize(
-    "backend",
-    [
-        None,
-        # derives its bmm scales from the k/v scales at every forward
-        pytest.param(
-            "FLASHINFER",
-            marks=pytest.mark.skipif(
-                not current_platform.is_cuda(), reason="FlashInfer is CUDA-only"
-            ),
-        ),
-    ],
-)
-def test_kv_scale_reload(vllm_runner, backend):
+def test_kv_scale_reload(vllm_runner):
     """Test reloading a checkpoint that contains k_scale/v_scale weights."""
     if _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
@@ -1534,7 +1521,6 @@ def test_kv_scale_reload(vllm_runner, backend):
     with vllm_runner(
         model_name=model,
         load_format="dummy",
-        attention_config={"backend": backend},
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
