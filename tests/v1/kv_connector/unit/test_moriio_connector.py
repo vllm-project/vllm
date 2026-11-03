@@ -149,8 +149,7 @@ def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
     scheduler._has_mamba = False
     scheduler._reqs_need_recv = {}
     scheduler.transfer_id_to_request_id = {}
-    scheduler._write_recvs_in_flight = set()
-    scheduler._finished_write_recvs_in_flight = set()
+    scheduler._write_recvs_in_flight = {}
     scheduler.unmap_request_id = MagicMock()  # type: ignore[method-assign]
     return scheduler
 

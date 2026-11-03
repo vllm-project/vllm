@@ -778,11 +778,10 @@ class MoRIIOConnectorScheduler:
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
         # WRITE consumer: requests whose producer push has not been reported
-        # in finished_recving yet, and those among them that already finished
-        # (e.g. aborted). A finished one keeps its transfer_id mapping so the
-        # late write_done can still release its delayed-free blocks.
-        self._write_recvs_in_flight: set[ReqId] = set()
-        self._finished_write_recvs_in_flight: set[ReqId] = set()
+        # in finished_recving yet, mapped to whether the request already
+        # finished (e.g. aborted). A finished one keeps its transfer_id mapping
+        # so the late write_done can still release its delayed-free blocks.
+        self._write_recvs_in_flight: dict[ReqId, bool] = {}
 
     def get_exchange_clipped_blocks(
         self,
@@ -1069,7 +1068,7 @@ class MoRIIOConnectorScheduler:
             and params.get("do_remote_prefill")
             and num_external_tokens > 0
         ):
-            self._write_recvs_in_flight.add(request_id)
+            self._write_recvs_in_flight.setdefault(request_id, False)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
             local_block_ids: BlockIds = blocks.get_block_ids()
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -1617,7 +1616,7 @@ class MoRIIOConnectorScheduler:
                 # Rejection cleanup must not unmap or release an active receive.
                 return False, None
             if request_id in self._write_recvs_in_flight:
-                self._finished_write_recvs_in_flight.add(request_id)
+                self._write_recvs_in_flight[request_id] = True
             else:
                 self.unmap_request_id(request_id, transfer_id=transfer_id)
         logger.debug(
@@ -1754,9 +1753,7 @@ class MoRIIOConnectorScheduler:
         """
         if not self.is_producer:
             for req_id in connector_output.finished_recving or ():
-                self._write_recvs_in_flight.discard(req_id)
-                if req_id in self._finished_write_recvs_in_flight:
-                    self._finished_write_recvs_in_flight.discard(req_id)
+                if self._write_recvs_in_flight.pop(req_id, False):
                     self.unmap_request_id(req_id)
             return
 
