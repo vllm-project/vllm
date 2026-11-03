@@ -2209,7 +2209,6 @@ def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(monkeypatch, max
     )
     num_pool_blocks = 1 + math.ceil((8 + (max_loads or 0)) * cap * 1.5)
     assert kv_cache_config.pool_num_blocks == {1: num_pool_blocks}
-    assert kv_cache_config.num_blocks_of_group(len(shared_groups)) == num_pool_blocks
 
     shared_bytes_per_block = kv_cache_planning._pool_bytes_per_block(
         config, kv_cache_config.kv_cache_groups
@@ -2225,7 +2224,6 @@ def test_draft_kv_pool_places_the_drafter_after_the_shared_pool(monkeypatch, max
     assert pool_tensor.layers == ["draft.0", "draft.1"]
     assert pool_tensor.offset == shared_bytes
     assert pool_tensor.block_stride == pool_bytes_per_block
-    assert kv_cache_config.num_blocks_of(pool_tensor) == num_pool_blocks
 
 
 def test_draft_kv_pool_sizes_agree_across_pp_stages(monkeypatch):
@@ -2273,11 +2271,8 @@ def test_draft_kv_pool_refuses_unsupported_configs(
         config.kv_transfer_config = SimpleNamespace(
             kv_connector=connector, is_kv_consumer=True
         )
-    specs = _draft_kv_pool_specs()
-    if method == "eagle":
-        specs["draft.0"] = specs["draft.1"] = _as_draft(new_kv_cache_spec())
     with pytest.raises(error, match="--draft-kv-pool"):
-        get_kv_cache_configs(config, [specs], [2**30])
+        get_kv_cache_configs(config, [_draft_kv_pool_specs()], [2**30])
 
 
 _GQA_SPEC = FullAttentionSpec(

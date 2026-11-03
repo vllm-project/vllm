@@ -376,6 +376,8 @@ def test_private_pool_regions_hold_their_pools_blocks(layout):
     """A drafter group in its own pool (--draft-kv-pool) registers regions over
     the pool's part of the backing, each with the pool's block count, so its
     block IDs address its own blocks."""
+    from vllm.v1.worker.utils import allocate_kv_cache
+
     block_size, num_blocks, num_pool_blocks = 16, 6, 3
     target = FullAttentionSpec(
         block_size=block_size, num_kv_heads=1, head_size=8, dtype=torch.uint8
@@ -389,57 +391,38 @@ def test_private_pool_regions_hold_their_pools_blocks(layout):
     )
     page = target.page_size_bytes
     shared_bytes = 2 * page * num_blocks
-    raw = torch.zeros(shared_bytes + 2 * page * num_pool_blocks, dtype=torch.int8)
+    size = shared_bytes + 2 * page * num_pool_blocks
     block_outer = layout.is_block_outermost
-    tensors = [
-        KVCacheTensor(
-            size=raw.nbytes,
-            layers=["target.0", "target.1"],
-            layer_stride=page if block_outer else page * num_blocks,
-            block_stride=2 * page if block_outer else page,
-        ),
-        KVCacheTensor(
-            size=raw.nbytes,
-            layers=["draft.0", "draft.1"],
-            layer_stride=page if block_outer else page * num_pool_blocks,
-            block_stride=2 * page if block_outer else page,
-            offset=shared_bytes,
-            pool_id=1,
-        ),
-    ]
     kv_cache_config = KVCacheConfig(
         num_blocks,
-        tensors,
+        [
+            KVCacheTensor(
+                size=size,
+                layers=["target.0", "target.1"],
+                layer_stride=page if block_outer else page * num_blocks,
+                block_stride=2 * page if block_outer else page,
+            ),
+            KVCacheTensor(
+                size=size,
+                layers=["draft.0", "draft.1"],
+                layer_stride=page if block_outer else page * num_pool_blocks,
+                block_stride=2 * page if block_outer else page,
+                offset=shared_bytes,
+                pool_id=1,
+            ),
+        ],
         [
             KVCacheGroupSpec(["target.0", "target.1"], target),
             KVCacheGroupSpec(["draft.0", "draft.1"], draft, pool_id=1),
         ],
         pool_num_blocks={1: num_pool_blocks},
     )
-    caches = {}
-    for tensor, spec in zip(tensors, (target, draft)):
-        views = create_kv_cache_views(
-            raw, spec, kv_cache_config.num_blocks_of(tensor), layout, tensor
-        )
-        caches.update(zip(tensor.layers, views))
-
+    caches = allocate_kv_cache(kv_cache_config, torch.device("cpu"), layout)
     config = create_vllm_config(block_size=block_size)
     config.cache_config.kv_cache_layout = layout.name
-    backend = MagicMock()
-    backend.get_supported_kernel_block_sizes.return_value = [block_size]
-    backend.get_name.return_value = "FLASH_ATTN"
-    backend.full_cls_name.return_value = "fake.FLASH_ATTN"
-    with (
-        patch.object(bw, "NixlWrapper", _RecordingNixl),
-        patch.object(bw, "get_tensor_model_parallel_rank", return_value=0),
-        patch.object(bw, "get_tensor_model_parallel_world_size", return_value=1),
-        patch.object(bw, "get_current_attn_backends", return_value=[backend]),
-        patch("threading.Thread"),
-    ):
-        worker = NixlPullConnectorWorker(config, "consumer", kv_cache_config)
-        worker.register_kv_caches(caches)
+    worker = _real_model_worker("consumer", config, kv_cache_config, caches)
 
-    base = raw.data_ptr()
+    base = caches["target.0"].data_ptr()
     regions = {
         name: (addr - base, count)
         for name, addr, count in zip(
@@ -459,7 +442,7 @@ def test_private_pool_regions_hold_their_pools_blocks(layout):
     }
     # Every descriptor stays inside the backing.
     descs = expand_strided_descs(worker.src_blocks_data)
-    assert (descs[:, 0] + descs[:, 1] <= base + raw.nbytes).all()
+    assert (descs[:, 0] + descs[:, 1] <= base + size).all()
 
 
 def _register_overlaid_mla_worker(
