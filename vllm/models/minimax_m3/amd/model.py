@@ -99,6 +99,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_splits_layer_sharing,
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
@@ -1731,6 +1732,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 )
         else:
             self.topk_indices_buffer = None
+        sparse_layers = _sparse_attention_layer_ids(config)
+        skip_layers = {i for i in sparse_layers if _should_skip_index_topk(config, i)}
+        if pp_splits_layer_sharing(
+            config.num_hidden_layers, sparse_layers, skip_layers
+        ):
+            # The top-k is sharded over TP index heads, so PP cannot send it.
+            raise NotImplementedError(
+                "use_index_cache with a PP stage that starts on a top-k sharing "
+                "layer is not supported. Set VLLM_PP_LAYER_PARTITION so every "
+                "stage starts on a top-k computing layer."
+            )
 
         # Leave each FFN output un-reduced and fuse its all-reduce into the next
         # norm. PP ships hidden states across stages, and the mono and
