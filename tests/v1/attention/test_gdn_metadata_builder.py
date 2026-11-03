@@ -163,6 +163,8 @@ def _create_gdn_builder(
     vllm_config.compilation_config.cudagraph_mode = (
         CUDAGraphMode.FULL_AND_PIECEWISE if full_cuda_graph else CUDAGraphMode.NONE
     )
+    # These builders test the eager staging; the capture tests opt in.
+    vllm_config.compilation_config.use_breakable_cudagraph = False
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -930,6 +932,7 @@ def test_captures_mixed_batches_unless_checkpoints_are_exported(
         model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
     )
     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.compilation_config.use_breakable_cudagraph = True
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     mamba_spec = MambaSpec(
         block_size=BLOCK_SIZE,
@@ -938,7 +941,6 @@ def test_captures_mixed_batches_unless_checkpoints_are_exported(
         num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
     )
     with (
-        patch.object(gdn_attn, "is_breakable_cudagraph_enabled", return_value=True),
         patch.object(gdn_attn.current_platform, "is_cuda", return_value=True),
         patch.object(
             VllmConfig, "use_v2_model_runner", new_callable=PropertyMock
