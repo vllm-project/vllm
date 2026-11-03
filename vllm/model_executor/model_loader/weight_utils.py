@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -47,6 +48,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
+from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
@@ -1273,10 +1275,13 @@ def runai_safetensors_weights_iterator(
             else "cpu"
         )
 
+        # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
+        owned = "owned" in inspect.signature(streamer.stream_files).parameters
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **({"owned": True} if owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1293,7 +1298,7 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(
@@ -1506,6 +1511,42 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Run every module's own post-load hook after a full load or reload,
+    each module after all of its submodules.
+
+    Quantization methods, the submodules of quantized layers (their quant
+    method processes them) and attention layers are skipped: the loader runs
+    them in its earlier per-layer passes, which later passes may read.
+    """
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+
+    seen: set[torch.nn.Module] = set()
+
+    def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        quantized = isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        )
+        # a module shared by several parents runs once, before all of them
+        for child in [] if quantized else module.children():
+            if child not in seen:
+                seen.add(child)
+                yield from children_first(child)
+        yield module
+
+    for module in children_first(model):
+        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
+            module
+        ):
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if callable(hook):
+            hook()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:
@@ -1513,14 +1554,14 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
             # reshape to match before copying
-            param.data.copy_(loaded_weight.view(param.shape))
+            copy_weight_(param.data, loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
                 f"into parameter ({param.size()})"
             )
 
-            param.data.copy_(loaded_weight)
+            copy_weight_(param.data, loaded_weight)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.

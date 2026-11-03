@@ -225,6 +225,17 @@ class MemoryRuntime(IUMBPRuntime):
         del namespace
         return _MemoryWorkerHandle(self._store, topology, layout)
 
+    def evict_all(self) -> None:
+        self._store.clear()
+
+
+def mori_has_umbp() -> bool:
+    try:
+        from mori.cpp import UMBPClient  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
 
 def install_memory_runtime(monkeypatch):
     """Share one isolated store across the connectors created by a test."""
