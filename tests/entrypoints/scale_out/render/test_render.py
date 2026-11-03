@@ -806,6 +806,23 @@ async def test_chat_completion_render_with_sampling_params(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
+)
+async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
+    """``max_tokens=16`` (also the completions default) equals the
+    ``SamplingParams`` default; /render must still return it, or generate
+    treats it as unset."""
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello, world.", **max_tokens},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["sampling_params"].get("max_tokens") == 16
+
+
+@pytest.mark.asyncio
 async def test_completion_render_emits_token_offsets(client):
     """With return_token_offsets, /v1/completions/render returns per-token
     (start, end) char offsets aligned with token_ids."""
