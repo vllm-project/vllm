@@ -9,8 +9,13 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import (
+    gptq_linear_batch_invariant,
+)
 from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
@@ -312,12 +317,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
+        # The Marlin GEMM picks its tiling and K-split from the number of
+        # tokens, so its results depend on the batch size. In batch-invariant
+        # mode, dequantize the weight and use the batch-invariant matmul.
+        self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
+        self.kernel: MPLinearKernel | None = None
 
         # Verify supported on platform.
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
-        )
+        if not self.use_batch_invariant:
+            verify_marlin_supported(
+                quant_type=self.quant_config.quant_type,
+                group_size=self.quant_config.group_size,
+            )
 
     def create_weights(
         self,
@@ -346,11 +357,16 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             zero_points=False,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if self.use_batch_invariant:
+            kernel_type = None
+            backend_name = "dequantize + batch-invariant matmul"
+        else:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+            backend_name = kernel_type.__name__
 
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
+        if backend_name not in self._kernel_backends_being_used:
+            logger.info("Using %s for AutoGPTQLinearMethod", backend_name)
+            self._kernel_backends_being_used.add(backend_name)
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -428,14 +444,22 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        self.kernel = kernel_type(
-            mp_linear_kernel_config,
-            w_q_param_name="qweight",
-            w_s_param_name="scales",
-            w_zp_param_name="qzeros",
-        )
+        if kernel_type is not None:
+            self.kernel = kernel_type(
+                mp_linear_kernel_config,
+                w_q_param_name="qweight",
+                w_s_param_name="scales",
+                w_zp_param_name="qzeros",
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_batch_invariant:
+            # No Marlin repacking: apply() unpacks the checkpoint layout.
+            for name in ("qweight", "scales", "qzeros"):
+                replace_parameter(layer, name, getattr(layer, name).data)
+            return
+
+        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
@@ -444,6 +468,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_batch_invariant:
+            return gptq_linear_batch_invariant(
+                x,
+                layer.qweight,
+                layer.scales,
+                num_bits=self.quant_type.size_bits,
+                group_size=self.quant_config.group_size,
+                zero_bias=self.quant_type.bias,
+                bias=bias,
+            )
+
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
