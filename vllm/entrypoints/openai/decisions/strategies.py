@@ -153,12 +153,16 @@ class ReadStrategy(ABC):
     def __init__(self, context: ReadContext):
         self.context = context
 
+    def _media_io_kwargs(self) -> dict[str, dict[str, Any]]:
+        model_config = self.context.engine_client.model_config
+        return model_config.get_multimodal_config().media_io_kwargs
+
     @cached_property
     def _connector(self) -> MediaConnector:
         model_config = self.context.engine_client.model_config
         return MEDIA_CONNECTOR_REGISTRY.load(
             envs.VLLM_MEDIA_CONNECTOR,
-            media_io_kwargs=model_config.get_multimodal_config().media_io_kwargs,
+            media_io_kwargs=self._media_io_kwargs(),
             allowed_local_media_path=model_config.allowed_local_media_path,
             allowed_media_domains=model_config.allowed_media_domains,
         )
@@ -279,6 +283,11 @@ class NextTokenStrategy(ReadStrategy):
         # read() currently renders only images into the user turn.
         if context.engine_client.model_config.supports_multimodal_inputs:
             self.modalities = frozenset({"image"})
+
+    def _media_io_kwargs(self) -> dict[str, dict[str, Any]]:
+        # The images are resized with Pillow and passed on as `image_pil` parts.
+        kwargs = super()._media_io_kwargs()
+        return kwargs | {"image": kwargs.get("image", {}) | {"image_backend": "pil"}}
 
     def _tokenizer(self) -> TokenizerLike:
         return self.context.online_renderer.renderer.get_tokenizer()
