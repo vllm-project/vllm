@@ -50,9 +50,7 @@ class _RenamedAdapterMapper(WeightsMapper):
         name = self.mapper.map_name(key) if self.mapper else key
         if name is None or self.is_target(name):
             return name
-        renamed = self.renames.map_name(key)
-        if renamed is not None and self.mapper:
-            renamed = self.mapper.map_name(renamed)
+        renamed = self.fallback.map_name(key)
         return renamed if renamed is not None and self.is_target(renamed) else name
 
 
