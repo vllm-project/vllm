@@ -175,6 +175,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         # something to pull; a full local hit stays RUNNING.
                         num_external_tokens > 0,
                     )
+                    if num_external_tokens > 0:
+                        self._reqs_receiving.add(request.request_id)
 
                 else:
                     logger.warning(
@@ -215,6 +217,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         # Stop heartbeating for aborted requests that never reached finished_recving:
         # normal path cleans up in update_connector_output.
         self._stop_heartbeat(request.request_id)
+        receiving = request.request_id in self._reqs_receiving
+        self._reqs_receiving.discard(request.request_id)
 
         if params.get("do_remote_prefill"):
             # If do_remote_prefill is still True when the request is finished,
@@ -233,16 +237,12 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             if (
                 self.vllm_config.cache_config.kv_cache_host_pinned
                 and not self.use_host_buffer
-                and request.status
-                in (
-                    RequestStatus.FINISHED_LENGTH_CAPPED,
-                    RequestStatus.FINISHED_STOPPED,
-                )
+                and not receiving
                 and any(len(group) > 0 for group in block_ids)
             ):
                 # The next pull may RDMA into these blocks while this step's GPU
-                # work (e.g. the MTP drafter) still writes them. Aborted requests
-                # keep the upstream path: one still receiving is freed on recv.
+                # work (e.g. the MTP drafter) still writes them. A request still
+                # receiving keeps the upstream path: it is freed on recv done.
                 self._reqs_to_release.append(request.request_id)
                 return True, None
             return False, None
