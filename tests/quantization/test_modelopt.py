@@ -401,7 +401,7 @@ def test_modelopt_mixed_precision_composes_gemma4_mappers():
 def test_modelopt_mixed_precision_resolves_mistral_large_4_modules(host_prefix):
     """A Mistral-format checkpoint lists checkpoint modules; Mistral Large 4
     maps them to its modules, standalone or hosted by Pixtral."""
-    from vllm.models.mistral_large4.nvidia.model import _map_quant_config_layers
+    from vllm.models.mistral.mistral_large4.nvidia.model import _map_quant_config_layers
 
     config = _mixed_precision_config(
         {
