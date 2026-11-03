@@ -14,12 +14,26 @@ install.
 
 ## Hash coverage
 
-Archive hashes cover the packages emitted in the five compiled locks. Packages
-excluded from the ROCm lock, separate lint/build/bootstrap installs, and
-source-built wheels are outside that coverage. Hashing a source archive does
-not hash its separate build dependencies. Mixed installs continue to use uv's
-verification of supplied hashes; globally requiring hashes needs complete locks
-for every dependency in the install.
+Archive hashes cover the package versions emitted in the five compiled locks.
+Outside the documentation install, uv verifies supplied hashes but does not
+require every installed package to have one. Coverage excludes:
+
+- Versions replaced by overrides. For example, the CUDA image's `NCCL_VERSION`
+  sets `UV_OVERRIDE` to install `nvidia-nccl-cu13==2.31.2`, replacing the lock's
+  `2.30.7` pin. uv drops the original pin's hashes when applying that override,
+  so the installed NCCL archive is not hash-verified against the lock.
+- Packages from handwritten requirements such as `requirements/{common,cuda,rocm}.txt`
+  and separate lint/build/bootstrap installs, unless the installed versions are
+  also constrained by hashed lock entries.
+- Packages named directly in Dockerfiles, such as `quart`, `msgpack`, and
+  `aiohttp` in `Dockerfile.rocm`, unless covered by hashed lock entries in that
+  install, and packages excluded from the ROCm lock.
+- Source-built wheels and separate build dependencies. Hashing a source archive
+  does not hash the resulting wheel or its build dependencies.
+
+Globally requiring hashes needs complete locks for every dependency in the
+install. Keeping NCCL hash-covered also requires updating the source requirements
+and compiled lock together with future `NCCL_VERSION` changes.
 
 ## GitHub Actions commit pins
 

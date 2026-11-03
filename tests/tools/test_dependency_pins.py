@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import hashlib
 import io
 import json
@@ -12,8 +13,34 @@ from pathlib import Path
 
 import pytest
 import regex as re
+from packaging.version import Version
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_docs_mock_versions_are_valid_with_hashed_requirements():
+    """Exercise the docs version loader without importing the CLI generators."""
+    path = ROOT / "docs/mkdocs/gen_files/generate_argparse.py"
+    tree = ast.parse(path.read_text())
+    loader = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(child, ast.Name) and child.id == "VERSIONS"
+            for child in ast.walk(node)
+        )
+    )
+    namespace: dict = {"ROOT_DIR": ROOT}
+    exec(
+        compile(ast.Module(body=[loader], type_ignores=[]), str(path), "exec"),
+        namespace,
+    )
+    versions = namespace["VERSIONS"]
+    lock = (ROOT / "requirements/test/cuda.txt").read_text()
+    assert len(versions) == len(re.findall(r"^\S+==", lock, re.MULTILINE))
+    for version in versions.values():
+        Version(version)
 
 
 @pytest.mark.parametrize("prefix", [False, True])

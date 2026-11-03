@@ -873,6 +873,8 @@ steps:
   - tools/pre_commit/check_github_actions_pins.py
   - tools/use_existing_torch.py
   - tests/tools/test_dependency_pins.py
+  - docs/mkdocs/gen_files/generate_argparse.py
+  - requirements/test/cuda.txt
   - docker/Dockerfile.rocm
   - docker/Dockerfile.rocm_gfx1250
   - tests/tool_parsers
