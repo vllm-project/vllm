@@ -77,7 +77,6 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.structured_output.utils import strip_speculative_padding
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -327,7 +326,7 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
-            self.use_eagle = speculative_config.use_eagle()
+            self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
                 speculative_config.needs_eagle_block_drop()
@@ -2248,14 +2247,7 @@ class Scheduler(SchedulerInterface):
             structured_output_request_ids,
             scheduler_output.scheduled_spec_decode_tokens,
         )
-        spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-        num_acceptable_drafts = [
-            len(strip_speculative_padding(spec_tokens.get(req_id, [])))
-            for req_id in structured_output_request_ids
-        ]
-        return GrammarOutput(
-            structured_output_request_ids, bitmask, num_acceptable_drafts
-        )
+        return GrammarOutput(structured_output_request_ids, bitmask)
 
     def update_from_output(
         self,
@@ -2397,6 +2389,7 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             ec_transfer_params = None
             prefill_stats = None
+            watermarking = None
             status_before_stop = request.status
 
             # Check for stop and update request status.
@@ -2457,6 +2450,15 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
+                    params = request.sampling_params
+                    if params is not None and self.vllm_config.watermark_config:
+                        # Report the flag after enforcement; the sampler skips
+                        # greedy and trace replay rows.
+                        watermarking = bool(
+                            params.watermarking
+                            and params.temperature != 0
+                            and params.trace_decode_token_ids is None
+                        )
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2532,6 +2534,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        watermarking=watermarking,
                     )
                 )
             else:

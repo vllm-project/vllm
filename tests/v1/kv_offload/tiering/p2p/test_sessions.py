@@ -497,6 +497,8 @@ class TestConnectHandshake:
 
         assert not conn.alive
         assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+        assert conn._sent[-1][TYPE_KEY] == DisconnectMsg.TYPE
+        assert session.data_plane_fault == "peer registration failed: nixl exploded"
 
     def test_failed_ack_send_marks_connection_dead(self):
         """A ConnectAckMsg send that raises marks the connection dead."""
@@ -698,6 +700,7 @@ class TestClientFlows:
         session.finish_request("req-1")
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (8, False)
+        assert failure.request_finished
         assert not _released(failure)
         assert session._client.has_active_loads is True
 
@@ -750,6 +753,7 @@ class TestClientFlows:
         )
         (failure,) = session.poll().loads
         assert (failure.job_id, failure.success) == (10, False)
+        assert failure.request_finished
         assert _released(failure)
 
         conn.enqueue(
@@ -3017,6 +3021,71 @@ class TestPendingSession:
 
 
 class TestDisconnect:
+    @pytest.mark.parametrize(
+        "completion", ["abort_ack", "transfer_done", "timeout", "close"]
+    )
+    @pytest.mark.parametrize("finished", [False, True])
+    def test_late_failure_preserves_request_finish(
+        self, lookup_clock, completion, finished
+    ):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
+        if finished:
+            session.finish_request("req-7")
+        if completion == "close":
+            result = session.close()
+            assert result.failed_jobs == [7]
+            assert result.failed_req_ids == ([] if finished else ["req-7"])
+            return
+        loads = []
+        if not finished and completion in ("timeout", "abort_ack"):
+            lookup_clock.now = _PD_LOAD_TIMEOUT_S + 1
+            loads.extend(session.poll().loads)
+        if completion == "timeout":
+            if finished:
+                lookup_clock.now = _ABORT_ACK_TIMEOUT_S + 1
+            else:
+                lookup_clock.now += _ABORT_ACK_TIMEOUT_S + 1
+        else:
+            terminal = AbortAckMsg if completion == "abort_ack" else TransferDoneMsg
+            msg = {
+                TYPE_KEY: terminal.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+            }
+            if terminal is TransferDoneMsg:
+                msg[TransferDoneMsg.SUCCESS] = False
+            conn.enqueue(msg)
+        loads.extend(session.poll().loads)
+        assert len(loads) == 1
+        assert (loads[0].job_id, loads[0].kv_request_id, loads[0].success) == (
+            7,
+            "req-7",
+            False,
+        )
+        assert loads[0].request_finished is finished
+
+    def test_finish_marks_buffered_result_before_request_id_reuse(self):
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(7, "req-7", [OffloadKey(b"old")], [0])
+        session._client.on_transfer_done("req-7", success=False, round_seq=0)
+        session.finish_request("req-7")
+        session.request_blocks(8, "req-7", [OffloadKey(b"new")], [1])
+        loads = session.poll().loads
+        assert len(loads) == 1 and loads[0].job_id == 7 and not loads[0].success
+        assert loads[0].request_finished
+        conn.enqueue(
+            {
+                TYPE_KEY: TransferDoneMsg.TYPE,
+                TransferDoneMsg.KV_REQUEST_ID: "req-7",
+                TransferDoneMsg.ROUND_SEQ: 0,
+                TransferDoneMsg.SUCCESS: False,
+            }
+        )
+        assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
+
     def test_disconnect_marks_session_dead(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -3685,6 +3754,9 @@ def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
     )
 
 
+_STALL_S = 20.0
+
+
 class TestPeerFaultEscalation:
     """A transport peer fault ends the session through the normal reap
     path (see "Failure model" in data/base.py): no new WRITE is submitted,
@@ -3746,6 +3818,73 @@ class TestPeerFaultEscalation:
         session.poll()
         assert not session.alive
 
+    def _stalled_session(self):
+        session, conn, transport = _make_session()
+        session._server._stall_timeout_s = _STALL_S
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+        transport._cancel_still_inflight.add(tid)
+        return session, conn, transport, tid
+
+    def test_transfer_under_stall_timeout_keeps_session(self):
+        session, _, _, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S + 1.0
+        session.poll()
+        assert session.alive
+        assert session._server.peer_fault is None
+
+    def test_transfer_done_in_same_poll_is_not_stalled(self):
+        """A WRITE past the stall timeout that the transport reports done in
+        this very poll completes; it does not fault the peer."""
+        session, _, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        transport._poll_done.append(tid)
+        stores = session.poll().stores
+        assert session.alive
+        assert session._server.peer_fault is None
+        assert StoreResult(job_id=1, success=True) in stores
+
+    def test_stalled_transfer_faults_peer_without_releasing(self):
+        """A WRITE past the stall timeout faults the peer at once (no drain
+        wait), and close() retains it with its store job still pinned."""
+        session, conn, transport, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S - 1.0
+
+        stores = session.poll().stores
+        assert not session.alive
+        assert session.data_plane_fault.startswith("transfer stalled for")
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert StoreResult(job_id=1, success=False) not in stores
+
+        result = session.close()
+        assert result.retained == {tid: frozenset({1})}
+        assert 1 not in result.failed_stores
+        assert tid in transport._transfers
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+
+    def test_stalled_peer_gets_no_new_writes(self):
+        """The fault lands in the same poll that would serve a new fetch."""
+        session, conn, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        session._server.collect_results()
+        assert session._server.peer_fault is not None
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        session.poll()
+        assert list(transport._transfers) == [tid]
+
+    def test_stall_timeout_zero_disables(self):
+        session, _, _, tid = self._stalled_session()
+        session._server._stall_timeout_s = 0
+        session._server._inflight[tid].submitted_at = 0.0
+        session.poll()
+        assert session.alive
+
     def test_death_reasons(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -3761,3 +3900,116 @@ class TestPeerFaultEscalation:
         transport._peer_faults["peer:8000"] = "late"
         session.poll()
         assert session.death_reason == "peer disconnected"
+
+
+@pytest.mark.parametrize("success", [False, True])
+def test_drain_stores_keeps_inflight_pins_until_transport_finishes(success):
+    """Drain fails queued jobs once, but cannot release slots read by a WRITE."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    session.add_stored_blocks(
+        "req-1", [OffloadKey(b"active"), OffloadKey(b"extra")], [0, 1], job_id=1
+    )
+    session.add_stored_blocks("req-1", [OffloadKey(b"queued")], [2], job_id=2)
+    _fetch(conn, "req-1", [b"active"], [5])
+    assert session.poll().stores == []
+    (tid,) = transport._transfers
+
+    assert session.drain_stores().stores == [StoreResult(2, False)]
+    assert session.has_pending_work
+    assert session.drain_stores().stores == []
+    assert session.poll().stores == []
+    assert transport._cancel_calls == []
+
+    (transport._poll_done if success else transport._poll_failed).append(tid)
+    assert session.poll().stores == [StoreResult(1, success)]
+    assert not session.has_pending_work
+    assert session.drain_stores().stores == []
+    _fetch(conn, "req-1", [b"extra"], [6])
+    session.poll()
+    assert len(transport._transfers) == 1
+    session.finish_request("req-1")
+    session.poll()
+    done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+    assert done[-1][TransferDoneMsg.SUCCESS] is False
+    assert session.poll().stores == []
+
+
+def test_drain_rejects_unfetched_lookup_round_without_timeout():
+    """Withdrawn lookup supply must fail a late FetchMsg in one poll."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    key = OffloadKey(b"lookup")
+    parent = FakeParent(stored={key: 0})
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: "sym",
+            LookupMsg.KEYS: [key],
+            LookupMsg.ROUND_SEQ: 0,
+        }
+    )
+    session.poll()
+    _serve(session, parent)
+    assert conn._sent[-1][LookupRespMsg.HITS] == [True]
+    session.drain_stores()
+    _fetch(conn, "sym", [key], [0])
+    session.poll()
+    assert transport._transfers == {}
+    done = [m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE]
+    assert len(done) == 1
+    assert done[0][TransferDoneMsg.SUCCESS] is False
+
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: "sym",
+            LookupMsg.KEYS: [key],
+            LookupMsg.ROUND_SEQ: 1,
+        }
+    )
+    session.poll()
+    _serve(session, parent)
+    assert conn._sent[-1][LookupRespMsg.HITS] == [True]
+    conn.enqueue(
+        {
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.KV_REQUEST_ID: "sym",
+            FetchMsg.KEYS: [key],
+            FetchMsg.BLOCK_INDEXES: [1],
+            FetchMsg.ROUND_SEQ: 1,
+        }
+    )
+    session.poll()
+    (tid,) = transport._transfers
+    transport._poll_done.append(tid)
+    assert session.poll().stores == [StoreResult(1001, True)]
+    assert conn._sent[-1][TransferDoneMsg.SUCCESS] is True
+
+
+def test_drain_aborted_round_sends_only_abort_ack():
+    """An abort parked behind a WRITE must get exactly one terminal message."""
+    session, conn, transport = _make_session()
+    _activate(session, conn)
+    key = OffloadKey(b"active")
+    session.add_stored_blocks("req", [key], [0], job_id=1)
+    _fetch(conn, "req", [key], [0])
+    session.poll()
+    (tid,) = transport._transfers
+    transport._cancel_still_inflight.add(tid)
+    conn.enqueue(
+        {
+            TYPE_KEY: AbortFetchMsg.TYPE,
+            AbortFetchMsg.KV_REQUEST_ID: "req",
+            AbortFetchMsg.ROUND_SEQ: 0,
+        }
+    )
+    session.poll()
+    session.drain_stores()
+    transport._poll_done.append(tid)
+    result = session.poll()
+    assert result.stores == [StoreResult(1, False)]
+    terminals = [
+        m for m in conn._sent if m[TYPE_KEY] in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+    ]
+    assert [m[TYPE_KEY] for m in terminals] == [AbortAckMsg.TYPE]
