@@ -275,6 +275,17 @@ class AnthropicMessagesRequest(BaseModel):
     top_p: float | None = None
 
     # vLLM-specific fields that are not in Anthropic spec
+    ignore_eos: bool = Field(
+        default=False,
+        description="Whether to ignore EOS tokens and continue generating.",
+    )
+    min_tokens: int = Field(
+        default=0,
+        description=(
+            "Minimum number of tokens to generate before EOS or stop_token_ids "
+            "can be generated."
+        ),
+    )
     mm_payload: MMPayload = Field(
         default="tensors",
         description=(
