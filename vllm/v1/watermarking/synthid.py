@@ -155,6 +155,12 @@ class SynthIDWatermarker(Watermarker):
             self._fused_verified = True
             return sample
 
+        logger.warning_once(
+            "SynthID-Text is sampling with the torch tournament, which is much "
+            "slower than the fused kernels and meant for correctness, not "
+            "serving. The fused kernels need an NVIDIA GPU with compute "
+            "capability 8.0 or newer and Triton 3.8 or newer."
+        )
         watermarked_logits = self.watermark_logits(logits, contexts)
         if skip_mask is not None:
             watermarked_logits = torch.where(

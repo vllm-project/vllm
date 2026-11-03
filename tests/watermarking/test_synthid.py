@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import math
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 
 from vllm.config import VllmConfig
 from vllm.config.watermarking import WatermarkConfig
+from vllm.logger import _print_warning_once
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
 from vllm.v1.watermarking.prfs import PhiloxPRF
@@ -540,6 +542,25 @@ def test_fused_failure_after_the_first_call_is_not_swallowed(monkeypatch):
     assert first.token_ids.tolist() == [3, 4]
     with pytest.raises(RuntimeError, match="illegal memory access"):
         watermarker.sample(logits, contexts, random_sampler)
+
+
+def test_torch_tournament_sampling_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: False)
+    monkeypatch.setattr(
+        RandomSampler, "__call__", lambda self, scores: scores.argmax(dim=-1)
+    )
+    _print_warning_once.cache_clear()
+    logits, contexts, random_sampler = _cpu_sampler_inputs()
+    watermarker = SynthIDWatermarker(42, context_width=3, depth=5)
+
+    with caplog.at_level(logging.WARNING):
+        watermarker.sample(logits, contexts, random_sampler)
+        SynthIDWatermarker(7, context_width=3, depth=5).sample(
+            logits, contexts, random_sampler
+        )
+
+    assert caplog.text.count("sampling with the torch tournament") == 1
+    assert "meant for correctness, not serving" in caplog.text
 
 
 @pytest.mark.parametrize(
