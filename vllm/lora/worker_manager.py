@@ -31,9 +31,9 @@ logger = init_logger(__name__)
 
 
 class _RenamedAdapterMapper(WeightsMapper):
-    """Maps adapter keys like `mapper`, except a key that then names no LoRA target
-    is first put back through Transformers' reversed renames (see
-    `get_transformers_renames`), if that names one."""
+    """Only for LoRA name parsing: maps like `mapper`, falling back to Transformers'
+    reversed renames (`get_transformers_renames`) when the result names no LoRA
+    target."""
 
     def __init__(
         self,
