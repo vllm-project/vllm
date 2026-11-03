@@ -690,6 +690,7 @@ class RocmPlatform(Platform):
         "fp8_per_tensor",
         "fp8_per_block",
         "fp8_per_channel",
+        "mxfp4_hadamard32",
         "online",
         "gpt_oss_mxfp4",
     ]

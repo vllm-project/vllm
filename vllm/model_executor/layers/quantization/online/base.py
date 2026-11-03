@@ -33,6 +33,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -46,6 +49,7 @@ from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4HadamardOnlineMoEMethod,
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
 )
@@ -97,6 +101,13 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kFp8StaticChannelSym: Fp8PtpcOnlineLinearMethod,
     kMxfp8Dynamic: Mxfp8OnlineLinearMethod,
     kMxfp4Static: Mxfp4OnlineLinearMethod,
+}
+
+# Online linear methods validated with `QuantSpec.hadamard_size`.
+_ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
+# Online MoE methods mapped to their `QuantSpec.hadamard_size` variant.
+_ONLINE_HADAMARD_MOE_METHODS: dict[type, type] = {
+    Mxfp4OnlineMoEMethod: Mxfp4HadamardOnlineMoEMethod,
 }
 
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
@@ -273,6 +284,21 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
+        if spec.hadamard_size is None:
+            return cls
+        if cls in _ONLINE_HADAMARD_MOE_METHODS:
+            return _ONLINE_HADAMARD_MOE_METHODS[cls]
+        # TODO: InputHadamardLinearMethod is format-agnostic; allow the
+        # remaining linear and MoE methods once validated.
+        if cls not in _ONLINE_HADAMARD_LINEAR_METHODS:
+            supported = [
+                *_ONLINE_HADAMARD_LINEAR_METHODS,
+                *_ONLINE_HADAMARD_MOE_METHODS,
+            ]
+            raise NotImplementedError(
+                f"hadamard_size is not yet supported for online {cls.__name__}; "
+                f"supported: {sorted(c.__name__ for c in supported)}"
+            )
         return cls
 
     def resolve_quant_method_cls(
@@ -403,7 +429,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
         if resolved is not None:
-            source, quant_key_str, target_pattern, _, quant_method_cls = resolved
+            source, quant_key_str, target_pattern, quant_spec, quant_method_cls = (
+                resolved
+            )
             self.quantized_layers[prefix] = (
                 source.value,
                 quant_key_str,
@@ -411,9 +439,16 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
             if isinstance(layer, RoutedExperts):
                 assert issubclass(quant_method_cls, FusedMoEMethodBase)
-                return quant_method_cls(moe=layer.moe_config)
+                kwargs = {}
+                if quant_spec.hadamard_size is not None:
+                    kwargs["hadamard_size"] = quant_spec.hadamard_size
+                return quant_method_cls(moe=layer.moe_config, **kwargs)
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
+            if quant_spec.hadamard_size is not None:
+                return InputHadamardLinearMethod(
+                    quant_method_cls(), quant_spec.hadamard_size, rotate_weight=True
+                )
             return quant_method_cls()
 
         if isinstance(layer, LinearBase):

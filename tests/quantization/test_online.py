@@ -142,6 +142,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_trtllm_fused_moe,
 )
+from vllm.utils.import_utils import has_humming
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -162,6 +163,102 @@ PARTIALLY_PREQUANTIZED_MODEL_NAME = (
 )
 NVFP4_MOE_MODEL_NAME = "RedHatAI/Qwen3-30B-A3B-NVFP4"
 MODELOPT_NVFP4_MOE_MODEL_NAME = "nvidia/Qwen3-30B-A3B-NVFP4"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
+@pytest.mark.parametrize(
+    "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]
+)
+@pytest.mark.parametrize("requantize", [False, True])
+def test_online_moe_stages_quantized_weights_for_humming(
+    scheme, requantize, tmp_path, dist_init, workspace_init
+) -> None:
+    """Real online conversion and reload must match a fresh Humming layer."""
+    from vllm.config import set_current_vllm_config
+
+    _write_minimal_llama_config(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        kernel_config=KernelConfig(moe_backend="humming"),
+    )
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(moe=scheme))
+    quant_config = online_config
+    if requantize:
+        quant_config = ModelOptNvFp4Config(is_checkpoint_nvfp4_serialized=True)
+        quant_config.online_quantization_config = online_config
+
+    def create(prefix):
+        return FusedMoEFactory(
+            num_experts=2,
+            top_k=1,
+            hidden_size=256,
+            intermediate_size=256,
+            params_dtype=torch.bfloat16,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def load(runner, factor):
+        layer = runner.routed_experts
+        for name, parameter in list(layer.named_parameters()):
+            if "scale" in name:
+                weight = torch.full(
+                    parameter.shape,
+                    0.125 * factor,
+                    dtype=parameter.dtype,
+                    device=DEVICE,
+                )
+            elif parameter.dtype == torch.uint8:
+                weight = torch.full_like(parameter, 0x22, device=DEVICE)
+            else:
+                weight = torch.full(
+                    parameter.shape,
+                    0.125 * factor,
+                    dtype=parameter.dtype,
+                    device=DEVICE,
+                )
+            for expert in range(2):
+                if name.startswith("w13"):
+                    if weight[expert].ndim == 0:
+                        gate = up = weight[expert]
+                    else:
+                        gate, up = weight[expert].chunk(2, dim=0)
+                    for shard, tensor in (("w1", gate), ("w3", up)):
+                        parameter.weight_loader(parameter, tensor, name, shard, expert)
+                else:
+                    parameter.weight_loader(
+                        parameter, weight[expert], name, "w2", expert
+                    )
+        runner._quant_method.process_weights_after_loading(layer)
+        finalize_layerwise_reload(runner, config.model_config)
+
+    with set_current_vllm_config(config), torch.device(DEVICE):
+        runner = create("humming.loaded")
+        record_metadata_for_reloading(runner)
+        load(runner, 1.0)
+        parameters = dict(runner.named_parameters())
+        first = {name: tensor.clone() for name, tensor in parameters.items()}
+        initialize_layerwise_reload(runner)
+        load(runner, 2.0)
+        fresh = create("humming.fresh")
+        record_metadata_for_reloading(fresh)
+        load(fresh, 2.0)
+        expected = dict(fresh.named_parameters())
+        assert parameters.keys() == expected.keys()
+        for name, tensor in runner.named_parameters():
+            assert tensor is parameters[name]
+            torch.testing.assert_close(
+                tensor.view(torch.uint8),
+                expected[name].view(torch.uint8),
+                rtol=0,
+                atol=0,
+            )
+        assert any(
+            not torch.equal(tensor.view(torch.uint8), first[name].view(torch.uint8))
+            for name, tensor in runner.named_parameters()
+        )
 
 
 @pytest.mark.parametrize(
@@ -2277,6 +2374,52 @@ def test_online_nvfp4_per_token_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(100)
+        and has_humming()
+    ),
+    reason="MXFP4 activations on Humming need SM100+ and humming-kernels.",
+)
+def test_online_mxfp4_hadamard32_moe(vllm_runner, monkeypatch) -> None:
+    """Experts run W4A4 MXFP4 with the rotation on Humming; dense layers stay bf16."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4HadamardOnlineMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.humming.moe import (
+        HummingMoEQuantConfig,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="mxfp4_hadamard32_moe",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            experts = layer.block_sparse_moe.experts.routed_experts
+            method = experts.quant_method
+            assert isinstance(method, Mxfp4HadamardOnlineMoEMethod)
+            assert method.mxfp4_backend == Mxfp4MoeBackend.HUMMING
+            quant_config = method.moe_quant_config
+            assert isinstance(quant_config, HummingMoEQuantConfig)
+            assert quant_config.w1_hadamard_block_size == 32
+            assert quant_config.w2_hadamard_block_size == 32
+            assert quant_config.w1_humming_config.input_quant_mode.should_quantize
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+            )
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        assert "Paris" in output[0][1]
 
 
 def _patch_max_reduce(monkeypatch, full_amax) -> None:
