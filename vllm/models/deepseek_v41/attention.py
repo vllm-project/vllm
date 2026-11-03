@@ -725,7 +725,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata,
                 positions,
                 self.rotary_emb.cos_sin_cache,
-                pcp_group=get_pcp_group() if self.use_pcp else None,
+                use_pcp=self.use_pcp,
                 fp8_scale=(
                     self._flashinfer_fp8_kv_scale
                     if cache.dtype == torch.float8_e4m3fn
@@ -1111,7 +1111,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata,
                 positions,
                 cos_sin_cache,
-                pcp_group=get_pcp_group(),
+                use_pcp=self.use_pcp,
                 fp8_scale=(
                     self._flashinfer_fp8_kv_scale
                     if cache_dtype == torch.float8_e4m3fn

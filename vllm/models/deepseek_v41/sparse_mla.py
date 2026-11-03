@@ -179,6 +179,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         # Pre-allocate compressed slot mapping buffer for CUDA graph address
         # stability when compress_ratio > 1.
+        self.pcp_compressed_slot_mapping_buffer: torch.Tensor | None = None
         if self.compress_ratio > 1:
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
@@ -210,11 +211,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
-                pcp_buffer=(
-                    self.pcp_compressed_slot_mapping_buffer
-                    if self.pcp_size > 1
-                    else None
-                ),
+                pcp_buffer=self.pcp_compressed_slot_mapping_buffer,
             )
 
         return DeepseekV4FlashMLAMetadata(

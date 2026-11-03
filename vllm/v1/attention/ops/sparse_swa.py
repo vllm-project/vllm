@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.distributed import GroupCoordinator
+from vllm.distributed import get_pcp_group
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -17,16 +17,16 @@ def insert_swa_kv(
     positions: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     *,
-    pcp_group: GroupCoordinator | None = None,
+    use_pcp: bool = False,
     fp8_scale: torch.Tensor | None = None,
     kv_mxfp8: bool = False,
 ) -> torch.Tensor:
     """Insert SWA KV, gathering PCP rows, and return the cache-write positions."""
     slots = metadata.slot_mapping
-    if pcp_group is not None:
+    if use_pcp:
         assert metadata.cache_slot_mapping is not None
         assert metadata.cache_positions is not None
-        kv = pcp_group.all_gather(kv.contiguous(), dim=0)
+        kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
         slots = metadata.cache_slot_mapping
         positions = metadata.cache_positions
     torch.ops._C.fused_deepseek_v4_kv_rope_insert(
