@@ -323,10 +323,13 @@ RUN --mount=type=bind,source=requirements/common.txt,target=/r/common.txt \
 # USE_ROCM and can detect libamdhip64.so at runtime.
 RUN --mount=type=bind,source=requirements/test/rocm.txt,target=/r/test.txt \
     --mount=type=cache,target=/root/.cache/pip \
-    FASTSAFETENSORS_REQ="$(grep -E '^fastsafetensors(==| @ )' /r/test.txt | head -1)" \
-    && test -n "${FASTSAFETENSORS_REQ}" \
-    && python3 -m pip install --force-reinstall --no-deps \
-        --no-binary fastsafetensors "${FASTSAFETENSORS_REQ}"
+    awk '/^fastsafetensors(==| @ )/ {keep=1} \
+         keep {print; if ($0 !~ /\\$/) exit}' \
+        /r/test.txt > /tmp/fastsafetensors-req.txt \
+    && test -s /tmp/fastsafetensors-req.txt \
+    && python3 -m pip install --force-reinstall --no-deps --require-hashes \
+        --no-binary fastsafetensors -r /tmp/fastsafetensors-req.txt \
+    && rm /tmp/fastsafetensors-req.txt
 
 # ROCm profiler limits workaround.
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > /app/libkineto.conf

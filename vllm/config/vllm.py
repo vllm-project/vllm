@@ -3210,8 +3210,6 @@ class VllmConfig:
             )
         elif not self.use_v2_model_runner:
             unsupported = "it requires the V2 model runner"
-        elif self.attention_config.hisparse_config is not None:
-            unsupported = "HiSparse allocates its KV cache itself"
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
@@ -3747,11 +3745,6 @@ class VllmConfig:
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
-        elif self.use_v2_model_runner:
-            raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
             )
         if (
             self.kv_transfer_config is not None
