@@ -286,7 +286,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
-    VLLM_NVFP4_W4A16_DISPATCH_M: int = 0
+    VLLM_NVFP4_W4A16_DISPATCH: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -2043,12 +2043,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
     ),
-    # Number of tokens in a step from which the NVFP4 W4A16 linear layers use the
-    # FlashInfer CuTe-DSL kernel instead of Marlin. Marlin is faster for few tokens
-    # and CuTe-DSL for many. Both weight formats are kept in memory. 0 (default)
-    # disables the dispatch and keeps the automatically selected kernel.
-    "VLLM_NVFP4_W4A16_DISPATCH_M": lambda: int(
-        os.getenv("VLLM_NVFP4_W4A16_DISPATCH_M", "0")
+    # On sm_12x GPUs with automatic NVFP4 W4A16 kernel selection, choose between
+    # Marlin and FlashInfer CuTe-DSL per layer shape and number of tokens. At load
+    # time the kernels are timed once per shape, and layers of a shape where
+    # CuTe-DSL never wins keep only Marlin. Shapes where it wins keep both weight
+    # formats in memory. Set to 0 to disable and keep Marlin. An explicit
+    # --linear-backend is not affected.
+    "VLLM_NVFP4_W4A16_DISPATCH": lambda: bool(
+        int(os.getenv("VLLM_NVFP4_W4A16_DISPATCH", "1"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
