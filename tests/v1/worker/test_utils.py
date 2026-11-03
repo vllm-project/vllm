@@ -24,6 +24,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _select_written_row_mirrors,
     _SlotMappingStaging,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonMetadata,
+)
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
@@ -54,6 +57,43 @@ def test_hisparse_resident_gather_preserves_stride_and_payload(packed_bytes):
     )
 
     torch.testing.assert_close(destination, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "tokens,decode_tokens,requests,query_len,max_rows,expected",
+    [
+        (4, 4, 4, 1, 8, True),
+        (8, 8, 2, 4, 8, True),
+        (4, 4, 1, 4, 8, True),
+        (8, 4, 2, 4, 8, False),
+        (9, 9, 3, 3, 8, False),
+        (0, 0, 0, 1, 8, False),
+        (4, 4, 0, 4, 8, False),
+        (4, 4, 1, 0, 8, False),
+    ],
+)
+def test_hisparse_group_prefetch_requires_bounded_decode_only(
+    tokens, decode_tokens, requests, query_len, max_rows, expected
+):
+    metadata = SparseMLACommonMetadata(
+        num_reqs=requests,
+        max_query_len=query_len,
+        max_seq_len=128,
+        num_actual_tokens=tokens,
+        query_start_loc=torch.zeros(requests + 1, dtype=torch.int32),
+        slot_mapping=torch.arange(tokens, dtype=torch.int64),
+        block_table=torch.zeros((requests, 2), dtype=torch.int32),
+        req_id_per_token=torch.zeros(tokens, dtype=torch.int32),
+        num_decodes=requests,
+        num_decode_tokens=decode_tokens,
+        num_prefills=0,
+    )
+
+    assert (
+        hisparse_runtime_module.is_hisparse_group_prefetch_batch(metadata, max_rows)
+        is expected
+    )
+    assert not hisparse_runtime_module.is_hisparse_group_prefetch_batch(None, max_rows)
 
 
 def _make_hisparse_worker() -> HiSparseConnectorWorker:
@@ -638,7 +678,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
             sum(cache.nbytes for cache in worker.host_caches)
         )
         request.addfinalizer(
-            lambda: hisparse_runtime_module.release_pinned_state([], [registered])
+            lambda: hisparse_runtime_module.release_pinned_state([registered])
         )
         host_caches = host_pool.view(torch.float32).view(2, 12, 2).unbind()
         for destination, source in zip(host_caches, worker.host_caches):
@@ -1314,9 +1354,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
-    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+    def release_pinned_state(pinned_host_pools, shared_host_region):
         nonlocal released
-        assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
         released = True
