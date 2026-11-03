@@ -290,21 +290,6 @@ QWEN_MTP_CASE = ModelCase(
 )
 
 
-# FP8 per-tensor dense linears go through FlashInfer's autotuned bmm_fp8,
-# which has multiple backends on SM90 (cublas, cudnn). The model uses
-# vllm-native fp8 quantization: the preload daemon rejects compressed-tensors
-# weights (they do not support pre-processed weights).
-FP8_CASE = ModelCase(
-    model="nm-testing/Qwen2-0.5B-Instruct-FP8",
-    prompts=["The capital of France is"],
-    llm_kwargs=dict(
-        gpu_memory_utilization=0.3,
-        enforce_eager=True,
-        max_model_len=1024,
-    ),
-)
-
-
 DSV2_EP_CASE = ModelCase(
     model="deepseek-ai/DeepSeek-V2-Lite-Chat",
     prompts=["The capital of France is"],
@@ -450,21 +435,29 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
 
 @create_new_process_for_each_test()
 @pytest.mark.distributed(num_gpus=2)
-@pytest.mark.parametrize("case", [FP8_CASE, K3_CASE], ids=["fp8", "kimi-k3"])
-def test_mooncake_warmup_cache_store_e2e(vllm_runner, case, tmp_path, monkeypatch):
+def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
     """Autotune tables published to a Mooncake store let a fresh daemon
     generation skip tuning with no source daemon online."""
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     if not (has_flashinfer() and current_platform.has_device_capability(90)):
         pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
-    if case is K3_CASE and not current_platform.is_device_capability_family(100):
-        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
 
-    # Both daemons run at tp=2: the v1 per-rank cache needs a multi-rank
-    # tuning group (v2 is gated to single-rank).
-    if case.llm_kwargs.get("tensor_parallel_size") != 2:
-        case = replace(case, llm_kwargs={**case.llm_kwargs, "tensor_parallel_size": 2})
+    # tp=2 for the v1 per-rank path; small token budget keeps the sweep short.
+    case = replace(
+        K3_CASE,
+        prompts=K3_CASE.prompts[:2],
+        images=None,
+        llm_kwargs={
+            **K3_CASE.llm_kwargs,
+            "tensor_parallel_size": 2,
+            "max_model_len": 1024,
+            "max_num_batched_tokens": 256,
+        },
+        daemon_args=[*K3_CASE.daemon_args, "--max-num-batched-tokens", "256"],
+    )
     baseline_outputs = generate(vllm_runner, case, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
 

@@ -822,11 +822,11 @@ steps:
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Distributed Preload with Mooncake Store"
-  key: preload-mooncake-store-2-gpus
-  timeout_in_minutes: 30
+- label: ":nvidia: (B200) Distributed Preload with Mooncake Store"
+  key: preload-mooncake-store-2xb200
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace"
-  device: h100
+  device: b200-k8s
   num_devices: 2
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
