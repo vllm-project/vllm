@@ -70,7 +70,9 @@ from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
 )
 from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from .qwen2_5_vl import _pad_flashinfer_cu_seqlens_buffer
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -489,6 +491,13 @@ class KimiK25ForConditionalGeneration(
             if n < dst.shape[0]:
                 dst[n:] = src[-1] if n else 0
 
+        attn_backend = self.vision_tower.encoder.blocks[0].attn.attn_backend
+        cu_seqlens_padding = (
+            _pad_flashinfer_cu_seqlens_buffer
+            if attn_backend == AttentionBackendEnum.FLASHINFER
+            else pad_cu_seqlens
+        )
+
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],
             buffer_keys=[
@@ -500,7 +509,7 @@ class KimiK25ForConditionalGeneration(
                 "merge_gather_idx",
             ],
             out_hidden_size=self.config.text_config.hidden_size,
-            padding_logics={"cu_seqlens": pad_cu_seqlens},
+            padding_logics={"cu_seqlens": cu_seqlens_padding},
         )
 
     def get_encoder_cudagraph_budget_range(
