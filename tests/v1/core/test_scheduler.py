@@ -1279,6 +1279,8 @@ def test_local_prefill_interval_defers_inflight_prefill_chunk(interval: int):
     # Once the interval has elapsed the chunk resumes.
     output = scheduler.schedule()
     assert "chk0" in output.num_scheduled_tokens
+
+
 def _setup_cache_aware(num_tokens: int = 48, **kwargs):
     """A scheduler where `warm`'s prompt is already cached and `cold`'s is not.
 
