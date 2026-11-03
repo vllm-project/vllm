@@ -589,11 +589,11 @@ steps:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
 
-- label: ":nvidia: (4xB200) DeepSeek-V4.1 Specialized Decode"
-  key: dsv41-nvidia-specialized-decode-4xb200
+- label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
+  key: dsv41-nvidia-kernels-4xb200
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   device: b200-k8s
   num_devices: 4
   source_file_dependencies:
@@ -602,12 +602,17 @@ steps:
   - vllm/models/deepseek_v41/common/
   - vllm/v1/worker/gpu/model_states/
   - vllm/model_executor/layers/fused_moe/config.py
+  - vllm/model_executor/warmup/
+  - tests/models/deepseek_v41/nvidia/test_swapab_decode.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
   commands:
+  # Swap-AB decode: the kernel tests need SM10x and a CuTe DSL built with
+  # CUDA 13.2+; the dispatch and warmup-key tests run on the CPU.
+  - pytest -v -s models/deepseek_v41/nvidia/test_swapab_decode.py
   # decode_backend=latency_specialized is for GB300 (SM103); no CI agent has four of them.
   # B200 runs the kernels and the TP4 numerics; the model test skips.
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
