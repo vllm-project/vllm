@@ -1049,6 +1049,17 @@ def _fwd_verify_kernel_stage1(
                 v = nv
                 kpe = nkpe
                 nmask = offs_n + BLOCK_N < split_end
+                if PAGE_SIZE < 8 and not K_Buffer.dtype.element_ty.is_fp8():
+                    # Two-tile block-table read-ahead spills VGPRs here.
+                    nkv_off = _verify_tile_off(
+                        pt,
+                        start_n + BLOCK_N,
+                        split_end,
+                        stride_buf_kpbs,
+                        stride_buf_kbs,
+                        BLOCK_N,
+                        PAGE_SIZE,
+                    )
                 nk0, nk1, nv, nkpe = _verify_load_tile_qsplit(
                     K_Buffer,
                     nkv_off,
