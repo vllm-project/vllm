@@ -13,6 +13,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -269,6 +270,10 @@ class QuantizationConfig(ABC):
 
         return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        """Return a checkpoint-selected KV-cache dtype for one layer."""
+        return None
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
@@ -355,6 +360,11 @@ def resolve_quant_method(
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
+        if online_target[3].hadamard_size is not None:
+            raise NotImplementedError(
+                f"{prefix}: online hadamard_size on an already quantized layer "
+                "(requantization) is not supported yet."
+            )
 
         online_quant_method = online_config.get_quant_method(layer, prefix)
 
