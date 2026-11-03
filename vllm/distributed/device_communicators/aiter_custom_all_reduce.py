@@ -17,19 +17,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# aiter's fused QR+RMSNorm kernel needs a row that divides its 32 KiB tile.
-_QR_RMSNORM_TILE_BYTES = 32 * 1024
-
-
-def qr_rmsnorm_supports_row(hidden_dim: int, dtype: torch.dtype) -> bool:
-    """Whether aiter's fused QuickReduce + RMSNorm kernel takes this row."""
-    row_size = hidden_dim * dtype.itemsize
-    return (
-        dtype in (torch.bfloat16, torch.float16)
-        and row_size > 0
-        and _QR_RMSNORM_TILE_BYTES % row_size == 0
-    )
-
 
 class AiterCustomAllreduce:
     # Default IPC buffer size for AITER's CustomAllreduce.
@@ -49,15 +36,15 @@ class AiterCustomAllreduce:
     ) -> int:
         """Max input byte size eligible for fusing all-reduce with RMSNorm.
 
-        The fused QuickReduce + RMSNorm kernel stages through the QuickReduce
-        workspace, not this class's IPC pool, so that is the limit wherever the
-        kernel can run.
+        The fused FlyDSL QuickReduce + RMSNorm kernel stages through the
+        QuickReduce workspace, not this class's IPC pool, so that is the limit
+        wherever the kernel can run.
         """
         pool = cls.effective_max_size()
         if (
             qr_comm is None
             or getattr(qr_comm, "disabled", True)
-            or not qr_rmsnorm_supports_row(hidden_dim, dtype)
+            or not qr_comm.supports_fused_rmsnorm(hidden_dim, dtype)
         ):
             return pool
         return max(pool, qr_comm.qr_max_size)
