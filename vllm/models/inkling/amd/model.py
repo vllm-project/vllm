@@ -19,6 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import (
@@ -51,8 +52,9 @@ from .layernorm import InklingRMSNorm
 from .logits_processor import InklingLogitsProcessor
 from .mlp import InklingDenseMLP
 from .moe import InklingMoE
+from .ops.lamport import get_lamport_rs_conv, initialize_lamport_rs_conv
 from .ops.norm import add_rmsnorm, embed_rmsnorm
-from .sconv_swa_attn import _ATTN, _MLP, InklingConvState
+from .sconv_swa_attn import _ATTN, _MLP, InklingConvState, InklingSconvMetadata
 from .short_conv import InklingShortConv
 
 
@@ -70,11 +72,40 @@ def _sconv_add_norm(
 ) -> tuple[torch.Tensor | None, torch.Tensor]:
     """`h = hidden + sconv(TP-sum(delta)); y = rmsnorm(h)`.
 
-    ROCm uses the portable collective path. The Lamport P2P implementation in
-    the NVIDIA model relies on CUDA GDC and CUDA-specific symmetric-memory
-    publication semantics which cannot be linked into a gfx950 HSACO."""
+    Uses the fused Lamport P2P RS/sconv/AG kernels (``ops/lamport.py``) when
+    available, otherwise the portable RCCL collective path."""
     norm_w = norm.weight if norm is not None else None
     eps = norm.variance_epsilon if norm is not None else 0.0
+
+    attn_metadata = get_forward_context().attn_metadata
+    m = (
+        attn_metadata.get(sconv.owner.prefix)
+        if isinstance(attn_metadata, dict)
+        else None
+    )
+    mm = get_lamport_rs_conv(hidden.shape[-1], sconv.kernel_size)
+    if mm is not None and mm.usable(delta.shape[0]) and m is not None:
+        cache = sconv.owner.kv_cache
+        assert cache.numel() > 0
+        assert isinstance(m, InklingSconvMetadata)
+        off_s, ws = sconv.owner.stream_ranges[sconv.stream_idx]
+        return mm.rs_sconv_ag_add_norm(
+            delta,
+            hidden,
+            sconv.weight.squeeze(1),
+            norm_w,
+            eps,
+            cache,
+            positions,
+            m.block_table,
+            m.seq_idx,
+            m.slot_mapping,
+            off_s,
+            ws,
+            # The hybrid KV-cache planner enlarges the conv page to match the
+            # attention caches, and slot_mapping is built against that size.
+            sconv.owner.cache_block_size,
+        )
 
     # RCCL RS -> shard sconv -> AG -> fused add(+rmsnorm).
     shard = tensor_model_parallel_reduce_scatter(delta, dim=-1)
@@ -390,6 +421,11 @@ class _TmlForCausalLMBase(nn.Module, SupportsPP, SupportsLoRA):
             config=text_config,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "model"),
+        )
+        initialize_lamport_rs_conv(
+            text_config.hidden_size,
+            text_config.sconv_kernel_size,
+            vllm_config.scheduler_config.max_num_batched_tokens,
         )
         self.lm_head = ParallelLMHead(
             text_config.padded_vocab_size,
