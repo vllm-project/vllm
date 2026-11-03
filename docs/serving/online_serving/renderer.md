@@ -34,29 +34,33 @@ The Rust frontend also serves a `vllm.Render` gRPC service, defined in
 `VLLM_USE_RUST_FRONTEND=1`, where it runs next to `vllm.Inference` and
 `vllm.Control`.
 
-- `Render.Tokenize` renders a chat request into prompt token IDs, plus the
-  settings that rendering decides: the tool-call grammar (`structural_tag`),
-  `skip_special_tokens`, the engine reasoning gate, and the preprocessed media
-  of image, video and audio parts. Copy them into your own
-  `vllm.GenerateRequest` with your sampling parameters, and set
-  `response.output_token_ids = true` and `response.output_text = false` so
-  `Inference.Generate` returns only token IDs. Set `omit_media_kwargs` to get
-  only media hashes and placeholder ranges, like `"mm_payload": "none"`.
-- `Render.Detokenize` takes the same chat request, the prompt token IDs, and the
-  `SequenceOutput` from `Inference.Generate`. It returns the answer text,
+- `Render.RenderChat` renders a chat request into prompt token IDs, plus the
+  settings that rendering decides: the effective structured-output constraint
+  (the request's, or the grammar a tool-call or reasoning parser built around
+  it), the engine reasoning gate, and the preprocessed media of image, video
+  and audio parts. Copy them into your own `vllm.GenerateRequest` with your
+  sampling parameters, and set `response.output_token_ids = true` and
+  `response.output_text = false` so `Inference.Generate` returns only token
+  IDs. Set `omit_media_kwargs` to get only media hashes and placeholder ranges,
+  like `"mm_payload": "none"`.
+- `Render.DerenderChat` takes the same chat request, the prompt token IDs, and
+  the `SequenceOutput` from `Inference.Generate`, plus the decoding options:
+  stop strings and `skip_special_tokens`. It returns the answer text,
   reasoning, parsed tool calls, the finish info, and, when the output carries
   them, decoded logprobs.
-- `Render.DetokenizeStream` is the streaming form for `Inference.GenerateStream`.
-  The first message carries the `DetokenizeRequest`, and each later message
-  carries the `SequenceOutput` of one chunk. Each response carries the content,
-  reasoning, tool-call and logprob deltas decoded so far, and the last response
-  carries the finish info.
+- `Render.DerenderChatStream` is the streaming form for
+  `Inference.GenerateStream`. The first message carries the
+  `DerenderChatRequest`, and each later message carries the `SequenceOutput`
+  of one chunk. Each response carries the content, reasoning, tool-call and
+  logprob deltas decoded so far, and the last response carries the finish
+  info.
 
-Detokenize applies `stop_strings`, `include_stop_strings` and `min_new_tokens`
-like the engine. `Inference.Generate` cannot check stop strings when
-`output_text` is false, so Detokenize cuts the output at the first stop string
-it finds. It also applies a stop string that Generate reported. Unlike Python's
-streaming derender, `DetokenizeStream` supports stop strings, holding back text
+DerenderChat applies `stop_strings`, `include_stop_strings` and
+`min_new_tokens` like the engine. `Inference.Generate` cannot check stop strings
+when `output_text` is false, so DerenderChat cuts the output at the first stop
+string it finds. It also applies a stop string that Generate reported. Unlike
+Python's streaming derender, `DerenderChatStream` supports stop strings, holding
+back text
 that may still begin one, but only those given in its first message. When a
 stop string ends the output, the server closes the stream, and the client must
 cancel `GenerateStream`. LoRA adapter names are accepted as the chat request's

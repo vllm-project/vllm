@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-//! gRPC `Render` service: engine-free chat tokenize and detokenize, the gRPC
+//! gRPC `Render` service: engine-free chat render and derender, the gRPC
 //! counterpart of the HTTP render API.
 
 use std::pin::Pin;
@@ -10,6 +10,7 @@ use std::sync::Arc;
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{Stream, StreamExt as _, TryStreamExt as _, stream};
 use itertools::Itertools as _;
+use llm_multimodal::ImageDetail;
 use thiserror_ext::AsReport as _;
 use tokio::sync::oneshot;
 use tonic::{Request, Response, Status, Streaming};
@@ -20,11 +21,10 @@ use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, AssistantToolCall,
     ChatContent, ChatContentPart, ChatEvent, ChatEventStream, ChatMessage, ChatOptions,
     ChatRequest, ChatRequestProcessor, ChatTool, ChatToolChoice, DetokenizeChunk,
-    ResolvedToolContext, SamplingParams,
+    GenerationPromptMode, ResolvedToolContext, SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
-use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, FinishReason, PromptTruncation, PromptTruncationLimit, TextDecodeOptions,
     TextRequestProcessor, TruncationSide,
@@ -35,9 +35,7 @@ use super::inference::text_error_to_status;
 use super::media;
 use super::pb;
 use super::pb::render_server::{Render, RenderServer};
-use crate::error::ApiError;
 use crate::render::RenderState;
-use crate::routes::openai::chat_completions::convert::normalize_generation_prompt_mode;
 use crate::state::AppState;
 
 pub(crate) type RenderGrpcService<S> = RenderServer<RenderServiceImpl<S>>;
@@ -92,16 +90,16 @@ impl<S> RenderServiceImpl<S> {
 
 #[tonic::async_trait]
 impl<S: RenderContext> Render for RenderServiceImpl<S> {
-    async fn tokenize(
+    async fn render_chat(
         &self,
-        request: Request<pb::TokenizeRequest>,
-    ) -> Result<Response<pb::TokenizeResponse>, Status> {
-        let pb::TokenizeRequest {
+        request: Request<pb::RenderChatRequest>,
+    ) -> Result<Response<pb::RenderChatResponse>, Status> {
+        let pb::RenderChatRequest {
             chat,
             omit_media_kwargs,
         } = request.into_inner();
-        let span = info_span!("grpc_render", rpc = "Tokenize");
-        let result = tokenize(
+        let span = info_span!("grpc_render", rpc = "RenderChat");
+        let result = render_chat(
             self.state.as_ref(),
             chat.unwrap_or_default(),
             omit_media_kwargs,
@@ -112,27 +110,27 @@ impl<S: RenderContext> Render for RenderServiceImpl<S> {
         result.map(Response::new)
     }
 
-    async fn detokenize(
+    async fn derender_chat(
         &self,
-        request: Request<pb::DetokenizeRequest>,
-    ) -> Result<Response<pb::DetokenizeResponse>, Status> {
-        let span = info_span!("grpc_render", rpc = "Detokenize");
-        let result = detokenize(self.state.as_ref(), request.into_inner())
+        request: Request<pb::DerenderChatRequest>,
+    ) -> Result<Response<pb::DerenderChatResponse>, Status> {
+        let span = info_span!("grpc_render", rpc = "DerenderChat");
+        let result = derender_chat(self.state.as_ref(), request.into_inner())
             .instrument(span.clone())
             .await;
         log_failure(&span, &result);
         result.map(Response::new)
     }
 
-    type DetokenizeStreamStream =
-        Pin<Box<dyn Stream<Item = Result<pb::DetokenizeStreamResponse, Status>> + Send>>;
+    type DerenderChatStreamStream =
+        Pin<Box<dyn Stream<Item = Result<pb::DerenderChatStreamResponse, Status>> + Send>>;
 
-    async fn detokenize_stream(
+    async fn derender_chat_stream(
         &self,
-        request: Request<Streaming<pb::DetokenizeStreamRequest>>,
-    ) -> Result<Response<Self::DetokenizeStreamStream>, Status> {
-        let span = info_span!("grpc_render", rpc = "DetokenizeStream");
-        let result = detokenize_stream(self.state.as_ref(), request.into_inner())
+        request: Request<Streaming<pb::DerenderChatStreamRequest>>,
+    ) -> Result<Response<Self::DerenderChatStreamStream>, Status> {
+        let span = info_span!("grpc_render", rpc = "DerenderChatStream");
+        let result = derender_chat_stream(self.state.as_ref(), request.into_inner())
             .instrument(span.clone())
             .await;
         log_failure(&span, &result);
@@ -154,12 +152,13 @@ fn log_failure<T>(span: &tracing::Span, result: &Result<T, Status>) {
     }
 }
 
-async fn tokenize(
+async fn render_chat(
     state: &impl RenderContext,
     chat: pb::ChatRequest,
     omit_media_kwargs: bool,
-) -> Result<pb::TokenizeResponse, Status> {
+) -> Result<pb::RenderChatResponse, Status> {
     check_model(state, &chat.model).await?;
+    let requested_structured_output = chat.structured_output.clone();
     let chat_request = to_chat_request(chat)?;
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
 
@@ -174,19 +173,15 @@ async fn tokenize(
         .map(|feature| media::feature_to_proto(feature, !omit_media_kwargs))
         .try_collect()?;
 
-    // A parser-built output grammar replaces the request's structured output.
-    let structural_tag = text_request
-        .sampling_params
-        .structured_outputs
-        .filter(|params| Some(params) != structured_outputs.as_ref())
-        .map(|params| {
-            params.constraint.into_structural_tag().map_err(|constraint| {
-                Status::internal(format!(
-                    "parser output grammar is not a structural tag: {constraint:?}"
-                ))
-            })
-        })
-        .transpose()?;
+    // A parser-built output grammar replaces the request's constraint. Echo an
+    // unchanged constraint as sent, so a JSON schema keeps its exact text.
+    let structured_output = match text_request.sampling_params.structured_outputs {
+        Some(params) if Some(&params) != structured_outputs.as_ref() => {
+            Some(convert::structured_output_to_proto(&params))
+        }
+        Some(_) => requested_structured_output,
+        None => None,
+    };
     let ReasoningParserKwargs {
         chat_template_kwargs,
     } = text_request.reasoning_parser_kwargs;
@@ -199,25 +194,24 @@ async fn tokenize(
         )),
     });
 
-    Ok(pb::TokenizeResponse {
+    Ok(pb::RenderChatResponse {
         prompt_token_ids: prepared.generate_request.prompt_token_ids,
-        media,
-        structural_tag,
-        skip_special_tokens: text_request.decode_options.skip_special_tokens,
+        structured_output,
         engine_reasoning_gate,
+        media,
     })
 }
 
-async fn detokenize(
+async fn derender_chat(
     state: &impl RenderContext,
-    mut request: pb::DetokenizeRequest,
-) -> Result<pb::DetokenizeResponse, Status> {
+    mut request: pb::DerenderChatRequest,
+) -> Result<pb::DerenderChatResponse, Status> {
     let output = request.output.take().unwrap_or_default();
     let reported_finish_info = output.finish_info.clone();
     // A stop string reported by Generate cuts the text as well.
     let reported_stop_string = reported_stop_string(&output).cloned();
     let (chat_request, prompt_token_ids) =
-        prepare_detokenize(state, request, reported_stop_string).await?;
+        prepare_derender(state, request, reported_stop_string).await?;
     let mut chunk = chunk_from_proto(output)?;
     // Unlike in a stream, an omitted `finish_info` ends the output.
     chunk.finish_reason.get_or_insert(FinishReason::Length);
@@ -239,7 +233,7 @@ async fn detokenize(
         &collected.token_ids,
     )?;
     let message = collected.message;
-    Ok(pb::DetokenizeResponse {
+    Ok(pb::DerenderChatResponse {
         content: message.text(),
         reasoning: message.reasoning().unwrap_or_default(),
         tool_calls: message
@@ -256,31 +250,33 @@ async fn detokenize(
     })
 }
 
-/// Start a DetokenizeStream from its first message. The returned response
+/// Start a DerenderChatStream from its first message. The returned response
 /// stream owns `inbound`.
-async fn detokenize_stream(
+async fn derender_chat_stream(
     state: &impl RenderContext,
-    mut inbound: Streaming<pb::DetokenizeStreamRequest>,
-) -> Result<impl Stream<Item = Result<pb::DetokenizeStreamResponse, Status>> + Send + 'static, Status>
-{
-    use pb::detokenize_stream_request::Request as StreamRequest;
+    mut inbound: Streaming<pb::DerenderChatStreamRequest>,
+) -> Result<
+    impl Stream<Item = Result<pb::DerenderChatStreamResponse, Status>> + Send + 'static,
+    Status,
+> {
+    use pb::derender_chat_stream_request::Request as StreamRequest;
 
-    let Some(pb::DetokenizeStreamRequest {
+    let Some(pb::DerenderChatStreamRequest {
         request: Some(StreamRequest::Start(mut start)),
     }) = inbound.message().await?
     else {
         return Err(Status::invalid_argument(
-            "the first DetokenizeStream message must be `start`",
+            "the first DerenderChatStream message must be `start`",
         ));
     };
     let (end_tx, end_rx) = oneshot::channel();
-    let inbound = DetokenizeInbound {
+    let inbound = DerenderInbound {
         messages: inbound,
         first_output: start.output.take(),
         stop_strings: start.stop_strings.clone(),
         end_tx: Some(end_tx),
     };
-    let (chat_request, prompt_token_ids) = prepare_detokenize(state, *start, None).await?;
+    let (chat_request, prompt_token_ids) = prepare_derender(state, *start, None).await?;
 
     let chunks = stream::unfold(Some(inbound), |inbound| async move {
         let mut inbound = inbound?;
@@ -306,12 +302,12 @@ async fn detokenize_stream(
             chunks,
         )
         .map_err(chat_error_to_status)?;
-    Ok(detokenize_stream_responses(events, end_rx))
+    Ok(derender_chat_stream_responses(events, end_rx))
 }
 
-/// The request stream of a DetokenizeStream after its start message.
-struct DetokenizeInbound {
-    messages: Streaming<pb::DetokenizeStreamRequest>,
+/// The request stream of a DerenderChatStream after its start message.
+struct DerenderInbound {
+    messages: Streaming<pb::DerenderChatStreamRequest>,
     /// `start.output`, read before `messages`.
     first_output: Option<pb::SequenceOutput>,
     stop_strings: Vec<String>,
@@ -321,27 +317,27 @@ struct DetokenizeInbound {
     end_tx: Option<oneshot::Sender<Result<pb::FinishInfo, Status>>>,
 }
 
-impl DetokenizeInbound {
+impl DerenderInbound {
     /// Read the next output chunk, applying only the stop strings of the start
     /// message: text before a stop string reported in the final chunk may have
     /// been sent already. A finished chunk reports its finish info through
     /// `end_tx`.
     async fn next_chunk(&mut self) -> Result<DetokenizeChunk, Status> {
-        use pb::detokenize_stream_request::Request as StreamRequest;
+        use pb::derender_chat_stream_request::Request as StreamRequest;
 
         let output = match self.first_output.take() {
             Some(output) => output,
             None => match self.messages.message().await? {
-                Some(pb::DetokenizeStreamRequest {
+                Some(pb::DerenderChatStreamRequest {
                     request: Some(StreamRequest::Output(output)),
                 }) => *output,
                 Some(_) => {
                     return Err(Status::invalid_argument(
-                        "only the first DetokenizeStream message may be `start`",
+                        "only the first DerenderChatStream message may be `start`",
                     ));
                 }
                 // Closing early ends the output like an omitted `finish_info`
-                // in Detokenize.
+                // in DerenderChat.
                 None => {
                     return Ok(DetokenizeChunk {
                         finish_reason: Some(FinishReason::Length),
@@ -377,16 +373,16 @@ impl DetokenizeInbound {
 /// Coalesce the chat events available at once into one response, ending with
 /// the response that carries `finish_info`.
 #[try_stream]
-async fn detokenize_stream_responses(
+async fn derender_chat_stream_responses(
     events: ChatEventStream,
     mut end_rx: oneshot::Receiver<Result<pb::FinishInfo, Status>>,
-    mut y: TryYielder<pb::DetokenizeStreamResponse, Status>,
+    mut y: TryYielder<pb::DerenderChatStreamResponse, Status>,
 ) -> Result<(), Status> {
     // The cap only bounds the size of one response.
     let mut events = events.ready_chunks(64);
     let mut last_token_id = None;
     while let Some(batch) = events.next().await {
-        let mut response = pb::DetokenizeStreamResponse::default();
+        let mut response = pb::DerenderChatStreamResponse::default();
         for event in batch {
             let event = event.map_err(|error| match end_rx.try_recv() {
                 Ok(Err(status)) => status,
@@ -456,13 +452,13 @@ async fn detokenize_stream_responses(
                 | ChatEvent::ToolCallEnd { .. } => {}
             }
         }
-        if response != pb::DetokenizeStreamResponse::default() {
+        if response != pb::DerenderChatStreamResponse::default() {
             y.yield_ok(response).await;
         }
     }
     Err(match end_rx.try_recv() {
         Ok(Err(status)) => status,
-        _ => Status::internal("detokenize stream ended without a final output"),
+        _ => Status::internal("derender stream ended without a final output"),
     })
 }
 
@@ -497,20 +493,21 @@ fn detokenized_finish_info(
     })
 }
 
-/// Check the model and build the chat request of either Detokenize RPC.
+/// Check the model and build the chat request of either DerenderChat RPC.
 /// `extra_stop_string` applies on top of the requested stop strings.
-async fn prepare_detokenize(
+async fn prepare_derender(
     state: &impl RenderContext,
-    request: pb::DetokenizeRequest,
+    request: pb::DerenderChatRequest,
     extra_stop_string: Option<String>,
 ) -> Result<(ChatRequest, Vec<u32>), Status> {
-    let pb::DetokenizeRequest {
+    let pb::DerenderChatRequest {
         chat,
         prompt_token_ids,
         output: _,
         mut stop_strings,
         include_stop_strings,
         min_new_tokens,
+        skip_special_tokens,
     } = request;
     if let Some(stop) = extra_stop_string
         && !stop_strings.contains(&stop)
@@ -521,6 +518,7 @@ async fn prepare_detokenize(
     check_model(state, &chat.model).await?;
     let mut chat_request = to_chat_request(chat)?;
     let decode_options = &mut chat_request.decode_options;
+    decode_options.skip_special_tokens = skip_special_tokens.unwrap_or(true);
     decode_options.stop_strings = (!stop_strings.is_empty()).then_some(stop_strings);
     decode_options.include_stop_str_in_output = include_stop_strings;
     decode_options.min_tokens = min_new_tokens;
@@ -602,13 +600,17 @@ async fn check_model(state: &impl RenderContext, model: &str) -> Result<(), Stat
 }
 
 fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
+    // `ChatRequest::validate` checks a continued final message is an assistant's.
+    let generation_prompt_mode = match chat.generation_prompt_mode() {
+        pb::GenerationPromptMode::Unspecified | pb::GenerationPromptMode::StartNewAssistant => {
+            GenerationPromptMode::StartNewAssistant
+        }
+        pb::GenerationPromptMode::ContinueFinalAssistant => {
+            GenerationPromptMode::ContinueFinalAssistant
+        }
+        pb::GenerationPromptMode::NoGenerationPrompt => GenerationPromptMode::NoGenerationPrompt,
+    };
     let messages: Vec<_> = chat.messages.into_iter().map(message_from_proto).try_collect()?;
-    let generation_prompt_mode = normalize_generation_prompt_mode(
-        chat.add_generation_prompt,
-        chat.continue_final_message,
-        &messages,
-    )
-    .map_err(api_error_to_status)?;
     let tool_choice = chat.tool_choice.and_then(|choice| choice.choice).and_then(|choice| {
         use pb::chat_tool_choice::{Choice, Mode};
         match choice {
@@ -633,7 +635,9 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
         request_id: Uuid::new_v4().to_string(),
         messages,
         sampling_params: SamplingParams {
-            structured_outputs: structured_output_from_proto(chat.structured_output)?,
+            structured_outputs: convert::structured_output_from_proto(
+                chat.structured_output.as_ref(),
+            )?,
             ..Default::default()
         },
         chat_options: ChatOptions {
@@ -650,16 +654,10 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
                 .unwrap_or_default(),
         },
         tool_context,
-        decode_options: TextDecodeOptions {
-            skip_special_tokens: chat.skip_special_tokens.unwrap_or(true),
-            ..Default::default()
-        },
+        // Derender sets the decode options; render does not decode.
+        decode_options: TextDecodeOptions::default(),
         intermediate: false,
-        // Proto3 uses zero as unset, as in `GenerateRequest`.
-        prompt_truncation: (chat.truncate_prompt_tokens != 0).then_some(PromptTruncation {
-            limit: PromptTruncationLimit::Fixed(u64::from(chat.truncate_prompt_tokens)),
-            side: TruncationSide::Left,
-        }),
+        prompt_truncation: chat.truncation.map(truncation_from_proto).transpose()?,
         priority: 0,
         documents: None,
         cache_salt: None,
@@ -670,61 +668,77 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
     })
 }
 
+fn truncation_from_proto(truncation: pb::PromptTruncation) -> Result<PromptTruncation, Status> {
+    use pb::prompt_truncation::{Limit, Side};
+
+    let side = match truncation.side() {
+        Side::Unspecified | Side::Left => TruncationSide::Left,
+        Side::Right => TruncationSide::Right,
+    };
+    let limit = match truncation.limit {
+        Some(Limit::MaxTokens(max_tokens)) => PromptTruncationLimit::Fixed(max_tokens),
+        Some(Limit::InputBudget(())) => PromptTruncationLimit::InputBudget,
+        None => return Err(Status::invalid_argument("truncation.limit is required")),
+    };
+    Ok(PromptTruncation { limit, side })
+}
+
 fn message_from_proto(message: pb::ChatMessage) -> Result<ChatMessage, Status> {
-    let pb::ChatMessage {
-        role,
-        content,
-        reasoning,
-        tool_calls,
-        tool_call_id,
-        tools,
-    } = message;
-    let content = content_from_proto(content)?;
-    Ok(match role.as_str() {
-        "system" => ChatMessage::system(content),
-        "user" => ChatMessage::user(content),
-        "developer" => {
-            let tools = tools_from_proto(tools)?;
-            ChatMessage::developer(content, (!tools.is_empty()).then_some(tools))
+    use pb::chat_message::Message;
+
+    Ok(match message.message {
+        Some(Message::System(system)) => ChatMessage::system(content_from_proto(system.content)?),
+        Some(Message::Developer(developer)) => {
+            let tools = tools_from_proto(developer.tools)?;
+            ChatMessage::developer(
+                content_from_proto(developer.content)?,
+                (!tools.is_empty()).then_some(tools),
+            )
         }
-        "tool" => ChatMessage::tool_response(content, tool_call_id),
-        "assistant" => {
-            let mut blocks = Vec::new();
-            if !reasoning.is_empty() {
-                blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
-            }
-            match content {
-                ChatContent::Text(text) => blocks.push(AssistantContentBlock::Text { text }),
-                ChatContent::Parts(parts) => {
-                    for part in parts {
-                        let ChatContentPart::Text { text } = part else {
-                            return Err(Status::invalid_argument(
-                                "assistant messages support text content parts only",
-                            ));
-                        };
-                        blocks.push(AssistantContentBlock::Text { text });
-                    }
-                }
-            }
-            blocks.extend(tool_calls.into_iter().map(|call| {
-                AssistantContentBlock::ToolCall(AssistantToolCall {
-                    id: call.id,
-                    name: call.name,
-                    arguments: call.arguments,
-                })
-            }));
-            ChatMessage::assistant_blocks(blocks)
+        Some(Message::User(user)) => ChatMessage::user(content_from_proto(user.content)?),
+        Some(Message::Assistant(assistant)) => ChatMessage::assistant_blocks(
+            assistant.blocks.into_iter().map(assistant_block_from_proto).try_collect()?,
+        ),
+        Some(Message::Tool(tool)) => {
+            ChatMessage::tool_response(content_from_proto(tool.content)?, tool.tool_call_id)
         }
-        "" => return Err(Status::invalid_argument("chat message role is required")),
-        _ => ChatMessage::custom(role, content),
+        Some(Message::Custom(custom)) if custom.role.is_empty() => {
+            return Err(Status::invalid_argument("custom message role is required"));
+        }
+        Some(Message::Custom(custom)) => {
+            ChatMessage::custom(custom.role, content_from_proto(custom.content)?)
+        }
+        None => return Err(Status::invalid_argument("chat message is required")),
     })
 }
 
-fn content_from_proto(content: Option<pb::chat_message::Content>) -> Result<ChatContent, Status> {
-    use pb::chat_content_part::Part;
-    use pb::chat_message::Content;
+fn assistant_block_from_proto(
+    block: pb::AssistantContentBlock,
+) -> Result<AssistantContentBlock, Status> {
+    use pb::assistant_content_block::Block;
 
-    Ok(match content {
+    Ok(match block.block {
+        Some(Block::Text(text)) => AssistantContentBlock::Text { text },
+        Some(Block::Reasoning(text)) => AssistantContentBlock::Reasoning { text },
+        Some(Block::ToolCall(call)) => AssistantContentBlock::ToolCall(AssistantToolCall {
+            id: call.id,
+            name: call.name,
+            arguments: call.arguments,
+        }),
+        None => {
+            return Err(Status::invalid_argument(
+                "assistant content block is required",
+            ));
+        }
+    })
+}
+
+/// Omitted content renders as empty text.
+fn content_from_proto(content: Option<pb::ChatContent>) -> Result<ChatContent, Status> {
+    use pb::chat_content::Content;
+    use pb::chat_content_part::Part;
+
+    Ok(match content.and_then(|content| content.content) {
         None => ChatContent::Text(String::new()),
         Some(Content::Text(text)) => ChatContent::Text(text),
         Some(Content::Parts(parts)) => ChatContent::Parts(
@@ -732,40 +746,33 @@ fn content_from_proto(content: Option<pb::chat_message::Content>) -> Result<Chat
                 .parts
                 .into_iter()
                 .filter_map(|part| part.part)
-                .map(|part| {
-                    Ok(match part {
-                        Part::Text(text) => ChatContentPart::text(text),
-                        Part::ImageUrl(image) => ChatContentPart::ImageUrl {
-                            image_url: image.url,
-                            detail: image
-                                .detail
-                                .map(|detail| {
-                                    serde_json::from_value(serde_json::Value::String(detail))
-                                        .map_err(|error| {
-                                            Status::invalid_argument(format!(
-                                                "invalid image detail: {error}"
-                                            ))
-                                        })
-                                })
-                                .transpose()?,
-                            uuid: image.uuid,
+                .map(|part| match part {
+                    Part::Text(text) => ChatContentPart::text(text),
+                    Part::ImageUrl(image) => ChatContentPart::ImageUrl {
+                        detail: match image.detail() {
+                            pb::ImageDetail::Unspecified => None,
+                            pb::ImageDetail::Auto => Some(ImageDetail::Auto),
+                            pb::ImageDetail::Low => Some(ImageDetail::Low),
+                            pb::ImageDetail::High => Some(ImageDetail::High),
                         },
-                        Part::VideoUrl(video) => ChatContentPart::VideoUrl {
-                            video_url: video.url,
-                            uuid: video.uuid,
-                        },
-                        Part::AudioUrl(audio) => ChatContentPart::AudioUrl {
-                            audio_url: audio.url,
-                            uuid: audio.uuid,
-                        },
-                        Part::InputAudio(audio) => ChatContentPart::InputAudio {
-                            data: audio.data,
-                            format: audio.format,
-                            uuid: audio.uuid,
-                        },
-                    })
+                        image_url: image.url,
+                        uuid: image.uuid,
+                    },
+                    Part::VideoUrl(video) => ChatContentPart::VideoUrl {
+                        video_url: video.url,
+                        uuid: video.uuid,
+                    },
+                    Part::AudioUrl(audio) => ChatContentPart::AudioUrl {
+                        audio_url: audio.url,
+                        uuid: audio.uuid,
+                    },
+                    Part::InputAudio(audio) => ChatContentPart::InputAudio {
+                        data: audio.data,
+                        format: audio.format,
+                        uuid: audio.uuid,
+                    },
                 })
-                .collect::<Result<_, Status>>()?,
+                .collect(),
         ),
     })
 }
@@ -795,26 +802,6 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
         .collect()
 }
 
-fn structured_output_from_proto(
-    structured_output: Option<pb::chat_request::StructuredOutput>,
-) -> Result<Option<StructuredOutputsParams>, Status> {
-    use pb::chat_request::StructuredOutput as Chat;
-    use pb::decoding_parameters::StructuredOutput as Decoding;
-
-    let structured_output = structured_output.map(|output| match output {
-        Chat::Json(schema) => Decoding::Json(schema),
-        Chat::Regex(regex) => Decoding::Regex(regex),
-        Chat::Choice(choices) => Decoding::Choice(choices),
-        Chat::Grammar(grammar) => Decoding::Grammar(grammar),
-        Chat::JsonObject(json_object) => Decoding::JsonObject(json_object),
-        Chat::StructuralTag(tag) => Decoding::StructuralTag(tag),
-    });
-    convert::convert_structured_output(&pb::DecodingParameters {
-        structured_output,
-        ..Default::default()
-    })
-}
-
 // ========================================================================================
 // Errors
 // ========================================================================================
@@ -825,18 +812,5 @@ fn chat_error_to_status(error: vllm_chat::Error) -> Status {
         Status::invalid_argument(message)
     } else {
         Status::internal(message)
-    }
-}
-
-fn api_error_to_status(error: ApiError) -> Status {
-    let message = error.to_error_response().error.message;
-    match error {
-        ApiError::InvalidRequest { .. } | ApiError::JsonParseError { .. } => {
-            Status::invalid_argument(message)
-        }
-        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => Status::not_found(message),
-        ApiError::ServiceUnavailable { .. } => Status::unavailable(message),
-        ApiError::Conflict { .. } => Status::failed_precondition(message),
-        ApiError::ServerError { .. } => Status::internal(message),
     }
 }
