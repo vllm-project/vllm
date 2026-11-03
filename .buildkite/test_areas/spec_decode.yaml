@@ -374,6 +374,8 @@ steps:
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/
     - vllm/model_executor/models/qwen3_dflash.py
+    - vllm/model_executor/model_loader/reload/
+    - vllm/model_executor/utils.py
     - tests/models/test_qwen3_dflash_mxfp8_context_kv.py
   commands:
     - pytest -v -s v1/e2e/spec_decode/draft_model/
@@ -381,6 +383,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) Spec Decode Draft Model Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_1
       num_devices: 1
@@ -577,6 +580,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Spec Decode AL DSpark"
   key: spec-decode-dspark-nightly
+  automatic_shard: true
   timeout_in_minutes: 60
   device: h200_35gb
   optional: true
@@ -591,6 +595,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Spec Decode AL DSpark Nightly"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 90
