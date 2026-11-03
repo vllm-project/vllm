@@ -186,7 +186,7 @@ def _write(
             f"casts {src.dtype} to {copy.dtype} at copy_ "
             f"(send it as {copy.dtype} to make it direct)"
         )
-    target = stand_ins.target(copy.storage, copy.byte_offset)
+    target = stand_ins.by_storage.get(copy.storage)
     if target is None:
         raise Fallback("copies into a tensor that is not a checkpoint tensor")
     size = dtype.itemsize
@@ -231,7 +231,7 @@ def _check_overlap(traced: Traced, stand_ins: StandIns) -> None:
         named.sort()
         for (_, stop, name), (start, _, other) in itertools.pairwise(named):
             if start < stop:
-                target = stand_ins.by_storage[key][0]
+                target = stand_ins.by_storage[key]
                 raise RuntimeError(
                     f"load plan: {name!r} and {other!r} (may) write the same "
                     f"bytes of {target.module}.{target.tensor}"

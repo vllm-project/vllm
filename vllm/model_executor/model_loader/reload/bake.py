@@ -37,7 +37,6 @@ class Target:
     tensor: str
     real: torch.Tensor
     byte_offset: int  # of its checkpoint layout in its storage
-    nbytes: int  # span of its checkpoint layout
 
 
 class _Slot(NamedTuple):
@@ -54,7 +53,7 @@ class StandIns:
 
     def __init__(self, model: torch.nn.Module):
         self.slots: list[_Slot] = []
-        self.by_storage: dict[int, list[Target]] = defaultdict(list)  # meta key
+        self.by_storage: dict[int, Target] = {}  # meta storage key
         self.by_name: dict[tuple[str, str], Target] = {}
         stand_ins: dict[int, torch.Tensor] = {}
         meta_storages: dict[int, torch.UntypedStorage] = {}
@@ -78,30 +77,11 @@ class StandIns:
         stand_in.__dict__ = t.__dict__.copy()
         if hasattr(t, "_ckpt"):  # a checkpoint tensor: a write target
             apply_checkpoint_attrs(stand_in)
-            span = (
-                0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
-            )
-            target = Target(
-                module_name, key, t, offset * dtype.itemsize, span * dtype.itemsize
-            )
-            self.by_storage[meta._cdata].append(target)
+            target = Target(module_name, key, t, offset * dtype.itemsize)
+            # writes into this storage are labelled with its first target
+            self.by_storage.setdefault(meta._cdata, target)
             self.by_name[(module_name, key)] = target
         return stand_in
-
-    def target(self, storage: int, byte_offset: int) -> Target | None:
-        """The checkpoint tensor whose span holds ``byte_offset``, else the
-        first one on ``storage``."""
-        targets = self.by_storage.get(storage)
-        if not targets:
-            return None
-        return next(
-            (
-                t
-                for t in targets
-                if t.byte_offset <= byte_offset < t.byte_offset + t.nbytes
-            ),
-            targets[0],
-        )
 
     @contextmanager
     def swapped(self) -> Iterator[None]:

@@ -423,6 +423,26 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
+def test_tensors_sharing_one_storage():
+    """Two checkpoint tensors on one storage: each write lands in its own
+    tensor, whichever tensor names the storage."""
+
+    def make():
+        model = _Toy()
+        base = torch.zeros(24, dtype=BF16)
+        for i, name in enumerate(("a", "b")):
+            setattr(model, name, _Layer())
+            view = base[12 * i : 12 * (i + 1)].view(3, 4)
+            getattr(model, name).weight = torch.nn.Parameter(view, requires_grad=False)
+        return model
+
+    shapes = {"a.weight": ((3, 4), BF16), "b.weight": ((3, 4), BF16)}
+    model, plan = _check_plan_equals_cold_start(make, shapes)
+    for name in ("a", "b"):
+        ((_, dest),) = plan.get_dest(f"{name}.weight")
+        assert dest.data_ptr() == getattr(model, name).weight.data_ptr()
+
+
 def _two_names(loader_a):
     """``a`` through ``loader_a``, ``b`` a plain copy."""
 
