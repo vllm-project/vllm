@@ -345,9 +345,8 @@ class GitHubClient:
             method="POST",
         )
 
-    def list_pr_files(self, number: int) -> list[str]:
-        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
-        return [str(file["filename"]) for file in files]
+    def list_pr_files(self, number: int) -> list[dict[str, Any]]:
+        return self._paginate(self._repo_path(f"/pulls/{number}/files"))
 
     def get_file_sha(self, path: str, ref: str) -> str:
         path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
@@ -365,9 +364,18 @@ class GitHubClient:
         try:
             response = self._request(f"/orgs/{org}/teams/{team}/memberships/{username}")
         except ApiError as error:
-            if error.status == 404:
-                return False
-            raise
+            if error.status != 404:
+                raise
+            try:  # 404 for a non-member, and for a team the token cannot see
+                self._request(f"/orgs/{org}/teams/{team}")
+            except ApiError as team_error:
+                if team_error.status == 404:
+                    raise RuntimeError(
+                        f"CI_MAINTAINERS_TOKEN cannot see {org}/{team}: it needs "
+                        "organization Members: read."
+                    ) from team_error
+                raise
+            return False
         return response.get("state") == "active"
 
     def rerun_failed_pre_commit(self, sha: str) -> bool:
@@ -1232,13 +1240,21 @@ def handle_cancel_ci(
     )
 
 
-def changes_rocm_stack(github: GitHubClient, pr: Mapping[str, Any]) -> bool:
-    files = github.list_pr_files(pr["number"])
-    return any(path in ROCM_STACK_INPUTS for path in files)
+def rocm_stack_changes(github: GitHubClient, pr: Mapping[str, Any]) -> dict[str, str]:
+    """The PR's blob of each stack input it changes ("none": removed)."""
+    return {
+        file["filename"]: "none" if file["status"] == "removed" else file["sha"]
+        for file in github.list_pr_files(pr["number"])
+        if file["filename"] in ROCM_STACK_INPUTS
+    }
 
 
 def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
-    if not changes_rocm_stack(github, pr):
+    try:
+        if not rocm_stack_changes(github, pr):
+            return ""
+    except ApiError as error:  # never fail the run command over a reminder
+        print(f"Could not check the ROCm stack inputs: {error}", file=sys.stderr)
         return ""
     org, team = ROCM_CACHE_TEAM
     return (
@@ -1257,12 +1273,16 @@ def handle_cache_amd(
     pr: Mapping[str, Any],
     image_sources: Sequence[BuildkiteClient] = (),
 ) -> str:
-    if not changes_rocm_stack(github, pr):
+    changes = rocm_stack_changes(github, pr)
+    if not changes:
         return "This PR does not change the ROCm base image; nothing to cache."
     sha = pr["head"]["sha"]
-    # A cache build stays good for later commits, e.g. merges of main, that keep
-    # these files; pre-commit.yml checks the image main needs either way.
-    inputs = ",".join(f"{p}={github.get_file_sha(p, sha)}" for p in ROCM_STACK_INPUTS)
+    # A cache build stays good while these files keep their blobs on the PR and on
+    # main; pre-commit.yml checks the image main needs either way.
+    inputs = ",".join(
+        f"{p}={changes.get(p, 'none')}:{github.get_file_sha(p, 'main')}"
+        for p in ROCM_STACK_INPUTS
+    )
     builds = [
         build
         for build in buildkite.list_builds(

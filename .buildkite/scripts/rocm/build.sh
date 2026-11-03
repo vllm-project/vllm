@@ -76,9 +76,15 @@ if [[ $MODE == prebuild ]]; then
     "+refs/pull/${ROCM_PREBUILD_PR:?}/head:refs/rocm-prebuild/pr"
   [[ $(git rev-parse --is-shallow-repository) == false ]] || git fetch -q --unshallow origin
   # Later commits (e.g. merges of main) may follow it; a force-push past it may not.
-  git merge-base --is-ancestor "${ROCM_PREBUILD_SHA:?}" refs/rocm-prebuild/pr \
+  git merge-base --is-ancestor "${ROCM_PREBUILD_SHA:?}" refs/rocm-prebuild/pr 2>/dev/null \
     || { echo "$ROCM_PREBUILD_SHA is no longer on #$ROCM_PREBUILD_PR" >&2; exit 1; }
   mb=$(git merge-base refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA")
+  # Only content changes merge below; their key would differ from main's after the merge.
+  if git diff --summary "$mb" "$ROCM_PREBUILD_SHA" -- "$SDF" tools/vllm-rocm/therock_wheels.py \
+      | grep -E '^ (delete|mode change)' >&2; then
+    echo "#$ROCM_PREBUILD_PR deletes or changes the mode of a stack input: it cannot be pre-built" >&2
+    exit 1
+  fi
   for f in "$SDF" tools/vllm-rocm/therock_wheels.py; do   # each as merged into current main
     git show "$mb:$f" > "$f.base" 2>/dev/null || : > "$f.base"   # not there yet: empty
     git show "$ROCM_PREBUILD_SHA:$f" > "$f.pr" 2>/dev/null || : > "$f.pr"

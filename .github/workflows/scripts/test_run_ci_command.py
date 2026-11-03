@@ -149,8 +149,11 @@ class FakeGitHub:
     def add_comment(self, issue_number: int, body: str) -> None:
         self.comments.append(body)
 
-    def list_pr_files(self, number: int) -> list[str]:
-        return self.files
+    def list_pr_files(self, number: int) -> list[dict[str, Any]]:
+        return [
+            {"filename": path, "status": "modified", "sha": "blob"}
+            for path in self.files
+        ]
 
     def get_file_sha(self, path: str, ref: str) -> str:
         return self.file_shas.get(path, "none")
@@ -1640,7 +1643,9 @@ class RunCiCommandTest(unittest.TestCase):
 
 
 STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
-STACK_INPUTS = "docker/Dockerfile.rocm_base=none,tools/vllm-rocm/therock_wheels.py=none"
+STACK_INPUTS = (
+    "docker/Dockerfile.rocm_base=blob:none,tools/vllm-rocm/therock_wheels.py=none:none"
+)
 
 
 def cache_build(state: str, inputs: str = STACK_INPUTS) -> dict[str, Any]:
@@ -1710,7 +1715,7 @@ class RocmCacheTest(unittest.TestCase):
             (cache_build("running"), False, False, "still caching"),
             (cache_build("passed"), False, True, "re-running `pre-commit`"),
             (cache_build("failed"), True, False, "Started"),
-            # The stack inputs changed since that build.
+            # The stack inputs changed on the PR or on main since that build.
             (cache_build("passed", "other"), True, False, "Started"),
         ]
         for build, starts, reruns, text in cases:
@@ -1730,6 +1735,42 @@ class RocmCacheTest(unittest.TestCase):
 
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn("nothing to cache", github.comments[0])
+
+    def test_team_check_tells_a_token_problem_from_a_non_member(self) -> None:
+        class Answers:
+            def __init__(self, answers: list[Any]) -> None:
+                self.answers = answers
+
+            def request(self, url: str, **kwargs: Any) -> Any:
+                answer = self.answers.pop(0)
+                if isinstance(answer, ApiError):
+                    raise answer
+                return answer
+
+        missing = ApiError(404, "Not Found")
+        for answers, member in (
+            ([missing, {"id": 1}], False),
+            ([missing, missing], None),
+            ([{"state": "active"}], True),
+        ):
+            with self.subTest(answers=answers):
+                github = GitHubClient("t", "o/r", transport=Answers(answers))
+                if member is None:
+                    with self.assertRaisesRegex(RuntimeError, "Members: read"):
+                        github.is_team_member("o", "team", "user")
+                else:
+                    self.assertEqual(github.is_team_member("o", "team", "user"), member)
+
+    def test_a_failed_reminder_lookup_keeps_the_run_reply(self) -> None:
+        class NoFiles(FakeGitHub):
+            def list_pr_files(self, number: int) -> list[dict[str, Any]]:
+                raise ApiError(502, "bad gateway")
+
+        github = NoFiles()
+
+        run(make_event(COMMAND_RUN_AMD_CI), github, FakeBuildkite([[], []]))
+
+        self.assertIn("Triggered", github.comments[0])
 
     def test_run_commands_remind_about_the_cache_on_stack_prs(self) -> None:
         for files, reminded in ((STACK_PR_FILES, True), (["vllm/foo.py"], False)):
