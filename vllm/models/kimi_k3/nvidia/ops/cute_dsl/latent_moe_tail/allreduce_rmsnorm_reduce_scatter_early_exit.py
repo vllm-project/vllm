@@ -15,15 +15,16 @@ import torch
 import torch.distributed as dist
 import torch.distributed._symmetric_memory as symm_mem
 from cutlass import BFloat16, Float32, Int32, Int64, Uint32
+from cutlass._mlir import ir
+from cutlass._mlir.dialects import llvm, vector
+from cutlass.cutlass_dsl import T, dsl_user_op
 
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
-
-from .primitives import (
-    NUM_LAMPORT_BUFFERS,
+from vllm.models.common.ops.moe_tail_fusion.primitives import (
+    LAMPORT_GENERATIONS,
     PACKED_BYTES,
     VEC_BF16,
     bf16x8_to_packed_u32x4,
-    finalize_top16_bf16,
     fragment_is_dirty,
     load_global_u32x4,
     load_shared_f32x2,
@@ -32,7 +33,7 @@ from .primitives import (
     map_shared_to_peer,
     packed_u32x4_to_bf16x8,
     red_async_release_gpu_add_u32,
-    sanitize_negative_zero,
+    sanitize_negative_zero_u32x4,
     stmc_bf16x8,
     store_global_u32x4,
     store_lamport_sentinel_128,
@@ -43,6 +44,103 @@ from .primitives import (
 )
 
 _SEVEN_CTA_MAX_M = 4
+
+
+def _make_top16_bf16_finalize_asm() -> str:
+    lines = [
+        "{",
+        ".reg .pred _valid<16>;",
+        ".reg .s32 _index<16>;",
+        ".reg .b32 _weight_words<8>;",
+        ".reg .b16 _weights<16>;",
+        ".reg .b32 _data<64>;",
+        ".reg .b16 _lo, _hi;",
+        ".reg .f32 _acc<8>;",
+        ".reg .u64 _address<16>;",
+        "ld.global.v4.u32 {_index0, _index1, _index2, _index3}, [$5];",
+        "ld.global.v4.u32 {_index4, _index5, _index6, _index7}, [$5+16];",
+        "ld.global.v4.u32 {_index8, _index9, _index10, _index11}, [$5+32];",
+        "ld.global.v4.u32 {_index12, _index13, _index14, _index15}, [$5+48];",
+        "ld.global.v4.u32 "
+        "{_weight_words0, _weight_words1, _weight_words2, "
+        "_weight_words3}, [$6];",
+        "ld.global.v4.u32 "
+        "{_weight_words4, _weight_words5, _weight_words6, "
+        "_weight_words7}, [$6+16];",
+    ]
+    for pair in range(8):
+        lines.append(
+            f"mov.b32 {{_weights{2 * pair}, _weights{2 * pair + 1}}}, "
+            f"_weight_words{pair};"
+        )
+    for element in range(8):
+        lines.append(f"mov.f32 _acc{element}, 0f00000000;")
+    for route in range(16):
+        data = 4 * route
+        lines.extend(
+            [
+                f"setp.ge.s32 _valid{route}, _index{route}, 0;",
+                f"@_valid{route} mad.wide.s32 _address{route}, "
+                f"_index{route}, 7168, $4;",
+                f"@_valid{route} ld.global.v4.u32 "
+                f"{{_data{data}, _data{data + 1}, _data{data + 2}, "
+                f"_data{data + 3}}}, [_address{route}];",
+            ]
+        )
+    for route in range(16):
+        for pair in range(4):
+            data = 4 * route + pair
+            element = 2 * pair
+            lines.extend(
+                [
+                    f"@_valid{route} mov.b32 {{_lo, _hi}}, _data{data};",
+                    f"@_valid{route} fma.rn.f32.bf16 _acc{element}, _lo, "
+                    f"_weights{route}, _acc{element};",
+                    f"@_valid{route} fma.rn.f32.bf16 _acc{element + 1}, _hi, "
+                    f"_weights{route}, _acc{element + 1};",
+                ]
+            )
+    for pair in range(4):
+        lines.append(f"cvt.rn.bf16x2.f32 ${pair}, _acc{2 * pair + 1}, _acc{2 * pair};")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+_TOP16_BF16_FINALIZE_ASM = _make_top16_bf16_finalize_asm()
+
+
+@dsl_user_op
+def finalize_top16_bf16(
+    gemm2_vector: cute.Pointer,
+    route_indices: cute.Pointer,
+    route_weights: cute.Pointer,
+    *,
+    loc=None,
+    ip=None,
+):
+    """Finalize one Kimi K3 top-16 vector with wide metadata loads."""
+    addresses = [
+        pointer.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+        for pointer in (gemm2_vector, route_indices, route_weights)
+    ]
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        addresses,
+        _TOP16_BF16_FINALIZE_ASM,
+        "=r,=r,=r,=r,l,l,l",
+        has_side_effects=False,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    packed = vector.from_elements(
+        ir.VectorType.get([4], T.i32(), loc=loc),
+        [llvm.extractvalue(T.i32(), out, [i], loc=loc, ip=ip) for i in range(4)],
+        loc=loc,
+        ip=ip,
+    )
+    return cute.TensorSSA(packed, 4, Uint32)
 
 
 def _mapping(
@@ -367,7 +465,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                         cute.AddressSpace.gmem,
                         assumed_align=16,
                     )
-                    local_packed = sanitize_negative_zero(
+                    local_packed = sanitize_negative_zero_u32x4(
                         finalize_top16_bf16(
                             gemm2_vector,
                             route_indices,
@@ -402,7 +500,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                                     local_values[element]
                                     + values[element].to(Float32) * weight
                                 )
-                    local_packed = sanitize_negative_zero(
+                    local_packed = sanitize_negative_zero_u32x4(
                         bf16x8_to_packed_u32x4(local_values.load().to(BFloat16))
                     )
             else:
@@ -412,7 +510,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                     cute.AddressSpace.gmem,
                     assumed_align=16,
                 )
-                local_packed = sanitize_negative_zero(
+                local_packed = sanitize_negative_zero_u32x4(
                     load_global_u32x4(local_ptr, volatile=False)
                 )
             multicast_offset = (
@@ -592,7 +690,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                     arrived = load_volatile_u32(access_counter)
                     while arrived < Uint32(m):
                         arrived = load_volatile_u32(access_counter)
-                next_index = (current_index + Uint32(1)) % Uint32(NUM_LAMPORT_BUFFERS)
+                next_index = (current_index + Uint32(1)) % Uint32(LAMPORT_GENERATIONS)
                 actual_bytes = Uint32(m) * Uint32(self.tp_size * self.latent_dim * 2)
                 cute.arch.store((latent_flags.iterator + 0).llvm_ptr, next_index)
                 cute.arch.store((latent_flags.iterator + 1).llvm_ptr, current_index)
@@ -653,7 +751,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                             cute.AddressSpace.gmem,
                             assumed_align=16,
                         )
-                        local_packed = sanitize_negative_zero(
+                        local_packed = sanitize_negative_zero_u32x4(
                             load_global_u32x4(source_ptr, volatile=False)
                         )
                         destination_element = current_elements + (
@@ -771,7 +869,7 @@ class AllReduceRMSNormWithReduceScatterEarlyExit:
                 target = Uint32(m) * Uint32(self.shared_roles)
                 while arrived < target:
                     arrived = load_volatile_u32(access_counter)
-                next_index = (current_index + Uint32(1)) % Uint32(NUM_LAMPORT_BUFFERS)
+                next_index = (current_index + Uint32(1)) % Uint32(LAMPORT_GENERATIONS)
                 actual_bytes = Uint32(m) * Uint32(self.tp_size * self.shard_dim * 2)
                 cute.arch.store((shared_flags.iterator + 0).llvm_ptr, next_index)
                 cute.arch.store((shared_flags.iterator + 1).llvm_ptr, current_index)
@@ -1071,7 +1169,7 @@ class CollectiveKernel:
         )
 
         bytes_per_routed_buffer = max_m * tp_size * latent_dim * 2
-        routed_bytes = NUM_LAMPORT_BUFFERS * bytes_per_routed_buffer
+        routed_bytes = LAMPORT_GENERATIONS * bytes_per_routed_buffer
         self._routed_workspace = symm_mem.empty(
             routed_bytes // 4,
             dtype=torch.float32,
@@ -1080,7 +1178,7 @@ class CollectiveKernel:
         self._routed_symm_mem = symm_mem.rendezvous(self._routed_workspace, group)
         self._routed_workspace.fill_(-0.0)
         actual_bytes_per_buffer = (
-            self._routed_symm_mem.buffer_size // NUM_LAMPORT_BUFFERS // 16 * 16
+            self._routed_symm_mem.buffer_size // LAMPORT_GENERATIONS // 16 * 16
         )
         if actual_bytes_per_buffer < bytes_per_routed_buffer:
             raise RuntimeError("routed symmetric workspace is too small")
@@ -1105,7 +1203,7 @@ class CollectiveKernel:
         self._shared_shard = self._shared_output[:, shard_start:shard_end]
 
         self._shared_workspace = symm_mem.empty(
-            (NUM_LAMPORT_BUFFERS, max_m, tp_size, self.shard_dim),
+            (LAMPORT_GENERATIONS, max_m, tp_size, self.shard_dim),
             dtype=torch.bfloat16,
             device=device,
         )

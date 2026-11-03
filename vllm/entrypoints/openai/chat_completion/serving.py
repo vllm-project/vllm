@@ -201,6 +201,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -629,6 +630,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                     _make_completion_tokens_details(0)
                                     if self._include_reasoning_tokens_details
                                     else None
+                                ),
+                                # Known from the first output, so the first
+                                # chunk's prompt split matches the final one.
+                                prompt_tokens_details=_make_prompt_tokens_details(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens,
+                                    num_cache_creation_tokens,
+                                    mm_token_counts,
                                 ),
                             )
 
