@@ -67,7 +67,11 @@ def router_gate(mlp) -> torch.Tensor:
     expert path routes with it), made here if it does not exist yet."""
     runner = mlp.experts
     if getattr(runner, "_fse_fuse_gate", False):
-        runner._maybe_fuse_gate_weights()
+        if runner._combined_gate_weight is None:
+            # The loader fuses it (process_weights_after_loading, vllm#64692);
+            # before #64692 the runner fused it on first use.
+            fuse = getattr(runner, "process_weights_after_loading", None)
+            (fuse or runner._maybe_fuse_gate_weights)()
         return runner._combined_gate_weight
     return torch.cat([mlp.gate.weight, mlp.shared_expert_gate.weight], 0).contiguous()
 
