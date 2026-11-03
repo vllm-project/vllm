@@ -176,6 +176,17 @@ class SchedulerConfig:
     - "priority" means requests are handled based on given priority (lower
       value means earlier handling) and time of arrival deciding any ties)."""
 
+    max_priority_preemptions_per_step: int = Field(default=0, ge=0)
+    """With the priority policy, the most running requests that the
+    highest-priority waiting request may preempt in a step when the KV cache
+    lacks room for its whole sequence. Only requests of a strictly lower
+    priority are preempted, in the scheduler's preemption order (the lowest
+    priority, then the latest arrival), as few as needed and none if this many
+    would not make room. In a step that schedules a higher-priority prefill, a
+    lower-priority request that holds no KV blocks is admitted only if its whole
+    sequence fits beside the blocks in-flight prefills still need. 0 (the
+    default) disables it."""
+
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
     partially schedule a multimodal item. Only used in V1
@@ -319,6 +330,7 @@ class SchedulerConfig:
             "max_num_encoder_input_tokens",
             "encoder_cache_size",
             "policy",
+            "max_priority_preemptions_per_step",
             "disable_chunked_mm_input",
             "scheduler_cls",
             "disable_hybrid_kv_cache_manager",
@@ -386,6 +398,12 @@ class SchedulerConfig:
             raise ValueError(
                 f"max_num_active_seqs ({self.max_num_active_seqs}) cannot be "
                 f"greater than max_num_seqs ({self.max_num_seqs})."
+            )
+
+        if self.max_priority_preemptions_per_step and self.policy != "priority":
+            raise ValueError(
+                "max_priority_preemptions_per_step requires the priority "
+                f"scheduling policy, not {self.policy!r}."
             )
 
         if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
