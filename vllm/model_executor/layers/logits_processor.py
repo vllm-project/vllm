@@ -320,10 +320,10 @@ class LogitsProcessor(PluggableLayer):
         values = values.float()
         if return_log_probs:
             return ids, values - log_partition
-        if self.scale != 1.0:
-            values = values * self.scale
         if self.soft_cap is not None:
             values = torch.tanh(values / self.soft_cap) * self.soft_cap
+        if self.scale != 1.0:
+            values = values * self.scale
         return ids, values
 
     def extra_repr(self) -> str:
