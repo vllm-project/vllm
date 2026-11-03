@@ -911,13 +911,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs = num_tokens // self.decode_query_len
             assert num_tokens % self.decode_query_len == 0
         elif self.speculator is not None:
+            assert self.speculative_config is not None
             num_reqs = min(
                 num_reqs, self.max_num_tokens // self.speculator.num_query_per_req
             )
             num_tokens = min(
                 num_tokens,
                 self.max_num_tokens
-                - num_reqs * self.speculator.num_extra_query_per_req,
+                - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
             )
 
         assert num_tokens <= self.max_num_tokens, (

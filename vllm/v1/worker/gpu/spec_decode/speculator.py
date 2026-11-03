@@ -76,8 +76,6 @@ class BaseSpeculator(ABC):
     """
 
     num_query_per_req: int = 1
-    # Extra query slots reserved per request outside the regular queries.
-    num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
