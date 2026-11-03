@@ -149,8 +149,8 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             has_weight=config.norm_affine,
             zero_centered_gamma=config.norm_zero_centered_gamma,
         )
-        # Context K/V goes through _build_fused_kv_buffers, never the parent's
-        # MXFP8 context projection.
+        # Context K/V is projected in _project_muse_context_kv, never by the
+        # parent's MXFP8 context projection.
         self._context_kv_proj = None
         self.markov_head = DSparkMarkovHead(
             config.vocab_size,
