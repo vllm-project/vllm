@@ -205,8 +205,3 @@ class RayPrometheusStatLogger(PrometheusStatLogger):
     _spec_decoding_cls = RaySpecDecodingProm
     _kv_connector_cls = RayKVConnectorProm
     _perf_metrics_cls = RayPerfMetricsProm
-
-    @staticmethod
-    def _unregister_vllm_metrics():
-        # No-op on purpose
-        pass
