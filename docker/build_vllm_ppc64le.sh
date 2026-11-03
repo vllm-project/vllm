@@ -13,6 +13,7 @@ cd "$REPO_ROOT"
 ########################################
 
 IBM_DEVPI_URL=${IBM_DEVPI_URL:-"https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/"}
+PYTHON_VERSION=${PYTHON_VERSION:-3.14}
 
 ########################################
 # wheel dir
@@ -109,7 +110,7 @@ OPENSSL_DEVEL="openssl-devel-$(rpm -q --queryformat '%{VERSION}-%{RELEASE}' open
 
 microdnf install -y \
     "${OPENSSL_DEVEL}" \
-    python3.12 python3.12-devel python3.12-pip gcc \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip gcc \
     git jq gcc-toolset-14 gcc-toolset-14-libatomic-devel \
     automake libtool clang-devel \
     harfbuzz-devel kmod lcms2-devel libimagequant-devel libjpeg-turbo-devel \
@@ -128,10 +129,10 @@ rpm -ivh --nodeps \
     https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-compiler-3.14.0-17.el9.ppc64le.rpm
 
 ########################################
-# Python 3.12 virtual environment
+# Python virtual environment
 ########################################
 
-python3.12 -m venv /opt/vllm
+python${PYTHON_VERSION} -m venv /opt/vllm
 source /opt/vllm/bin/activate
 
 export PATH=/opt/vllm/bin:$PATH
@@ -429,7 +430,7 @@ else
     cd xgrammar
 
     cp cmake/config.cmake .
-    export PYTHONPATH=/opt/vllm/lib64/python3.12/site-packages:/opt/vllm/lib/python3.12/site-packages:${PYTHONPATH:-}
+    export PYTHONPATH=/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages:/opt/vllm/lib/python${PYTHON_VERSION}/site-packages:${PYTHONPATH:-}
 
     uv build \
         --wheel \
