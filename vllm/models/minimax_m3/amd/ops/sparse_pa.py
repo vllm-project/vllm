@@ -10,6 +10,7 @@ except ModuleNotFoundError:
     import triton
     import triton.language as tl
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 
 ASM_PAGE_SIZE = 16
@@ -296,6 +297,7 @@ def _insert_index_cache_kernel(
     CACHE_BLOCK_SIZE: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
+    FP8_MAX: tl.constexpr,
 ):
     pid_t = tl.program_id(0)
     offs_d = tl.arange(0, BLOCK_D)
@@ -312,6 +314,8 @@ def _insert_index_cache_kernel(
     )
     mask = (slot >= 0) & (offs_d < HEAD_DIM)
     value = tl.load(src, mask=offs_d < HEAD_DIM, other=0.0)
+    if FP8_MAX > 0:
+        value = tl.clamp(value.to(tl.float32), -FP8_MAX, FP8_MAX)
     # The side cache carries its own dtype (bf16, or e4m3 for the fp8 indexer),
     # so convert rather than leaning on the store's implicit cast.
     tl.store(dst, value.to(dst.dtype.element_ty), mask=mask)
@@ -336,6 +340,9 @@ def minimax_m3_insert_index_cache(
         raise ValueError("MiniMax-M3 index cache requires contiguous head dimension")
 
     head_dim = index_k.shape[1]
+    fp8_max = 0.0
+    if index_cache.element_size() == 1:
+        fp8_max = get_fp8_min_max()[1]
     _insert_index_cache_kernel[(index_k.shape[0],)](
         index_k,
         index_cache,
@@ -349,6 +356,7 @@ def minimax_m3_insert_index_cache(
         CACHE_BLOCK_SIZE=index_cache.shape[1],
         HEAD_DIM=head_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
+        FP8_MAX=fp8_max,
         num_warps=4,
     )
 
@@ -552,6 +560,18 @@ def _run_gluon_decode(
     # V is offset by half a block when the sides interleave, so it holds fewer
     # pages than K even though both are addressed by the same page id.
     v_nphys16 = v_cache.shape[0]
+    sides_packed = _sides_are_packed(k_cache, v_cache)
+    if sides_packed:
+        if v_nphys16 > nphys16:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA packed V view is longer than K "
+                f"({v_nphys16} > {nphys16})"
+            )
+        # AITER's pa_decode_gluon requires equal shape[0]. Trim K to the V
+        # suffix length: valid page ids only address that range (the trailing
+        # K-only pages are the last block's V pages under the K view).
+        k_cache = k_cache[:v_nphys16]
+        nphys16 = v_nphys16
     k_cache_view = k_cache.view(nphys16 * hkv, 1, *k_cache.shape[2:])
     v_cache_view = v_cache.view(v_nphys16 * hkv, 1, *v_cache.shape[2:])
     q_view = q.view(total_q * num_kv_heads, group_size, head_size)
@@ -570,7 +590,7 @@ def _run_gluon_decode(
     is_fp8 = _is_fp8_kv_cache_tensor(k_cache)
     compute_type = aiter_dtypes.fp8 if is_fp8 else q.dtype
     if is_fp8:
-        if _sides_are_packed(k_cache, v_cache) and not all(
+        if sides_packed and not all(
             scale is None or scale.numel() == 1 for scale in (k_scale, v_scale)
         ):
             raise NotImplementedError(

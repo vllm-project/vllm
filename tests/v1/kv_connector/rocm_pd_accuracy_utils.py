@@ -11,7 +11,9 @@ import contextlib
 import importlib
 import json
 import os
+import random
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -31,6 +33,24 @@ _REVISIONS = {
     QWEN_MODEL: "c1899de289a04d12100db370d81485cdf75e47ca",
     DEEPSEEK_MODEL: "66c54660eae7e90c9ba259bfdf92d07d6e3ce8aa",
 }
+
+
+def _side_channel_ports(count: int) -> list[int]:
+    """Free ports below the ephemeral range, which ``bind(0)`` never returns.
+
+    NIXL binds its side channel only after the model loads, and until then an
+    ephemeral port could be given to another ``bind(0)`` listener.
+    """
+    with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+        ephemeral_start = int(f.read().split()[0])
+    rng = random.SystemRandom()
+    ports: set[int] = set()
+    while len(ports) < count:
+        port = rng.randrange(10000, ephemeral_start)
+        with socket.socket() as sock, contextlib.suppress(OSError):
+            sock.bind(("", port))
+            ports.add(port)
+    return list(ports)
 
 
 def _metric_total(server, name: str, **labels: str) -> float:
@@ -158,10 +178,21 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
         "VLLM_ROCM_USE_AITER": "1",
         "VLLM_KV_CACHE_LAYOUT": "HND",
     }
-    bootstrap_port = get_open_port()
     with contextlib.ExitStack() as stack:
+        bootstrap_port = 0
+        if connector == "mooncake":
+            from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (  # noqa: E501
+                MooncakeBootstrapServer,
+            )
+
+            bootstrap = MooncakeBootstrapServer("127.0.0.1", 0)
+            stack.callback(bootstrap.shutdown)
+            bootstrap.start()
+            bootstrap_port = bootstrap.port
+            extra["bootstrap_server_address"] = f"127.0.0.1:{bootstrap_port}"
         servers: list[RemoteOpenAIServer] = []
         stack.callback(RemoteOpenAIServer.shutdown_many, servers)
+        side_channel_ports = _side_channel_ports(2)
         for role, tp, assigned in (
             ("kv_producer", prefill_tp, devices[:prefill_tp]),
             ("kv_consumer", decode_tp, devices[prefill_tp : prefill_tp + decode_tp]),
@@ -175,8 +206,7 @@ def run_rocm_pd_accuracy(connector, model, prefill_tp, decode_tp, monkeypatch):
                 **common_env,
                 selector: ",".join(assigned),
                 "VLLM_PORT": str(get_open_port()),
-                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(get_open_port()),
-                "VLLM_MOONCAKE_BOOTSTRAP_PORT": str(bootstrap_port),
+                "VLLM_NIXL_SIDE_CHANNEL_PORT": str(side_channel_ports.pop()),
             }
             servers.append(
                 RemoteOpenAIServer(

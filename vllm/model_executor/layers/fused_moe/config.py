@@ -6,6 +6,7 @@ from typing import Union
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
@@ -15,7 +16,10 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
@@ -248,6 +252,8 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
     is_scale_swizzled: bool = True
+    # Emit block-quant activation scales column-major (physical [G, M] layout).
+    is_scale_transposed: bool = False
 
     # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
     # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
@@ -502,6 +508,7 @@ class FusedMoEQuantConfig:
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
         is_scale_swizzled: bool = True,
+        is_scale_transposed: bool = False,
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
@@ -536,6 +543,9 @@ class FusedMoEQuantConfig:
         - is_scale_swizzled: Whether the activation scale-factor layout is
           swizzled. Pass through to the underlying quantization kernel for
           dtypes that distinguish layouts (nvfp4, mxfp8). Defaults to True.
+        - is_scale_transposed: Whether block-quantized activation scales are
+          emitted column-major (physical [num_groups, num_tokens] layout) by
+          the quantize step. Defaults to False.
         - gemm1_alpha: Optional MXFP4 TRTLLM SwiGLU alpha parameter.
         - gemm1_beta: Optional MXFP4 TRTLLM SwiGLU beta parameter.
         - gemm1_clamp_limit: Optional MXFP4 TRTLLM SwiGLU clamp limit.
@@ -572,6 +582,7 @@ class FusedMoEQuantConfig:
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
             is_scale_swizzled=is_scale_swizzled,
+            is_scale_transposed=is_scale_transposed,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
@@ -596,6 +607,7 @@ def fp8_w8a8_moe_quant_config(
     a2_gscale: torch.Tensor | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
@@ -616,6 +628,7 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        is_scale_transposed=is_scale_transposed,
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
@@ -1016,6 +1029,7 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
+    mori_ep_v2: bool = False  # whether the "mori" all2all backend runs EPv2
 
     @property
     def is_sequence_parallel(self) -> bool:
@@ -1068,10 +1082,26 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_mori_kernels(self):
+    def use_passthrough_all2all(self):
+        # Not gated on use_all2all_kernels: the experts dispatch and combine
+        # internally in every EP topology, including TP-only.
+        return self.all2all_backend == "passthrough"
+
+    @property
+    def use_mori_epv1_kernels(self):
+        if self.all2all_backend == "mori":
+            return self.use_all2all_kernels and not self.mori_ep_v2
         return self.use_all2all_kernels and self.all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
+        )
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "mori"
+            and self.mori_ep_v2
         )
 
     @property
@@ -1206,6 +1236,7 @@ class FusedMoEParallelConfig:
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 enable_eplb=vllm_parallel_config.enable_eplb,
+                mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
             )
         # DP + EP / TP + EP / DP + TP + EP
         assert use_ep
@@ -1226,6 +1257,7 @@ class FusedMoEParallelConfig:
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
             enable_eplb=vllm_parallel_config.enable_eplb,
+            mori_ep_v2=bool(vllm_parallel_config.mori_ep_v2),
         )
 
     @classmethod
@@ -1245,6 +1277,12 @@ class FusedMoEParallelConfig:
             all2all_backend="allgather_reducescatter",
             enable_eplb=False,
         )
+
+
+# Model types validated for VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1. This flag
+# also changes the MXFP4 weight shuffle layout, so using it on other models
+# can produce garbled output.
+_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES = ("deepseek_v41", "deepseek_v41_text")
 
 
 # Adapted from pplx-kernels tests/all_to_all_utils.py
@@ -1280,6 +1318,9 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_lora_enabled: bool = False
     has_hash_routing: bool = False
+    # Routes are adjusted between routing and expert execution.
+    require_decomposed_backend: bool = False
+    shared_expert_prefix: str | None = None
 
     # When True, the MoE skips its final cross-rank all-reduce (and the separate
     # shared-expert reduce), returning the partial per-rank sum. The caller is
@@ -1313,7 +1354,18 @@ class FusedMoEConfig:
     # Use the allocated width as the checkpoint TP stride, including for scales.
     tp_shard_with_padding: bool = False
     rocm_aiter_fmoe_enabled: bool = False
-    aiter_fmoe_shared_expert_enabled: bool = False
+    is_fused_shared_expert_requested: bool = False
+    # Activation scheme the routed experts were trained (QAT) against, when the
+    # checkpoint does not record it. Quant methods use it in place of their
+    # default: MiniMax-M3.1 quantizes the FC1 input per token and ships a 1.0
+    # ``input_global_scale`` placeholder, which is indistinguishable from a
+    # calibrated per-tensor scale of 1.0.
+    qat_activation_key: QuantKey | None = None
+    # Whether to force MXFP4 (a4w4) MoE activations for DeepSeek V4.1 on
+    # ROCm/AITER. Opt-in via VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1; rejected
+    # for any other model type. Resolved here, not in the forward path,
+    # because get_current_vllm_config() isn't set there.
+    use_mxfp4_w4a4_dsv4: bool = False
 
     def __post_init__(self):
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1341,15 +1393,39 @@ class FusedMoEConfig:
 
         if self.is_act_and_mul:
             self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-            self.aiter_fmoe_shared_expert_enabled = (
+            self.is_fused_shared_expert_requested = bool(
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
-        if self.use_mori_kernels:
-            assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+        if self.rocm_aiter_fmoe_enabled and envs.VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4:
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            model_type = (
+                getattr(vllm_config.model_config.hf_config, "model_type", None)
+                if vllm_config is not None
+                else None
             )
-            assert not self.aiter_fmoe_shared_expert_enabled, (
+            if model_type not in _AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES:
+                raise ValueError(
+                    f"VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 only supports "
+                    f"model_type in {_AITER_MOE_A4W4_DSV4_VALIDATED_MODEL_TYPES}, "
+                    f"got {model_type!r}. Unset this env var for this model."
+                )
+            if not rocm_aiter_ops.fused_moe_supports_quant_dtype_a():
+                raise ValueError(
+                    "VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4=1 needs an AITER build "
+                    "with fused_moe(quant_dtype_a=...) support "
+                    "(ROCm/aiter#5439+). Upgrade AITER or unset this env var."
+                )
+            self.use_mxfp4_w4a4_dsv4 = True
+
+        if self.use_mori_epv1_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "MoRI EPv1 needs to be used with aiter fused_moe for now."
+            )
+        if self.use_mori_epv1_kernels or self.use_mori_epv2_kernels:
+            assert not self.is_fused_shared_expert_requested, (
                 "Mori does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
@@ -1496,8 +1572,16 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
-    def use_mori_kernels(self):
-        return self.moe_parallel_config.use_mori_kernels
+    def use_passthrough_all2all(self):
+        return self.moe_parallel_config.use_passthrough_all2all
+
+    @property
+    def use_mori_epv1_kernels(self):
+        return self.moe_parallel_config.use_mori_epv1_kernels
+
+    @property
+    def use_mori_epv2_kernels(self):
+        return self.moe_parallel_config.use_mori_epv2_kernels
 
     @property
     def use_fi_nvl_two_sided_kernels(self):

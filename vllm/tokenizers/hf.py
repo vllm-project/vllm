@@ -8,12 +8,14 @@ from typing import TypeAlias, TypeVar
 
 from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
 HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
+logger = init_logger(__name__)
 
 
 class ThreadSafeHFTokenizerMixin:
@@ -124,10 +126,11 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # Some tokenizers (e.g., QwenTokenizer) have special tokens that
     # are added and included in the implementation of the vocab_size
     # property, but not in get_vocab(); if there is an implementation
-    # of vocab size, we should take the greater value.
+    # of vocab size, we should take the greater value. vocab_size is a
+    # count, so the largest id it implies is vocab_size - 1.
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+            max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property

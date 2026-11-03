@@ -1,0 +1,24 @@
+model_name: "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
+accuracy_threshold: 0.72
+num_questions: 1319
+num_fewshot: 5
+rocm_request_timeout_seconds: 1800
+# Dense MLA PCP on MI355; DP1/DCP1, eager execution, and Triton MoE.
+server_args: >-
+  --revision efe1ced428db63e7ccbcf367334596f77e9af140
+  --code-revision e434a23f91ba5b4923cf6c9d9a238eb4a08e3a11
+  --dtype bfloat16
+  --enforce-eager
+  --max-model-len 4096
+  --max-num-seqs 8
+  --max-num-batched-tokens 4096
+  --tensor-parallel-size 1
+  --prefill-context-parallel-size 2
+  --enable-expert-parallel
+  --moe-backend triton
+  --attention-config '{"backend":"ROCM_AITER_MLA","mla_prefill_backend":"ROCM_AITER_FA"}'
+  --kv-cache-dtype auto
+env:
+  VLLM_USE_V2_MODEL_RUNNER: "1"
+  VLLM_ROCM_USE_AITER: "1"
+  VLLM_WORKER_MULTIPROC_METHOD: "spawn"

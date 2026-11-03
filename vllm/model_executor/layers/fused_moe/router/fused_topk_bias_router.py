@@ -8,23 +8,23 @@ import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    BaseRouter,
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
     can_use_dsv4_topk,
     dsv4_topk,
 )
 
-
-def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
-    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
-        is_padding = get_forward_context().is_padding
-        return is_padding[:num_tokens] if is_padding is not None else None
-    return None
+# AITER instantiates biased_grouped_topk only for these NUM_GRP values, with at
+# most this many experts per group.
+AITER_SUPPORTED_NUM_GRP = (1, 2, 4, 8)
+AITER_MAX_EXPERTS_PER_GROUP = 32
 
 
 def vllm_topk_softmax(
@@ -42,7 +42,7 @@ def vllm_topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        is_padding=get_moe_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -65,7 +65,7 @@ def vllm_topk_sigmoid(
         renormalize,
         e_score_correction_bias,
         routed_scaling_factor,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        is_padding=get_moe_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -94,7 +94,7 @@ def vllm_topk_softplus_sqrt(
         e_score_correction_bias,
         input_tokens,
         hash_indices_table,
-        is_padding=_get_padding_mask(topk_indices.shape[0]),
+        is_padding=get_moe_padding_mask(topk_indices.shape[0]),
         bias_vl=bias_vl,
         image_sentinel_lo=image_sentinel_lo,
     )
@@ -104,15 +104,38 @@ def vllm_topk_softplus_sqrt(
 
 @functools.lru_cache(maxsize=8)
 def _aiter_get_num_expert_group(num_experts: int) -> int:
-    _AITER_MAX_EXPERTS_PER_GROUP = 32
-    g = max(1, -(-num_experts // _AITER_MAX_EXPERTS_PER_GROUP))
+    g = max(1, -(-num_experts // AITER_MAX_EXPERTS_PER_GROUP))
     while num_experts % g != 0:
         g += 1
     assert num_experts % g == 0, f"{num_experts=} not divisible by {g=}"
-    assert num_experts // g <= _AITER_MAX_EXPERTS_PER_GROUP, (
-        f"group size {num_experts // g} exceeds limit {_AITER_MAX_EXPERTS_PER_GROUP}"
+    # Grouping is a no-op here (topk_group == num_expert_group), so any divisor
+    # within the limit routes identically and we are free to pick one AITER has
+    # a kernel for. If none fits, the unsupported value is returned as-is --
+    # callers must gate on _aiter_can_use_biased_grouped_topk.
+    if g not in AITER_SUPPORTED_NUM_GRP:
+        g = next(
+            (
+                c
+                for c in sorted(AITER_SUPPORTED_NUM_GRP, reverse=True)
+                if num_experts % c == 0
+                and num_experts // c <= AITER_MAX_EXPERTS_PER_GROUP
+            ),
+            g,
+        )
+    assert num_experts // g <= AITER_MAX_EXPERTS_PER_GROUP, (
+        f"group size {num_experts // g} exceeds limit {AITER_MAX_EXPERTS_PER_GROUP}"
     )
     return g
+
+
+def _aiter_can_use_biased_grouped_topk(num_experts: int, topk: int) -> bool:
+    """Whether AITER has an instantiated kernel for this routing shape.
+
+    Both checks are needed: an unsupported group count can still be small
+    enough to satisfy ``topk >= g`` (num_experts=33 gives g=3).
+    """
+    g = _aiter_get_num_expert_group(num_experts)
+    return topk >= g and g in AITER_SUPPORTED_NUM_GRP
 
 
 def fused_topk_bias(
@@ -148,6 +171,7 @@ def fused_topk_bias(
         )
 
         output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        padding_mask = get_moe_padding_mask(gating_output.shape[0])
         if (
             scoring_func == "sqrtsoftplus"
             and hash_indices_table is None
@@ -165,6 +189,7 @@ def fused_topk_bias(
                 e_score_correction_bias,
                 output_indices_dtype,
                 routed_scaling_factor,
+                is_padding=padding_mask,
                 input_ids=input_tokens,
                 bias_vl=bias_vl,
                 image_sentinel_lo=image_sentinel_lo,
@@ -229,7 +254,7 @@ def fused_topk_bias(
         M = hidden_states.size(0)
         num_experts = gating_output.shape[-1]
         num_expert_group = _aiter_get_num_expert_group(num_experts)
-        if topk >= num_expert_group:
+        if _aiter_can_use_biased_grouped_topk(num_experts, topk):
             topk_weights = torch.empty(
                 M, topk, dtype=torch.float32, device=hidden_states.device
             )

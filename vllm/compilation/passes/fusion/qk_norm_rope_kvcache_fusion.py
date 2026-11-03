@@ -969,6 +969,10 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     layer.head_size,
                 )
                 continue
+            # Every layer the fused writer may serve must read and write the
+            # interleaved V cache, including layers whose patterns are not
+            # registered separately below.
+            layer.impl.set_interleaved_v_cache()
             shape_key = (
                 layer.num_heads,
                 layer.num_kv_heads,
@@ -991,7 +995,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                     quant_query=quant_q,
                                     v_norm=v_norm,
                                 ).register(self.patterns)
-
             if supports_mrope:
                 for section, is_interleaved in self.mrope_configs:
                     rotary_dim = 2 * sum(section)

@@ -5,7 +5,7 @@ import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 from transformers import PreTrainedConfig
@@ -24,10 +24,12 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 _C = TypeVar("_C", bound=PreTrainedConfig)
+_C_co = TypeVar("_C_co", bound=PreTrainedConfig, covariant=True)
 
 
-class _RootConfig(Protocol[_C]):
-    vision_config: _C
+class _RootConfig(Protocol[_C_co]):
+    @property
+    def vision_config(self) -> _C_co: ...
 
 
 class VisionEncoderInfo(ABC, Generic[_C]):
@@ -60,7 +62,8 @@ class VisionEncoderInfo(ABC, Generic[_C]):
 
 
 class VisionLanguageConfig(Protocol):
-    vision_config: Final[PreTrainedConfig]
+    @property
+    def vision_config(self) -> PreTrainedConfig: ...
 
 
 def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInfo:

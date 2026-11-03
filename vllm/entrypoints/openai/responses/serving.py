@@ -12,10 +12,10 @@ from typing import Any, Final, cast
 from fastapi import Request
 from openai.types.responses import (
     ResponseOutputItem,
+    ResponseOutputItemDoneEvent,
     ResponseOutputMessage,
     ResponseOutputText,
     ResponseStatus,
-    response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from pydantic import TypeAdapter
@@ -23,9 +23,6 @@ from pydantic import TypeAdapter
 from vllm import envs
 from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-)
 from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     RequestResponseMetadata,
@@ -48,6 +45,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -69,10 +67,15 @@ from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     extract_function_tool_names,
     extract_tool_types,
+    response_item_status,
+    reuse_streamed_item_ids,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    maybe_filter_parallel_tool_calls,
+)
 from vllm.exceptions import GenerationError, VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
@@ -82,6 +85,9 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import TokenizeParams
+from vllm.renderers.chat_utils import (
+    ChatTemplateContentFormatOption,
+)
 from vllm.renderers.online_renderer import (
     OnlineRenderer,
     ResponsesPreviousMessages,
@@ -109,7 +115,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
         tool_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         tool_server: ToolServer | None = None,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
@@ -139,6 +145,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             tool_strict_level=tool_strict_level,
             model_name=self.model_config.model,
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+            tokenizer=self.renderer.tokenizer,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -201,6 +208,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
@@ -332,6 +340,16 @@ class OpenAIServingResponses(GenerateBaseServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
+        maybe_template_error = self.online_renderer.validate_chat_template(
+            request_chat_template=None,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=(
+                self.online_renderer.trust_request_chat_template
+            ),
+        )
+        if maybe_template_error is not None:
+            return maybe_template_error
+
         self._preflight()
 
         if request.store and not self.enable_store:
@@ -429,11 +447,18 @@ class OpenAIServingResponses(GenerateBaseServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
             session_id = self._get_session_id(request, raw_request)
+            data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
                 request, tokenizer, chat_template_kwargs
             )
+            if response_parser is not None:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    response_parser.set_prompt_token_ids(prompt_token_ids)
 
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
@@ -502,7 +527,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=True if request._grammar_from_parser else None,
+                max_tool_calls=request.max_tool_calls,
             )
             generators.append(generator)
 
@@ -623,13 +651,17 @@ class OpenAIServingResponses(GenerateBaseServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
+        data_parallel_rank: int | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
+        max_tool_calls: int | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
 
         orig_priority = priority
         sub_request = 0
+        num_tool_calls = 0
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
@@ -649,7 +681,9 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 priority=priority,
                 session_id=session_id,
+                data_parallel_rank=data_parallel_rank,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=reasoning_ended,
             )
 
             async for res in generator:
@@ -661,10 +695,14 @@ class OpenAIServingResponses(GenerateBaseServing):
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
+            if max_tool_calls is not None and num_tool_calls >= max_tool_calls:
+                # The built-in tool call budget is spent; ignore the call.
+                break
 
             # Call the tool and update the context with the result.
             context.request_metrics_cover_all_generation_turns = False
             tool_output = await context.call_tool()
+            num_tool_calls += 1
             context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
@@ -691,6 +729,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     context.request,
                     context.response_messages,
                 )
+                if context.response_parser is not None:
+                    prompt_token_ids = self._extract_prompt_components(
+                        engine_input
+                    ).token_ids
+                    if prompt_token_ids is not None:
+                        context.response_parser.set_prompt_token_ids(prompt_token_ids)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
@@ -756,17 +800,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             assert isinstance(context, HarmonyContext)
             output = []
             harmony_msgs = context.messages[context.num_init_messages :]
-            if harmony_msgs:
-                fn_names = context.function_tool_names
-                for msg in harmony_msgs[:-1]:
-                    output.extend(harmony_to_response_output(msg, fn_names))
-                output.extend(
-                    harmony_to_response_output(
-                        harmony_msgs[-1],
-                        fn_names,
-                        incomplete=context.last_append_flush_status,
-                    )
+            # Streamed messages are a subsequence of harmony_msgs, in order.
+            streamed = iter(context.streamed_items_by_message)
+            next_streamed = next(streamed, None)
+            for i, msg in enumerate(harmony_msgs):
+                items = harmony_to_response_output(
+                    msg,
+                    context.function_tool_names,
+                    incomplete=(
+                        i == len(harmony_msgs) - 1 and context.last_append_flush_status
+                    ),
                 )
+                if next_streamed is not None and next_streamed[0] is msg:
+                    reuse_streamed_item_ids(items, next_streamed[1])
+                    next_streamed = next(streamed, None)
+                output.extend(items)
 
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -810,14 +858,19 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            # TODO: Build final response items from the accumulated streaming
-            # parser results instead of reparsing the complete output.
-            output = self._make_response_output_items(
-                request,
-                final_output,
-                tokenizer,
-                parser=context.response_parser,
+            streamed_items = context.streamed_output_items
+            self._log_final_output(
+                request, final_output, is_streaming=streamed_items is not None
             )
+            if streamed_items is not None:
+                output = streamed_items
+            else:
+                output = self._make_response_output_items(
+                    request,
+                    final_output,
+                    tokenizer,
+                    parser=context.response_parser,
+                )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -845,7 +898,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             output_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
             input_tokens_details=InputTokensDetails(
-                cache_write_tokens=getattr(context, "num_cache_creation_tokens", 0),
+                cache_write_tokens=context.num_cache_creation_tokens,
                 cached_tokens=num_cached_tokens,
                 input_tokens_per_turn=[
                     turn.input_tokens for turn in context.all_turn_metrics
@@ -959,32 +1012,21 @@ class OpenAIServingResponses(GenerateBaseServing):
             )
         return out
 
-    def _create_stream_response_logprobs(
+    def _log_final_output(
         self,
-        token_ids: Sequence[int],
-        logprobs: SampleLogprobs | None,
-        tokenizer: TokenizerLike,
-        top_logprobs: int | None = None,
-    ) -> list[response_text_delta_event.Logprob]:
-        lgs = self._create_response_logprobs(
-            token_ids=token_ids,
-            logprobs=logprobs,
-            tokenizer=tokenizer,
-            top_logprobs=top_logprobs,
-        )
-        return [
-            response_text_delta_event.Logprob(
-                token=lg.token,
-                logprob=lg.logprob,
-                top_logprobs=[
-                    response_text_delta_event.LogprobTopLogprob(
-                        token=tl.token, logprob=tl.logprob
-                    )
-                    for tl in lg.top_logprobs
-                ],
+        request: ResponsesRequest,
+        final_output: CompletionOutput,
+        is_streaming: bool,
+    ) -> None:
+        if self.enable_log_outputs and self.request_logger:
+            self.request_logger.log_outputs(
+                request_id=request.request_id,
+                outputs=final_output.text,
+                output_token_ids=final_output.token_ids,
+                finish_reason=final_output.finish_reason,
+                is_streaming=is_streaming,
+                delta=False,
             )
-            for lg in lgs
-        ]
 
     def _make_response_output_items(
         self,
@@ -993,17 +1035,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         tokenizer: TokenizerLike,
         parser: Parser | None = None,
     ) -> list[ResponseOutputItem]:
-        # Log complete response if output logging is enabled
-        if self.enable_log_outputs and self.request_logger:
-            self.request_logger.log_outputs(
-                request_id=request.request_id,
-                outputs=final_output.text,
-                output_token_ids=final_output.token_ids,
-                finish_reason=final_output.finish_reason,
-                is_streaming=False,
-                delta=False,
-            )
-
         # Compute logprobs if requested
         logprobs = None
         if request.is_include_output_logprobs() and final_output.logprobs:
@@ -1028,9 +1059,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
-                tool_calls=tool_calls,
+                tool_calls=maybe_filter_parallel_tool_calls(tool_calls or [], request),
                 logprobs=logprobs,
                 tools=request.tools,
+                finish_reason=final_output.finish_reason,
             )
 
         # Fallback when no parser is configured
@@ -1048,7 +1080,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if final_output.text
                 else [],
                 role="assistant",
-                status="completed",
+                status=response_item_status(final_output.finish_reason),
                 type="message",
             )
         ]
@@ -1110,7 +1142,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             while current_index < len(event_deque):
                 event = event_deque[current_index]
                 yield event
-                if getattr(event, "type", "unknown") == "response.completed":
+                if getattr(event, "type", "unknown") in (
+                    "response.completed",
+                    "response.incomplete",
+                ):
                     return
                 current_index += 1
 
@@ -1192,22 +1227,23 @@ class OpenAIServingResponses(GenerateBaseServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor(tools=request.tools)
 
-        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+        hide_stream_metadata = (
+            not request.include_reasoning and context.response_parser is not None
+        )
 
-        def _get_logprobs(
-            output: CompletionOutput,
-        ) -> list[response_text_delta_event.Logprob]:
+        def _get_logprobs(output: CompletionOutput) -> list[Logprob]:
             if not request.is_include_output_logprobs():
                 return []
             if hide_stream_metadata:
                 return []
-            return self._create_stream_response_logprobs(
+            return self._create_response_logprobs(
                 token_ids=output.token_ids,
                 logprobs=output.logprobs,
                 tokenizer=tokenizer,
                 top_logprobs=request.top_logprobs,
             )
 
+        finish_reason: str | None = None
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None or not ctx.last_output.outputs:
@@ -1215,6 +1251,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             output = ctx.last_output.outputs[0]
             self._raise_if_error(output.finish_reason, request.request_id)
+            finish_reason = output.finish_reason
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
@@ -1231,6 +1268,7 @@ class OpenAIServingResponses(GenerateBaseServing):
 
             if not delta_message:
                 continue
+            delta_message = maybe_filter_parallel_tool_calls(delta_message, request)
 
             for dm in split_delta(delta_message):
                 target_state, tool_call = processor.resolve_target_state(dm)
@@ -1246,8 +1284,11 @@ class OpenAIServingResponses(GenerateBaseServing):
                 for event in processor.emit_delta(dm, output, _get_logprobs):
                     yield _increment_sequence_number_and_return(event)
 
-        for event in processor.close_current():
+        for event in processor.close_current(response_item_status(finish_reason)):
             yield _increment_sequence_number_and_return(event)
+
+        assert isinstance(context, SimpleContext)
+        context.streamed_output_items = processor.output_items
 
     async def _process_harmony_streaming_events(
         self,
@@ -1279,16 +1320,24 @@ class OpenAIServingResponses(GenerateBaseServing):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
+                    done_items: list[ResponseOutputItem] = []
                     # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message, state, ctx.function_tool_names
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
 
                     for event in emit_tool_action_events(
                         completed_message, state, self.tool_server
                     ):
+                        if isinstance(event, ResponseOutputItemDoneEvent):
+                            done_items.append(event.item)
                         yield _increment_sequence_number_and_return(event)
+                    ctx.streamed_items_by_message.append(
+                        (completed_message, done_items)
+                    )
                     state.reset_for_new_item()
 
     async def responses_stream_generator(
@@ -1389,10 +1438,20 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request_metadata,
                 created_time=created_time,
             )
-            yield _increment_sequence_number_and_return(
-                ResponseCompletedEvent(
+            terminal_event: StreamingResponsesResponse
+            if (
+                isinstance(final_response, ResponsesResponse)
+                and final_response.status == "incomplete"
+            ):
+                terminal_event = ResponseIncompleteEvent(
+                    type="response.incomplete",
+                    sequence_number=-1,
+                    response=final_response,
+                )
+            else:
+                terminal_event = ResponseCompletedEvent(
                     type="response.completed",
                     sequence_number=-1,
                     response=final_response,
                 )
-            )
+            yield _increment_sequence_number_and_return(terminal_event)
