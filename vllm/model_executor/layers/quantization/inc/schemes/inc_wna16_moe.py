@@ -8,6 +8,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
+    MoEActivation,
     apply_moe_activation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -66,7 +67,7 @@ class INCARKWNA16MoEMethod(MoeWNA16Method):
         self.unpermuted_row_to_permuted_row: torch.Tensor | None = None
         self.router_weight_ones: torch.Tensor | None = None
         self.router_weights_fn = self._keep_router_weights
-        self.activation = None
+        self.activation: MoEActivation | None = None
         self.activation_config = ApplyMoEActivationConfig.from_configs(
             moe,
             FusedMoEQuantConfig.make(),

@@ -3223,3 +3223,88 @@ def test_e2e_selects_w4a8_for_every_linear(vllm_runner, monkeypatch) -> None:
             assert all(i % 8 == 0 and o % 8 == 0 for i, o in shapes), shapes
 
         vllm_model.apply_model(check_model)
+
+
+def test_cri_mxfp4_checkpoint_decode_preserves_signed_e2m1_and_scales():
+    """The ARK weight-basis conversion must decode packed codes, not INT4."""
+    from vllm.model_executor.layers.quantization.inc.schemes.inc_ark_mxfp4_moe import (  # noqa: E501
+        dequantize_mxfp4,
+    )
+
+    codes = torch.tensor([0x22, 0xAA, 0x77, 0xFF], dtype=torch.uint8)
+    codes = codes.repeat(8).reshape(1, 32)
+    scales = torch.tensor([[127, 128]], dtype=torch.uint8)
+    expected_group = torch.tensor([1, 1, -1, -1, 6, 6, -6, -6]).repeat(4)
+    expected = torch.cat((expected_group, expected_group * 2)).float()[None]
+    actual = dequantize_mxfp4(codes, scales)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_cri_mxfp4_unknown_selector_fails_closed(monkeypatch):
+    from vllm import envs
+
+    monkeypatch.setenv("VLLM_XPU_INC_MXFP4_BACKEND", "ark_int4")
+    with pytest.raises(ValueError, match="VLLM_XPU_INC_MXFP4_BACKEND"):
+        _ = envs.VLLM_XPU_INC_MXFP4_BACKEND
+
+
+@pytest.mark.parametrize("backend", ["ark_mxfp4", "ark_mxfp8", "ark_mxfp4_fwht"])
+def test_cri_mxfp4_full_model_e2e(vllm_runner, monkeypatch, backend):
+    """All 48 routed layers must use the requested path and generate Paris."""
+    monkeypatch.setenv("VLLM_XPU_INC_MXFP4_BACKEND", backend)
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        "INCModel/Qwen3-30B-A3B-AutoRound-MXFP4-W4A4",
+        revision="30056176cb3d122602172e39c33a0b36edda93a4",
+        max_model_len=2048,
+        max_num_batched_tokens=4096,
+        max_num_seqs=8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=0.65,
+        attention_config={"backend": "TRITON_ATTN"},
+    ) as runner:
+
+        def verify_layers(model):
+            layers = [
+                module.quant_method
+                for module in model.modules()
+                if type(getattr(module, "quant_method", None)).__name__
+                == "INCARKMxfp4MoEMethod"
+            ]
+            assert len(layers) == 48
+            assert all(method.backend == backend for method in layers)
+            if backend in ("ark_mxfp8", "ark_mxfp4", "ark_mxfp4_fwht"):
+                from vllm import envs
+
+                enabled = (
+                    envs.VLLM_XPU_INC_MXFP8_PREPACK
+                    if backend == "ark_mxfp8"
+                    else envs.VLLM_XPU_INC_MXFP4_PREPACK
+                )
+                assert all(
+                    method.use_prepacked_weights == enabled for method in layers
+                )
+                if enabled:
+                    assert all(
+                        set(method.prepared_weights) == {"w13", "w2"}
+                        for method in layers
+                    )
+                    prepared_bytes = sum(
+                        p.nbytes
+                        for method in layers
+                        for p in method.prepared_weights.values()
+                    )
+                    assert prepared_bytes == (
+                        48 * 128 * (1536 * 2048 + 2048 * 768)
+                        * (33 if backend == "ark_mxfp8" else 17) // 32
+                    )
+
+        runner.apply_model(verify_layers)
+        outputs = runner.generate_greedy(
+            ["The capital of France is", "One plus one equals"], max_tokens=8
+        )
+        assert "Paris" in outputs[0][1]
+        assert "two" in outputs[1][1] or "2" in outputs[1][1]
+        repeated = runner.generate_greedy(["The capital of France is"], max_tokens=8)
+        assert "Paris" in repeated[0][1]
