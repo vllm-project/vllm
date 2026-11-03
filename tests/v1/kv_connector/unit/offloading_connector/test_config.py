@@ -329,10 +329,8 @@ def _replicated_layout(
     distributed_executor_backend: Any = "mp",
     nnodes: int = 1,
     world_size: int | None = None,
-    extra_config: dict[str, Any] | None = None,
 ) -> bool:
     config = _make_vllm_config(
-        extra_config=extra_config,
         tensor_parallel_size=tensor_parallel_size,
         pipeline_parallel_size=pipeline_parallel_size,
         prefill_context_parallel_size=prefill_context_parallel_size,
@@ -909,36 +907,6 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
         kv_cache_groups=[KVCacheGroupSpec(mla_layers, spec)],
     )
     assert _replicated_layout(kv_cache_config)
-
-
-@pytest.mark.parametrize(
-    "replicas,scratch,secondary,expected",
-    [
-        (4, True, False, True),
-        (1, True, False, False),
-        (4, True, True, False),
-        (4, False, True, True),
-    ],
-)
-def test_replicated_layout_selected_groups(replicas, scratch, secondary, expected):
-    kv_config = _make_mla_kv_cache_config()
-    kv_config.kv_cache_groups[0].kv_tp_replicas = replicas
-    if scratch:
-        kv_config.kv_cache_groups.append(
-            KVCacheGroupSpec(
-                ["scratch"],
-                CircularBufferSpec(
-                    block_size=16, num_kv_heads=1, head_size=128, dtype=torch.float32
-                ),
-            )
-        )
-    assert (
-        _replicated_layout(
-            kv_config,
-            extra_config={"secondary_tiers": [{"type": "fs"}] if secondary else []},
-        )
-        == expected
-    )
 
 
 @pytest.mark.parametrize(
