@@ -194,6 +194,13 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports core lookahead hashing."""
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
@@ -636,7 +643,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
