@@ -416,6 +416,46 @@ mod tests {
     }
 
     #[test]
+    fn completion_logprobs_keep_space_prefixed_tokens_distinct() {
+        let logprobs = DecodedLogprobs {
+            positions: vec![
+                DecodedPositionLogprobs {
+                    entries: vec![
+                        DecodedTokenLogprob {
+                            token_id: 1,
+                            token: " the".to_string(),
+                            logprob: -0.1,
+                            rank: 1,
+                        },
+                        DecodedTokenLogprob {
+                            token_id: 2,
+                            token: "the".to_string(),
+                            logprob: -0.2,
+                            rank: 2,
+                        },
+                    ],
+                },
+                DecodedPositionLogprobs {
+                    entries: vec![DecodedTokenLogprob {
+                        token_id: 3,
+                        token: "x".to_string(),
+                        logprob: -0.3,
+                        rank: 1,
+                    }],
+                },
+            ],
+        };
+
+        let response = decoded_logprobs_to_openai(&logprobs, 0, false).unwrap();
+        assert_eq!(response.tokens, [" the", "x"]);
+        assert_eq!(response.text_offset, [0, 4]);
+        assert_eq!(
+            response.top_logprobs[0].as_ref().unwrap(),
+            &indexmap::IndexMap::from([(" the".to_string(), -0.1), ("the".to_string(), -0.2),])
+        );
+    }
+
+    #[test]
     fn chat_logprobs_dedupes_repeated_tokens_before_top_logprobs_cut() {
         // Sampled `A` is also the top-1 token: the engine row is `[A, A, B, C]`.
         let mut logprobs = sample_logprobs();
