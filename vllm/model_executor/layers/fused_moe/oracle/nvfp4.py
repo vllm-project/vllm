@@ -203,7 +203,11 @@ def nvfp4_backend_supports_csf_scales(
     backend: NvFp4MoeBackend, config: FusedMoEConfig, use_a16: bool
 ) -> bool:
     """Whether the backend keeps `csf` checkpoint scales compressed."""
-    if backend != NvFp4MoeBackend.B12X or _use_a16(backend, use_a16):
+    if (
+        backend != NvFp4MoeBackend.B12X
+        or _use_a16(backend, use_a16)
+        or not envs.VLLM_B12X_MOE_CSF_RESIDENT_SCALES
+    ):
         return False
     from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
 
