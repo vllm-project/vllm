@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
-from vllm.models.deepseek_v4.nvidia.ops.o_proj import deep_gemm_fp8_o_proj
 from vllm.platforms import current_platform
 
 
@@ -32,6 +31,10 @@ def _fused_wo_a_max_tokens(layer: nn.Module) -> int:
 
 def _can_fuse_wo_a(layer: nn.Module) -> bool:
     """Whether the attention layer matches the fused WO-A kernel's layout."""
+    # The fused kernel never materializes the BF16 input an adapter on wo_a
+    # needs, so such a layer takes ``deep_gemm_fp8_o_proj`` instead.
+    if getattr(layer.wo_a, "requires_unquantized_input", False):
+        return False
     method = getattr(layer.wo_b, "scheme", layer.wo_b.quant_method)
     return (
         current_platform.is_device_capability_family(100)
@@ -88,12 +91,10 @@ def dsv41_o_proj(
         return wo_b_proj(
             QuantizedActivation(q, scales, o.dtype, q.shape, kMxfp8Dynamic)
         )
-    return deep_gemm_fp8_o_proj(
+    z = layer.wo_a.grouped_forward(
         o,
         positions,
         cos_sin_cache,
-        layer.wo_a,
-        wo_b_proj,
         n_groups=layer.n_local_groups,
         heads_per_group=layer.n_local_heads // layer.n_local_groups,
         nope_dim=layer.nope_head_dim,
@@ -102,3 +103,4 @@ def dsv41_o_proj(
         einsum_recipe=layer._einsum_recipe,
         tma_aligned_scales=layer._tma_aligned_scales,
     )
+    return wo_b_proj(z.flatten(1))
