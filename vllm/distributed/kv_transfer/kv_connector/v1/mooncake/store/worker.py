@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import functools
 import math
 import os
 import queue
@@ -74,6 +75,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_OK,
     decode_lookup_response,
     encode_lookup_response,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.selective_lease import (  # noqa: E501
+    SelectiveLookupLease,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
@@ -402,7 +406,7 @@ def _event_token_ids(req_meta: ReqMeta, start: int, end: int) -> tuple[int, ...]
     ids_start = req_meta.token_ids_start
     if token_ids is None or start < ids_start:
         return ()
-    if end > ids_start + len(token_ids):
+    if end + req_meta.num_hash_lookahead_tokens > ids_start + len(token_ids):
         return ()
     return tuple(token_ids[start - ids_start : end - ids_start])
 
@@ -517,6 +521,13 @@ class StoreResidencyEvents:
                 continue
             start, end = block.token_span
             group_idx, kind, sliding_window = self._groups[block.group_idx]
+            token_ids = _event_token_ids(req_meta, start, end)
+            job_token_ids = req_meta.token_ids
+            lookahead = req_meta.num_hash_lookahead_tokens
+            lookahead_token_ids = None
+            if token_ids and job_token_ids is not None and lookahead:
+                offset = end - req_meta.token_ids_start
+                lookahead_token_ids = [job_token_ids[offset : offset + lookahead]]
             event = BlockStored(
                 block_hashes=[maybe_convert_block_hash(block.block_hash)],
                 parent_block_hash=(
@@ -524,7 +535,8 @@ class StoreResidencyEvents:
                     if block.parent_hash is not None
                     else None
                 ),
-                token_ids=list(_event_token_ids(req_meta, start, end)),
+                token_ids=list(token_ids),
+                lookahead_token_ids=lookahead_token_ids,
                 block_size=end - start,
                 lora_id=None,
                 medium=STORE_MEDIUM,
@@ -936,7 +948,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
         return blocks
 
-    def _write(self, blocks: Sequence[StoreBlock], req_meta: ReqMeta) -> bool:
+    def _write(
+        self,
+        blocks: Sequence[StoreBlock],
+        req_meta: ReqMeta,
+        *,
+        clear_pressure: bool = True,
+    ) -> bool:
         """Write blocks to the Store and announce the resident ones.
 
         The only Store write path: dedup, transfer, failure handling,
@@ -1072,7 +1090,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         if failed:
             return False
-        if self._clear_store_pressure():
+        if clear_pressure and self._clear_store_pressure():
             logger.info(
                 "Mooncake CPU/disk offloading pressure cleared after a "
                 "successful store batch"
@@ -1243,11 +1261,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 retry_token_ids = self._get_retry_token_ids(req_meta)
                 if retry_token_ids is not None and req_meta.token_ids is not None:
                     retry_start, retry_ids = retry_token_ids
-                    if retry_start + len(retry_ids) == req_meta.token_ids_start:
+                    if (
+                        retry_start
+                        <= req_meta.token_ids_start
+                        <= retry_start + len(retry_ids)
+                    ):
                         # Cover the failed batch again: the range re-saved here
                         # has to produce payloads contiguous with the ones the
                         # earlier attempt announced.
-                        req_meta.token_ids = retry_ids + req_meta.token_ids
+                        req_meta.token_ids = (
+                            retry_ids[: req_meta.token_ids_start - retry_start]
+                            + req_meta.token_ids
+                        )
                         req_meta.token_ids_start = retry_start
 
             if self._should_skip_request(req_id):
@@ -1272,7 +1297,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not positional:
                 save_completed = not missing_source_blocks
                 return
-            if not self._write(positional, req_meta):
+            if not self._write(
+                positional, req_meta, clear_pressure=not missing_source_blocks
+            ):
                 return
             save_completed = not missing_source_blocks
 
@@ -1755,6 +1782,7 @@ class MooncakeStoreWorker:
 
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
+        self._selective_lease: SelectiveLookupLease | None = None
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
@@ -1806,6 +1834,14 @@ class MooncakeStoreWorker:
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
         self._init_lookup_key_prefixes()
+        if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
+            self._selective_lease = SelectiveLookupLease(
+                self.store,
+                self.token_dbs,
+                self._kv_cache_groups,
+                self._lookup_key_prefixes,
+                self._record_kv_connector_operation,
+            )
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
@@ -2513,9 +2549,15 @@ class MooncakeStoreWorker:
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(req_id)
 
+        pending_save_req_ids = {
+            request.req_id for request in meta.requests if request.can_save
+        }
         for req_id in finished_req_ids | self.finished_store_req:
-            if self.kv_send_thread.stored_requests.get(req_id):
-                # Queued jobs still need the resume offset; retire on a later step.
+            if (
+                req_id in pending_save_req_ids
+                or self.kv_send_thread.stored_requests.get(req_id)
+            ):
+                # Current or queued saves still need the request's bookkeeping.
                 self.finished_store_req.add(req_id)
             else:
                 self.finished_store_req.discard(req_id)
@@ -2579,9 +2621,14 @@ class MooncakeStoreWorker:
         if not candidate_keys:
             return MooncakeLookupResult(0)
 
+        exists_fn = (
+            self.store.batch_is_exist
+            if self._selective_lease is None
+            else self._selective_lease.probe
+        )
         lookup_start = time.perf_counter()
         try:
-            res = self.store.batch_is_exist(candidate_keys)
+            res = exists_fn(candidate_keys)
             self._record_kv_connector_operation(
                 "lookup_exists",
                 time.perf_counter() - lookup_start,
@@ -2620,6 +2667,27 @@ class MooncakeStoreWorker:
                 preceding_chunks_present &= present
             pos += count
 
+        hit, load_masks = self._longest_hit(
+            num_tokens, token_len, block_hashes, exists_set
+        )
+        if self._selective_lease is None:
+            return hit
+        return self._selective_lease.lease_hit(
+            block_hashes,
+            hit,
+            load_masks,
+            exists_set,
+            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+        )
+
+    def _longest_hit(
+        self,
+        num_tokens: int,
+        token_len: int,
+        block_hashes: Sequence[BlockHash],
+        exists_set: set[tuple[int, bytes]],
+    ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
+        """Longest prefix hit and its load masks over the stored group/hash pairs."""
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
@@ -2632,20 +2700,23 @@ class MooncakeStoreWorker:
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:
-                return MooncakeLookupResult(0)
+                return MooncakeLookupResult(0), ()
             load_masks, hit_length = self.coord.find_longest_cache_hit(
                 block_hashes,
                 usable_length,
                 cached_block_pool,
             )
-        return MooncakeLookupResult(
-            hit_length,
-            self._tail_key_boundaries(
-                block_hashes,
+        return (
+            MooncakeLookupResult(
                 hit_length,
-                cached_block_pool,
-                load_masks,
+                self._tail_key_boundaries(
+                    block_hashes,
+                    hit_length,
+                    cached_block_pool,
+                    load_masks,
+                ),
             ),
+            load_masks,
         )
 
     def _tail_key_boundaries(
