@@ -593,12 +593,13 @@ def test_load_mask_with_eagle_does_not_double_prune_full_attention():
     coord = _make_coord(groups, hash_block_size=16, use_eagle=True)
     hs = _hashes(4)
     cmap = ExternalCachedBlockPool(16, {(0, bytes(h)) for h in hs})
-    _masks, hit = coord.find_longest_cache_hit(
+    lookup_masks, hit = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     assert hit == 48  # eagle popped 1 block
 
     masks = coord.load_mask(hs, token_len=hit)
+    assert lookup_masks == masks  # Lookup leases and receives need the same blocks.
     # Every chunk that process_tokens(token_len=48, ...) would yield must
     # have a corresponding mask slot. process_tokens emits chunk_id 0..2
     # (start=0, 16, 32), so the mask must be length 3, all True.
@@ -617,13 +618,14 @@ def test_load_mask_with_eagle_hybrid_full_plus_swa():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
+    lookup_masks, hit = coord.find_longest_cache_hit(
         hs, max_length=64, cached_block_pool=cmap
     )
     # FullAttn dictates the convergence; eagle pops one block off it.
     assert hit == 48
 
     masks = coord.load_mask(hs, token_len=hit)
+    assert lookup_masks == masks  # Lookup leases and receives need the same blocks.
     # FullAttn: all chunks populated locally.
     assert masks[0] == [True, True, True]
     # SWA: tail-window only (ceil((32-1)/16) = 2 trailing blocks).
@@ -672,12 +674,11 @@ def test_lookup_with_eagle_hybrid_full_plus_mamba_no_overrun():
     hs = _hashes(4)
     exists = {(g, bytes(h)) for g in (0, 1) for h in hs}
     cmap = ExternalCachedBlockPool(16, exists)
-    _masks, hit = coord.find_longest_cache_hit(
-        hs, max_length=64, cached_block_pool=cmap
-    )
+    masks, hit = coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
     # FullAttn matches 4 blocks, eagle pops 1 -> 48 verified tokens. The
     # Mamba group must serve its state@48 snapshot, not peek to state@64.
     assert hit == 48
+    assert masks == coord.load_mask(hs, token_len=hit)
 
 
 def test_eagle_flag_propagates_to_all_merged_swa_groups():

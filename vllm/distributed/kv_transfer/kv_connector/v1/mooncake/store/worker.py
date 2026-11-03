@@ -11,6 +11,7 @@ and MooncakeDistributedStore integration.
 """
 
 import dataclasses
+import functools
 import math
 import os
 import queue
@@ -70,6 +71,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
     RESP_OK,
     decode_lookup_response,
     encode_lookup_response,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.selective_lease import (  # noqa: E501
+    SelectiveLookupLease,
 )
 from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
@@ -1623,6 +1627,7 @@ class MooncakeStoreWorker:
 
         self._kv_cache_config = kv_cache_config
         self.token_dbs: list[ChunkedTokenDatabase] = []
+        self._selective_lease: SelectiveLookupLease | None = None
 
         # a capacity-only instance does not need below utils
         if self._capacity_only:
@@ -1664,6 +1669,14 @@ class MooncakeStoreWorker:
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
         self._init_lookup_key_prefixes()
+        if envs.VLLM_MOONCAKE_STORE_SELECTIVE_LEASE:
+            self._selective_lease = SelectiveLookupLease(
+                self.store,
+                self.token_dbs,
+                self._kv_cache_groups,
+                self._lookup_key_prefixes,
+                self._record_kv_connector_operation,
+            )
 
     def _select_store_layout(
         self, extra_config: dict[str, Any]
@@ -2436,9 +2449,14 @@ class MooncakeStoreWorker:
         if not candidate_keys:
             return MooncakeLookupResult(0)
 
+        exists_fn = (
+            self.store.batch_is_exist
+            if self._selective_lease is None
+            else self._selective_lease.probe
+        )
         lookup_start = time.perf_counter()
         try:
-            res = self.store.batch_is_exist(candidate_keys)
+            res = exists_fn(candidate_keys)
             self._record_kv_connector_operation(
                 "lookup_exists",
                 time.perf_counter() - lookup_start,
@@ -2477,6 +2495,27 @@ class MooncakeStoreWorker:
                 preceding_chunks_present &= present
             pos += count
 
+        hit, load_masks = self._longest_hit(
+            num_tokens, token_len, block_hashes, exists_set
+        )
+        if self._selective_lease is None:
+            return hit
+        return self._selective_lease.lease_hit(
+            block_hashes,
+            hit,
+            load_masks,
+            exists_set,
+            functools.partial(self._longest_hit, num_tokens, token_len, block_hashes),
+        )
+
+    def _longest_hit(
+        self,
+        num_tokens: int,
+        token_len: int,
+        block_hashes: Sequence[BlockHash],
+        exists_set: set[tuple[int, bytes]],
+    ) -> tuple[MooncakeLookupResult, tuple[list[bool], ...]]:
+        """Longest prefix hit and its load masks over the stored group/hash pairs."""
         cached_block_pool = ExternalCachedBlockPool(
             self.hash_block_size,
             exists_set,
@@ -2489,20 +2528,23 @@ class MooncakeStoreWorker:
         if hit_length >= num_tokens:
             usable_length = self.coord.align_lookup_length(num_tokens - 1)
             if usable_length <= 0:
-                return MooncakeLookupResult(0)
+                return MooncakeLookupResult(0), ()
             load_masks, hit_length = self.coord.find_longest_cache_hit(
                 block_hashes,
                 usable_length,
                 cached_block_pool,
             )
-        return MooncakeLookupResult(
-            hit_length,
-            self._tail_key_boundaries(
-                block_hashes,
+        return (
+            MooncakeLookupResult(
                 hit_length,
-                cached_block_pool,
-                load_masks,
+                self._tail_key_boundaries(
+                    block_hashes,
+                    hit_length,
+                    cached_block_pool,
+                    load_masks,
+                ),
             ),
+            load_masks,
         )
 
     def _tail_key_boundaries(
