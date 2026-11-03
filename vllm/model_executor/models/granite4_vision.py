@@ -820,8 +820,11 @@ class Granite4VisionForConditionalGeneration(
         # 1. Text embeddings
         text_embeds = lm_inner.embed_input_ids(input_ids)
 
-        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0))
-        text_embeds[is_multimodal] = 0.0
+        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0)).
+        #    masked_fill_ with the mask on device avoids a GPU<->CPU sync.
+        assert is_multimodal is not None
+        mm_mask = is_multimodal.to(text_embeds.device, non_blocking=True)
+        text_embeds.masked_fill_(mm_mask.unsqueeze(-1), 0.0)
 
         # 3. Apply embedding_multiplier
         inputs_embeds = text_embeds * lm_inner.config.embedding_multiplier
