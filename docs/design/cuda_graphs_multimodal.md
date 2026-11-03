@@ -23,6 +23,7 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 | `KimiK25ForConditionalGeneration` | `Kimi-K2.5, Kimi-K2.6` | ✅︎ | ❌︎ | ❌︎ |
 | `KimiK3ForConditionalGeneration` | `Kimi-K3` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `PaddleOCRVLForConditionalGeneration` | `PaddleOCR-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
