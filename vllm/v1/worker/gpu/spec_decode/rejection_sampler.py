@@ -206,6 +206,7 @@ class RejectionSampler:
         cu_num_logits_np: np.ndarray,
         expanded_idx_mapping: torch.Tensor,
         logprobs_dims: tuple[int, int] | None,
+        device_boundaries: bool = False,
     ) -> LogprobsTensors | None:
         if logprobs_dims is None:
             return None
@@ -227,7 +228,7 @@ class RejectionSampler:
         expanded_logits = num_logits != num_reqs
         cu_num_generated_tokens: list[int] | torch.Tensor | None = None
         if expanded_logits:
-            if self.enable_adaptive_verification:
+            if device_boundaries:
                 # Adaptive verification keeps the true per-request boundaries
                 # on device only; cu_num_logits_np holds the pre-compacted layout.
                 cu_num_generated_tokens = cu_num_logits.clone()
@@ -343,14 +344,25 @@ class RejectionSampler:
         num_reqs = input_batch.num_reqs
 
         if max_chunk_logits is None or logits.shape[0] <= max_chunk_logits:
-            # One chunk covers the batch. Adaptive verification compacts the logits
-            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
-            # so the stale sums must not pick chunk boundaries; its budget cap
-            # guarantees the compacted batch always lands here.
+            # One chunk covers the batch. Under adaptive verification
+            # cu_num_logits_np may still hold the scheduled (pre-compaction) layout.
             request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
+            device_boundaries = self.enable_adaptive_verification
         else:
-            assert not self.enable_adaptive_verification
+            if input_batch.num_admitted_draft_tokens is not None:
+                # Adaptive verification trimmed drafts on device; rebuild the
+                # compacted layout from the admitted counts.
+                assert input_batch.num_draft_tokens_per_req is not None
+                num_logits_np = (
+                    np.diff(cu_num_logits_np)
+                    - input_batch.num_draft_tokens_per_req
+                    + input_batch.num_admitted_draft_tokens.wait()
+                )
+                cu_num_logits_np = np.zeros_like(cu_num_logits_np)
+                np.cumsum(num_logits_np, out=cu_num_logits_np[1:])
+            assert cu_num_logits_np[-1] == logits.shape[0]
             request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
+            device_boundaries = False
 
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
@@ -390,6 +402,7 @@ class RejectionSampler:
                 chunk_cu_num_logits_np,
                 input_batch.expanded_idx_mapping[lo:hi],
                 logprobs_dims,
+                device_boundaries=device_boundaries,
             )
             if chunk_logprobs is not None:
                 logprobs_chunks.append(chunk_logprobs)

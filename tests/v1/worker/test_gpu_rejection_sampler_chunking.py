@@ -46,6 +46,8 @@ def _make_input_batch(
             )
         ).to(device),
         seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+        num_draft_tokens_per_req=None,
+        num_admitted_draft_tokens=None,
     )
 
 
@@ -320,41 +322,65 @@ def test_max_verify_logits_bounds_only_steps_that_copy_logits():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_unbounded_adaptive_verification_runs_one_chunk():
-    """Without a chunk bound, compacted adaptive-verification logits of any size
-    are verified in one call, whatever the stale host layout says."""
+def test_adaptive_verification_chunks_at_admitted_counts():
+    """Compacted adaptive-verification logits are verified in one call when
+    unbounded, whatever the stale host layout says; when they overflow a chunk,
+    they are cut at the request boundaries the admitted draft counts give on
+    the host, with the same result."""
     device = torch.device("cuda")
     vocab_size = 17
+    true_cu = np.array([0, 3, 4, 8, 10], dtype=np.int32)
     idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
-    input_batch = _make_input_batch(
-        np.array([0, 3, 4, 8, 10], dtype=np.int32), idx_mapping_np, device
+    sampler = _make_sampler_with_token_ids(
+        "raw_logprobs", {3: [5, 11], 0: [2], 2: [], 1: [16, 0, 7]}, -1, device
     )
-    input_batch.cu_num_logits_np = np.arange(0, 17, 4, dtype=np.int32)
-    sampler = _make_sampler_with_token_ids("raw_logprobs", {}, NO_LOGPROBS, device)
-    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
-    rejection_sampler.enable_adaptive_verification = True
-    calls = []
-    fake_verify = _fake_verify(device, vocab_size)
+    dims = sampler.get_logprobs_dims(idx_mapping_np)
+    torch.manual_seed(0)
+    logits = torch.randn(10, vocab_size, device=device)
 
-    def counting_verify(self, logits, *args):
-        calls.append(logits.shape[0])
-        return fake_verify(self, logits, *args)
+    def run(max_chunk_logits: int | None):
+        input_batch = _make_input_batch(true_cu, idx_mapping_np, device)
+        # 3 scheduled drafts + 1 bonus row per request on the host; the device
+        # tensors hold the compacted layout.
+        input_batch.cu_num_logits_np = np.arange(0, 17, 4, dtype=np.int32)
+        input_batch.num_draft_tokens_per_req = np.full(4, 3, dtype=np.int32)
+        admitted = np.array([2, 0, 3, 1], dtype=np.int32)
+        input_batch.num_admitted_draft_tokens = SimpleNamespace(wait=lambda: admitted)
+        rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+        rejection_sampler.enable_adaptive_verification = True
+        calls = []
+        fake_verify = _fake_verify(device, vocab_size)
 
-    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
-        counting_verify, rejection_sampler
-    )
-    sampled, num_sampled, _, _ = rejection_sampler._verify_in_chunks(
-        torch.randn(10, vocab_size, device=device),
-        input_batch,
-        draft_logits=None,
-        draft_sampled=torch.arange(10, device=device),
-        pos=torch.arange(10, device=device),
-        max_chunk_logits=None,
-        logprobs_dims=None,
-    )
-    assert calls == [10]
-    assert num_sampled.tolist() == [3, 1, 4, 2]
-    assert sampled.shape[0] == 4
+        def counting_verify(self, chunk_logits, *args):
+            calls.append(chunk_logits.shape[0])
+            return fake_verify(self, chunk_logits, *args)
+
+        rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+            counting_verify, rejection_sampler
+        )
+        out = rejection_sampler._verify_in_chunks(
+            logits,
+            input_batch,
+            draft_logits=None,
+            draft_sampled=torch.arange(10, device=device),
+            pos=torch.arange(10, device=device),
+            max_chunk_logits=max_chunk_logits,
+            logprobs_dims=dims,
+        )
+        return calls, out
+
+    whole_calls, whole = run(None)
+    chunked_calls, chunked = run(5)
+    assert whole_calls == [10]
+    assert chunked_calls == [4, 4, 2]
+    assert whole[1].tolist() == np.diff(true_cu).tolist()
+    assert torch.equal(whole[0], chunked[0])
+    assert torch.equal(whole[1], chunked[1])
+    assert whole[2] is not None and chunked[2] is not None
+    assert torch.equal(whole[2].logprob_token_ids, chunked[2].logprob_token_ids)
+    assert torch.equal(whole[2].logprobs, chunked[2].logprobs)
+    assert whole[2].cu_num_generated_tokens_tensor.tolist() == true_cu.tolist()
+    assert chunked[2].cu_num_generated_tokens == true_cu.tolist()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

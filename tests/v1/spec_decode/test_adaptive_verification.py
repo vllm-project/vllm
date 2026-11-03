@@ -250,35 +250,37 @@ def test_compact_batch_preserves_totals_and_bounds():
     assert compacted[2] == 40
 
 
-def test_budget_caps_at_one_rejection_sampler_chunk():
-    # The chunked verification path cannot address the compacted logits
-    # layout, so the budget must keep total logits within a single chunk.
+def test_budget_overflowing_one_chunk_needs_host_admitted_counts():
+    # The budget is not capped by a rejection-sampling chunk; one that overflows
+    # it has its admitted counts copied to the host to cut chunks there.
     manager = make_manager(
         np.array([[0.9, 0.9], [0.9, 0.9]], dtype=np.float32),
         np.ones(7),
     )
-    manager.get_num_tokens(
-        {"low": 3, "high": 3},
-        {"low": [1, 2], "high": [3, 4]},
-        3,  # 2 bonus logits + at most 1 draft
-    )
-    assert manager._batch_budget is not None
-    _, _, draft_budget = manager._batch_budget
-    assert draft_budget <= 1
+    for max_total_logits, chunked in ((None, False), (6, False), (3, True)):
+        manager.get_num_tokens(
+            {"low": 3, "high": 3},
+            {"low": [1, 2], "high": [3, 4]},
+            max_total_logits,
+        )
+        assert manager._batch_budget is not None
+        _, _, draft_budget = manager._batch_budget
+        assert draft_budget == 4  # 2 bonus + 4 draft logits
+        assert manager._verification_chunked == chunked
 
 
 def test_zero_budget_rebuilds_cpu_cu_num_logits():
-    # When one bonus row per request already overflows a verification chunk, the
-    # budget clamps to zero but the batch still needs chunking. Every capacity is
-    # zeroed on device, so the CPU can name that layout exactly -- and must, since
-    # _iter_request_chunks slices the compacted logits with these offsets.
+    # A zero budget zeroes every capacity on device, so the CPU can name that
+    # layout exactly -- and must when the bonus rows alone overflow a
+    # verification chunk, since _iter_request_chunks slices the compacted logits
+    # with these offsets.
     #
     # The third request is a chunked prefill (no drafts, still mid-prompt). The
     # runner gives *every* request num_bonus_tokens logits rows regardless
     # (num_logits = num_draft_tokens_per_req + num_bonus_tokens), so the rebuilt
     # offsets stay uniform rather than skipping non-verification rows.
     manager = make_manager(
-        np.array([[0.9, 0.9], [0.9, 0.9], [1.0, 1.0]], dtype=np.float32),
+        np.array([[0.0, 0.0], [0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
         np.ones(64),
     )
     manager.req_states.req_id_to_index["prefill"] = 2
