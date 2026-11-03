@@ -831,12 +831,8 @@ class SupportsPP(Protocol):
         """Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
 
-        Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] on every
-        PP rank except the last. Each tensor must cover all `positions.shape[0]`
-        tokens, be fully reduced, and be identical on every TP rank: PP transport
-        sends one slice per TP rank and all-gathers it on the receiver. Models
-        that shard tokens across TP ranks (sequence parallelism) gather them
-        before returning and shard them again on the next stage.
+        Return [`IntermediateTensors`][vllm.sequence.IntermediateTensors] only
+        for the last PP rank.
         """
         ...
 
