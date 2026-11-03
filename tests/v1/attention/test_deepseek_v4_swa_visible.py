@@ -927,14 +927,15 @@ def _prefix_replay_attention_cls():
     [
         (False, 0, True, True),
         (True, 4, True, True),
-        (True, 3, True, False),
+        (True, 3, True, True),
+        (True, 2, True, False),
         (True, 4, False, False),
     ],
 )
 def test_prefix_cache_replays_the_swa_window(
     monkeypatch, is_rocm, cdna, flag, replays_window
 ):
-    """Prefix caching stays on, and the window is replayed only on CDNA4.
+    """Prefix caching stays on, and the window is replayed on CDNA3 and CDNA4.
 
     tests/v1/core/test_prefix_replay.py already checks that a
     bounded-replay SWA spec makes a prefix hit recompute the window.
