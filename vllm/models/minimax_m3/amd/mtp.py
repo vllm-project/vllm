@@ -219,14 +219,17 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
                 "bf16"
             )
             if indexer_kv_dtype != "bf16":
-                raise NotImplementedError(
-                    f"MiniMax M3 MTP could not select the MSA indexer, leaving "
-                    f"its draft layers on the bf16 indexer, so "
-                    f"indexer_kv_dtype={indexer_kv_dtype!r} has nowhere to go. "
-                    f"See the preceding 'MSA unavailable' log line for why. Drop "
-                    f"indexer_kv_dtype from --attention-config, or speculate "
-                    f"with an EAGLE3 drafter instead."
-                )
+                from vllm.platforms.rocm import on_gfx942
+
+                if not on_gfx942():
+                    raise NotImplementedError(
+                        f"MiniMax M3 MTP could not select the MSA indexer, leaving "
+                        f"its draft layers on the bf16 indexer, so "
+                        f"indexer_kv_dtype={indexer_kv_dtype!r} has nowhere to go. "
+                        f"See the preceding 'MSA unavailable' log line for why. Drop "
+                        f"indexer_kv_dtype from --attention-config, or speculate "
+                        f"with an EAGLE3 drafter instead."
+                    )
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): MiniMaxM3MultiTokenPredictorLayer(
@@ -265,10 +268,17 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
 
 
 class MiniMaxM3MTP(nn.Module):
+    # Shares the target's input embedding unless loading finds its own (only
+    # tracked under V2 PP, where the target's may not be available).
+    has_own_embed_tokens = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        if vllm_config.use_v2_model_runner and get_pp_group().world_size > 1:
+        self._tracks_own_embed = (
+            vllm_config.use_v2_model_runner and get_pp_group().world_size > 1
+        )
+        if self._tracks_own_embed:
             # Preserve embeddings from loaders that bypass load_weights.
             self.has_own_embed_tokens = vllm_config.load_config.load_format != "dummy"
 
@@ -441,7 +451,7 @@ class MiniMaxM3MTP(nn.Module):
                     f"Failed to load MTP layer {layer_idx} weights from checkpoint."
                 )
 
-        if hasattr(self, "has_own_embed_tokens"):
+        if self._tracks_own_embed:
             if "model.embed_tokens.weight" in loaded_params:
                 self.has_own_embed_tokens = True
             elif is_mtp_completeness_check_enabled():
