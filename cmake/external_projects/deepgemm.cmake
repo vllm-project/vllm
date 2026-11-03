@@ -39,7 +39,7 @@ else()
   # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
   # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "99180528f9c72b1209f2f8771cd62f88a78634e3")
+  set(_DEEPGEMM_UPSTREAM_TAG "ae4fd25d036a86042ac4bbfc01e2e0fa5fb362b6")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
