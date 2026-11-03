@@ -117,10 +117,6 @@ class WorkerLoRAManager:
         return True
 
     @cached_property
-    def _transformers_renames(self) -> WeightsMapper | None:
-        return get_transformers_renames(self.hf_config)
-
-    @cached_property
     def _module_names(self) -> set[str]:
         return {name for name, _ in self._adapter_manager.model.named_modules()}
 
