@@ -35,6 +35,16 @@ def _make_config(
     )
 
 
+@pytest.fixture(autouse=True)
+def _not_xpu():
+    """The resolver branches on is_xpu() first, so pin it to keep these
+    platform-mocked tests independent of the host they run on."""
+    with patch.object(
+        qwen_gdn_linear_attn.current_platform, "is_xpu", return_value=False
+    ):
+        yield
+
+
 def _resolve_on_rocm(config, *, kernels_available: bool = True):
     with (
         patch.object(
