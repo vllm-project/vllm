@@ -35,8 +35,22 @@ steps:
     - vllm/v1/
     - tests/compile
   commands:
-  # Unit tests directly under compile/; subdirectories run in their own steps.
-  - pytest -s -v compile/ --ignore-glob='compile/*/*'
+  # One pytest per root-level file: several tests use @pytest.mark.forked,
+  # which fails once an earlier file has initialized CUDA in the same process.
+  # Add new root-level test files here; subdirectories run in their own steps.
+  - pytest -s -v compile/test_aot_compile.py
+  - pytest -s -v compile/test_codegen.py
+  - pytest -s -v compile/test_compile_ranges.py
+  - pytest -s -v compile/test_compiler_interface.py
+  - pytest -s -v compile/test_config.py
+  - pytest -s -v compile/test_decorator.py
+  - pytest -s -v compile/test_deepstack_input_contract.py
+  - pytest -s -v compile/test_depyf_compat.py
+  - pytest -s -v compile/test_graph_partition.py
+  - pytest -s -v compile/test_inductor_operator_str_patch.py
+  - pytest -s -v compile/test_rotary_embedding_compile.py
+  - pytest -s -v compile/test_structured_logging.py
+  - pytest -s -v compile/test_wrapper.py
   mirror:
     amd:
       automatic_shard: true
