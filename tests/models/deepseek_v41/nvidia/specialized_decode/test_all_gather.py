@@ -193,6 +193,7 @@ def _worker(rank: int, port: int, replays: int, skip_path: str, custom: bool) ->
             cleanup_dist_env_and_memory()
             return
         if custom:
+            assert ca_comm is not None
 
             def all_gather(x):
                 # It takes floating-point inputs only; the int32 words pass
