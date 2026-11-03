@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -907,6 +908,71 @@ def test_replicated_layout_enabled_for_uniform_wrapper_mla():
         kv_cache_groups=[KVCacheGroupSpec(mla_layers, spec)],
     )
     assert _replicated_layout(kv_cache_config)
+
+
+@pytest.mark.parametrize(
+    "sibling_shards", [1, 2, None], ids=["replicated", "sharded", "unknown"]
+)
+@pytest.mark.parametrize("secondary_tiers", [[], [{"type": "fs", "root": "/tmp/kv"}]])
+def test_replicated_layout_uses_selected_group_metadata(
+    sibling_shards, secondary_tiers
+):
+    config = _make_vllm_config(
+        tensor_parallel_size=8, extra_config={"secondary_tiers": secondary_tiers}
+    )
+    config.model_config.use_mla = True
+    config.parallel_config.distributed_executor_backend = "mp"
+    spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "source.0": _mla_spec(tokens_per_state=2),
+            "source.1": replace(
+                _mla_spec(tokens_per_state=2), max_tp_shards=sibling_shards
+            ),
+        },
+    )
+    groups = [
+        KVCacheGroupSpec(list(spec.kv_cache_specs), spec),
+        KVCacheGroupSpec(["indexer"], _mla_spec(head_size=128)),
+        KVCacheGroupSpec(
+            ["scratch"],
+            CircularBufferSpec(
+                block_size=16, num_kv_heads=1, head_size=128, dtype=torch.float32
+            ),
+        ),
+    ]
+    for group in groups:
+        group.kv_tp_replicas = kv_cache_groups_tp_replicas([group], 8)
+    kv_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        kv_tp_replicas=kv_cache_groups_tp_replicas(groups, 8),
+    )
+    assert kv_config.kv_tp_replicas == 1
+
+    scheduler_config = generate_scheduler_kv_cache_config([kv_config])
+    assert [group.kv_tp_replicas for group in scheduler_config.kv_cache_groups] == [
+        group.kv_tp_replicas for group in groups
+    ]
+    for cache_config in (kv_config, scheduler_config):
+        offloading = build_offloading_config(config, cache_config)
+        assert [group.group_id for group in offloading.groups] == [0, 1]
+        assert offloading.replicated_layout == (
+            sibling_shards == 1 and not secondary_tiers
+        )
+
+
+def test_global_replicated_layout_keeps_secondary_tier_support():
+    config = _make_vllm_config(
+        tensor_parallel_size=8,
+        extra_config={"secondary_tiers": [{"type": "fs", "root": "/tmp/kv"}]},
+    )
+    config.model_config.use_mla = True
+    config.parallel_config.distributed_executor_backend = "mp"
+    kv_config = _make_mla_kv_cache_config()
+    kv_config.kv_tp_replicas = 8
+    assert build_offloading_config(config, kv_config).replicated_layout
 
 
 @pytest.mark.parametrize(

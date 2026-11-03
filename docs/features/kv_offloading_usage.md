@@ -22,6 +22,11 @@ flowchart LR
     CPU <--> SN["..."]
 ```
 
+For DeepSeek V4.1, CPU-only offloading stores one copy of TP-replicated
+persistent KV across ranks on a single node using the multiprocessing executor.
+Scratch groups do not affect eligibility. Secondary tiers retain the requirement
+that every cache group is replicated.
+
 ## Per-request load control
 
 Individual requests can cap how many tokens are loaded from offloaded storage

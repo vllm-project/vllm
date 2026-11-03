@@ -1519,6 +1519,8 @@ class KVCacheGroupSpec:
     # source group after a connector load.
     enable_kv_transfer: bool = True
     role: KVCacheGroupRole = KVCacheGroupRole.DEFAULT
+    # Resolved before scheduler projection discards per-layer specs.
+    kv_tp_replicas: int = 1
 
 
 @dataclass

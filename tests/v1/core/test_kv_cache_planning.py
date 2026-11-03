@@ -2143,6 +2143,11 @@ def test_kv_tp_replicas(monkeypatch, specs, expected):
     assert configs[0].kv_tp_replicas == expected
     scheduler = generate_scheduler_kv_cache_config(configs)
     assert scheduler.kv_tp_replicas == expected
+    expected_groups = [
+        kv_cache_groups_tp_replicas([group], 4) for group in configs[0].kv_cache_groups
+    ]
+    assert [g.kv_tp_replicas for g in configs[0].kv_cache_groups] == expected_groups
+    assert [g.kv_tp_replicas for g in scheduler.kv_cache_groups] == expected_groups
 
 
 @pytest.mark.parametrize(

@@ -1611,6 +1611,12 @@ def get_kv_cache_configs(
         )
 
     for kv_cache_config in kv_cache_configs:
+        for group in kv_cache_config.kv_cache_groups:
+            group.kv_tp_replicas = kv_cache_groups_tp_replicas(
+                [group],
+                vllm_config.parallel_config.tensor_parallel_size,
+                vllm_config.parallel_config.decode_context_parallel_size,
+            )
         kv_cache_config.kv_tp_replicas = kv_cache_groups_tp_replicas(
             kv_cache_config.kv_cache_groups,
             vllm_config.parallel_config.tensor_parallel_size,
