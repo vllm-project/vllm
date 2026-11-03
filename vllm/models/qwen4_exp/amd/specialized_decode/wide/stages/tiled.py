@@ -703,36 +703,47 @@ def sum_partials4(part, plan, tokens: int, token, row):
     return total
 
 
-def fold(g, gemm, plan, part, counter0, finish, done=None):
+def fold(g, gemm, plan, part, counter0, finish, done=None, other=None):
     """Split-K units whose row group's last arriving unit sums the group's
     partials and finishes them: ``finish(group, first_row, lane, acc)`` with the
     summed accumulators of each weight tile, in the epilogue's layout, then
-    ``done(group)`` (CTA-uniform, when given). Returns the (epilogue, after)
-    pair of ``gemm_units``; ``counter0`` is the first of the plan's ``groups``
-    fold counters."""
+    ``done(group)`` (CTA-uniform, when given). With two splits, ``other(group)``
+    (CTA-uniform, when given) runs on the group's first arriver instead.
+    Returns the (epilogue, after) pair of ``gemm_units``; ``counter0`` is the
+    first of the plan's ``groups`` fold counters."""
+    assert other is None or plan.splits == 2, plan.splits
     epilogue = partial_epilogue(gemm, plan, part)
+
+    @traced
+    def last(group):
+        wave, lane = gemm.tid // i32(LANES), gemm.tid % i32(LANES)
+        for mt in range_constexpr(plan.mtiles):
+            first = group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(TILE)
+            row = first + lane // i32(TILE) * i32(4)
+            acc = []
+            for t in range_constexpr(gemm.tiles):
+                token = i32(t * TILE) + lane % i32(TILE)
+                token = (token < i32(gemm.batch)).select(token, i32(gemm.batch - 1))
+                acc.append(
+                    fx.Vector.from_elements(
+                        sum_partials4(part, plan, gemm.batch, token, row),
+                        fx.Float32,
+                    )
+                )
+            finish(group, first, lane, acc)
+        if const_expr(done is not None):
+            done(group)
 
     @traced
     def after(group, split):
         if fold_arrive(g, counter0 + group, plan.splits):
-            wave, lane = gemm.tid // i32(LANES), gemm.tid % i32(LANES)
-            for mt in range_constexpr(plan.mtiles):
-                first = group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(
-                    TILE
-                )
-                row = first + lane // i32(TILE) * i32(4)
-                acc = []
-                for t in range_constexpr(gemm.tiles):
-                    token = i32(t * TILE) + lane % i32(TILE)
-                    token = (token < i32(gemm.batch)).select(token, i32(gemm.batch - 1))
-                    acc.append(
-                        fx.Vector.from_elements(
-                            sum_partials4(part, plan, gemm.batch, token, row),
-                            fx.Float32,
-                        )
-                    )
-                finish(group, first, lane, acc)
-            if const_expr(done is not None):
-                done(group)
+            last(group)
 
-    return epilogue, after
+    @traced
+    def after_other(group, split):
+        if fold_arrive(g, counter0 + group, plan.splits):
+            last(group)
+        else:
+            other(group)
+
+    return epilogue, (after if other is None else after_other)

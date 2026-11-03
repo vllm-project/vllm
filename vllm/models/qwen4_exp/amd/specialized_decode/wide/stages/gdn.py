@@ -9,7 +9,8 @@ decode on one rank) as grid phases over every row of the step.
   ``silu(w0 s0 + w1 s1 + w2 s2 + w3 x)``, new state ``[s1, s2, x]``, ``x``
   the projection rounded to bf16 (the stock GEMM's output); ``z`` is stored
   as is. The ``[b | a]`` rows (bf16 ``W_ba``) are one-chunk units
-  whose partials the recurrence sums.
+  whose partials the recurrence sums, run by the first arrivers of the
+  first groups, so no last arriver's conv waits behind one.
 - ``recur``: a unit is (row, key head), a CTA: the key head's three value
   heads in turn, each the gated delta rule on its 128 x 128 fp32 state in
   place, then the gated RMSNorm of the output (``RMSNormGated`` with the
@@ -150,24 +151,22 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
 
     At the resident widths the [b | a] chunk ``c`` is multiplied by the unit
     of split ``c // per`` and group ``c % per``, whose stage holds it, before
-    the unit's fold; wider steps run it as one-chunk units after the
-    projection's (``ba_units``). With ``tag`` (resident widths) the outputs
-    are tagged pairs (``tagged``) the recurrence polls, with no grid barrier
-    between: ``qkv`` holds ``[rows, QKVZ / 2]`` (bf16 pair, tag) pairs, z
-    included, ``ba`` the partials' (value, tag) pairs."""
+    the unit's fold; wider steps run it as one-chunk units on the first
+    arrivers of the projection's groups (``_proj_streamed``). With ``tag``
+    (resident widths) the outputs are tagged pairs (``tagged``) the
+    recurrence polls, with no grid barrier between: ``qkv`` holds ``[rows,
+    QKVZ / 2]`` (bf16 pair, tag) pairs, z included, ``ba`` the partials'
+    (value, tag) pairs."""
     plan = proj_plan()
     source = tiled.Source(b.x, HIDDEN)
+    if not gemm.resident:
+        _proj_streamed(g, gemm, w, b, rows, fold0, pending, plan, source)
+        return
 
     def finish(group, first, lane, acc):
         conv_rows(w, b, rows, first + lane // 16 * 4, lane, acc, gemm.tiles, tag)
 
     epilogue, after = tiled.fold(g, gemm, plan, b.part, fold0, finish)
-    if not gemm.resident:
-        tiled.gemm_units(
-            g.bid, BLOCKS, gemm, source, proj_weights(w), plan, epilogue, after, pending
-        )
-        ba_units(g, gemm, w, b, plan.units % BLOCKS)
-        return
     if plan.units > BLOCKS or plan.per * plan.splits != BA_SPLITS:
         raise ValueError("the [b | a] chunks ride on one projection unit a CTA")
     loads, ba_loads = (None, None) if pending is None else pending
@@ -205,6 +204,55 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
     )
 
 
+def _proj_streamed(g, gemm, w, b, rows: int, fold0: int, pending, plan, source):
+    """``proj`` past ``tiled.RESIDENT_MAX``. The conv's inputs do not depend on
+    the projection, so they leave the group's fold chain: the slots load
+    before the GEMM and the taps and states after the unit's partials, both on
+    either unit of a group (only the last arriver uses them). The ``[b | a]``
+    units run on the first arrivers of groups ``0 ..``, which have nothing
+    else to do in the phase."""
+    tokens, _ = _conv_tokens(rows, gemm.lane, gemm.tiles)
+    slots = [ld(b.st_idx, tk, fx.Int32, cm=CM_DEV) for tk in tokens]
+    staged: list = []
+
+    def finish(group, first, lane, acc):
+        row = first + lane // 16 * 4
+        conv_rows(w, b, rows, row, lane, acc, gemm.tiles, loads=staged[0])
+
+    bplan = ba_plan()
+    bw = ba_weights(w)
+    ba_epilogue = tiled.partial_epilogue(gemm, bplan, b.ba)
+
+    @traced
+    def ba_unit(group):
+        """The [b | a] unit ``group`` (one chunk), on the group's first arriver."""
+        if group < i32(bplan.units):
+            _, split, firsts, rws = tiled.unit_rows(bplan, group, gemm.tid)
+            acc = gemm.run(source, bw, rws, split * i32(bplan.per), bplan.per)
+            ba_epilogue(group, split, firsts[0], gemm.lane, acc[0])
+
+    epilogue, after = tiled.fold(g, gemm, plan, b.part, fold0, finish, other=ba_unit)
+
+    def stage_epilogue(unit, split, first_row, lane, acc):
+        epilogue(unit, split, first_row, lane, acc)
+        # a z row reads the last conv rows' and uses nothing
+        row = fx.min(first_row + lane // 16 * 4, i32(CONV_DIM - 4))
+        staged[:] = [conv_loads(w, b, row, tokens, slots)]
+
+    assert plan.units == BLOCKS and plan.mtiles == 1, (plan.units, plan.mtiles)
+    tiled.gemm_units(
+        g.bid,
+        BLOCKS,
+        gemm,
+        source,
+        proj_weights(w),
+        plan,
+        stage_epilogue,
+        after,
+        pending,
+    )
+
+
 def _tagged_partials(gemm, plan, part, tag):
     """``tiled.partial_epilogue`` storing (value, tag) pairs."""
 
@@ -238,52 +286,54 @@ def _ba_issue(g, bw, c):
     return bw.issue(g.wave * 16 + g.lane % 16, c, g.lane // 16)
 
 
-@traced
-def ba_units(g, gemm, w, b, first_unit: int):
-    """The [b | a] rows: one chunk a unit, placed after the projection's
-    units (on CTAs ``first_unit ..`` of the grid)."""
-    bplan = ba_plan()
-    bw = tiled.Bf16Weights(w.ba, BA, HIDDEN)
-    source = tiled.Source(b.x, HIDDEN)
-    epi = tiled.partial_epilogue(gemm, bplan, b.ba)
-    for unit in range(g.bid - first_unit, bplan.units, BLOCKS):
-        if unit >= 0:
-            _, split, firsts, rws = tiled.unit_rows(bplan, unit, gemm.tid)
-            acc = gemm.run(source, bw, rws, split * i32(bplan.per), bplan.per)
-            epi(unit, split, firsts[0], gemm.lane, acc[0])
-
-
-@traced
-def conv_rows(w, b, rows: int, row, lane, acc, tiles: int, tag=None):
-    """Projection rows ``row .. row + 3`` of every token (a fold's summed
-    accumulators): conv + silu with the state update for q | k | v, the plain
-    store for z. A group of four never straddles the two. Every token tile's
-    slot and state loads are issued before the first use (a padding token's
-    lane reads the last token's and stores nothing). With ``tag`` q | k | v
-    and z are stored as tagged pairs (``proj``)."""
+def _conv_tokens(rows: int, lane, tiles: int):
+    """A lane's token of each tile (a padding lane takes the last token) and
+    whether it is a real one."""
     tokens = [fx.min(i32(t * 16) + lane % 16, i32(rows - 1)) for t in range(tiles)]
     valid = [i32(t * 16) + lane % 16 < rows for t in range(tiles)]
-    if row < CONV_DIM:
-        words = [
-            ld_i32x4(w.conv, row * 2),
-            ld_i32x4(w.conv, row * 2 + 4),
-        ]  # the rows' 16 taps
+    return tokens, valid
+
+
+def conv_loads(w, b, row, tokens, slots=None):
+    """The conv's loads for projection rows ``row .. row + 3`` (conv rows):
+    their taps and each token's state (``slots``: the ``tokens``' state slots,
+    loaded here if None)."""
+    words = [
+        ld_i32x4(w.conv, row * 2),
+        ld_i32x4(w.conv, row * 2 + 4),
+    ]  # the rows' 16 taps
+    if slots is None:
         slots = [ld(b.st_idx, tk, fx.Int32, cm=CM_DEV) for tk in tokens]
-        live = [sl > 0 for sl in slots]
-        # a slot's [3, CONV_DIM] state, slots ``conv_stride`` elements apart
-        sbs = [
-            b.conv_state
-            + (
-                fx.Int64(live[t].select(slots[t], i32(0))) * b.conv_stride
-                + fx.Int64(row)
-            )
-            * fx.Int64(2)
-            for t in range(tiles)
-        ]
-        states = [
-            [gld(sbs[t] + fx.Int64(jj * CONV_DIM * 2), fx.Int32, 2) for jj in range(3)]
-            for t in range(tiles)
-        ]
+    live = [sl > 0 for sl in slots]
+    # a slot's [3, CONV_DIM] state, slots ``conv_stride`` elements apart
+    sbs = [
+        b.conv_state
+        + (fx.Int64(live[t].select(slots[t], i32(0))) * b.conv_stride + fx.Int64(row))
+        * fx.Int64(2)
+        for t in range(len(tokens))
+    ]
+    states = [
+        [gld(sbs[t] + fx.Int64(jj * CONV_DIM * 2), fx.Int32, 2) for jj in range(3)]
+        for t in range(len(tokens))
+    ]
+    return words, live, sbs, states
+
+
+@traced
+def conv_rows(w, b, rows: int, row, lane, acc, tiles: int, tag=None, loads=None):
+    """Projection rows ``row .. row + 3`` of every token (a fold's summed
+    accumulators): conv + silu with the state update for q | k | v, the plain
+    store for z. A group of four never straddles the two. ``loads``: the rows'
+    ``conv_loads``, issued before the fold; without them every token tile's
+    slot and state loads are issued here before the first use. A padding
+    token's lane reads the last token's and stores nothing. With ``tag``
+    q | k | v and z are stored as tagged pairs (``proj``)."""
+    tokens, valid = _conv_tokens(rows, lane, tiles)
+    if row < CONV_DIM:
+        if const_expr(loads is None):
+            words, live, sbs, states = conv_loads(w, b, row, tokens)
+        else:
+            words, live, sbs, states = loads
         tap = []
         for e in range_constexpr(4):
             w01 = _halves(words[e // 2][2 * (e % 2)])
