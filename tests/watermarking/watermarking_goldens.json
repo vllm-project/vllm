@@ -3034,6 +3034,7 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "depth": 4,
+          "enforce": false,
           "prf": "philox"
         }
       },
@@ -3167,6 +3168,7 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "depth": 4,
+          "enforce": false,
           "prf": "philox"
         }
       },
