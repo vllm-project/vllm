@@ -29,7 +29,9 @@ QUERY_LENS = [1, 160, 96, 200]
 OFFSETS = [0, 64, 64, 128]
 STATE_SLOTS = [NULL_BLOCK_ID, 5, NULL_BLOCK_ID, 3]
 NUM_SLOTS = 8
-RECURRENT_SHAPE = (2, 16, 16)
+# Per-checkpoint recurrent state. "wide" is far wider than every conv window
+# here, so the launch has programs past the conv window that only store state.
+RECURRENT_SHAPES = {"narrow": (2, 16, 16), "wide": (4, 64, 128)}
 
 
 @dataclass(frozen=True)
@@ -43,9 +45,18 @@ class _Caller:
     # SSM cache dtype; the emitted states are FP32.
     recurrent_dtype: torch.dtype = torch.float32
     token_map: bool = False
+    # The inputs are a column slice of a wider projection, as in the Mamba2 mixer.
+    sliced_qkv: bool = False
 
 
 CALLERS = {
+    "mamba2": _Caller(
+        MambaPrefillCheckpointExporter(state_len=3),
+        width=96,
+        conv_window=3,
+        recurrent="rows",
+        sliced_qkv=True,
+    ),
     # Qwen3.5 and Qwen4Exp default to an FP32 SSM cache, Qwen3-Next to BF16.
     "gdn-flashinfer-fp32-ssm": _Caller(
         MambaPrefillCheckpointExporter(state_len=3),
@@ -94,11 +105,15 @@ CALLERS = {
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="needs a GPU")
 @pytest.mark.parametrize("state_layout", ["DS", "SD"])
+@pytest.mark.parametrize("recurrent_shape", list(RECURRENT_SHAPES))
 @pytest.mark.parametrize("caller", list(CALLERS))
-def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str):
+def test_exporter_stores_each_callers_checkpoints(
+    caller: str, state_layout: str, recurrent_shape: str
+):
     """Each checkpoint gets the inputs before its offset as its conv window and
     its emitted recurrent state; nothing else in either cache changes."""
     c = CALLERS[caller]
+    state_shape = RECURRENT_SHAPES[recurrent_shape]
     device = torch.device("cuda")
     gen = torch.Generator(device=device).manual_seed(0)
     cu_seqlens = torch.tensor(
@@ -109,9 +124,15 @@ def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str
     num_tokens = sum(QUERY_LENS)
     # The token map interleaves other rows' tokens, as in a mixed spec batch.
     num_inputs = 2 * num_tokens if c.token_map else num_tokens
-    raw_qkv = torch.randn(
-        num_inputs, c.width, device=device, dtype=torch.bfloat16, generator=gen
+    lead, trail = (16, 24) if c.sliced_qkv else (0, 0)
+    projection = torch.randn(
+        num_inputs,
+        lead + c.width + trail,
+        device=device,
+        dtype=torch.bfloat16,
+        generator=gen,
     )
+    raw_qkv = projection[:, lead : lead + c.width]
     token_indices = (
         torch.randperm(num_inputs, device=device, generator=gen)[:num_tokens]
         if c.token_map
@@ -128,11 +149,11 @@ def test_exporter_stores_each_callers_checkpoints(caller: str, state_layout: str
             NUM_SLOTS, state_width, c.width, device=device, dtype=torch.bfloat16
         ).transpose(-1, -2)
     recurrent_state = torch.randn(
-        NUM_SLOTS, *RECURRENT_SHAPE, device=device, dtype=c.recurrent_dtype
+        NUM_SLOTS, *state_shape, device=device, dtype=c.recurrent_dtype
     )
     # FP32 like the kernels emit, with values the cache dtype holds exactly.
     emitted = (
-        torch.randn(2 * len(OFFSETS), *RECURRENT_SHAPE, device=device, generator=gen)
+        torch.randn(2 * len(OFFSETS), *state_shape, device=device, generator=gen)
         .bfloat16()
         .float()
     )
