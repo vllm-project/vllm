@@ -28,7 +28,7 @@ End-to-end measurements behind the [protocol](protocol.md). The designs are desc
 | X6 | | | | | | pass |
 | X7 | | | | | | pass |
 | X9 | | | | | | pass (alignment verified) |
-| Indexer/hidden through the delivery path | | | | | | in progress |
+| Indexer/hidden through the delivery path | | | pass | | | |
 
 ## Setup
 
@@ -124,6 +124,39 @@ The workload is small, and the differences are within run-to-run noise.
 
 - Codec speed: 300–380 MB/s per core.
 - Delta encoding on top of zstd does not help.
+
+### Indexer and hidden states through the delivery path
+
+Indexer selections and hidden states were added to the same block-wise path as R3, with the P-S design on 112 requests:
+- indexer: one object per full block, 20-bit packing + zstd, same deduplication and "first computation wins" rule as R3;
+- hidden states: one object per 64 generated positions, fp8 e4m3 with a per-token scale;
+- the manifest describes every field.
+
+| Output | Check | Result | Bytes stored per token |
+|---|---|---|---|
+| R3 | delivered vs inline rows | 112/112 equal, 0 missing | 480 (raw) |
+| Indexer | delivered vs an independent in-engine capture of the same requests | 112/112 bitwise equal, 0 missing, 0 holes | 551 (16,384 raw) |
+| Hidden | delivered vs the captured hidden state | every row is the exact fp8 requantization | 5,124 (10,240 as bf16) |
+
+Stored indexer bytes are far below the per-token compressed size (2.5–3.6 KB) because blocks are written once per session.
+
+Full-vocabulary check for hidden states: the delivered fp8 hidden state times `lm_head`, compared with vLLM's distribution.
+
+| Metric | Mean | Max |
+|---|---|---|
+| KL | 7.7e-4 | 0.012 |
+| Logprob difference | 0.019 | 0.24 |
+
+All objects were removed by session release, with 0 keys left.
+
+**Throughput.** Total output tokens/s over 4 alternating passes per arm (first pass excluded as warm-up):
+
+| Arm | Median | Range |
+|---|---|---|
+| R3 only | 552 | 520–565 |
+| R3 + indexer + hidden | 495 | 443–533 |
+
+That is ~10% lower. The ranges overlap on this small workload, and the split between compression, device-to-host copies and puts has not been measured.
 
 ### Hidden states (X7)
 
