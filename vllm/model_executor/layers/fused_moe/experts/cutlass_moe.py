@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_group_gemm_supported,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -709,6 +710,8 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     """CUTLASS FP4 fused MoE expert implementation."""
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            return
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
         # when EPLB rearranges the parameter.
@@ -724,7 +727,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         p = current_platform
         return p.is_cuda() and (
             p.is_device_capability_family(100)
-            or p.is_device_capability_family(110)
+            # SM110 excluded: grouped NVFP4 kernel is sm100-only
             or p.is_device_capability_family(120)
         )
 
