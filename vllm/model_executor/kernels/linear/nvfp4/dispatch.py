@@ -150,6 +150,11 @@ class MarlinCuteDslNvFp4W4A16DispatchKernel(NvFp4LinearKernel):
         super().__init__(config)
         self.marlin = MarlinNvFp4LinearKernel(config)
         self.cute = FlashInferCuteDslNvFp4W4A16LinearKernel(config)
+        self._cute_plan: _Plan | None = None
+
+    def uses_cutedsl(self, num_tokens: int) -> bool:
+        """Whether a step of `num_tokens` tokens runs this layer on CuTe-DSL."""
+        return self._cute_plan is not None and self._cute_plan.pick_cute(num_tokens)
 
     def _calibrate(self, layer: nn.Module, cute_layer: nn.Module) -> _Plan:
         n = layer.output_size_per_partition
@@ -235,6 +240,7 @@ class MarlinCuteDslNvFp4W4A16DispatchKernel(NvFp4LinearKernel):
             plan = _PLANS[key] = self._calibrate(layer, cute_layer)
         if not plan.any_cute:
             cute_layer = None
+        self._cute_plan = plan if cute_layer is not None else None
         self._n = n
         layer._nvfp4_dispatch_idx = len(_ENTRIES)
         _ENTRIES.append(
