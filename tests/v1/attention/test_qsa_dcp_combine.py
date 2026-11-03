@@ -157,7 +157,8 @@ def test_copy_free_combine_matches_upstream_cp_lse_ag_out_rs(world, rows):
     for lse in lses:
         lse[rows - 1] = float("-inf")  # a row empty on every rank
 
-    ours, upstream = [], []
+    ours: list[torch.Tensor] = []
+    upstream: list[torch.Tensor] = []
     for rank in range(world):
         heads_first = torch.empty_like(partials[rank]).view(-1)
         returned = qsa_dcp.qsa_dcp_lse_ag_out_rs(

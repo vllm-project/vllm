@@ -265,7 +265,10 @@ def test_sharded_topk_merge_matches_dcp1_stable_topk(dcp_size):
     for the dim-1 and the rank-major gather."""
     topk = 32
     expected, ranks = _sharded_topk_case(dcp_size, topk)
-    candidates = [_pack_reference(*rank[1:], rank[0]) for rank in ranks]
+    candidates = [
+        _pack_reference(logits, local_topk, shard)
+        for shard, logits, local_topk in ranks
+    ]
 
     merged = _select_reference(torch.cat(candidates, dim=1), topk)
     rank_major = _select_rank_major_reference(torch.stack(candidates))
@@ -431,11 +434,11 @@ def _expand_inputs(rows, compress_ratio, positions_dtype, token_topk=2048):
     positions[1::5] = (positions[1::5] // compress_ratio + 1) * compress_ratio - 1
     visible = torch.randint(0, block_topk * 2, (rows,), generator=generator)
     visible[::9] = 0
-    return [
+    return (
         block_indices.int().cuda(),
         positions.to(positions_dtype).cuda(),
         visible.int().cuda(),
-    ]
+    )
 
 
 @requires_cuda_triton
@@ -448,14 +451,20 @@ def test_fused_expand_localize_matches_expand_then_localize(
     """The fused kernel writes what expand_qsa_block_indices followed by the
     in-place qsa_localize_dcp_indices writes, on every rank."""
     token_topk, world, interleave = 2048, 4, 16
-    inputs = _expand_inputs(rows, compress_ratio, positions_dtype, token_topk)
+    block_indices, positions, visible = _expand_inputs(
+        rows, compress_ratio, positions_dtype, token_topk
+    )
     width = token_topk + compress_ratio - 1
     expanded = torch.full((rows, width + 1), 9, dtype=torch.int32, device="cuda")
-    expand_qsa_block_indices(*inputs, compress_ratio, token_topk, expanded)
+    expand_qsa_block_indices(
+        block_indices, positions, visible, compress_ratio, token_topk, expanded
+    )
     for rank in range(world):
         fused = torch.full_like(expanded, 9)
         qsa_dcp_selector.expand_localize_qsa_block_indices(
-            *inputs,
+            block_indices,
+            positions,
+            visible,
             compress_ratio,
             token_topk,
             fused,
@@ -520,7 +529,7 @@ class _TwoPassDCPGroup:
 
     def __init__(self, world):
         self.world = world
-        self.records = [[] for _ in range(world)]
+        self.records: list[list] = [[] for _ in range(world)]
         self.calls = [0] * world
         self.rank = 0
         self.replay = False
