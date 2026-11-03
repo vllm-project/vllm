@@ -106,11 +106,10 @@ def test_custom_speculator(register, lazy: bool):
     assert config.num_lookahead_tokens == 0
     with patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", None):
         assert config.use_v2_model_runner
-    with (
-        patch.object(envs, "VLLM_USE_V2_MODEL_RUNNER", False),
-        pytest.raises(ValueError, match="'dummy' requires Model Runner V2"),
+    with pytest.raises(
+        ValueError, match="V1 does not support: custom speculative method 'dummy'"
     ):
-        _ = config.use_v2_model_runner
+        config._validate_v1_model_runner()
 
 
 def test_custom_speculator_inherits_builtin_config(register):
@@ -216,10 +215,10 @@ def test_init_speculator():
         (_vllm_config(NotASpeculatorConfig), TypeError, "must be a subclass of"),
         (
             SimpleNamespace(
-                speculative_config=fake_speculative_config(method="suffix")
+                speculative_config=fake_speculative_config(method="custom_class")
             ),
             NotImplementedError,
-            "suffix is not supported",
+            "custom_class is not supported",
         ),
     ],
 )
