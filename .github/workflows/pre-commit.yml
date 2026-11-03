@@ -88,5 +88,5 @@ jobs:
           echo "::error::Could not check $url (HTTP ${code:-none}); re-run this job."
           exit 1
         fi
-        echo "::error::This PR changes the ROCm base image, and rocm/vllm-ci:stack-rocm-$Ks does not exist yet. Once Buildkite CI is green and the PR is approved, a member of @vllm-project/vllm-ci-maintainers comments /amd-ci cache, then again once that build passes to re-run this job."
+        echo "::error::This PR changes the ROCm base image, and rocm/vllm-ci:stack-rocm-$Ks does not exist yet. Once Buildkite CI is green and a member of @vllm-project/vllm-ci-maintainers approved the PR, comment /amd-ci cache, then again once that build passes to re-run this job."
         exit 1

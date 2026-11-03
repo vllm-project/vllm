@@ -156,7 +156,7 @@ class FakeGitHub:
         ]
 
     def get_file_sha(self, path: str, ref: str) -> str:
-        return self.file_shas.get(path, "none")
+        return self.file_shas.get(f"{ref}:{path}", "none")
 
     def is_team_member(self, org: str, team: str, username: str) -> bool:
         return team == "vllm-ci-maintainers" and username in self.team
@@ -1658,9 +1658,12 @@ def cache_build(state: str, inputs: str = STACK_INPUTS) -> dict[str, Any]:
     }
 
 
+STAMP = {"user": {"login": "maintainer"}, "state": "APPROVED", "commit_id": "c0"}
+
+
 class RocmCacheTest(unittest.TestCase):
     def cache(
-        self, github: FakeGitHub, *build_lists: list[dict[str, Any]], actor="maintainer"
+        self, github: FakeGitHub, *build_lists: list[dict[str, Any]], actor="reviewer"
     ) -> FakeBuildkite:
         buildkite = FakeBuildkite(list(build_lists))
         run(
@@ -1672,18 +1675,40 @@ class RocmCacheTest(unittest.TestCase):
         )
         return buildkite
 
-    def test_only_ci_maintainers_can_cache(self) -> None:
-        github = FakeGitHub(permission="admin", files=STACK_PR_FILES)
+    def test_cache_needs_a_ci_maintainer_approval_of_the_stack_inputs(self) -> None:
+        changed = {"0123456789abcdef:docker/Dockerfile.rocm_base": "new"}
+        cases = [
+            ([], {}, False),
+            ([{**STAMP, "user": {"login": "writer"}}], {}, False),  # not on the team
+            ([STAMP, {**STAMP, "state": "CHANGES_REQUESTED"}], {}, False),
+            ([STAMP], changed, False),  # the stack inputs changed since
+            ([STAMP], {}, True),
+        ]
+        for reviews, file_shas, allowed in cases:
+            with self.subTest(reviews=reviews, file_shas=file_shas):
+                github = FakeGitHub(files=STACK_PR_FILES, reviews=reviews)
+                github.file_shas = file_shas
 
-        buildkite = self.cache(github, actor="admin-user")
+                buildkite = self.cache(github, [], [])
 
-        self.assertEqual(buildkite.created_builds, [])
-        self.assertIn(
-            "only members of @vllm-project/vllm-ci-maintainers", github.comments[0]
+                self.assertEqual(bool(buildkite.created_builds), allowed)
+                if not allowed:
+                    self.assertIn("needs an approval from a member", github.comments[0])
+
+    def test_the_author_can_cache_once_ci_is_delegated(self) -> None:
+        github = FakeGitHub(
+            files=STACK_PR_FILES,
+            permissions={"author": "read", "maintainer": "write"},
+            review_decision="APPROVED",
+            reviews=[STAMP],
         )
 
+        buildkite = self.cache(github, [], [], actor="author")
+
+        self.assertEqual(len(buildkite.created_builds), 1)
+
     def test_cache_starts_a_main_build_with_the_prs_ci_images(self) -> None:
-        github = FakeGitHub(files=STACK_PR_FILES)
+        github = FakeGitHub(files=STACK_PR_FILES, reviews=[STAMP])
         images = {"rocm-rocm-stack": "s", "rocm-rocm-stack-wheels": "w"}
         ci_build = {
             "created_at": "1",
@@ -1720,7 +1745,7 @@ class RocmCacheTest(unittest.TestCase):
         ]
         for build, starts, reruns, text in cases:
             with self.subTest(build=build):
-                github = FakeGitHub(files=STACK_PR_FILES)
+                github = FakeGitHub(files=STACK_PR_FILES, reviews=[STAMP])
 
                 buildkite = self.cache(github, [build], [])
 

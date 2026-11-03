@@ -1259,9 +1259,32 @@ def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
     org, team = ROCM_CACHE_TEAM
     return (
         "\n\nℹ️ This PR changes the ROCm base image, so `pre-commit` fails until it "
-        "is cached. Once Buildkite CI is green and the PR is approved, a member of "
-        f"@{org}/{team} comments `{COMMAND_CACHE_AMD}`, then comments it again once "
-        "that build passes."
+        f"is cached. Once Buildkite CI is green and a member of @{org}/{team} "
+        f"approved the PR, comment `{COMMAND_CACHE_AMD}`, then again once that "
+        "build passes."
+    )
+
+
+def rocm_stack_approved(
+    github: GitHubClient, team_github: GitHubClient, pr: Mapping[str, Any]
+) -> bool:
+    """A vllm-ci-maintainer's latest review approves the PR's current stack inputs."""
+    latest: dict[str, dict[str, Any]] = {}
+    for review in github.list_reviews(pr["number"]):
+        login = (review.get("user") or {}).get("login")
+        if login and review.get("state") in {
+            "APPROVED",
+            "CHANGES_REQUESTED",
+            "DISMISSED",
+        }:
+            latest[login] = review
+    head = [github.get_file_sha(p, pr["head"]["sha"]) for p in ROCM_STACK_INPUTS]
+    return any(
+        review["state"] == "APPROVED"
+        and team_github.is_team_member(*ROCM_CACHE_TEAM, login)
+        and [github.get_file_sha(p, review["commit_id"]) for p in ROCM_STACK_INPUTS]
+        == head
+        for login, review in latest.items()
     )
 
 
@@ -1271,12 +1294,19 @@ def handle_cache_amd(
     buildkite: BuildkiteClient,
     github: GitHubClient,
     pr: Mapping[str, Any],
+    team_github: GitHubClient,
     image_sources: Sequence[BuildkiteClient] = (),
 ) -> str:
     changes = rocm_stack_changes(github, pr)
     if not changes:
         return "This PR does not change the ROCm base image; nothing to cache."
     sha = pr["head"]["sha"]
+    if not rocm_stack_approved(github, team_github, pr):
+        org, team = ROCM_CACHE_TEAM
+        raise CiPreparationError(
+            f"`{COMMAND_CACHE_AMD}` needs an approval from a member of @{org}/{team} "
+            "that covers the PR's current ROCm stack inputs."
+        )
     # A cache build stays good while these files keep their blobs on the PR and on
     # main; pre-commit.yml checks the image main needs either way.
     inputs = ",".join(
@@ -1401,28 +1431,6 @@ def run(
             )
             return
 
-        if command == COMMAND_CACHE_AMD:
-            if team_github is None:
-                raise RuntimeError("The CI_MAINTAINERS_TOKEN secret is not set.")
-            org, team = ROCM_CACHE_TEAM
-            if not team_github.is_team_member(org, team, actor):
-                github.add_comment(
-                    issue_number,
-                    f"❌ @{actor}, only members of @{org}/{team} can use "
-                    f"`{COMMAND_CACHE_AMD}`.\n\n{command_comment_marker(comment_id)}",
-                )
-                return
-            message = handle_cache_amd(
-                actor=actor,
-                buildkite=buildkite,
-                github=github,
-                pr=pr,
-                image_sources=image_sources,
-            )
-            add_reaction_safely(github, comment_id, "rocket")
-            github.add_comment(issue_number, f"✅ {message}")
-            return
-
         trusted_users = parse_trusted_users(trusted_users_value)
         should_check_approval = (
             not is_trusted_permission(permission)
@@ -1478,6 +1486,17 @@ def run(
                 buildkite=buildkite,
                 command=command,
                 pr=pr,
+            )
+        elif command == COMMAND_CACHE_AMD:
+            if team_github is None:
+                raise RuntimeError("The CI_MAINTAINERS_TOKEN secret is not set.")
+            message = handle_cache_amd(
+                actor=actor,
+                buildkite=buildkite,
+                github=github,
+                pr=pr,
+                team_github=team_github,
+                image_sources=image_sources,
             )
         else:
             raise ValueError(f"Unsupported CI command: {command}")
