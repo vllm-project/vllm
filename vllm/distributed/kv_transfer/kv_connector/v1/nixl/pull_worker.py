@@ -693,4 +693,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     del self.expected_consumer_notifications_by_req[req_id]
                     self._reqs_to_process.remove(req_id)
                     self._reqs_to_send.pop(req_id, None)
+                    if hasattr(self, "_claimed_reqs"):
+                        self._claimed_reqs.discard(req_id)
         return notified_req_ids

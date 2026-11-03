@@ -736,6 +736,9 @@ class SendBlockMeta:
     need_send: int = 0
     sent: int = 0
     sending: int = 0
+    # Glue (B2b): set once D renewed the lease or pulled; unclaimed exports
+    # get kv_unclaimed_grace extra seconds before they expire.
+    claimed: bool = False
 
 
 class MooncakeConnectorMetadata(KVConnectorMetadata):
@@ -1464,6 +1467,9 @@ class MooncakeConnectorWorker:
         self._lease_cache_lock = threading.Lock()
         self._lease_last_sent = 0.0
         self._lease_renewal_started = False
+        self._unclaimed_grace: float = float(
+            kv_transfer_config.get_from_extra_config("kv_unclaimed_grace", 0)
+        )
         # Expired transfers in expiry order, so a late pull fails at once
         # instead of waiting for a prefill that already happened.
         self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
@@ -1717,6 +1723,7 @@ class MooncakeConnectorWorker:
             # must not recreate them.
             send_meta = self.reqs_need_send.get(transfer_id)
             if send_meta is not None:
+                send_meta.claimed = True
                 send_meta.expire_time = max(send_meta.expire_time, new_expire_time)
         return MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
 
@@ -1838,6 +1845,7 @@ class MooncakeConnectorWorker:
                     ready=asyncio.Event(),
                 )
             send_meta = self.reqs_need_send[transfer_id]
+            send_meta.claimed = True
             pending_reqs[d_req_id] = send_meta
 
         if expired_reqs:
@@ -1910,8 +1918,8 @@ class MooncakeConnectorWorker:
                         )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
-                    # Glue (B3): aborted or expired before sending. Answer D
-                    # with an error instead of leaving its pull unanswered.
+                    # Glue (B3): aborted (woken by record_send_reqs) or expired
+                    # before sending; the FINISH reply omits it and D settles it.
                     logger.warning(
                         "Request %s was aborted or expired before sending on P side.",
                         d_req_id,
@@ -1930,10 +1938,8 @@ class MooncakeConnectorWorker:
                 local_regions,
                 remote_regions,
             )
-            if gone_reqs:
-                err_reqs = list(err_reqs) + gone_reqs
-                gone_msg = "KV freed on P side before the pull (request aborted)."
-                err_msg = gone_msg if err_msg is None else f"{err_msg}; {gone_msg}"
+            # gone_reqs are omitted from ok_reqs/err_reqs: the decoder settles
+            # omitted results on FINISH (see test_expired_peer_finish_...).
             err_req_set = set(err_reqs)
             ok_ready_reqs = [
                 (d_req_id, send_meta)
@@ -2555,7 +2561,9 @@ class MooncakeConnectorWorker:
         for transfer_id, send_meta in self.reqs_need_send.items():
             if (
                 send_meta.p_req_id
-                and send_meta.expire_time < now
+                and send_meta.expire_time
+                + (0.0 if send_meta.claimed else self._unclaimed_grace)
+                < now
                 and send_meta.sending == 0
             ):
                 if self._kv_lease_duration is None:
@@ -3053,6 +3061,8 @@ class MooncakeConnectorWorker:
             )
 
     def _forget_lease(self, pull_meta: PullReqMeta) -> None:
+        if not hasattr(self, "_lease_cache_lock"):  # worker built without __init__ (tests)
+            return
         with self._lease_cache_lock:
             hb = self._lease_cache.get(pull_meta.remote_engine_id)
             if hb is None:

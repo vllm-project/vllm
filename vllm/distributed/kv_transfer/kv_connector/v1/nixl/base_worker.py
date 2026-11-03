@@ -698,6 +698,17 @@ class NixlBaseConnectorWorker:
         self._hb_stop = threading.Event()
         self._hb_thread: threading.Thread | None = None
         self._notif_lock = threading.Lock()
+        # Glue (B2b): an export no decoder has claimed yet (no heartbeat seen)
+        # gets this much extra time before its lease is reaped. Covers requests
+        # that reached a paused D, whose scheduler cannot start heartbeats.
+        # 0 keeps upstream behaviour; the cost is holding blocks of requests
+        # whose client went away for that much longer.
+        self._unclaimed_grace: float = float(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "kv_unclaimed_grace", 0
+            )
+        )
+        self._claimed_reqs: set[ReqId] = set()
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -3403,10 +3414,15 @@ class NixlBaseConnectorWorker:
         if not self._reqs_to_send:
             return
         now = time.perf_counter()
+        claimed = getattr(self, "_claimed_reqs", set())
+        grace = getattr(self, "_unclaimed_grace", 0.0)
         expired = [
-            req_id for req_id, expires in self._reqs_to_send.items() if now >= expires
+            req_id
+            for req_id, expires in self._reqs_to_send.items()
+            if now >= expires + (0.0 if req_id in claimed else grace)
         ]
         for req_id in expired:
+            claimed.discard(req_id)
             count = self.consumer_notification_counts_by_req.pop(req_id, 0)
             self.expected_consumer_notifications_by_req.pop(req_id, None)
             self.xfer_stats.record_kv_expired_req()
@@ -3431,6 +3447,8 @@ class NixlBaseConnectorWorker:
         new_expiry = time.perf_counter() + self._lease_extension
         for req_id in payload.split(","):
             if req_id in self._reqs_to_send:
+                if hasattr(self, "_claimed_reqs"):
+                    self._claimed_reqs.add(req_id)
                 old = self._reqs_to_send[req_id]
                 self._reqs_to_send[req_id] = max(old, new_expiry)
                 logger.debug(
@@ -3603,7 +3621,7 @@ class NixlBaseConnectorWorker:
 
     def _hb_forget(self, meta: ReqMeta | None) -> None:
         """Stop heartbeating for a request whose read finished (or failed)."""
-        if meta is None or meta.remote is None:
+        if meta is None or meta.remote is None or not hasattr(self, "_hb_lock"):
             return
         with self._hb_lock:
             hb = self._hb_cache.get(meta.remote.engine_id)
