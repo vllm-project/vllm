@@ -31,6 +31,9 @@ initialize, or load table replicas.
 - DP size 1 within each serving instance, CPU Engram offload, and explicit lazy
   safetensors loading. TP can differ between independent instances, subject to
   the usual model and KV connector limits.
+- In-place weight reload and weight transfer are unsupported: a new checkpoint
+  cannot change the owner's immutable Engram generation in place. Start a new
+  owner generation and new consumers for an updated checkpoint.
 
 ## Start the owner
 
