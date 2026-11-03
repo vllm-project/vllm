@@ -197,6 +197,8 @@ if TYPE_CHECKING:
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_USING_PATHWAYS: bool = False
+    VLLM_MHC_USE_FLASHINFER_MEGA: bool = False
+    VLLM_MHC_FLASHINFER_MEGA_MIN_TOKENS: int = 0
     VLLM_USE_DEEP_GEMM: bool = True
     VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
@@ -1601,6 +1603,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether using Pathways
     "VLLM_TPU_USING_PATHWAYS": lambda: bool(
         "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
+    ),
+    # Run MHCFusedPostPreOp (with its fused RMSNorm) on FlashInfer's fused mHC
+    # kernel, flashinfer.mega_mhc (experimental), where FlashInfer ships a
+    # program for the device and shape (hidden size 4096, four residual
+    # streams, e.g. GLM-5.3-Flash on SM107a). Other calls keep TileLang.
+    "VLLM_MHC_USE_FLASHINFER_MEGA": lambda: bool(
+        int(os.getenv("VLLM_MHC_USE_FLASHINFER_MEGA", "0"))
+    ),
+    # With VLLM_MHC_USE_FLASHINFER_MEGA, the smallest token count sent to
+    # FlashInfer; smaller batches keep TileLang. 0 means no limit. Where a
+    # tensor-parallel all-reduce precedes each mHC call, TileLang is faster at
+    # up to about 4 tokens (GLM-5.3-Flash TP4 on R200), so 5 suits TP.
+    "VLLM_MHC_FLASHINFER_MEGA_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_MHC_FLASHINFER_MEGA_MIN_TOKENS", "0")
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),

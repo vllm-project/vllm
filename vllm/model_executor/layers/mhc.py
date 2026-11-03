@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.mhc.flashinfer_mega import use_flashinfer_mega_mhc
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 
@@ -798,6 +799,23 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if use_flashinfer_mega_mhc(residual, norm_weight):
+            return torch.ops.vllm.mhc_fused_post_pre_flashinfer_mega(
+                x,
+                residual,
+                post_layer_mix,
+                comb_res_mix,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                norm_weight,
+                norm_eps,
+            )
         return torch.ops.vllm.mhc_fused_post_pre_tilelang(
             x,
             residual,
