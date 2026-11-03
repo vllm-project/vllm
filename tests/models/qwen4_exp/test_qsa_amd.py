@@ -642,7 +642,11 @@ def test_qsa_select_decode_rows_replays_in_cuda_graph(
     )
     # Warmup and capture launched it; the replay does not go through Python.
     assert spy.launches == 2
-    torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+    # top-k emits the selected blocks in unspecified order (differs between identical
+    # launches), so compare the selection as a set per row.
+    torch.testing.assert_close(
+        captured.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
+    )
 
 
 @pytest.mark.parametrize(
