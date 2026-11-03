@@ -68,7 +68,9 @@ def v41_moe_config(dist_init):
             ),
         ),
         quant_config=None,
-        kernel_config=SimpleNamespace(moe_backend="deep_gemm_mega_moe"),
+        kernel_config=SimpleNamespace(
+            moe_backend="deep_gemm_mega_moe", mhc_overlap_max_tokens=16
+        ),
         parallel_config=SimpleNamespace(
             enable_expert_parallel=True,
             enable_eplb=False,
@@ -366,6 +368,7 @@ def v4_dspark_config(dist_init):
         kernel_config=SimpleNamespace(
             moe_backend="deep_gemm_mega_moe",
             enable_jit_warmup=False,
+            mhc_overlap_max_tokens=16,
         ),
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=1,
