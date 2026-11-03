@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, Union
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn import Parameter
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
@@ -42,13 +42,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
     check_marlin_supports_layer,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -60,6 +58,7 @@ from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -93,7 +92,7 @@ def _replace_or_register_parameter(
 def _convert_awq_to_standard_format(
     layer: torch.nn.Module,
     w_q_name: str,
-    w_zp_name: str,
+    w_zp_name: str | None,
     size_bits: int,
 ) -> None:
     """Convert AWQ weight and zero-point tensors to standard GPTQ-like format.
@@ -101,6 +100,7 @@ def _convert_awq_to_standard_format(
     AWQ packs qweight along the output dim with a non-standard bit order.
     This converts to standard bit order and repacks qweight along the input
     dim, matching the format expected by the MPLinearKernel framework.
+    If w_zp_name is None (symmetric quantization), only the weight is converted.
     """
     pack_factor = 32 // size_bits
     mask = (1 << size_bits) - 1
@@ -137,7 +137,10 @@ def _convert_awq_to_standard_format(
         packed_factor=pack_factor,
         weight_loader=_noop_loader,
     )
-    setattr(layer, w_q_name, new_param)
+    replace_parameter(layer, w_q_name, new_param)
+
+    if w_zp_name is None:
+        return
 
     # --- Convert qzeros: fix AWQ bit ordering and repack
     # AWQ qzeros: (G, N // pack) packed along dim 1, AWQ bit order
@@ -165,7 +168,7 @@ def _convert_awq_to_standard_format(
         packed_factor=pack_factor,
         weight_loader=_noop_loader,
     )
-    setattr(layer, w_zp_name, new_zp_param)
+    replace_parameter(layer, w_zp_name, new_zp_param)
 
 
 class AutoAWQConfig(QuantizationConfig):
@@ -367,7 +370,7 @@ class AutoAWQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_to_not_convert:
@@ -638,9 +641,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_qzeros", w2_qzeros)
         set_weight_attrs(w2_qzeros, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
@@ -713,7 +713,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 
@@ -790,6 +790,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )
 
 
@@ -882,11 +883,6 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
         quant_config: The AWQ quantization config.
 
     """
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.qweight = torch.nn.Parameter(layer.qweight.data, requires_grad=False)
-        layer.qzeros = torch.nn.Parameter(layer.qzeros.data, requires_grad=False)
-        layer.scales = torch.nn.Parameter(layer.scales.data, requires_grad=False)
 
     def apply(
         self,

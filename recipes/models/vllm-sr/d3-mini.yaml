@@ -1,0 +1,179 @@
+meta:
+  title: "d3-mini"
+  slug: "d3-mini"
+  provider: "vLLM Semantic Router"
+  description: "Decision 3.0's 4B decision model: answers typed questions (choice, yes / no, score) about text, JSON, images and videos with a probability for every option, without generating text."
+  date_added: 2026-10-15
+  date_updated: 2026-10-15
+  tasks:
+    - embedding
+    - multimodal
+  performance_headline: "MI300X: 415 of 416 decisions match the checkpoint runtime (one near-tie); 2.8x its server's requests per second at 64 clients"
+  related_recipes:
+    - vllm-sr/d3
+    - vllm-sr/d3-flash
+    - vllm-sr/d3-nano
+    - vllm-sr/d3-lite
+    - vllm-sr/d3-edge
+  default_hardware: mi300x
+  hardware:
+    mi300x: verified
+
+model:
+  model_id: "vllm-sr/d3-mini"
+  min_vllm_version: "nightly"
+  nightly_required: true
+  install:
+    pip:
+      command: |
+        uv venv --python 3.12 --seed
+        source .venv/bin/activate
+
+        # NVIDIA GPUs (CUDA)
+        uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+
+        # AMD GPUs (ROCm 7.2; glibc 2.39 or newer, as on Ubuntu 24.04)
+        sudo apt install -y libopenmpi3t64 libdw1t64
+        export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | grep -oP 'rocm\d+' | head -1 | sed 's/%2B/+/g')
+        uv pip install --pre vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} --index-strategy unsafe-best-match
+      note: "Decision 3.0 is on vLLM main since 2026-10-14 (vllm-project/vllm#61565) and not in a release yet: install a nightly."
+    docker: false
+  architecture: dense
+  parameter_count: "4.54B"
+  active_parameters: "4.54B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+
+features: {}
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 11
+    description: "BF16 weights (9.1 GB) and an FP32 answer-code readout"
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [vllm-sr/d3-mini](https://huggingface.co/vllm-sr/d3-mini) is the 4B model of Decision 3.0, the decision models of
+  [vLLM Semantic Router](https://github.com/vllm-project/semantic-router). Give it a state (text or JSON,
+  optionally with images and videos) and typed questions: pick one of several options (`choice`), yes or no
+  (`noul`), or a level on a scale (`score`). It returns a probability for every option, without generating text.
+
+  It is a backbone of the Qwen3.5 architecture (4.54B parameters, including the 0.33B vision
+  encoder), trained from `Qwen/Qwen3.5-4B`, with an answer-code readout. vLLM detects the checkpoint's `decision_config.json` and serves it
+  as a classification model (`D3ForSequenceClassification`) on its System One endpoint, `/v1/systemone`: one
+  forward pass per question, whose readout scores that question's options at the last token. The full attention
+  layers read the prompt in both directions, so chunked prefill and prefix caching are off.
+
+  The Decision 3.0 models, all served the same way:
+
+  - [`vllm-sr/d3`](https://huggingface.co/vllm-sr/d3) (27B)
+  - [`vllm-sr/d3-flash`](https://huggingface.co/vllm-sr/d3-flash) (9B)
+  - [`vllm-sr/d3-mini`](https://huggingface.co/vllm-sr/d3-mini) (4B) — this recipe
+  - [`vllm-sr/d3-nano`](https://huggingface.co/vllm-sr/d3-nano) (2B)
+  - [`vllm-sr/d3-lite`](https://huggingface.co/vllm-sr/d3-lite) (0.8B)
+  - [`vllm-sr/d3-edge`](https://huggingface.co/vllm-sr/d3-edge) (0.6B)
+
+  ## Prerequisites
+
+  - **Hardware**: one GPU. The BF16 weights take 9.1 GB; vLLM reserves 92 % of the GPU's memory by default.
+  - **vLLM**: a nightly build. Decision 3.0 support ([vllm-project/vllm#61565](https://github.com/vllm-project/vllm/pull/61565))
+    is on vLLM main since 2026-10-14 and not in a release yet (the latest, v0.31.0, does not include it).
+    Every nightly built since 2026-10-15 includes it.
+  - **ROCm**: Python 3.12, glibc 2.39 or newer (for example Ubuntu 24.04), and the system libraries
+    `libopenmpi3t64` and `libdw1t64`, which the ROCm wheels load at import.
+
+  ```bash
+  uv venv --python 3.12 --seed
+  source .venv/bin/activate
+
+  # NVIDIA GPUs (CUDA)
+  uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+
+  # AMD GPUs (ROCm 7.2; glibc 2.39 or newer, as on Ubuntu 24.04)
+  sudo apt install -y libopenmpi3t64 libdw1t64
+  export VLLM_ROCM_VARIANT=$(curl -s https://wheels.vllm.ai/rocm/nightly | grep -oP 'rocm\d+' | head -1 | sed 's/%2B/+/g')
+  uv pip install --pre vllm --extra-index-url https://wheels.vllm.ai/rocm/nightly/${VLLM_ROCM_VARIANT} --index-strategy unsafe-best-match
+  ```
+
+  ## Launch
+
+  ```bash
+  vllm serve vllm-sr/d3-mini
+  ```
+
+  No flags are needed; the first start downloads the model.
+
+  ## Client usage
+
+  The command builder's cURL and Bench buttons send chat completions, which a decision model does not
+  serve. Ask questions on `/v1/systemone` instead:
+
+  ```bash
+  curl -s localhost:8000/v1/systemone -H 'content-type: application/json' -d '{
+    "model": "vllm-sr/d3-mini",
+    "state": "Write a Python function that merges two sorted lists.",
+    "questions": {
+      "kind": {"type": "choice", "instructions": "What kind of work is this?",
+               "criteria": {"code": "Writing or fixing code", "math": "Mathematics", "chat": "Anything else"}},
+      "reasoning": {"type": "noul", "instructions": "Does answering this need multi-step reasoning?"}
+    }
+  }'
+  ```
+
+  Each answer carries the pick, the probability of every option, and `confidence`, the chosen option's
+  probability; a `noul` answer's value is the probability of yes. The probabilities are the checkpoint
+  runtime's (`model.system_one()`). Images and videos go in `images` and `videos` as http(s) or base64 data
+  URLs; vLLM places them before the text and reads them with the runtime's budgets (images up to 1.6
+  megapixels; videos at 2 fps, at most 32 frames):
+
+  ```bash
+  curl -s localhost:8000/v1/systemone -H 'content-type: application/json' --data-binary @- <<EOF
+  {
+    "model": "vllm-sr/d3-mini",
+    "state": "What does the attached image show?",
+    "images": ["data:image/png;base64,$(base64 -w0 chart.png)"],
+    "questions": {
+      "kind": {"type": "choice", "instructions": "What kind of image is this?",
+               "criteria": {"chart": "A chart or plot", "photo": "A photograph", "document": "A document"}}
+    }
+  }
+  EOF
+  ```
+
+  A request takes up to 64 questions; a choice up to 255 options; a score 2 to 10 levels. A top-level
+  `instructions` field returns 400, since the prompt is fixed.
+
+  ## Measured
+
+  On one AMD Instinct MI300X (ROCm 7.2), in a new Ubuntu 24.04 environment with empty caches and the ROCm nightly `0.32.0rc1.dev190+g3f1bcfd82`, against the checkpoint's own runtime (`AutoModel.from_pretrained(..., trust_remote_code=True)` with transformers 5.17.0 and flash-linear-attention 0.5.2) on 416 questions (text, JSON, a 40-option choice, an image and a video): 1 decision changed (a near-tie: the reference's two most likely answers were 0.004 apart); the median probability difference was 0.0028 and the largest 0.042.
+
+  Closed loop over a mix of text, JSON, image and video requests (every image and video with new bytes), at 1, 8 and 64 concurrent clients: vLLM served 10.4, 37.1 and 35.7 requests per second, the checkpoint's own server (`d3_server.py`) 11.4, 16.2 and 12.7. From empty caches, vLLM gave its first answer 163 s after `vllm serve` started, the model download included.
+
+  ## Troubleshooting
+
+  - **`libmpi_cxx.so.40` or `libdw.so.1`: cannot open shared object file** when importing vLLM on ROCm: install
+    `libopenmpi3t64` and `libdw1t64`.
+  - **Python version on ROCm**: the ROCm nightly wheels are built for Python 3.12 only (`cp312`); create the venv
+    with `--python 3.12`, as above.
+
+  ## References
+
+  - [Model card](https://huggingface.co/vllm-sr/d3-mini)
+  - [Decision 3.0 in the vLLM docs](https://docs.vllm.ai/en/latest/models/structured_decisions_models/#decision-30)
+  - [vllm-project/vllm#61565](https://github.com/vllm-project/vllm/pull/61565): Decision 3.0 support
+  - [vllm-project/vllm#61778](https://github.com/vllm-project/vllm/pull/61778): d3-nano's loading and the other sizes' validation
+  - [vLLM Semantic Router](https://github.com/vllm-project/semantic-router)

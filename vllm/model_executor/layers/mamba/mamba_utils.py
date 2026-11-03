@@ -148,15 +148,6 @@ class MambaStateDtypeCalculator:
             )
         return (conv_state_dtype, recurrent_state_dtype)
 
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_dtypes: tuple[torch.dtype, ...],
-        model_dtype: ModelDType | torch.dtype,
-    ) -> tuple[torch.dtype, ...]:
-        activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, torch.float32, activation_dtype)
-
 
 class MambaStateShapeCalculator:
     @classmethod
@@ -222,22 +213,30 @@ class MambaStateShapeCalculator:
     @classmethod
     def append_replayssm_ring(
         cls,
-        base_shapes: tuple[tuple[int, ...], ...],
+        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         n_groups: int,
         tp_world_size: int,
         logical_window: int,
         backend: MambaBackendEnum,
-    ) -> tuple[tuple[int, ...], ...]:
+        num_speculative_tokens: int = 0,
+    ) -> tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int],
+        tuple[int, int, int],
+    ]:
         """Append the physical ReplaySSM ring shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
-        B_cache uses the un-extended ``n_groups``.
+        B_cache extends ``n_groups`` for head shards as in ``mamba2_state_shape``.
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
-            # FlashInfer keeps the live window and appended token together.
-            ring_buffer_len += 1
+            # FlashInfer keeps the live window and current verify window together.
+            ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
+        n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             *base_shapes,
@@ -318,27 +317,6 @@ class MambaStateShapeCalculator:
         )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
         return (conv_state_shape, recurrent_state_shape)
-
-    @classmethod
-    def append_kda_recoverssm_record(
-        cls,
-        base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
-        num_heads: int,
-        head_dim: int,
-        tp_world_size: int,
-        spec_query_len: int,
-    ) -> tuple[
-        tuple[int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-        tuple[int, int, int],
-    ]:
-        local_num_heads = divide(num_heads, tp_world_size)
-        return (
-            *base_shapes,
-            (local_num_heads, spec_query_len, head_dim),
-            (local_num_heads, spec_query_len, 2 * head_dim),
-        )
 
 
 @dataclass

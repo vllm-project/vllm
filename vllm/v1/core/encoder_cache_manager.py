@@ -59,6 +59,8 @@ class EncoderCacheManager:
             reference the cached entry. If the set is empty, the entry exists
             but is not referenced by any request and is eligible for
             reclamation.
+        num_embeds_by_hash: Mapping from mm_hash to the number of encoder
+            embeddings stored for that cache entry.
         freeable: List of tuples (mm_hash, num_encoder_embeds) representing entries
             whose no current running request is needed and that can be freed to
             make space when needed.
@@ -80,8 +82,13 @@ class EncoderCacheManager:
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
+        # mm_hash of mm_data => number of cached encoder embeddings
+        self.num_embeds_by_hash: dict[str, int] = {}
         # request_id => set of input_ids cached for that request
         self.request_cached_ids: dict[str, set[int]] = {}
+        # request_id => mm_hash => number of that request's cached input_ids
+        # with the mm_hash
+        self.request_hash_refs: dict[str, dict[str, int]] = {}
 
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
@@ -94,7 +101,9 @@ class EncoderCacheManager:
         Called when model weights are updated to invalidate stale embeddings.
         """
         self.cached.clear()
+        self.num_embeds_by_hash.clear()
         self.request_cached_ids.clear()
+        self.request_hash_refs.clear()
         self.freeable.clear()
         self.freed.clear()
         self.num_free_slots = self.cache_size
@@ -127,8 +136,15 @@ class EncoderCacheManager:
             self.num_freeable_slots -= num_encoder_embeds
 
         self.cached[mm_hash].add(request.request_id)
-        self.request_cached_ids.setdefault(request.request_id, set()).add(input_id)
+        self._add_cached_input_id(request.request_id, input_id, mm_hash)
         return True
+
+    def get_cached_num_encoder_embeds(
+        self, request: Request, input_id: int
+    ) -> int | None:
+        """Return the encoder-embedding count stored for a cached input."""
+        mm_hash = request.mm_features[input_id].identifier
+        return self.num_embeds_by_hash.get(mm_hash)
 
     def can_allocate(
         self,
@@ -188,6 +204,7 @@ class EncoderCacheManager:
         while num_embeds > self.num_free_slots:
             mm_hash, num_free_embeds = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
+            del self.num_embeds_by_hash[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_embeds
         return True
@@ -209,6 +226,12 @@ class EncoderCacheManager:
             self.cached[mm_hash] = set()
 
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+        cached_num_encoder_embeds = self.num_embeds_by_hash.setdefault(
+            mm_hash, num_encoder_embeds
+        )
+        # _try_schedule_encoder_inputs rejects local-hit and same-step
+        # identifier/count mismatches before allocation.
+        assert cached_num_encoder_embeds == num_encoder_embeds
 
         # NOTE: Encoder cache should always have enough space for encoder inputs
         # that are scheduled since eviction takes place at can_allocate().
@@ -216,9 +239,19 @@ class EncoderCacheManager:
         assert self.num_freeable_slots >= num_encoder_embeds
 
         self.cached[mm_hash].add(request_id)
-        self.request_cached_ids.setdefault(request_id, set()).add(input_id)
+        self._add_cached_input_id(request_id, input_id, mm_hash)
         self.num_free_slots -= num_encoder_embeds
         self.num_freeable_slots -= num_encoder_embeds
+
+    def _add_cached_input_id(
+        self, request_id: str, input_id: int, mm_hash: str
+    ) -> None:
+        cached_ids = self.request_cached_ids.setdefault(request_id, set())
+        if input_id in cached_ids:
+            return
+        cached_ids.add(input_id)
+        hash_refs = self.request_hash_refs.setdefault(request_id, {})
+        hash_refs[mm_hash] = hash_refs.get(mm_hash, 0) + 1
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request."""
@@ -238,10 +271,16 @@ class EncoderCacheManager:
         mm_hash = request.mm_features[input_id].identifier
         # Always clean up request_cached_ids, even if the mm_hash was
         # already evicted from cache (e.g. by can_allocate).
-        if req_id in self.request_cached_ids:
-            self.request_cached_ids[req_id].discard(input_id)
-            if not self.request_cached_ids[req_id]:
+        cached_ids = self.request_cached_ids.get(req_id)
+        if cached_ids is not None and input_id in cached_ids:
+            cached_ids.remove(input_id)
+            hash_refs = self.request_hash_refs[req_id]
+            hash_refs[mm_hash] -= 1
+            if not hash_refs[mm_hash]:
+                del hash_refs[mm_hash]
+            if not cached_ids:
                 del self.request_cached_ids[req_id]
+                del self.request_hash_refs[req_id]
         # The mm_hash not in cache or the req_id set is empty
         if not self.cached.get(mm_hash, None):
             return
@@ -251,14 +290,11 @@ class EncoderCacheManager:
         # occurrence is freed: dropping it at the first makes the entry
         # evictable while the request still needs it, and the encoder then
         # recomputes an item it already has.
-        if any(
-            request.mm_features[other_id].identifier == mm_hash
-            for other_id in self.request_cached_ids.get(req_id, ())
-        ):
+        if mm_hash in self.request_hash_refs.get(req_id, ()):
             return
         self.cached[mm_hash].discard(req_id)
         if not self.cached[mm_hash]:
-            num_encoder_embeds = request.get_num_encoder_embeds(input_id)
+            num_encoder_embeds = self.num_embeds_by_hash[mm_hash]
             self.freeable[mm_hash] = num_encoder_embeds
             self.num_freeable_slots += num_encoder_embeds
 

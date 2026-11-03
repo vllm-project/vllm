@@ -142,6 +142,9 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
         def setsockopt(self, *_args, **_kwargs):
             pass
 
+        def getsockopt_string(self, _option):
+            return "inproc://dummy"
+
     monkeypatch.setattr(core_client_mod.zmq.Socket, "shadow", lambda *_: ShadowSocket())
     monkeypatch.setattr(
         core_client_mod, "make_zmq_socket", lambda *_, **__: DummySocket()
@@ -210,11 +213,35 @@ def _make_dplb_client(num_engines: int = 3, client_count: int = 1) -> DPLBAsyncM
     client = object.__new__(DPLBAsyncMPClient)
     client.client_count = client_count
     client.reqs_in_flight = {}
+    client.streaming_reqs = set()
     client.engine_inflight = Counter()
     client.core_engines = [bytes([i, 0]) for i in range(num_engines)]
     client.lb_engines = [[0, 0, 0.0] for _ in range(num_engines)]
     client.eng_start_index = 0
+    client._kv_event_sources = {}
+    client.vllm_config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(all2all_backend="allgather_reducescatter"),
+    )
     return client
+
+
+def test_dplb_weight_checksums_gather_every_engine():
+    """call_utility_async on a DPLB client would keep only the first engine."""
+    client = _make_dplb_client(num_engines=2)
+
+    async def call_utility(method, *args, engine):
+        assert (method, args) == ("compute_weight_checksums", ())
+        return [{f"dp{engine[0]}:tp{tp}:w": "x"} for tp in (0, 1)]
+
+    client._call_utility_async = call_utility
+    workers = asyncio.run(client.compute_weight_checksums_async())
+    assert [key for worker in workers for key in worker] == [
+        "dp0:tp0:w",
+        "dp0:tp1:w",
+        "dp1:tp0:w",
+        "dp1:tp1:w",
+    ]
 
 
 def test_dplb_late_interaction_sticky_routing():
@@ -247,6 +274,19 @@ def test_dplb_non_late_interaction_still_uses_lb():
     assert client.lb_engines[1][0] == 1
 
 
+def test_dplb_in_flight_request_stays_on_same_engine():
+    client = _make_dplb_client()
+    request = make_request(SamplingParams(max_tokens=1))
+    engine = client.core_engines[2]
+    client.reqs_in_flight[request.request_id] = engine
+    client.engine_inflight[engine] = 1
+
+    chosen_engine = client.get_core_engine_for_request(request)
+
+    assert chosen_engine == engine
+    assert client.engine_inflight[engine] == 1
+
+
 def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
     the exact in-flight floor must keep a burst spreading round-robin."""
@@ -274,7 +314,7 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     client.current_wave = 0
     client.resources = SimpleNamespace(stats_update_task=None)
     client.stats_update_address = "inproc://scale-down-stats"
-    client.first_req_sock_addr = "inproc://scale-down-first-request"
+    client.scale_sock_addr = "inproc://scale-down-notify"
     pause_started = asyncio.Event()
 
     async def pause_scheduler(*args, **kwargs):
@@ -286,11 +326,11 @@ async def test_dplb_scale_down_routes_after_stale_stats_snapshot():
     with (
         zmq.asyncio.Context() as ctx,
         ctx.socket(zmq.XPUB) as coordinator,
-        ctx.socket(zmq.PAIR) as first_req_socket,
+        ctx.socket(zmq.PAIR) as scale_socket,
     ):
         client.ctx = ctx
         coordinator.bind(client.stats_update_address)
-        first_req_socket.bind(client.first_req_sock_addr)
+        scale_socket.bind(client.scale_sock_addr)
         client._ensure_stats_update_task()
         scale_task = None
         try:
@@ -371,11 +411,47 @@ def test_dplb_finished_requests_release_inflight():
     assert req.request_id not in client.reqs_in_flight
 
 
+@pytest.mark.parametrize("final_sent", [False, True])
+def test_dplb_streaming_session_abort_goes_to_all_engines(final_sent: bool):
+    """A streaming-input chunk in flight when its session finished may
+    re-create it on any engine, so an open session's abort reaches every
+    engine. Other aborts go only to the routed engine."""
+    client = _make_dplb_client(num_engines=3)
+    client.resources = SimpleNamespace(engine_dead=False)
+    sent: dict[bytes, list[str]] = {}
+
+    async def abort_requests(request_ids, engine):
+        sent[engine] = request_ids
+
+    client._abort_requests = abort_requests
+
+    chunk = make_request(SamplingParams(max_tokens=1))
+    chunk.resumable = True
+    client.get_core_engine_for_request(chunk)
+    if final_sent:
+        chunk.resumable = False
+        client.get_core_engine_for_request(chunk)
+    # The engine finished the session, dropping its routing entry.
+    outputs = EngineCoreOutputs(finished_requests={chunk.request_id})
+    asyncio.run(DPLBAsyncMPClient.process_engine_outputs(client, outputs))
+    client.reqs_in_flight["live"] = client.core_engines[1]
+
+    asyncio.run(client.abort_requests_async([chunk.request_id, "live"]))
+
+    if final_sent:
+        expected = {client.core_engines[1]: ["live"]}
+    else:
+        expected = {engine: [chunk.request_id] for engine in client.core_engines}
+        expected[client.core_engines[1]].append("live")
+    assert sent == expected
+    assert not client.streaming_reqs
+
+
 @pytest.mark.parametrize(
     ("effective_size", "other_size"),
     [(None, None), (4224, 4224), (4224, 1056), (4224, None)],
 )
-def test_apply_ready_response_syncs_block_size(effective_size, other_size):
+def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     import msgspec
 
     client = object.__new__(MPClient)
@@ -383,8 +459,11 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
+    client.coordinator_input_address = None
+    client.coordinator_output_address = None
 
     payload = msgspec.msgpack.encode(
         EngineCoreReadyResponse(
@@ -405,6 +484,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
             instance_id="test-instance",
             supports_lora=False,
             max_loras=0,
+            coord_store_port=1234,
+            coordinator_input_address="tcp://127.0.0.1:1235",
+            coordinator_output_address="tcp://127.0.0.1:1236",
         )
     )
     fields = msgspec.msgpack.decode(payload)
@@ -425,6 +507,9 @@ def test_apply_ready_response_syncs_block_size(effective_size, other_size):
 
     client._apply_ready_response(b"")
     assert cache_config.effective_attention_block_size is None
+    assert client.vllm_config.parallel_config._coord_store_port == 1234
+    assert client.coordinator_input_address == "tcp://127.0.0.1:1235"
+    assert client.coordinator_output_address == "tcp://127.0.0.1:1236"
 
 
 def test_apply_ready_response_syncs_mamba_block_size():
@@ -435,6 +520,7 @@ def test_apply_ready_response_syncs_mamba_block_size():
     client.vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
         model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
     )
     client.stats_update_address = None
 
@@ -1490,3 +1576,58 @@ def test_ready_response_queries_executor_with_weight_transfer():
 
     executor.supports_draft_weight_updates.assert_called_once()
     assert response.supports_draft_weight_updates is True
+
+
+def test_apply_ready_response_retains_kv_event_sources():
+    """Each engine's resolved publisher config is kept by DP rank; engines
+    without KV events contribute nothing."""
+    import msgspec
+
+    from vllm.config.kv_events import KVEventsConfig
+
+    client = object.__new__(MPClient)
+    client._effective_attention_block_sizes = set()
+    client._kv_event_sources = {}
+    client.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        model_config=SimpleNamespace(max_model_len=8192),
+        parallel_config=SimpleNamespace(_coord_store_port=0),
+    )
+
+    def ready(rank: int, config: KVEventsConfig | None) -> bytes:
+        return msgspec.msgpack.encode(
+            EngineCoreReadyResponse(
+                max_model_len=8192,
+                num_gpu_blocks=100,
+                block_size=16,
+                dp_stats_address=None,
+                dtype="bfloat16",
+                vllm_version="test",
+                world_size=2,
+                data_parallel_size=2,
+                tensor_parallel_size=1,
+                pipeline_parallel_size=1,
+                decode_context_parallel_size=1,
+                data_parallel_rank=rank,
+                max_num_seqs=256,
+                max_num_batched_tokens=8192,
+                instance_id="test-instance",
+                supports_lora=False,
+                max_loras=0,
+                kv_events_config=config,
+            )
+        )
+
+    rank1 = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:41233"
+    )
+    client._apply_ready_response(ready(1, rank1))
+    client._apply_ready_response(ready(0, None))
+    assert client.get_kv_event_sources() == {1: rank1}
+
+    # A rank that comes back (elastic re-add) reports its new port.
+    rank1_again = KVEventsConfig(
+        enable_kv_cache_events=True, publisher="zmq", endpoint="tcp://10.0.0.2:47001"
+    )
+    client._apply_ready_response(ready(1, rank1_again))
+    assert client.get_kv_event_sources() == {1: rank1_again}

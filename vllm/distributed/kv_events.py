@@ -17,6 +17,12 @@ import zmq
 
 from vllm.config.kv_events import KVEventsConfig
 from vllm.logger import init_logger
+from vllm.utils.network_utils import (
+    get_ip,
+    get_tcp_uri,
+    is_valid_ipv6_address,
+    split_zmq_path,
+)
 from vllm.v1.core.kv_cache_utils import ExternalBlockHash
 
 logger = init_logger(__name__)
@@ -62,9 +68,11 @@ class BlockStored(KVCacheEvent):
     lora_name: str | None
 
     """Extra keys used in block hash computation, one entry per block in
-    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
-    prompt embedding hashes, etc. for that specific block. Exposed for external
-    KV cache consumers to reconstruct block hashes.
+    block_hashes. Each entry contains, in order, the LoRA name (if
+    `lora_name` is set), `(mm_identifier, offset)` pairs, the cache_salt
+    string and prompt embedding digests for that specific block. These are
+    published untagged; the block hash itself uses each value tagged with
+    its source, e.g. `("lora", name)` or `("mm", mm_identifier, offset)`.
     """
     extra_keys: list[tuple[Any, ...] | None] | None = None
 
@@ -84,6 +92,10 @@ class BlockStored(KVCacheEvent):
     ownership of the underlying block, which may be shared across sessions.
     """
     session_id: str | None = None
+    """Tokens beyond each block used in its hash, one list per block_hashes entry.
+    None when lookahead hashing is disabled.
+    """
+    lookahead_token_ids: list[list[int]] | None = None
 
     def __hash__(self) -> int:
         return hash(
@@ -101,6 +113,9 @@ class BlockStored(KVCacheEvent):
                 self.locality,
                 self.ownership,
                 self.session_id,
+                tuple(map(tuple, self.lookahead_token_ids))
+                if self.lookahead_token_ids is not None
+                else None,
             )
         )
 
@@ -349,6 +364,11 @@ class ZmqEventPublisher(EventPublisher):
             replay_endpoint, self._dp_rank
         )
         assert self._endpoint is not None
+        self._hwm = hwm
+        # ZMQ acks reads only every HWM/2 messages, so the sender can see up to
+        # HWM/2 stale messages; 2x lets a full replay plus marker always fit.
+        self._replay_hwm = 2 * (buffer_steps + 1)
+        self._socket_setup()
         self._publisher_config = KVEventsConfig(
             enable_kv_cache_events=True,
             publisher="zmq",
@@ -359,8 +379,6 @@ class ZmqEventPublisher(EventPublisher):
             max_queue_size=max_queue_size,
             topic=topic,
         )
-        self._hwm = hwm
-        self._socket_setup()
 
         # Payload
         self._seq_gen = count()
@@ -423,16 +441,10 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
-            # bind stable, connect volatile convention
-            if self._endpoint is not None and (
-                "*" in self._endpoint
-                or "::" in self._endpoint
-                or self._endpoint.startswith("ipc://")
-                or self._endpoint.startswith("inproc://")
-            ):
-                self._pub.bind(self._endpoint)
-            elif self._endpoint is not None:
+            assert self._endpoint is not None
+            if self._is_bind_endpoint(self._endpoint):
+                self._endpoint = self._bind(self._pub, self._endpoint)
+            else:
                 self._pub.connect(self._endpoint)
 
         # Set up replay socket: use ROUTER
@@ -441,7 +453,33 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
-            self._replay.bind(self._replay_endpoint)
+            # Queue a full replay plus its end marker for slow subscribers.
+            self._replay.setsockopt(zmq.SNDHWM, self._replay_hwm)
+            self._replay_endpoint = self._bind(self._replay, self._replay_endpoint)
+
+    @staticmethod
+    def _is_bind_endpoint(endpoint: str) -> bool:
+        """Bind wildcard and ipc/inproc endpoints; connect to the rest."""
+        return (
+            "*" in endpoint
+            or "::" in endpoint
+            or endpoint.startswith(("ipc://", "inproc://"))
+        )
+
+    @staticmethod
+    def _bind(sock: zmq.Socket, endpoint: str) -> str:
+        """Bind; tcp://*:0 binds this node's IP and returns the bound endpoint."""
+        if endpoint != "tcp://*:0":
+            sock.bind(endpoint)
+            return endpoint
+        ip = get_ip()
+        if ip in ("0.0.0.0", "::"):
+            raise ValueError("tcp://*:0 needs a node IP; set VLLM_HOST_IP")
+        if is_valid_ipv6_address(ip):
+            sock.setsockopt(zmq.IPV6, 1)
+        sock.bind(get_tcp_uri(ip, 0))
+        _, _, port = split_zmq_path(sock.getsockopt_string(zmq.LAST_ENDPOINT))
+        return get_tcp_uri(ip, int(port))
 
     def _publisher_thread(self) -> None:
         """Background thread that processes the event queue."""
@@ -514,7 +552,7 @@ class ZmqEventPublisher(EventPublisher):
 
         Returns:
             The endpoint with the port offset by data_parallel_rank
-                or suffix appended
+                or suffix appended; a tcp port of 0 is left for the OS.
 
         """
         # Do nothing if input is None or data_parallel_rank is 0
@@ -529,6 +567,8 @@ class ZmqEventPublisher(EventPublisher):
                 last_colon_idx = endpoint.rfind(":")
                 base_addr = endpoint[:last_colon_idx]
                 base_port = int(endpoint[last_colon_idx + 1 :])
+                if base_port == 0:
+                    return endpoint
                 new_port = base_port + data_parallel_rank
                 return f"{base_addr}:{new_port}"
             return endpoint

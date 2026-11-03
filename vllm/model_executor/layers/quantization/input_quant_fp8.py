@@ -155,8 +155,11 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
-        # Fallback to CUDA implementation
-        return self.forward_cuda(x, scale, scale_ub)
+        # Fall back to the CUDA implementation. Dispatch on the class, not
+        # through self: a subclass may override forward_cuda with a different
+        # signature (_DecodeConcatQuantFP8 does), and a virtual call would
+        # re-enter it with mismatched arguments.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub)
 
     def forward_xpu(
         self,
@@ -175,7 +178,8 @@ class QuantFP8(CustomOp):
                 dtype=_FP8_DTYPE,
                 use_ue8m0=self.use_ue8m0,
             )
-        return self.forward_cuda(x, scale, scale_ub, use_triton)
+        # Dispatch on the class, for the same reason as in forward_hip.
+        return QuantFP8.forward_cuda(self, x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,
@@ -197,7 +201,7 @@ class QuantFP8(CustomOp):
 
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
-                x_max, _ = x.abs().max(dim=-1)
+                x_max = x.abs().amax(dim=-1)
                 x_max = x_max.unsqueeze(-1).to(torch.float32)
                 if scale_ub is not None:
                     x_max = x_max.clamp(max=scale_ub)
@@ -240,10 +244,12 @@ class QuantFP8(CustomOp):
 
         x_grouped = x.view(-1, num_groups, self.group_size)
         absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-        scales_raw = absmax / _FP8_MAX
-        if self.use_ue8m0:
-            scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
-        scales = (scales_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        scales_raw = (absmax / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
+        scales = (
+            torch.exp2(torch.ceil(torch.log2(scales_raw)))
+            if self.use_ue8m0
+            else scales_raw
+        )
 
         x_scaled = x_grouped / scales
         x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)

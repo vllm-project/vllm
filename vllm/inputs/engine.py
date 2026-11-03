@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, assert_never
 
-from typing_extensions import NotRequired, TypedDict, assert_never
+from typing_extensions import TypedDict
 
 from vllm.exceptions import VLLMValidationError
 
@@ -42,11 +42,6 @@ class TokensInput(_InputOptions):
     prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
     """Char-level (start, end) offsets per token, propagated from the
     renderer's TokensPrompt when offsets were computed."""
-
-    assistant_tokens_mask: NotRequired[list[int] | None]
-    """Per-token 0/1 mask marking assistant-generated tokens.
-    Populated when ``return_assistant_tokens_mask=True`` is set on the
-    render request and the chat template supports ``{% generation %}``."""
 
 
 def tokens_input(
@@ -154,11 +149,6 @@ class MultiModalInput(_InputOptions):
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.
     """
-
-    assistant_tokens_mask: NotRequired[list[int] | None]
-    """Per-token 0/1 mask marking assistant-generated tokens.
-    Populated when ``return_assistant_tokens_mask=True`` is set on the
-    render request and the chat template supports ``{% generation %}``."""
 
 
 def mm_input(

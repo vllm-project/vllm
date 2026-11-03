@@ -3,8 +3,6 @@
 from dataclasses import dataclass
 
 import pytest
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 import vllm
 from tests.conftest import VllmRunner
@@ -29,20 +27,12 @@ class TestConfig:
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
-            # There is a bug in transformers v4 where size is ignored by
-            # `Qwen2VLProcessor.__call__`
-            if Version(TRANSFORMERS_VERSION) < Version("5.2.0"):
-                self.mm_processor_kwargs = {
-                    "min_pixels": 28 * 28,
-                    "max_pixels": 1280 * 28 * 28,
+            self.mm_processor_kwargs = {
+                "size": {
+                    "shortest_edge": 28 * 28,
+                    "longest_edge": 1280 * 28 * 28,
                 }
-            else:
-                self.mm_processor_kwargs = {
-                    "size": {
-                        "shortest_edge": 28 * 28,
-                        "longest_edge": 1280 * 28 * 28,
-                    }
-                }
+            }
 
 
 class Qwen2VLTester:
@@ -143,6 +133,7 @@ class Qwen2VLTester:
 
             for output_text, expected_text in zip(output_texts, expected_texts):
                 # NOTE beam search .text contains the whole text including inputs
+                assert output_text is not None
                 assert output_text.endswith(expected_text), (
                     f"Generated {output_text} does not match expected {expected_text}"
                 )

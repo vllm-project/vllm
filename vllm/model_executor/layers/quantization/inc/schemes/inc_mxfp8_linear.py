@@ -17,9 +17,6 @@ from .inc_scheme import INCLinearScheme
 
 
 class INCMxfp8LinearScheme(INCLinearScheme):
-    def __init__(self) -> None:
-        self.kernel = init_mxfp8_linear_kernel()
-
     @classmethod
     def get_min_capability(cls) -> int:
         return 75
@@ -71,6 +68,8 @@ class INCMxfp8LinearScheme(INCLinearScheme):
             weight_loader=extra_weight_attrs.get("weight_loader"),
         )
         layer.register_parameter("weight_scale", weight_scale)
+
+        self.kernel = init_mxfp8_linear_kernel(weight_shape=layer.weight.shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)
