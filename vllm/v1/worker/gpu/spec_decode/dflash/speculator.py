@@ -133,9 +133,9 @@ class DFlashSpeculator(DraftModelSpeculator):
     @property
     def attn_vllm_config(self) -> VllmConfig:
         # The draft's attention differs from the target's in causality.
-        config = copy.copy(super().attn_vllm_config)
+        config = super().attn_vllm_config
         config.attention_config = replace(
-            self.vllm_config.attention_config,
+            config.attention_config,
             use_non_causal=self.requires_non_causal,
         )
         return config
@@ -575,6 +575,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_padded = batch_desc.num_tokens
         num_tokens_across_dp = (
