@@ -66,6 +66,11 @@ DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
         # Several logits per request (speculative decoding).
         ([15, 5, 8], [1, 2, 1]),
         ([40, 3, 17, 9], [4, 3, 1, 2]),
+        # A request without logits: max_logits_per_req == 1 but
+        # num_logits_indices != num_reqs, so `arange` would be wrong.
+        ([15, 5, 8, 9], [1, 1, 1, 0]),
+        # num_logits_indices == num_reqs but max_logits_per_req > 1.
+        ([15, 5, 8, 9], [2, 1, 1, 0]),
     ],
 )
 def test_fast_prefill_query_start_loc(
@@ -96,3 +101,14 @@ def test_fast_prefill_query_start_loc_cpu_ready_while_gpu_busy(
     observed = out.query_start_loc_cpu.tolist()  # no synchronization before
     torch.accelerator.synchronize()
     assert observed == expected
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_fast_prefill_query_start_loc_cpu_under_cuda_default_device():
+    """The host offsets must stay on the CPU even when the default device is
+    CUDA."""
+    metadata, expected = _make_metadata([15, 5, 8, 300], [1, 1, 1, 1], "cuda")
+    with torch.device("cuda"):
+        out = make_kv_sharing_fast_prefill_common_attn_metadata(metadata)
+    assert out.query_start_loc_cpu.device.type == "cpu"
+    assert out.query_start_loc_cpu.tolist() == expected

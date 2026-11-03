@@ -827,7 +827,7 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     if decode_max_query_len == 1 and total_num_decode_tokens == num_reqs:
         # One logit per request: the offsets are [0, 1, ..., num_reqs].
         decode_query_start_loc_cpu = torch.arange(
-            num_reqs + 1, dtype=decode_query_start_loc.dtype
+            num_reqs + 1, dtype=decode_query_start_loc.dtype, device="cpu"
         )
     else:
         with gpu_sync_allowed():
