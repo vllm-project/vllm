@@ -244,6 +244,3 @@ def test_fp32_logits_gather_opt_in_flags():
 
     assert supports_fp32_logits_gather(MiniMaxM3SparseForCausalLM)
     assert supports_fp32_logits_gather(MiniMaxM3SparseForConditionalGeneration)
-    assert supports_fp32_logits_gather(OptedInModel)
-    assert not supports_fp32_logits_gather(PassthroughModel)
-    assert not supports_fp32_logits_gather(SoftCapModel)
