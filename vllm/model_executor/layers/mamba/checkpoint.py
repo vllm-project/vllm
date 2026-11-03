@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
@@ -188,6 +188,29 @@ class MambaPrefillCheckpointExporter:
         )
         width = raw_qkv.shape[-1]
         has_recurrent = recurrent_checkpoint is not None
+        if not HAS_TRITON or raw_qkv.device.type == "cpu":
+            if has_recurrent:
+                assert recurrent_state is not None
+                has_recurrent = recurrent_checkpoint[0].numel() > 0
+            offsets = checkpoint.checkpoint_offsets.tolist()
+            dst_indices = checkpoint.state_indices.tolist()
+            starts = cu_seqlens.tolist()
+            src_indices = (
+                recurrent_rows.tolist() if recurrent_rows is not None else None
+            )
+            for row, (offset, dst) in enumerate(zip(offsets, dst_indices)):
+                if dst == NULL_BLOCK_ID or offset <= 0:
+                    continue
+                if offset >= state_len:
+                    token_end = starts[row] + offset
+                    window = slice(token_end - state_len, token_end)
+                    if token_indices is not None:
+                        window = token_indices[window]
+                    conv_state[dst, :, :state_len].copy_(raw_qkv[window].T)
+                if has_recurrent and recurrent_state is not None:
+                    src = src_indices[row] if src_indices is not None else row
+                    recurrent_state[dst].copy_(recurrent_checkpoint[src])
+            return
         if recurrent_checkpoint is None:
             # Unread placeholders for the recurrent pointers.
             recurrent_checkpoint = recurrent_state = conv_state
