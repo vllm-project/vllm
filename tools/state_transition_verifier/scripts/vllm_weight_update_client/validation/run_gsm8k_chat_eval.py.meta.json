@@ -1,0 +1,14 @@
+{
+  "agent": "codex",
+  "artifact": "GSM8K raw-completions evaluator",
+  "cmd": "python run_gsm8k_chat_eval.py --host ... --model ... --output ... --details ... (records correct_count)",
+  "git_commit": "c7ce03bcbd380d0e94490abb111fe48861c16343",
+  "env_pins": {
+    "endpoint": "/v1/completions",
+    "dataset": "GSM8K test, 1319 questions, 5-shot",
+    "aiohttp_connection_limit": "matches --concurrency",
+    "temperature": 0.0,
+    "seed": 42
+  },
+  "ts": 1784505492
+}

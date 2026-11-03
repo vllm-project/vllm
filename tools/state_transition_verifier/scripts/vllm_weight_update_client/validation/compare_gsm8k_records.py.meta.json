@@ -1,0 +1,11 @@
+{
+  "artifact": "GSM8K before/after identity-update record comparator",
+  "cmd": "compare_gsm8k_records.py before.jsonl after.jsonl record-compare.json",
+  "git_commit": "working-tree weight-transfer/reload patch",
+  "env_pins": {
+    "model": "model supplied by the caller",
+    "comparison": "exact completion records excluding nondeterministic response IDs"
+  },
+  "agent": "codex",
+  "ts": 1784505492
+}

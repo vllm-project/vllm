@@ -1,0 +1,6 @@
+{
+  "artifact": "RL experiment source snapshot and patch-stack validator",
+  "cmd": "scripts/rl_source_snapshot.py prepare|verify|render-check|cleanup",
+  "git_commit": "uncommitted",
+  "ts": "2026-07-25"
+}

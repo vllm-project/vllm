@@ -1,0 +1,16 @@
+{
+  "artifact": "Fixed-token HTTP oracle",
+  "cmd": "fixed_token_oracle.py --base-url http://127.0.0.1:8000 --request-id modelb-fixed-oracle-001",
+  "git_commit": "c7ce03bcbd380d0e94490abb111fe48861c16343",
+  "env_pins": {
+    "temperature": 0,
+    "seed": 17,
+    "max_tokens": 8,
+    "logprobs": 20,
+    "prompt_logprobs": 1,
+    "return_token_ids": true
+  },
+  "change_note": "HTTPError failures now include the response body for server-side diagnosis.",
+  "ts": "2026-07-19T03:36:00Z",
+  "agent": "codex"
+}

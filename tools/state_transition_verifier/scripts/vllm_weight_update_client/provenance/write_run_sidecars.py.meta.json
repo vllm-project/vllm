@@ -1,0 +1,9 @@
+{
+  "artifact": "Generic per-artifact provenance sidecar writer",
+  "cmd": "write_run_sidecars.py <run> <model_path> <revision> <nodes> <head>",
+  "git_commit": "working-tree weight-transfer/reload patch",
+  "env_pins": {
+    "scope": "agent_run/results/<run>"
+  },
+  "agent": "codex"
+}

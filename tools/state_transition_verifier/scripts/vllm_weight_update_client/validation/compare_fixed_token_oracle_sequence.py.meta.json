@@ -1,0 +1,9 @@
+{
+  "agent": "codex",
+  "artifact": "Repeated pre/post fixed-token oracle comparator",
+  "cmd": "compare_fixed_token_oracle_sequence.py pre pre-repeat post post-repeat output",
+  "git_commit": "c7ce03bcbd380d0e94490abb111fe48861c16343",
+  "env_pins": {
+    "comparison": "token IDs, prompt boundaries, per-token logprobs, finish reason, request identity, usage"
+  }
+}
