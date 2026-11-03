@@ -2251,6 +2251,7 @@ class HiSparseSourceManager(FullAttentionManager):
             num_gpu_blocks=num_blocks,
             enable_caching=self.enable_caching and self.kv_cache_spec.prefix_cacheable,
             hash_block_size=device_pool.hash_block_size,
+            num_hash_lookahead_tokens=device_pool.num_hash_lookahead_tokens,
             enable_kv_cache_events=device_pool.enable_kv_cache_events,
             metrics_collector=(
                 KVCacheMetricsCollector(device_pool.metrics_collector.sample_rate)

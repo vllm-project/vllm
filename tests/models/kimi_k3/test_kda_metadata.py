@@ -134,7 +134,11 @@ def _make_builder(
     vllm_config.cache_config.cache_hit_alignment_tokens = (
         cache_hit_alignment_tokens or hash_block_size
     )
-    vllm_config.num_hash_lookahead_tokens = num_hash_lookahead_tokens
+    if vllm_config.speculative_config is not None:
+        vllm_config.speculative_config.disable_lookahead_block_hashes = (
+            not num_hash_lookahead_tokens
+        )
+    assert vllm_config.num_hash_lookahead_tokens == num_hash_lookahead_tokens
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,

@@ -8,7 +8,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from tests.v1.simple_kv_offload.test_scheduler import (
     _BYTES_PER_BLOCK,
@@ -84,23 +83,18 @@ def _make_connector(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("supported", [False, True])
-def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
+@pytest.mark.parametrize("lookahead", [False, True])
+def test_multi_cpu_coordinator_uses_parent_hash_protocol(lookahead):
     num_lookahead = 5
     config = _make_lookahead_config(num_lookahead)
+    config.speculative_config.disable_lookahead_block_hashes = not lookahead
     children = [
         {
             "kv_connector": "SimpleCPUOffloadConnector",
             "kv_role": "kv_both",
             "kv_connector_extra_config": {"num_cpu_blocks": 8},
-        },
-        {
-            "kv_connector": "SimpleCPUOffloadConnector",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {"num_cpu_blocks": 8},
         }
-        if supported
-        else _lookahead_connector_config(False),
+        for _ in range(2)
     ]
     children[0] = {
         "kv_connector": "MultiConnector",
@@ -113,17 +107,15 @@ def test_multi_cpu_coordinator_uses_parent_hash_protocol(supported):
         kv_connector_extra_config={"connectors": children},
     )
     config.scheduler_config.disable_hybrid_kv_cache_manager = True
-    config.num_hash_lookahead_tokens = config._resolve_num_hash_lookahead_tokens()
     connector = KVConnectorFactory.create_connector(
         config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
     )
     child = connector.sub_connectors[0].sub_connectors[0]
-    expected = num_lookahead if supported else 0
+    expected = num_lookahead if lookahead else 0
     assert config.num_hash_lookahead_tokens == expected
-    assert not config.speculative_config.disable_lookahead_block_hashes
     coord = child.scheduler_manager.cpu_coordinator
     assert coord.block_pool.num_hash_lookahead_tokens == expected
-    assert coord.drop_eagle_group_ids == (set() if supported else {0})
+    assert coord.drop_eagle_group_ids == (set() if lookahead else {0})
 
 
 def test_disk_mode_rejects_non_positive_capacity() -> None:

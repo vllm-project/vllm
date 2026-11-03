@@ -9,7 +9,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.test_multi_connector import _lookahead_connector_config
 from vllm import SamplingParams
 from vllm.config import KVEventsConfig, set_current_vllm_config
 from vllm.distributed.kv_events import BlockStored
@@ -1632,8 +1631,8 @@ def test_finish_preserves_both_store_jobs_and_releases_their_own_blocks(
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("all_supported", [False, True])
-def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
+@pytest.mark.parametrize("lookahead", [False, True])
+def test_store_uses_multi_connectors_final_hash_protocol(lookahead):
     num_lookahead = 2
     config = create_vllm_config(
         kv_connector="MultiConnector",
@@ -1642,16 +1641,11 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
         kv_connector_extra_config={
             "connectors": [
                 {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
-                {
-                    "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_both",
-                }
-                if all_supported
-                else _lookahead_connector_config(False),
+                {"kv_connector": "MooncakeStoreConnector", "kv_role": "kv_both"},
             ]
         },
     )
-    set_mtp_config(config, num_lookahead)
+    set_mtp_config(config, num_lookahead, disable_lookahead_block_hashes=not lookahead)
     kv_config = _make_kv_cache_config()
     with patch.object(scheduler, "LookupKeyClient"):
         connector = KVConnectorFactory.create_connector(
@@ -1661,11 +1655,11 @@ def test_store_uses_multi_connectors_final_hash_protocol(all_supported):
         )
     store_connector = connector.sub_connectors[0]
     coord = store_connector.connector_scheduler._store_coord
-    assert coord.num_hash_lookahead_tokens == (num_lookahead if all_supported else 0)
+    assert coord.num_hash_lookahead_tokens == (num_lookahead if lookahead else 0)
     hashes = [bytes([i]) for i in range(4)]
     cached = ExternalCachedBlockPool(16, {(0, h) for h in hashes})
     _, hit = coord.find_longest_cache_hit(hashes, 64, cached)
-    assert hit == (64 if all_supported else 48)
+    assert hit == (64 if lookahead else 48)
     # Even with the legacy protocol, applying the load mask must not drop again.
     assert coord.load_mask(hashes, hit) == ([True] * (hit // 16),)
 
