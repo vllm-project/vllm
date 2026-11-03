@@ -1182,6 +1182,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int64,
                 device=self.device,
             )
+            if self.use_pcp:
+                self.pcp_compressed_slot_mapping_buffer = torch.empty(
+                    scheduler_config.max_num_batched_tokens * self.pcp_world_size,
+                    dtype=torch.int64,
+                    device=self.device,
+                )
             # Buffer for compressed seq_lens in decode path
             self.expanded_seq_lens_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
@@ -1518,9 +1524,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 cp_interleave=self.cp_kv_cache_interleave_size,
             )
             if self.pcp_world_size > 1:
-                compressed_slot_mapping = get_pcp_group().all_gather(
-                    self.compressed_slot_mapping_buffer[:padded_num_tokens],
-                    dim=0,
+                compressed_slot_mapping = self.pcp_compressed_slot_mapping_buffer[
+                    : padded_num_tokens * self.pcp_world_size
+                ]
+                compressed_slot_mapping.copy_(
+                    get_pcp_group().all_gather(
+                        self.compressed_slot_mapping_buffer[:padded_num_tokens],
+                        dim=0,
+                    )
                 )
 
         # PCP decode sharding keeps a zero-token placeholder on ranks that own

@@ -153,6 +153,13 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
+            pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+            if pcp_size > 1:
+                self.pcp_compressed_slot_mapping_buffer = torch.empty(
+                    max_num_batched_tokens * pcp_size,
+                    dtype=torch.int64,
+                    device=device,
+                )
 
         # Pre-allocate C128A topk buffers for CUDA graph address stability.
         if self.compress_ratio == 128:
@@ -209,8 +216,14 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 out=self.compressed_slot_mapping_buffer,
             )
             if pcp_size > 1:
-                slot_mapping = get_pcp_group().all_gather(
-                    self.compressed_slot_mapping_buffer[: local_slots.numel()], dim=0
+                slot_mapping = self.pcp_compressed_slot_mapping_buffer[
+                    : local_slots.numel() * pcp_size
+                ]
+                slot_mapping.copy_(
+                    get_pcp_group().all_gather(
+                        self.compressed_slot_mapping_buffer[: local_slots.numel()],
+                        dim=0,
+                    )
                 )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}

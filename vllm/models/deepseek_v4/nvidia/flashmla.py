@@ -49,6 +49,12 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder)
             self.no_replay_start = self.no_replay_start.new_zeros(
                 2 * self.vllm_config.scheduler_config.max_num_seqs + 1
             )
+            self.pcp_cache_positions = torch.empty(
+                self.vllm_config.scheduler_config.max_num_batched_tokens
+                * self.pcp_size,
+                dtype=torch.int64,
+                device=self.device,
+            )
 
     def build(
         self,
@@ -67,7 +73,9 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder)
         if self.pcp_size > 1:
             metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
             assert cm.positions is not None
-            metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
+            positions = self.pcp_cache_positions[: cm.positions.numel() * self.pcp_size]
+            positions.copy_(get_pcp_group().all_gather(cm.positions, dim=0))
+            metadata.cache_positions = positions
         return metadata
 
 

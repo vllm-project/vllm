@@ -183,10 +183,6 @@ class PCPManager:
             raise NotImplementedError(reason)
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
-        is_dsv4_decode_graph = (
-            getattr(model_config.hf_text_config, "model_type", None) == "deepseek_v4"
-            and cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        )
         if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
             # Dense MLA prefill sizes its DCP KV gather from each rank's own
             # chunk rows, so the ranks' collectives diverge (#53573).
@@ -195,13 +191,12 @@ class PCPManager:
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
-            and not is_dsv4_decode_graph
             and getattr(model_config.hf_text_config, "model_type", None)
-            not in ("deepseek_v32", "glm_moe_dsa")
+            not in ("deepseek_v32", "glm_moe_dsa", "deepseek_v4")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
-                "and GLM-5.2/5.3; DeepSeek-V4 supports FULL_DECODE_ONLY. "
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2, "
+                "DeepSeek-V4, and GLM-5.2/5.3. "
                 "Set -cc.cudagraph_mode=NONE to disable graphs."
             )
         if (
