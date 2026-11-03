@@ -40,6 +40,7 @@ from vllm.model_executor.models.utils import (
     extract_layer_index,
     sequence_parallel_chunk,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.muse_spark.common.layers import (
     MulTanhSoftCap,
     MuseSpark1xNormPreservingResidualConnection,
@@ -302,11 +303,7 @@ class MuseSpark1xMoE(nn.Module):
             and weight.dtype == torch.float32
             and supports_router_bf16x3(*weight.shape)
         ):
-            planes = split_fp32_to_bf16x3(weight)
-            if getattr(self, "_router_planes", None) is None:
-                self._router_planes = planes
-            else:
-                self._router_planes.copy_(planes)
+            refill_derived(self, "_router_planes", split_fp32_to_bf16x3(weight))
 
     def _router_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         planes = getattr(self, "_router_planes", None)

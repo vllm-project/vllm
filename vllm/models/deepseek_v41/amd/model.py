@@ -49,6 +49,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_padding_mask,
@@ -1186,10 +1187,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 .view(-1, layer.hc_mult, layer.hidden_size)
                 .sum(dim=1)
             )
-            if layer.hc_attn_fn_broadcast is None:
-                layer.hc_attn_fn_broadcast = broadcast
-            else:
-                layer.hc_attn_fn_broadcast.copy_(broadcast)
+            refill_derived(layer, "hc_attn_fn_broadcast", broadcast)
 
 
 def _linear_scale_param_name(vllm_config: VllmConfig, expert_dtype: str) -> str:
