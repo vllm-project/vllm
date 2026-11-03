@@ -1585,7 +1585,10 @@ class MooncakeConnectorWorker:
             self.block_size = kernel_block_size
 
     def __del__(self):
-        self.shutdown()
+        # A constructor that raised before the ZeroMQ context existed still
+        # reaches this hook, so only shut down a worker that got that far.
+        if getattr(self, "async_zmq_ctx", None) is not None:
+            self.shutdown()
 
     def shutdown(self):
         """Cleanup background threads on destruction."""

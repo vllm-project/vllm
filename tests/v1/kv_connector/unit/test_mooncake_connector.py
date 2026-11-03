@@ -339,6 +339,23 @@ def test_align_transfer_regions_uses_layer_name_occurrences():
     assert mismatch_err is not None
 
 
+def test_del_keeps_quiet_when_the_constructor_did_not_finish():
+    """A constructor that raised leaves no state for the hook to tear down."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+
+    worker.__del__()
+
+
+def test_del_shuts_down_a_worker_that_started():
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.shutdown = MagicMock()
+
+    worker.__del__()
+
+    worker.shutdown.assert_called_once_with()
+
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_separates_prefill_pp_layers():
     """Each producer PP stage should send only its registered layer shard."""
