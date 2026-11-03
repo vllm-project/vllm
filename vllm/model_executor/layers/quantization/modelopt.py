@@ -1684,7 +1684,7 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         e2m1 = torch.tensor(
             [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=layer.weight.device
         )
-        layer.register_buffer("e2m1_lut", torch.cat((e2m1, -e2m1)), persistent=False)
+        refill_derived(layer, "e2m1_lut", torch.cat((e2m1, -e2m1)))
 
     def apply(self, layer, x, bias=None):
         raise NotImplementedError("NVFP4 embedding has no linear apply")

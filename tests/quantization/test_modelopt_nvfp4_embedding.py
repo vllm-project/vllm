@@ -70,6 +70,11 @@ def test_nvfp4_embedding_matches_reference_dequant(dist_init):
     expected = table.view(vocab, hidden)[ids].to(torch.bfloat16)
     torch.testing.assert_close(layer(ids), expected, rtol=0, atol=0)
 
+    # A reload reruns post-processing; captured CUDA graphs keep the old address.
+    lut = layer.e2m1_lut.data_ptr()
+    layer.quant_method.process_weights_after_loading(layer)
+    assert layer.e2m1_lut.data_ptr() == lut
+
 
 def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
     # OPT ties its word embeddings to the LM head, which would read packed bytes.
