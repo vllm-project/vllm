@@ -456,27 +456,40 @@ def test_read_completion_waits_for_every_posted_read():
 
 
 @pytest.mark.parametrize(
-    ("has_mamba", "single_group", "expected_invalid"),
-    [(False, True, {1, 2}), (True, True, set()), (False, False, set())],
+    ("has_mamba", "single_group", "expected_invalid", "expected_failed"),
+    [
+        (False, True, {1, 2}, set()),
+        (True, True, set(), {"req"}),
+        (False, False, set(), {"req"}),
+    ],
 )
 def test_failed_read_reports_blocks_only_for_one_group(
-    has_mamba, single_group, expected_invalid
+    has_mamba, single_group, expected_invalid, expected_failed
 ):
+    """Block-level recovery needs one KV cache group and no recurrent state;
+    otherwise the request is reported for request-level recovery."""
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
     worker._single_kv_cache_group = single_group
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
 
     worker._record_failed_recv("req")
 
     assert worker.get_block_ids_with_load_errors() == expected_invalid
+    assert worker._failed_sync_recving == expected_failed
 
 
 @pytest.mark.parametrize(
     ("has_mamba", "single_group"), [(True, False), (True, True), (False, False)]
 )
-def test_unrecoverable_step_barrier_fails_closed(has_mamba, single_group):
+def test_terminal_read_failure_reaches_scheduler_for_every_layout(
+    has_mamba, single_group
+):
+    """Once every READ is terminal no DMA is pending, so the step proceeds and
+    the failure is reported instead of killing the engine."""
+
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
             raise TransferError("failed")
@@ -490,8 +503,8 @@ def test_unrecoverable_step_barrier_fails_closed(has_mamba, single_group):
     worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
-    with pytest.raises(TransferError, match="failed"):
-        worker._await_reads_issued_this_step()
+    worker._await_reads_issued_this_step()
+    assert worker._reads_issued_this_step == []
 
 
 def test_step_barrier_awaits_every_read_before_forward():
@@ -622,6 +635,7 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
     worker._recving_transfers_start = {}
     worker._recving_local_blocks = {"a": [1, 2], "b": [3, 4]}
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
     return worker
 
 
@@ -638,15 +652,16 @@ def test_step_barrier_failure_still_awaits_other_requests(monkeypatch, fake_cloc
     assert worker.get_block_ids_with_load_errors() == {1, 2}
 
 
-def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch, fake_clock):
-    pending_b = _PolledStatus()
-    worker = _worker_with_failed_and_pending_read(True, pending_b, monkeypatch)
+def test_hybrid_step_barrier_failure_awaits_other_requests(monkeypatch, fake_clock):
+    late_b = _PolledStatus(succeed_after=5)
+    worker = _worker_with_failed_and_pending_read(True, late_b, monkeypatch)
 
-    with pytest.raises(TransferError, match="SQ full"):
-        worker._await_reads_issued_this_step()
+    worker._await_reads_issued_this_step()
 
-    assert pending_b.state == "in_progress"
-    assert fake_clock.sleeps == 0
+    assert late_b.state == "success"
+    assert worker._pop_done_transfers() == {"tx-b"}
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker._failed_sync_recving == {"a"}
 
 
 @pytest.mark.parametrize("has_mamba", [False, True])
