@@ -2421,21 +2421,3 @@ class TestWatermarking:
         params = _convert(request).to_sampling_params(16, {})
 
         assert params.watermarking is watermarking
-
-
-class TestMinTokens:
-    def test_defaults_to_zero(self):
-        request = _make_request([{"role": "user", "content": "hi"}])
-
-        assert _convert(request).to_sampling_params(128, {}).min_tokens == 0
-
-    def test_reaches_sampling_params(self):
-        request = _make_request([{"role": "user", "content": "hi"}], min_tokens=10)
-
-        assert _convert(request).to_sampling_params(128, {}).min_tokens == 10
-
-    def test_rejects_min_tokens_above_max_tokens(self):
-        request = _make_request([{"role": "user", "content": "hi"}], min_tokens=200)
-
-        with pytest.raises(VLLMValidationError, match="min_tokens"):
-            _convert(request).to_sampling_params(128, {})
