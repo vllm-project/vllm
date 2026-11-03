@@ -50,6 +50,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import vllm_ops
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -124,14 +125,14 @@ class NemotronLayerNorm1P(CustomOp):
         if residual is not None:
             if not hasattr(torch.ops._C, "fused_add_nemotron_layer_norm"):
                 return self.forward_native(x, residual)
-            torch.ops.vllm.xpu_fused_add_nemotron_layer_norm(
+            vllm_ops.xpu_fused_add_nemotron_layer_norm(
                 x, residual, self.weight, self.bias, self.eps
             )
             return x, residual
         # empty_like preserves x's strides, but the kernel requires a
         # contiguous out (unlike x, which it can handle non-contiguous).
         out = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-        torch.ops.vllm.xpu_nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
+        vllm_ops.xpu_nemotron_layer_norm(out, x, self.weight, self.bias, self.eps)
         return out
 
 

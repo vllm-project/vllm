@@ -12,7 +12,7 @@ from vllm.distributed import (
 )
 from vllm.lora.ops.triton_ops.utils import supports_pdl
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 @triton.jit
@@ -885,9 +885,9 @@ try:
         mutates_args=["output"],
     )
 
-    fused_moe_lora_fp8 = torch.ops.vllm.fused_moe_lora_fp8
-    fused_moe_lora_shrink_fp8 = torch.ops.vllm.fused_moe_lora_shrink_fp8
-    fused_moe_lora_expand_fp8 = torch.ops.vllm.fused_moe_lora_expand_fp8
+    fused_moe_lora_fp8 = vllm_ops.fused_moe_lora_fp8
+    fused_moe_lora_shrink_fp8 = vllm_ops.fused_moe_lora_shrink_fp8
+    fused_moe_lora_expand_fp8 = vllm_ops.fused_moe_lora_expand_fp8
 
 except AttributeError:
     fused_moe_lora_fp8 = _fused_moe_lora_fp8

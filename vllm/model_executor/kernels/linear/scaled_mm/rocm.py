@@ -8,7 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -117,7 +117,7 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        output = torch.ops.vllm.rocm_per_tensor_float_w8a8_scaled_mm_impl(
+        output = vllm_ops.rocm_per_tensor_float_w8a8_scaled_mm_impl(
             A, B, out_dtype, As, Bs, bias
         )
         return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)

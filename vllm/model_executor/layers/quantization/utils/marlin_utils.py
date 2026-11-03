@@ -22,7 +22,7 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .quant_utils import pack_cols, unpack_cols
 
@@ -791,7 +791,7 @@ def apply_gptq_marlin_linear(
 
         reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
-    output = torch.ops.vllm.marlin_gemm(
+    output = vllm_ops.marlin_gemm(
         reshaped_x,
         weight,
         bias,

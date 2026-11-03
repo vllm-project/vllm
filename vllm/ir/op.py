@@ -15,6 +15,7 @@ from vllm.ir.tolerances import DEFAULT_TOLERANCES, ToleranceSpec
 from vllm.ir.util import hash_source, weak_cache
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy, tensors_str_no_data
+from vllm.utils.torch_utils import is_eager_dispatch
 
 InputGenerator = Callable[..., tuple[Any, ...]]
 
@@ -61,9 +62,9 @@ def set_default_torch_wrap(enable: bool = True) -> None:
 def enable_torch_wrap(enable: bool = True):
     """Context manager to enable/disable torch custom op wrapping for vLLM IR ops.
     When torch wrapping is disabled, the torch custom op layer is skipped
-    and IR ops dispatch directly to the implementation.
-    Helpful for avoiding torch dispatch overhead in eager mode
-    and avoiding the need for lowering for platforms not using Inductor.
+    and IR ops dispatch directly to the implementation, so traced graphs
+    contain the implementation instead of the op. Useful for platforms not
+    using Inductor lowering. Eager calls skip the torch op layer regardless.
     """
     global _ENABLE_TORCH_WRAP
     old = _ENABLE_TORCH_WRAP
@@ -359,7 +360,7 @@ class IrOp:
         )
 
     def __call__(self, *args, **kwargs) -> Any:
-        if not _ENABLE_TORCH_WRAP:
+        if not _ENABLE_TORCH_WRAP or is_eager_dispatch(args, kwargs):
             return self._inner_call(*args, **kwargs)
 
         return self.torch_op(*args, **kwargs)
@@ -518,7 +519,7 @@ class IrOpInplaceOverload:
         self.torch_op = getattr(torch_ops, self.op.name).maybe_inplace
 
     def __call__(self, *args, **kwargs) -> Any:
-        if not _ENABLE_TORCH_WRAP:
+        if not _ENABLE_TORCH_WRAP or is_eager_dispatch(args, kwargs):
             return self._inner_call(*args, **kwargs)
 
         return self.torch_op(*args, **kwargs)

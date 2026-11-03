@@ -6,6 +6,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.torch_utils import vllm_ops
 
 from .common import ApplyRotaryEmb
 
@@ -225,7 +226,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.use_flashinfer:
-            torch.ops.vllm.flashinfer_rotary_embedding(
+            vllm_ops.flashinfer_rotary_embedding(
                 positions,
                 query,
                 key,

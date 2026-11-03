@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import vllm_ops
 
 logger = init_logger(__name__)
 
@@ -79,7 +80,7 @@ def apply_fp8_marlin_linear(
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
 
-    output = torch.ops.vllm.marlin_gemm(
+    output = vllm_ops.marlin_gemm(
         a=inputs,
         b_q_weight=weight,
         b_bias=bias,
@@ -396,7 +397,7 @@ def apply_mxfp8_marlin_linear(
         dtype=input.dtype,
     )
 
-    output = torch.ops.vllm.marlin_gemm(
+    output = vllm_ops.marlin_gemm(
         a=reshaped_x,
         b_q_weight=weight,
         b_bias=bias,

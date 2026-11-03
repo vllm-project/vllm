@@ -22,7 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 QWEN4_EXP_SM103_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused QKVZ projection, TP=4.
@@ -392,7 +392,7 @@ class _Qwen4ExpLowLatencyApply:
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if bias is None and not envs.VLLM_BATCH_INVARIANT:
-            return torch.ops.vllm.qwen4_exp_low_latency_gemm(x, layer.weight)
+            return vllm_ops.qwen4_exp_low_latency_gemm(x, layer.weight)
         return super().apply(layer, x, bias)  # type: ignore[misc]
 
 

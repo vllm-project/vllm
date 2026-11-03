@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
@@ -146,7 +146,7 @@ class Rdna3W4A8MxFp4LinearKernel(MxFp4LinearKernel):
         x_2d = x.reshape(-1, x.shape[-1])
         if not x_2d.is_contiguous():
             x_2d = x_2d.contiguous()
-        out = torch.ops.vllm.rdna3_mxfp4_w4a8_apply(
+        out = vllm_ops.rdna3_mxfp4_w4a8_apply(
             x_2d, layer.weight, layer.weight_scale, bias
         )
         return out.reshape(*x.shape[:-1], out.shape[-1])

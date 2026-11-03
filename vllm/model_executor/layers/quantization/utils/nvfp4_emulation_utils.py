@@ -8,7 +8,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 __all__ = [
     "break_fp4_bytes",
@@ -278,7 +278,7 @@ def nvfp4_gathered_bias(
     logits: torch.Tensor,
     alpha: float,
 ) -> None:
-    torch.ops.vllm.nvfp4_gathered_bias(
+    vllm_ops.nvfp4_gathered_bias(
         markov_embed,
         packed_weight,
         weight_scale,

@@ -17,7 +17,7 @@ from vllm.lora.ops.triton_ops.utils import (
     supports_pdl,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 # Batch-invariant shrink splits K into this many fixed partials (no atomics).
 _BI_SPLIT_K = 8
@@ -414,7 +414,7 @@ try:
         op_func=_lora_shrink,
         mutates_args=["output_tensor"],
     )
-    lora_shrink = torch.ops.vllm.lora_shrink
+    lora_shrink = vllm_ops.lora_shrink
 
 except AttributeError:
     lora_shrink = _lora_shrink

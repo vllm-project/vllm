@@ -13,7 +13,7 @@ from vllm.utils.deep_gemm import (
     fp8_einsum,
     is_deep_gemm_supported,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
@@ -79,7 +79,7 @@ class DeepGemmMxfp8BmmLinearKernel(Mxfp8LinearKernel):
             )
             q_input = q_input.view(tokens, groups, k)
             input_scale = input_scale.view(tokens, groups, k // 128)
-        output = torch.ops.vllm.deepgemm_mxfp8_bmm(
+        output = vllm_ops.deepgemm_mxfp8_bmm(
             q_input, input_scale, layer.weight, layer.weight_scale, list(self.recipe)
         )
         if bias is not None:

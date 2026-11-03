@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 
 
@@ -27,7 +28,7 @@ def rocm_fused_qk_norm_rope_kv_insert(
     eps: float,
 ) -> None:
     if torch.compiler.is_compiling():
-        torch.ops.vllm.muse_spark_fused_qk_norm_rope_kv_insert(
+        vllm_ops.muse_spark_fused_qk_norm_rope_kv_insert(
             qkv,
             positions,
             cos_sin_cache,
