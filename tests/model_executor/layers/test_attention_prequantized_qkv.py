@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import re
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.model_executor.layers.attention import attention as attention_module
-from vllm.v1.attention.backend import PrequantizedQKV
+from vllm.model_executor.layers.attention import prequantized_qkv_attention as module
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+    PrequantizedQKVAttention,
+)
 
 # (tokens, query heads, KV heads, head size) as seen by one rank: decode, an odd
 # mixed batch and a full prefill chunk, over the GQA ratios the backend admits
@@ -35,39 +39,11 @@ def _make_tensors(tokens, num_heads, num_kv_heads, head_size):
     )
 
 
-def test_make_prequantized_qkv_requires_all_tensors():
-    assert (
-        attention_module._make_prequantized_qkv(None, None, None, None, None, None)
-        is None
-    )
-
-    tensors = _make_tensors(2, 4, 1, 8)
-    with pytest.raises(ValueError, match="requires query, key, value"):
-        attention_module._make_prequantized_qkv(
-            tensors[0], tensors[1], tensors[2], tensors[3], tensors[4], None
-        )
-
-
-@WORKLOADS
-def test_make_prequantized_qkv_preserves_tensor_identity(
-    tokens, num_heads, num_kv_heads, head_size
-):
-    tensors = _make_tensors(tokens, num_heads, num_kv_heads, head_size)
-    result = attention_module._make_prequantized_qkv(*tensors)
-
-    assert isinstance(result, PrequantizedQKV)
-    assert all(actual is expected for actual, expected in zip(result, tensors))
-
-
 class _RecordingAttentionImpl:
     def __init__(self, supports_prequantized_qkv_input: bool):
         self.supports_prequantized_qkv_input = supports_prequantized_qkv_input
-        self.standard_calls = 0
         self.prequantized_calls = 0
         self.received_prequantized_qkv: PrequantizedQKV | None = None
-
-    def forward(self, *args, **kwargs):
-        self.standard_calls += 1
 
     def forward_with_prequantized_qkv(
         self, *args, prequantized_qkv: PrequantizedQKV, **kwargs
@@ -76,48 +52,86 @@ class _RecordingAttentionImpl:
         self.received_prequantized_qkv = prequantized_qkv
 
 
-def _patch_attention_context(monkeypatch, impl):
-    layer = SimpleNamespace(impl=impl)
+def _make_layer(impl, num_heads, num_kv_heads, head_size):
+    layer = object.__new__(PrequantizedQKVAttention)
+    torch.nn.Module.__init__(layer)
+    layer.impl = impl
+    layer.layer_name = "layer"
+    layer.num_heads = num_heads
+    layer.num_kv_heads = num_kv_heads
+    layer.head_size = head_size
+    layer.head_size_v = head_size
+    layer.use_direct_call = True
+    layer.kv_sharing_target_layer_name = None
+    layer.attn_backend = SimpleNamespace(forward_includes_kv_cache_update=True)
+    return layer
+
+
+def _patch_attention_context(monkeypatch, layer):
     monkeypatch.setattr(
-        attention_module,
+        module,
         "get_attention_context",
         lambda layer_name: (object(), layer, torch.empty(0), None),
     )
 
 
 @WORKLOADS
-def test_unified_attention_dispatches_prequantized_qkv(
+def test_forward_dispatches_prequantized_qkv_to_impl(
     monkeypatch, tokens, num_heads, num_kv_heads, head_size
 ):
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=True)
-    _patch_attention_context(monkeypatch, impl)
+    layer = _make_layer(impl, num_heads, num_kv_heads, head_size)
+    _patch_attention_context(monkeypatch, layer)
     tensors = _make_tensors(tokens, num_heads, num_kv_heads, head_size)
 
-    attention_module.unified_attention_with_output(
-        tensors[0],
-        tensors[1],
-        tensors[2],
-        torch.empty_like(tensors[0]),
-        "layer",
-        prequantized_query=tensors[0],
-        prequantized_key=tensors[1],
-        prequantized_value=tensors[2],
-        prequantized_query_descale=tensors[3],
-        prequantized_key_descale=tensors[4],
-        prequantized_value_descale=tensors[5],
-    )
+    output = layer(*tensors[:3], prequantized_qkv=PrequantizedQKV(*tensors))
 
-    assert impl.standard_calls == 0
+    assert output.shape == (tokens, num_heads * head_size)
     assert impl.prequantized_calls == 1
     assert impl.received_prequantized_qkv is not None
     assert all(
-        actual is expected
+        actual.shape == expected.shape and actual.data_ptr() == expected.data_ptr()
         for actual, expected in zip(impl.received_prequantized_qkv, tensors)
     )
 
 
-def test_unified_attention_custom_op_schema_has_prequantized_qkv():
-    schema = str(torch.ops.vllm.unified_attention_with_output.default._schema)
+def test_forward_updates_kv_cache_before_prequantized_attention(monkeypatch):
+    impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=True)
+    layer = _make_layer(impl, 4, 1, 8)
+    layer.attn_backend = SimpleNamespace(forward_includes_kv_cache_update=False)
+    _patch_attention_context(monkeypatch, layer)
+    calls = []
+    dep = torch.empty(0)
+
+    def fake_update(key, value, layer_name):
+        calls.append("update")
+        return dep
+
+    monkeypatch.setattr(module, "unified_kv_cache_update", fake_update)
+    original = module.unified_prequantized_attention_with_output
+
+    def recording_op(*args, kv_cache_dummy_dep=None, **kwargs):
+        calls.append(("attention", kv_cache_dummy_dep))
+
+    monkeypatch.setattr(
+        module, "unified_prequantized_attention_with_output", recording_op
+    )
+    tensors = _make_tensors(2, 4, 1, 8)
+    layer(*tensors[:3], prequantized_qkv=PrequantizedQKV(*tensors))
+    assert calls == ["update", ("attention", dep)]
+    assert original is not recording_op
+
+    # A layer sharing another layer's KV cache must not write to it.
+    calls.clear()
+    layer.kv_sharing_target_layer_name = "other"
+    layer(*tensors[:3], prequantized_qkv=PrequantizedQKV(*tensors))
+    assert calls == [("attention", None)]
+
+
+def test_custom_op_schema():
+    schema = str(
+        torch.ops.vllm.unified_prequantized_attention_with_output.default._schema
+    )
 
     for argument in (
         "prequantized_query",
@@ -127,45 +141,31 @@ def test_unified_attention_custom_op_schema_has_prequantized_qkv():
         "prequantized_key_descale",
         "prequantized_value_descale",
     ):
-        assert f"Tensor? {argument}=None" in schema
+        assert f"Tensor {argument}" in schema
+    assert re.search(r"Tensor\(a\d*!\) output", schema)
 
 
-def test_unified_attention_rejects_unsupported_prequantized_qkv(monkeypatch):
+def test_forward_rejects_unsupported_backend():
     impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=False)
-    _patch_attention_context(monkeypatch, impl)
+    layer = _make_layer(impl, 4, 1, 8)
     tensors = _make_tensors(2, 4, 1, 8)
 
-    with pytest.raises(ValueError, match="does not support prequantized QKV"):
-        attention_module.unified_attention_with_output(
-            tensors[0],
-            tensors[1],
-            tensors[2],
-            torch.empty_like(tensors[0]),
-            "layer",
-            prequantized_query=tensors[0],
-            prequantized_key=tensors[1],
-            prequantized_value=tensors[2],
-            prequantized_query_descale=tensors[3],
-            prequantized_key_descale=tensors[4],
-            prequantized_value_descale=tensors[5],
-        )
-
-    assert impl.standard_calls == 0
+    assert not layer.supports_prequantized_qkv_input
+    with pytest.raises(ValueError, match="does not support it"):
+        layer(*tensors[:3], prequantized_qkv=PrequantizedQKV(*tensors))
     assert impl.prequantized_calls == 0
 
 
-def test_unified_attention_standard_path_is_unchanged(monkeypatch):
-    impl = _RecordingAttentionImpl(supports_prequantized_qkv_input=False)
-    _patch_attention_context(monkeypatch, impl)
+def test_forward_without_bundle_uses_standard_attention(monkeypatch):
+    layer = _make_layer(_RecordingAttentionImpl(True), 4, 1, 8)
+    seen = {}
+
+    def fake_forward(self, query, key, value, output_shape=None, output_dtype=None):
+        seen["called"] = True
+        return query
+
+    monkeypatch.setattr(module.Attention, "forward", fake_forward)
     query, key, value, *_ = _make_tensors(2, 4, 1, 8)
 
-    attention_module.unified_attention_with_output(
-        query,
-        key,
-        value,
-        torch.empty_like(query),
-        "layer",
-    )
-
-    assert impl.standard_calls == 1
-    assert impl.prequantized_calls == 0
+    assert layer(query, key, value) is query
+    assert seen == {"called": True}

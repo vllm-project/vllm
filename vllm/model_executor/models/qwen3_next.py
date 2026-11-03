@@ -22,6 +22,10 @@ from vllm.distributed import (
 from vllm.kernels.triton.fused_sigmoid_gate_mul import fused_sigmoid_gate_mul
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+    PrequantizedQKVAttention,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
@@ -72,7 +76,7 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backend import AttentionType, PrequantizedQKV
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
     EagleModelMixin,
@@ -367,7 +371,15 @@ class Qwen3NextAttention(nn.Module):
             if getattr(config, "is_causal", True)
             else AttentionType.ENCODER_ONLY
         )
-        self.attn = Attention(
+        # This file also runs on RDNA and on ROCm without AITER; the fused
+        # kernel exists only for AITER on CDNA4 (gfx950).
+        is_aiter_cdna4 = False
+        if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
+            from vllm.platforms.rocm import get_cdna_version
+
+            is_aiter_cdna4 = get_cdna_version() == 4
+        attn_cls = PrequantizedQKVAttention if is_aiter_cdna4 else Attention
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -409,13 +421,6 @@ class Qwen3NextAttention(nn.Module):
             and supports_dtype
             and (text_only or supports_mrope)
         )
-        # This file also runs on RDNA and on ROCm without AITER; the fused
-        # kernel exists only for AITER on CDNA4 (gfx950).
-        is_aiter_cdna4 = False
-        if current_platform.is_rocm() and rocm_aiter_ops.is_enabled():
-            from vllm.platforms.rocm import get_cdna_version
-
-            is_aiter_cdna4 = get_cdna_version() == 4
         self.use_prequantized_qkv = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
@@ -423,6 +428,7 @@ class Qwen3NextAttention(nn.Module):
             and is_aiter_cdna4
             and text_only
             and supports_prequantized_scheduler(max_num_seqs)
+            and isinstance(self.attn, PrequantizedQKVAttention)
             and self.attn.supports_prequantized_qkv_input
         )
         if self.use_prequantized_qkv:

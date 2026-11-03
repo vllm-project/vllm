@@ -12,8 +12,10 @@ from vllm.model_executor.layers import (
     fused_qk_norm_rope_gate_fp8_quant as prep_module,
 )
 from vllm.model_executor.layers.attention import attention as attention_module
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+)
 from vllm.model_executor.models import qwen3_next as qwen3_next_model
-from vllm.v1.attention.backend import PrequantizedQKV
 
 HEAD_DIM = 256
 ROTARY_DIM = 64

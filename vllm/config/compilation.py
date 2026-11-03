@@ -768,6 +768,8 @@ class CompilationConfig:
     _attention_ops: ClassVar[list[str]] = [
         "vllm::unified_attention_with_output",
         "vllm::unified_mla_attention_with_output",
+        # Qwen3-Next on gfx950 (PrequantizedQKVAttention).
+        "vllm::unified_prequantized_attention_with_output",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",

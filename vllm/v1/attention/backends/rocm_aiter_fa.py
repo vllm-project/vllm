@@ -13,6 +13,9 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
@@ -31,7 +34,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
-    PrequantizedQKV,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
@@ -56,8 +58,8 @@ def _uses_direct_fp8_context_gather(layers: list[Attention], cache_dtype: str) -
     return (
         bool(layers)
         and all(
-            layer.impl.supports_prequantized_qkv_input
-            and layer.receives_prequantized_qkv
+            getattr(layer.impl, "supports_prequantized_qkv_input", False)
+            and getattr(layer, "receives_prequantized_qkv", False)
             for layer in layers
         )
         and is_quantized_kv_cache(cache_dtype)

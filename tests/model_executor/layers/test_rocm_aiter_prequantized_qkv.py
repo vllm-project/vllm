@@ -12,8 +12,10 @@ from vllm.model_executor.layers import (
     fused_qk_norm_rope_gate_fp8_quant as prep_module,
 )
 from vllm.model_executor.layers.attention import attention as attention_module
+from vllm.model_executor.layers.attention.prequantized_qkv_attention import (
+    PrequantizedQKV,
+)
 from vllm.platforms import current_platform
-from vllm.v1.attention.backend import PrequantizedQKV
 from vllm.v1.attention.backends import rocm_aiter_fa
 
 pytestmark = pytest.mark.skipif(
