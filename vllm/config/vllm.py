@@ -2932,26 +2932,28 @@ class VllmConfig:
                     self.uniform_decode_query_len
                 )
             )
-        decode_token_sizes = sorted(token_sizes)
+        decode_token_sizes = set(token_sizes)
         token_sizes.update(prefill_sizes)
-        # A resolved config holds matching sizes; re-resolving it must pass, also
-        # after a worker drops PIECEWISE capture and the mode to FULL_DECODE_ONLY.
-        if (
-            legacy_sizes
-            and uses_split_sizes
-            and shared_sizes not in (sorted(token_sizes), decode_token_sizes)
-        ):
-            raise ValueError(
-                "The deprecated cudagraph_capture_sizes and "
-                "max_cudagraph_capture_size cannot be combined with the prefill and "
-                "decode CUDA graph capture sizes; set only the latter."
-            )
         # FULL_DECODE_ONLY captures no prefill graph, so prefill sizes would only
         # inflate the recorded max; the deprecated sizes alone keep main's.
         if not (legacy_sizes and not uses_split_sizes) and (
             compilation_config.cudagraph_mode.mixed_mode() == CUDAGraphMode.NONE
         ):
             token_sizes = set(decode_token_sizes)
+        if legacy_sizes and uses_split_sizes:
+            # Resolving a resolved config again keeps the sizes it recorded, also
+            # when a worker has since dropped the mode to FULL_DECODE_ONLY.
+            if shared_sizes not in (
+                sorted(decode_token_sizes | set(prefill_sizes)),
+                sorted(decode_token_sizes),
+            ):
+                raise ValueError(
+                    "The deprecated cudagraph_capture_sizes and "
+                    "max_cudagraph_capture_size cannot be combined with the "
+                    "prefill and decode CUDA graph capture sizes; set only the "
+                    "latter."
+                )
+            token_sizes = set(shared_sizes)
         compilation_config.cudagraph_capture_sizes = sorted(token_sizes)
         compilation_config.max_cudagraph_capture_size = max(token_sizes, default=0)
         if not token_sizes:
