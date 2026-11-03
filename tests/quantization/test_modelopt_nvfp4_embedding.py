@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
@@ -62,7 +63,9 @@ def test_nvfp4_embedding_matches_reference_dequant(dist_init):
         ("weight_scale_2", global_scale),
     ):
         layer.weight_loader(getattr(layer, name), value)
-    layer.quant_method.process_weights_after_loading(layer)
+    # The loader post-processes under the model dtype; reloads do not.
+    with set_default_torch_dtype(torch.bfloat16):
+        layer.quant_method.process_weights_after_loading(layer)
 
     ids = torch.tensor([[0, 5, 36], [5, 5, 1]])
     table = break_fp4_bytes(weight, torch.float32).view(vocab, -1, 16)

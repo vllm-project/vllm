@@ -1681,8 +1681,11 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         layer.output_dtype = params_dtype
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # A fixed dtype: reloads run without the loader's default dtype.
         e2m1 = torch.tensor(
-            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=layer.weight.device
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0],
+            dtype=torch.float32,
+            device=layer.weight.device,
         )
         refill_derived(layer, "e2m1_lut", torch.cat((e2m1, -e2m1)))
 
