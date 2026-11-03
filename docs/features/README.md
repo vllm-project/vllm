@@ -3,6 +3,7 @@
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
+- [CPU offloading and concurrent prefix sharing](kv_offloading_usage.md)
 
 ## Compatibility Matrix
 
