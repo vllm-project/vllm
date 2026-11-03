@@ -33,6 +33,7 @@ from vllm.models.minimax_m3.nvidia.msa_cutlass_sparse_decode import (
     NVFP4_BLOCK_SCALE_SHIFT,
     MSACutlassDecodePlanCache,
     msa_cutlass_sparse_decode,
+    nvfp4_kv_cache_slots,
     nvfp4_kv_cache_views,
     prepare_decode_metadata,
     should_prepare_decode_metadata,
@@ -1450,3 +1451,25 @@ def test_msa_triton_decode_fallback_reads_dequantized_query_fp8() -> None:
         actual = impl.forward(layer, query_fp8, kv_cache, torch.zeros_like(query))
     current_platform.synchronize()
     torch.testing.assert_close(actual, expected, atol=0.02, rtol=0.02)
+
+
+def test_nvfp4_impl_caches_kv_cache_views():
+    """The NVFP4 impl builds its cache's slot and data/scale views once and
+    rebuilds them only for a different cache tensor."""
+    impl = MiniMaxM3SparseMSANvfp4Impl.__new__(MiniMaxM3SparseMSANvfp4Impl)
+    impl._kv_views = None
+    shape = (5, 2 * 2, BLOCK_SIZE, HEAD_DIM // 2 + HEAD_DIM // 16)
+    kv_cache = torch.zeros(shape, dtype=torch.uint8, device="cuda")
+
+    slots, views = impl._kv_cache_views(kv_cache)
+    for got, want in zip(slots, nvfp4_kv_cache_slots(kv_cache)):
+        assert got.data_ptr() == want.data_ptr()
+        assert (got.shape, got.stride()) == (want.shape, want.stride())
+    for got, want in zip(views, nvfp4_kv_cache_views(kv_cache)):
+        assert got.data_ptr() == want.data_ptr()
+        assert (got.shape, got.stride()) == (want.shape, want.stride())
+    again = impl._kv_cache_views(kv_cache)
+    assert again[0] is slots and again[1] is views
+
+    other = torch.zeros_like(kv_cache)
+    assert impl._kv_cache_views(other)[1][0].data_ptr() == other.data_ptr()
