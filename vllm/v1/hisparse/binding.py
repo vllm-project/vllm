@@ -29,6 +29,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
@@ -184,6 +185,20 @@ def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
     release_pinned_state(list(runtimes.values()), [])
 
 
+def _tensor_placements(
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, tuple[KVCacheTensor, int]]:
+    """Each cache's tensor placement and byte offset."""
+    return {
+        name: (
+            tensor_config,
+            tensor_config.offset + layer_index * tensor_config.layer_stride,
+        )
+        for tensor_config in kv_cache_config.kv_cache_tensors
+        for layer_index, name in enumerate(tensor_config.layers)
+    }
+
+
 def bind_hisparse_kv_caches(
     *,
     forward_context: dict[str, Any],
@@ -194,14 +209,7 @@ def bind_hisparse_kv_caches(
 ) -> list[HiSparseCacheHandle]:
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
-    tensor_configs = {
-        name: (
-            tensor_config,
-            tensor_config.offset + layer_index * tensor_config.layer_stride,
-        )
-        for tensor_config in kv_cache_config.kv_cache_tensors
-        for layer_index, name in enumerate(tensor_config.layers)
-    }
+    tensor_configs = _tensor_placements(kv_cache_config)
     resident_groups = [
         (group_id, group)
         for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -302,3 +310,50 @@ def bind_hisparse_kv_caches(
         ]
         cache_handle.mirror_slot_mapping = block_tables.slot_mappings[source_group_id]
     return cache_handles
+
+
+def rebind_hisparse_device_caches(
+    *,
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, torch.Tensor],
+) -> None:
+    """Rebind the resident and hot views over resized raw device storage.
+
+    kv_caches holds each resident and hot cache's raw storage, as allocation
+    returns it; as in `bind_hisparse_kv_caches`, resident entries become their
+    views and hot entries are dropped.
+    """
+    tensor_configs = _tensor_placements(kv_cache_config)
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        for cache_name in group.layer_names:
+            if isinstance(spec, HiSparseResidentSpec):
+                layer_name = cache_name[: -len(HISPARSE_RESIDENT_SUFFIX)]
+                cache_handle = _get_hisparse_cache(forward_context, layer_name)
+                tensor_config, byte_offset = tensor_configs[cache_name]
+                assert cache_handle.block_table is not None
+                assert cache_handle.slot_mapping is not None
+                cache_handle.bind_cache(
+                    kv_caches[cache_name],
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=spec.block_size,
+                    block_table=cache_handle.block_table,
+                    slot_mapping=cache_handle.slot_mapping,
+                )
+                assert cache_handle.view is not None
+                kv_caches[cache_name] = cache_handle.view.cache
+            elif isinstance(spec, HiSparseHotSpec):
+                layer_name = cache_name[: -len(HISPARSE_HOT_SUFFIX)]
+                runtime = _get_hisparse_cache(forward_context, layer_name).runtime
+                tensor_config, byte_offset = tensor_configs[cache_name]
+                runtime.bind_hot_cache(
+                    kv_caches.pop(cache_name),
+                    byte_offset=byte_offset,
+                    block_stride=tensor_config.block_stride,
+                    num_blocks=kv_cache_config.num_blocks,
+                    block_size=spec.block_size,
+                    block_table=runtime.hot_block_table,
+                )

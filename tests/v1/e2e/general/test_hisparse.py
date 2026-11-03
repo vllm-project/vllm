@@ -324,7 +324,12 @@ def test_hisparse_extensible_kv_cache(
             engine_core = runner.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
             caches = {
-                name: (cache.dtype, cache.device.type)
+                name: (
+                    cache.dtype,
+                    cache.device.type,
+                    tuple(cache.shape),
+                    cache.untyped_storage().nbytes(),
+                )
                 for name, cache in model_runner.kv_caches_by_layer.items()
             }
             outputs = [

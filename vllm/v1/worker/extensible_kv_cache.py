@@ -25,6 +25,7 @@ from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import format_gib
+from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
@@ -212,17 +213,23 @@ class ExtensibleKVCache:
 
         `kv_cache_config.num_blocks` must equal the committed count. Connectors
         derive extents from `untyped_storage().nbytes()`, so they must not see the
-        reservation. Host-resident layers and layers laid out over the raw
-        buffer keep their allocation-time views and are omitted. None for
-        layouts whose layers span several segments.
+        reservation. Host-resident layers are omitted. None for layouts whose
+        layers span several segments.
         """
         if not layout.is_block_compact:
             return None
         assert kv_cache_config.num_blocks == self.num_committed_blocks
         kv_caches: dict[str, torch.Tensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
+            if tensor.host_resident:
+                continue
             group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
-            if tensor.host_resident or not spec.has_layer_views:
+            if not spec.has_layer_views:
+                # Laid out by the layer itself over the raw buffer, as at
+                # allocation, now over just the committed blocks.
+                assert layout.is_block_outermost
+                raw_view = self.buffer.segment_view(0)
+                kv_caches.update((name, raw_view) for name in tensor.layers)
                 continue
             kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
             for layer_idx, layer_name in enumerate(tensor.layers):
@@ -475,12 +482,19 @@ def extend_kv_cache(
         kv_cache.num_committed_blocks,
         kv_cache.physical_bytes / (1 << 30),
     )
+    forward_context = runner.compilation_config.static_forward_context
     committed = kv_cache.committed_views(
         runner.kv_cache_config,
         runner.cache_config.get_resolved_kv_cache_layout(),
         runner.kernel_block_sizes,
     )
     if committed is not None:
+        if runner.vllm_config.attention_config.hisparse_config is not None:
+            rebind_hisparse_device_caches(
+                forward_context=forward_context,
+                kv_cache_config=runner.kv_cache_config,
+                kv_caches=committed,
+            )
         # As in `initialize_kv_cache`, draft groups map their views too.
         attn_groups = [
             group
@@ -490,7 +504,7 @@ def extend_kv_cache(
         ]
         bind_kv_caches(
             committed,
-            runner.compilation_config.static_forward_context,
+            forward_context,
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
