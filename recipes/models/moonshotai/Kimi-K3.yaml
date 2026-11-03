@@ -20,7 +20,6 @@ meta:
     gb200: verified
     gb300: verified
     mi355x: verified
-    ascend_910c: verified
 
 model:
   model_id: "moonshotai/Kimi-K3"
@@ -94,10 +93,6 @@ features:
         args:
           - "--speculative-config"
           - '{"model":"RedHatAI/Kimi-K3-speculator.dspark", "num_speculative_tokens":8, "method": "dspark", "attention_backend":"TOKENSPEED_MLA", "draft_sample_method": "probabilistic", "rejection_sample_method": "block"}'
-      npu:
-        args:
-          - "--speculative-config"
-          - '{"method":"dspark","model":"RedHatAI/Kimi-K3-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
   text_only:
     description: "Skip the vision encoder for text-only workloads. Mutually exclusive with encoder_parallel."
     args:
@@ -127,49 +122,6 @@ variants:
     model_id: "RedHatAI/Kimi-K3-NVFP4"
     description: "RedHatAI compressed-tensors NVFP4 quantization; MoE layers quantized to NVFP4, attention and embeddings at full precision"
 
-  ascend_w4a8:
-    model_id: "Eco-Tech/Kimi-K3-w4a8"
-    precision: int4
-    label: "W4A8 (Ascend)"
-    vram_minimum_gb: 1711
-    supported_hardware: [ascend_910c]
-    extra_args:
-      - "--quantization"
-      - "ascend"
-      - "--enable-prefix-caching"
-      - "--enable-expert-parallel"
-      - "--max-num-seqs"
-      - "16"
-      - "--max-model-len"
-      - "131072"
-      - "--max-num-batched-tokens"
-      - "24576"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--mm-processor-cache-gb"
-      - "0"
-      - "--additional-config"
-      - '{"enable_cpu_binding":true, "enable_flashcomm1":true}'
-      - "--mm-encoder-tp-mode"
-      - "data"
-      - "--limit-mm-per-prompt"
-      - '{"vision_chunk": 2}'
-      - "--allowed-local-media-path"
-      - "/"
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "1"
-      TASK_QUEUE_ENABLE: "1"
-      HCCL_BUFFSIZE: "800"
-      VLLM_ENGINE_READY_TIMEOUT_S: "7200"
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:kimi-k3-a3"
-    description: "ModelSlim INT4 W4A8 for Ascend NPU. Requires --quantization ascend. Validated on 4× 910C mixed P/D."
-
   fp8:
     model_id: "RedHatAI/Kimi-K3-FP8-BLOCK"
     precision: fp8
@@ -194,19 +146,9 @@ strategy_hardware:
     h200: supported
     gb200: supported
     gb300: supported
-    ascend_910c: supported
   multi_node_dep:
     h100: unsupported
     h200: unsupported
-    ascend_910c: unsupported
-  multi_node_tp:
-    ascend_910c: unsupported
-  multi_node_tep:
-    ascend_910c: unsupported
-  multi_node_tp_pp:
-    ascend_910c: unsupported
-  pd_cluster:
-    ascend_910c: unsupported
 
 default_strategy: single_node_tp
 
@@ -230,7 +172,6 @@ strategy_min_gpus:
   # https://vllm-project.github.io/2026/07/27/k3.html#performance-optimizations
   gb200:
     multi_node_tp: 16
-  ascend_910c: 64
 
 hardware_overrides:
   hopper:
