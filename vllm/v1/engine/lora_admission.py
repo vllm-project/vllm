@@ -44,6 +44,8 @@ class GroupLoRAAdmission:
         self.ready: frozenset[int] = frozenset()
         self.pinned: set[int] = set()
         self.identities: dict[int, bytes] = {}
+        self.fingerprints: dict[int, str] = {}
+        self.failed: dict[int, str] = {}
         self.registrations: dict[tuple, int] = {}
         self.next_id = 1
         self.requests: dict[
@@ -110,7 +112,7 @@ class GroupLoRAAdmission:
                 heapq.heappush(self.heads, (queue[0][0], adapter_id))
                 continue
             saved.append((key, adapter_id))
-            if adapter_id not in exclude:
+            if adapter_id not in exclude and adapter_id not in self.failed:
                 req = queue[0][1]()
                 assert req is not None
                 candidates.append((key, msgspec.msgpack.encode(req.lora_request)))
@@ -198,7 +200,10 @@ class GroupLoRAAdmission:
                 and argument not in self.pinned
                 and len(self.pinned) == self.capacity
             ):
-                raise RuntimeError("All group LoRA slots are already pinned")
+                self.reject(
+                    (method, argument), "All group LoRA slots are already pinned"
+                )
+                return None
             return method, argument
         selected = dict.fromkeys(sorted(self.pinned | running))
         for _, encoded in sorted(
@@ -233,7 +238,7 @@ class GroupLoRAAdmission:
             request.is_3d_lora_weight,
         )
 
-    def publish(self, action: tuple[str, Any], reports: list[dict]) -> None:
+    def validate(self, action: tuple[str, Any], reports: list[dict]) -> dict[int, str]:
         if not reports or any(report["error"] for report in reports):
             errors = [report["error"] for report in reports if report["error"]]
             raise RuntimeError(
@@ -246,6 +251,10 @@ class GroupLoRAAdmission:
                 if old != fingerprint:
                     raise RuntimeError(
                         f"Adapter {adapter} has different weights across workers"
+                    )
+                if self.fingerprints.get(adapter, fingerprint) != fingerprint:
+                    raise RuntimeError(
+                        f"Adapter {adapter} changed its immutable weights"
                     )
         method, argument = action
         if method in {"add_lora", "pin_lora"}:
@@ -267,6 +276,32 @@ class GroupLoRAAdmission:
                 raise RuntimeError(
                     "Not every worker acknowledged the complete LoRA epoch"
                 )
+        return identities
+
+    def reject(self, action: tuple[str, Any], error: str) -> set[int]:
+        self.admitted = self.ready
+        message = f"Group LoRA update failed; previous epoch restored: {error}"
+        if action[0] == "prepare":
+            failed = {
+                msgspec.msgpack.decode(item, type=LoRARequest).lora_int_id
+                for item in action[1]
+            } - self.ready
+            if not failed:
+                raise RuntimeError(message)
+            self.failed.update(dict.fromkeys(failed, message))
+            return failed
+        assert self.target is not None
+        _, _, future = self.pending.pop(self.target)
+        self.target = None
+        future.set_exception(ValueError(message))
+        return set()
+
+    def publish(self, action: tuple[str, Any], reports: list[dict]) -> None:
+        identities = self.validate(action, reports)
+        self.fingerprints.update(identities)
+        method, argument = action
+        if method == "prepare":
+            desired = frozenset(identities)
             self.ready = self.admitted = desired
             self.epoch += 1
         else:
@@ -275,6 +310,7 @@ class GroupLoRAAdmission:
                 self.identities[lora.lora_int_id] = argument
                 self.registrations[self._registration_key(lora)] = lora.lora_int_id
                 self.next_id = max(self.next_id, lora.lora_int_id + 1)
+                self.failed.pop(lora.lora_int_id, None)
             elif method == "pin_lora":
                 self.pinned.add(argument)
             elif method == "remove_lora":

@@ -50,6 +50,7 @@ class WorkerLoRAManager:
         self._lora_model_cls = lora_model_cls
         self.embedding_modules = embedding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
+        self._group_snapshot: LRUCacheLoRAModelManager.Snapshot | None = None
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
@@ -284,13 +285,31 @@ class WorkerLoRAManager:
 
     def group_update(self, method: str, argument: Any) -> dict:
         """Apply a retired-epoch mutation and acknowledge actual resident weights."""
+        manager = self._adapter_manager
+        assert isinstance(manager, LRUCacheLoRAModelManager)
+        previous = None
         try:
+            if method == "commit":
+                self._group_snapshot = None
+                return {"error": None, "fingerprints": {}, "result": True}
+            if method == "rollback":
+                assert self._group_snapshot is not None
+                manager.restore_adapters(self._group_snapshot)
+                return {
+                    "error": None,
+                    "fingerprints": {},
+                    "result": True,
+                    "state": self.group_adapter_state(),
+                }
+            if self._group_snapshot is not None:
+                raise RuntimeError("Previous group adapter transaction is unfinished")
+            self._group_snapshot = manager.snapshot_adapters()
+            previous = self.group_adapter_state()
             if method == "prepare":
                 requests = [
                     msgspec.msgpack.decode(item, type=LoRARequest) for item in argument
                 ]
                 desired = {request.lora_int_id for request in requests}
-                manager = self._adapter_manager
                 if not manager._active_adapters.pinned_items <= desired:
                     raise RuntimeError(
                         "A pinned adapter was omitted from the group epoch"
@@ -319,9 +338,32 @@ class WorkerLoRAManager:
                 ):
                     raise RuntimeError(f"Adapter {adapter} is not ready on this worker")
                 fingerprints[adapter] = model.source_fingerprint
-            return {"error": None, "fingerprints": fingerprints, "result": result}
+            return {
+                "error": None,
+                "fingerprints": fingerprints,
+                "result": result,
+                "previous": previous,
+            }
         except Exception as error:
-            return {"error": str(error), "fingerprints": {}, "result": False}
+            return {
+                "error": str(error),
+                "fingerprints": {},
+                "result": False,
+                "previous": previous,
+            }
+
+    def group_adapter_state(self) -> dict:
+        manager = self._adapter_manager
+        assert isinstance(manager, LRUCacheLoRAModelManager)
+        state = manager.snapshot_adapters()
+        return {
+            "models": [
+                (key, model.source_fingerprint) for key, model in state.models.items()
+            ],
+            "active": list(state.active),
+            "cpu_pinned": sorted(state.cpu_pinned),
+            "gpu_pinned": sorted(state.gpu_pinned),
+        }
 
 
 class LRUCacheWorkerLoRAManager(WorkerLoRAManager):

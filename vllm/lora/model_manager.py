@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Callable
-from typing import TypeVar
+from typing import NamedTuple, TypeVar
 
 import torch
 from torch import nn
@@ -1440,6 +1440,34 @@ class LoRAModelManager:
 
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
+
+    class Snapshot(NamedTuple):
+        models: dict[int, LoRAModel]
+        active: tuple[int, ...]
+        cpu_pinned: frozenset[int]
+        gpu_pinned: frozenset[int]
+
+    def snapshot_adapters(self) -> Snapshot:
+        return self.Snapshot(
+            dict(self._registered_adapters.cache),
+            tuple(self._active_adapters.order),
+            frozenset(self._registered_adapters.pinned_items),
+            frozenset(self._active_adapters.pinned_items),
+        )
+
+    def restore_adapters(self, snapshot: Snapshot) -> None:
+        """Restore retained, already-merged CPU models into the existing buffers."""
+        self.remove_all_adapters()
+        for adapter, model in snapshot.models.items():
+            self._registered_adapters[adapter] = model
+        for adapter in snapshot.active:
+            self.activate_adapter(adapter)
+        for adapter in snapshot.models:
+            self._registered_adapters.touch(adapter)
+        for adapter in snapshot.cpu_pinned:
+            self._registered_adapters.pin(adapter)
+        for adapter in snapshot.gpu_pinned:
+            self._active_adapters.pin(adapter)
 
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""

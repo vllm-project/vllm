@@ -1273,6 +1273,13 @@ class EngineCore:
             and req.lora_request is not None
         ):
             admission = self.group_lora_admission
+            if (
+                admission is not None
+                and req.lora_request.lora_int_id in admission.failed
+            ):
+                raise VLLMValidationError(
+                    admission.failed[req.lora_request.lora_int_id]
+                )
             registered = (
                 admission.identities.get(req.lora_request.lora_int_id)
                 if admission is not None
@@ -2571,24 +2578,57 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             action = admission.plan(frames)
             if action is not None:
-                local = self.model_executor.collective_rpc(
-                    "update_lora_group", args=action
-                )
-                reports = [
-                    report
-                    for rank in gather_metadata(self.dp_group, local)
-                    for report in rank
-                ]
-                expected = (
-                    self.dp_size * self.vllm_config.parallel_config.tensor_parallel_size
-                )
-                if len(reports) != expected:
-                    raise RuntimeError(
-                        "Missing worker acknowledgement for LoRA admission"
+                reports = self._group_lora_rpc(action)
+                error = None
+                try:
+                    admission.validate(action, reports)
+                except RuntimeError as failure:
+                    error = str(failure)
+                    restored = self._group_lora_rpc(("rollback", None))
+                    if any(
+                        item["error"] or item.get("state") != before.get("previous")
+                        for item, before in zip(restored, reports)
+                    ):
+                        raise RuntimeError(
+                            "Group LoRA rollback failed; admission remains blocked"
+                        ) from failure
+                finished = self._group_lora_rpc(("commit", None))
+                if any(item["error"] for item in finished):
+                    raise RuntimeError("Cannot finish group LoRA transaction")
+                if error is None:
+                    admission.publish(action, reports)
+                else:
+                    logger.error("Group LoRA update rolled back: %s", error)
+                    failed = admission.reject(action, error)
+                    requests = [
+                        request
+                        for request in scheduler.requests.values()
+                        if request.lora_request
+                        and request.lora_request.lora_int_id in failed
+                    ]
+                    scheduler.finish_requests(
+                        [request.request_id for request in requests],
+                        RequestStatus.FINISHED_ERROR,
                     )
-                admission.publish(action, reports)
+                    by_client = defaultdict(list)
+                    for request in requests:
+                        by_client[request.client_index].append(request.request_id)
+                    for client, ids in by_client.items():
+                        self._send_error_outputs_to_client(ids, client)
             scheduler.admitted_lora_ids = admission.admitted
         return super()._process_engine_step()
+
+    def _group_lora_rpc(self, action: tuple[str, Any]) -> list[dict]:
+        local = self.model_executor.collective_rpc("update_lora_group", args=action)
+        reports = [
+            report for rank in gather_metadata(self.dp_group, local) for report in rank
+        ]
+        if (
+            len(reports)
+            != self.dp_size * self.vllm_config.parallel_config.tensor_parallel_size
+        ):
+            raise RuntimeError("Missing worker acknowledgement for LoRA transaction")
+        return reports
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
