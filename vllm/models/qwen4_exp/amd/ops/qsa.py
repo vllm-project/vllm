@@ -931,8 +931,13 @@ def qsa_select_paged_tokens(
     compress_ratio: int,
     out: torch.Tensor | None = None,
     single_row_decode: bool = False,
+    max_seq_len: int | None = None,
 ) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
+    """Score, select, and expand QSA indices without host synchronization.
+
+    ``max_seq_len`` bounds the scored columns to the batch's longest sequence;
+    without it every column of ``page_table`` is scored.
+    """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
     if out is None:
@@ -943,6 +948,8 @@ def qsa_select_paged_tokens(
         return out
 
     columns = page_table.shape[1] * k_cache.shape[1]
+    if max_seq_len is not None:
+        columns = min(columns, -(-max_seq_len // compress_ratio))
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
@@ -963,6 +970,7 @@ def qsa_select_paged_tokens(
             query_positions[row_slice],
             sequence_lengths,
             compress_ratio,
+            num_columns=columns,
             single_row_decode=single_row_decode,
         )
         blocks = blocks_buffer[: row_end - row_start]

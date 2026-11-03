@@ -585,6 +585,32 @@ def test_qsa_select_decode_rows_ignores_unwritten_logits(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("single_row_decode", [False, True], ids=["tiled", "rows"])
+def test_qsa_select_bounded_columns_keeps_visible_blocks(
+    monkeypatch: pytest.MonkeyPatch, single_row_decode: bool
+) -> None:
+    # The longest request's last visible compressed block (61 // 4 - 1 = 14)
+    # gets the top score, so a bound that drops it changes the selection.
+    _force_rows_kernel(monkeypatch)
+    q, k_cache, page_table, token_to_req, _, _, _, ratio = _decode_select_case(
+        7, "bf16"
+    )
+    k_cache[page_table[0, 0], 14, 0] = 4 * q[0].sum(dim=0)
+    lengths = torch.tensor([61, 5, 33, 8, 47, 12, 60], device="cuda", dtype=torch.int32)
+    args = (q, k_cache, page_table, token_to_req, (lengths - 1).long(), lengths, 8)
+    expected = qsa_ops.qsa_select_paged_tokens(
+        *args, ratio, single_row_decode=single_row_decode
+    )
+    actual = qsa_ops.qsa_select_paged_tokens(
+        *args, ratio, single_row_decode=single_row_decode, max_seq_len=61
+    )
+    assert ((expected[0] >= 14 * ratio) & (expected[0] < 15 * ratio)).any()
+    torch.testing.assert_close(
+        actual.sort(dim=1).values, expected.sort(dim=1).values, rtol=0, atol=0
+    )
+
+
+@requires_qsa_kernels
 def test_qsa_select_decode_rows_replays_in_cuda_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -679,6 +705,7 @@ def test_qsa_indexer_flags_single_row_decode(
         seq_lens=None,
         num_prefills=num_prefills,
         decode_query_len=decode_query_len,
+        max_seq_len=64,
     )
     QSAIndexer._select(indexer, None, metadata, None)  # type: ignore[arg-type]
     assert seen["single_row_decode"] is expected
