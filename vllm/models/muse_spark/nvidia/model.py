@@ -69,6 +69,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
@@ -1153,8 +1154,18 @@ class MuseSpark1xAttention(nn.Module):
         self.sp_min_tokens = 0
         self.gemm_rs = None
 
-        self.rotary_emb = (
-            RotaryEmbedding(
+        # get_rope caches by key, so target layers share one fp32 table.
+        self.rotary_emb: RotaryEmbedding | None = None
+        if self.use_rope and not is_draft:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -1162,13 +1173,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -1393,9 +1401,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,
