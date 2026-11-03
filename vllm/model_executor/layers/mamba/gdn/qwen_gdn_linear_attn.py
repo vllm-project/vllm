@@ -7,7 +7,7 @@ import itertools
 import os
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from einops import rearrange

@@ -123,7 +123,6 @@ def test_flashinfer_gdn_prefill_omits_cp_kwargs_when_inactive(monkeypatch):
     assert captured_kwargs["backend"] == "flashinfer"
 
 
-
 @pytest.mark.skipif(
     not (
         current_platform.is_device_capability(90)
