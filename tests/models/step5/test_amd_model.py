@@ -4,11 +4,9 @@
 with top-k 16 so prompts past 128 tokens reach scored prefill and real decode
 selection.
 
-Dummy weights give a near-uniform attention softmax and gate, so this guards
-selection, paging and summary-page addressing (which V rows are read). Scores,
-scale, masks and the gate are covered by test_amd_csa_paged.py.
-
-_LOGPROB_ATOL is provisional and will be calibrated on GPU.
+Dummy weights keep the logits nearly flat, so this guards which request's
+block table and summary pages decode reads. Scores, scale, masks, in-kernel
+paging and the gate are covered by test_amd_csa_paged.py.
 """
 
 import random
@@ -29,7 +27,7 @@ pytestmark = pytest.mark.skipif(
 ARCH = "Step5ForConditionalGeneration"
 TOPK = 16
 DECODE_TOKENS = 24
-_LOGPROB_ATOL = 1e-2
+_LOGPROB_ATOL = 1e-4
 
 
 def tiny_step5(cfg):
