@@ -88,8 +88,7 @@ MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
-    """
-    Checks if the given tool types are custom tools
+    """Checks if the given tool types are custom tools
     (i.e. any tool other than MCP builtin tools)
     """
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
@@ -209,8 +208,7 @@ def get_system_or_developer_message(role: str, instructions: str) -> Message:
 
 
 def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
-    """
-    Parse a list of messages from request.messages in the Chat Completion API to
+    """Parse a list of messages from request.messages in the Chat Completion API to
     Harmony messages.
     """
     msgs: list[Message] = []
@@ -230,9 +228,8 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
 
 
 def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
-    """
-    Harmony models expect the analysis messages (representing raw chain of thought) to
-    be dropped after an assistant message to the final channel is produced from the
+    """Harmony models expect the analysis messages (representing raw chain of thought)
+    to be dropped after an assistant message to the final channel is produced from the
     reasoning of those messages.
 
     The openai-harmony library does this if the very last assistant message is to the
@@ -262,8 +259,7 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
 
 
 def flatten_input_text_content(content: Any) -> str | None:
-    """
-    Extract text parts from a Chat Completion or Responses API content field and
+    """Extract text parts from a Chat Completion or Responses API content field and
     flatten them into a single string. Returns None if no text content is found.
     """
     if content is None or isinstance(content, str):
@@ -286,8 +282,7 @@ def flatten_input_text_content(content: Any) -> str | None:
 def extract_instructions_from_messages(
     messages: Sequence[Any],
 ) -> tuple[str | None, list[Any]]:
-    """
-    Peel a leading system/developer Chat Completion or Responses message and
+    """Peel a leading system/developer Chat Completion or Responses message and
     flatten its instruction text.
     """
     remaining_messages = list(messages)
@@ -327,9 +322,7 @@ def build_harmony_preamble(
     container_description: str | None = None,
     with_custom_tools: bool = False,
 ) -> list[Message]:
-    """
-    Build the standard Harmony system/developer prefix for a request.
-    """
+    """Build the standard Harmony system/developer prefix for a request."""
     developer_instructions = system_instructions = None
     if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         system_instructions = instructions
@@ -359,8 +352,7 @@ def build_harmony_preamble(
 def parse_chat_input_to_harmony_message(
     chat_msg, tool_id_names: dict[str, str] | None = None
 ) -> list[Message]:
-    """
-    Parse a message from request.messages in the Chat Completion API to
+    """Parse a message from request.messages in the Chat Completion API to
     Harmony messages.
     """
     tool_id_names = tool_id_names or {}
@@ -457,12 +449,80 @@ def parse_chat_input_to_harmony_message(
 def render_for_completion(messages: list[Message]) -> list[int]:
     messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
-    token_ids = get_encoding().render_conversation_for_completion(
+    encoding = get_encoding()
+    token_ids = encoding.render_conversation_for_completion(
         conversation,
         Role.ASSISTANT,
         config=RenderConversationConfig(auto_drop_analysis=False),
     )
-    return token_ids
+    return _use_legacy_tool_call_headers(token_ids)
+
+
+def _use_legacy_tool_call_headers(token_ids: list[int]) -> list[int]:
+    """Keep prior assistant tool calls in the format expected by GPT-OSS.
+
+    oss-harmony 0.0.10 changed a rendered tool-call header from::
+
+        assistant to=python<|channel|>commentary code
+
+    to::
+
+        assistant<|channel|>commentary to=python <|constrain|>code
+
+    GPT-OSS can echo the latter as a malformed header with the recipient in
+    both positions. Rewrite only that unambiguous token-level header shape,
+    while retaining oss-harmony's embedded vocabulary and parser.
+    """
+    encoding = get_encoding()
+    start = encoding.encode("<|start|>", allowed_special="all")[0]
+    channel_token = encoding.encode("<|channel|>", allowed_special="all")[0]
+    constrain = encoding.encode("<|constrain|>", allowed_special="all")[0]
+    message = encoding.encode("<|message|>", allowed_special="all")[0]
+
+    result = token_ids.copy()
+    index = 0
+    while index < len(result):
+        if result[index] != start:
+            index += 1
+            continue
+
+        try:
+            header_end = result.index(message, index + 1)
+            channel_index = result.index(channel_token, index + 1, header_end)
+            constrain_index = result.index(constrain, channel_index + 1, header_end)
+        except ValueError:
+            index += 1
+            continue
+
+        author = encoding.decode(result[index + 1 : channel_index])
+        channel_and_recipient = encoding.decode(
+            result[channel_index + 1 : constrain_index]
+        )
+        content_type = encoding.decode(result[constrain_index + 1 : header_end])
+        if (
+            author != "assistant"
+            or " to=" not in channel_and_recipient
+            or not channel_and_recipient.endswith(" ")
+        ):
+            index = header_end + 1
+            continue
+
+        channel, recipient = channel_and_recipient[:-1].split(" to=", 1)
+        if not channel or not recipient or not content_type:
+            index = header_end + 1
+            continue
+
+        legacy_header = (
+            [start]
+            + encoding.encode(f"assistant to={recipient}")
+            + [channel_token]
+            + encoding.encode(f"{channel} {content_type}")
+            + [message]
+        )
+        result[index : header_end + 1] = legacy_header
+        index += len(legacy_header)
+
+    return result
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:

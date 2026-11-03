@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -114,8 +115,8 @@ impl GlmXmlToolParser {
         std::mem::take(&mut self.buffer)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_glm_event(input, &mut self.mode, self.separator)
@@ -261,7 +262,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: literal(ARG_KEY_END),
         _: ws0,
         _: literal(ARG_VALUE_START),
-        take_until(0.., ARG_VALUE_END).map(str::trim),
+        take_until(0.., ARG_VALUE_END),
         _: literal(ARG_VALUE_END),
     )
     .parse_next(input)?;
@@ -274,8 +275,8 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::Glm45MoeToolParser;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use super::{Glm45MoeToolParser, Glm47MoeToolParser};
+    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tokenizer, test_tools};
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn glm45_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -318,6 +319,38 @@ mod tests {
             serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
+    }
+
+    #[test]
+    fn glm_parse_complete_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+        ] {
+            let output = parser.parse_complete(&text).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
+    }
+
+    #[test]
+    fn glm_streaming_preserves_string_whitespace() {
+        let tools = test_tools();
+        let text = glm45_tool_call("get_weather", &[("city", "  Paris \n"), ("days", " 2 ")]);
+        for mut parser in [
+            Glm45MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+            Glm47MoeToolParser::create(&tools, test_tokenizer()).unwrap(),
+        ] {
+            let output = collect_stream(&mut *parser, &split_by_chars(&text, 7));
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+                json!({"city": "  Paris \n", "days": 2})
+            );
+        }
     }
 
     #[test]

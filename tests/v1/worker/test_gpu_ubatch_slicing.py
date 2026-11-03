@@ -10,6 +10,7 @@ threaded execution of the microbatches.
 """
 
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,13 +21,26 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.config import CUDAGraphMode, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.forward_context import create_forward_context
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer,
+)
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
-from vllm.v1.worker.gpu import dp_utils
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
+from vllm.v1.worker.gpu.cudagraph_utils import (
+    BatchExecutionDescriptor,
+    CudaGraphManager,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_utils import (
@@ -34,6 +48,7 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchState,
     _slice_input_batch,
     create_ubatch_slices,
+    merge_ubatch_outputs,
     slice_model_inputs,
 )
 from vllm.v1.worker.ubatch_utils import (
@@ -41,7 +56,11 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.ubatching import dbo_current_ubatch_id, dbo_yield
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id,
+    dbo_register_recv_hook,
+    dbo_yield,
+)
 
 MAX_NUM_REQS = 32
 MAX_NUM_TOKENS = 128
@@ -272,6 +291,7 @@ def _sync_dp(
     num_tokens_per_rank: list[int],
     uniform_token_count_per_rank: list[int] | None = None,
     allow_ubatching: bool = True,
+    cudagraph_manager: Any = None,
 ) -> tuple[BatchExecutionDescriptor, dp_utils.DPSyncState | None]:
     """Run the DP handshake with the all-reduce stubbed out.
 
@@ -282,20 +302,19 @@ def _sync_dp(
     """
     dp_size = len(num_tokens_per_rank)
     uniform_token_counts = uniform_token_count_per_rank or [0] * dp_size
-    reduced = torch.zeros(6, dp_size, dtype=torch.int32)
+    reduced = torch.zeros(7, dp_size, dtype=torch.int32)
     reduced[0] = torch.tensor(num_tokens_per_rank, dtype=torch.int32)
     reduced[1] = CUDAGraphMode.NONE.value
     reduced[2] = torch.tensor(uniform_token_counts, dtype=torch.int32)
     reduced[3] = -1  # max_query_len, -1 means None
     reduced[4] = int(allow_ubatching)
     reduced[5] = 8  # num_reqs
+    reduced[6] = 0  # allow_skip_drafts
 
-    with (
-        patch.object(dp_utils.dist, "all_reduce", lambda t, group: t.copy_(reduced)),
-        patch.object(dp_utils, "get_dp_group", lambda: SimpleNamespace(cpu_group=None)),
-    ):
+    dp_group = SimpleNamespace(cpu_all_reduce_=lambda t: t.copy_(reduced))
+    with patch.object(dp_utils, "get_dp_group", lambda: dp_group):
         return dp_utils.sync_cudagraph_and_dp_padding(
-            cudagraph_manager=None,
+            cudagraph_manager=cudagraph_manager,
             desired_batch_desc=BatchExecutionDescriptor(
                 cg_mode=CUDAGraphMode.NONE,
                 num_tokens=num_tokens_per_rank[0],
@@ -338,10 +357,10 @@ def test_decode_threshold_only_applies_when_every_rank_is_a_uniform_decode():
 
 def test_microbatching_pads_all_ranks_to_the_largest():
     """Ranks must run the same token count so microbatch sizes line up."""
-    desc, dp_sync = _sync_dp([200, 256])
+    desc, dp_sync_state = _sync_dp([200, 256])
     assert desc.num_tokens == 256
-    assert dp_sync is not None
-    assert dp_sync.num_tokens_across_dp.tolist() == [256, 256]
+    assert dp_sync_state is not None
+    assert dp_sync_state.num_tokens_across_dp.tolist() == [256, 256]
 
 
 def test_microbatching_survives_a_rank_that_cannot_fill_it():
@@ -414,6 +433,94 @@ def test_slice_model_inputs_handles_mrope_positions():
     torch.testing.assert_close(sliced["positions"], torch.arange(24).view(3, 8)[:, 4:8])
     assert sliced["inputs_embeds"] is None
     assert sliced["intermediate_tensors"] is None
+
+
+@pytest.mark.parametrize(
+    ("cudagraph_runtime_mode", "execution_method"),
+    [
+        (CUDAGraphMode.FULL, "_capture_ubatches"),
+        (CUDAGraphMode.NONE, "_run_ubatches"),
+    ],
+)
+def test_legacy_ubatch_contexts_slice_padding_mask(
+    cudagraph_runtime_mode: CUDAGraphMode, execution_method: str
+):
+    """Replacement contexts preserve each microbatch's padding rows."""
+    ubatch_slices = [
+        UBatchSlice(slice(0, 2), slice(0, 3)),
+        UBatchSlice(slice(2, 4), slice(3, 6)),
+    ]
+    is_padding = torch.tensor([False, True, False, True, False, True])
+    forward_context = SimpleNamespace(
+        batch_descriptor=object(),
+        ubatch_slices=ubatch_slices,
+        cudagraph_runtime_mode=cudagraph_runtime_mode,
+        attn_metadata=[{}, {}],
+        slot_mapping={},
+        dp_metadata=object(),
+        is_padding=is_padding,
+    )
+
+    wrapper = object.__new__(legacy_gpu_ubatch_wrapper.UBatchWrapper)
+    wrapper.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(data_parallel_size=2)
+    )
+    wrapper.comm_stream = object()
+    wrapper.ready_barrier = object()
+    wrapper.cudagraphs = {}
+    wrapper.sm_control = nullcontext()
+    wrapper.runnable = object()
+
+    def make_contexts(*, forward_contexts, **kwargs):
+        return [
+            SimpleNamespace(id=i, forward_context=context)
+            for i, context in enumerate(forward_contexts)
+        ]
+
+    def create_context(attn_metadata, vllm_config, **kwargs):
+        return SimpleNamespace(attn_metadata=attn_metadata, **kwargs)
+
+    model_inputs = {
+        "input_ids": torch.arange(6),
+        "positions": torch.arange(6),
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+    }
+    expected = object()
+    with (
+        patch.object(
+            legacy_gpu_ubatch_wrapper,
+            "get_forward_context",
+            return_value=forward_context,
+        ),
+        patch.object(
+            legacy_gpu_ubatch_wrapper.torch.cuda,
+            "current_stream",
+            return_value=object(),
+        ),
+        patch.object(
+            legacy_gpu_ubatch_wrapper.DPMetadata, "make", return_value=object()
+        ),
+        patch.object(
+            legacy_gpu_ubatch_wrapper,
+            "create_forward_context",
+            side_effect=create_context,
+        ),
+        patch.object(
+            legacy_gpu_ubatch_wrapper,
+            "make_ubatch_contexts",
+            side_effect=make_contexts,
+        ),
+        patch.object(wrapper, execution_method, return_value=expected) as execute,
+    ):
+        result = wrapper(**model_inputs)
+
+    assert result is expected
+    contexts = [
+        metadata.context.forward_context for metadata in execute.call_args.args[0]
+    ]
+    torch.testing.assert_close(contexts[0].is_padding, is_padding[:3])
+    torch.testing.assert_close(contexts[1].is_padding, is_padding[3:])
 
 
 def _make_dbo_config() -> VllmConfig:
@@ -493,17 +600,34 @@ def test_runner_allocates_one_buffer_pair_per_microbatch():
 class _YieldingModel(torch.nn.Module):
     """Toy model that hands off to the other microbatch mid-forward."""
 
-    def __init__(self, trace: list[tuple[str, int]]):
+    def __init__(
+        self,
+        trace: list[tuple[str, int]],
+        capturer: RoutedExpertsCapturer | None = None,
+    ):
         super().__init__()
         self.trace = trace
+        self.capturer = capturer
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         self.trace.append(("enter", dbo_current_ubatch_id()))
         out = input_ids.float().unsqueeze(-1) * 2 + positions.float().unsqueeze(-1)
         # Stands in for the expert all-to-all handoff point.
         dbo_yield()
+        if self.capturer is not None:
+            self.capturer.capture(0, input_ids.view(-1, 1).int())
         self.trace.append(("exit", dbo_current_ubatch_id()))
         return out
+
+
+def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCapturer:
+    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
+    capturer.dp_rank = 0
+    capturer.tp_size = 1
+    capturer.device_buffer = torch.full(
+        (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
+    )
+    return capturer
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
@@ -523,7 +647,8 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
     )
 
     trace: list[tuple[str, int]] = []
-    model = _YieldingModel(trace)
+    capturer = _make_capturer(16, device)
+    model = _YieldingModel(trace, capturer)
     output = runner.run(model, model_inputs, ubatch_state)
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
@@ -533,14 +658,31 @@ def test_ubatch_runner_overlaps_and_matches_single_batch():
 
     # Both microbatches reach the handoff before either finishes.
     assert trace == [("enter", 0), ("enter", 1), ("exit", 0), ("exit", 1)]
+    torch.testing.assert_close(
+        capturer.device_buffer[:, 0, 0], model_inputs["input_ids"].int()
+    )
+
+
+def test_merge_keeps_aux_hidden_states_per_layer():
+    # EAGLE3 and DFlash targets return (hidden_states, [aux per layer]).
+    hidden = torch.arange(6.0).view(6, 1)
+    aux = [torch.arange(6.0).view(6, 1) + 10 * i for i in range(3)]
+    merged_hidden, merged_aux = merge_ubatch_outputs(
+        [(hidden[:2], [x[:2] for x in aux]), (hidden[2:], [x[2:] for x in aux])]
+    )
+    torch.testing.assert_close(merged_hidden, hidden)
+    assert len(merged_aux) == len(aux)
+    for merged, expected in zip(merged_aux, aux):
+        torch.testing.assert_close(merged, expected)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
-def test_ubatch_runner_names_the_microbatch_that_failed():
+@pytest.mark.parametrize("failed_ubatch", [0, 1])
+def test_ubatch_runner_names_the_microbatch_that_failed(failed_ubatch):
     """A failing microbatch surfaces as a named error, not a downstream KeyError.
 
-    The model here never yields, so the microbatches run back to back and no
-    handoff is left outstanding when one of them dies. A microbatch that fails
+    The first recorded failure is reported, not microbatch 0's later error from
+    registering a recv hook on the exited microbatch 1. A microbatch that fails
     *while its sibling is parked at a yield* hangs the step instead -- the
     shared handoff protocol in `ubatching.py` has no way to unwind a parked
     microbatch, and the V1 runner has the same gap. Fixing that means changing
@@ -549,12 +691,19 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     vllm_config = _make_dbo_config()
     device = torch.device("cuda:0")
     runner = _make_execution_runner(vllm_config)
+    failed_threads: list[threading.Thread] = []
 
     class _FailingModel(torch.nn.Module):
         def forward(self, input_ids, positions, **kwargs):
-            if dbo_current_ubatch_id() == 0:
+            if dbo_current_ubatch_id() == failed_ubatch:
+                failed_threads.append(threading.current_thread())
                 raise ValueError("boom")
-            return input_ids.float().unsqueeze(-1)
+            if failed_ubatch == 0:
+                return input_ids.float().unsqueeze(-1)
+            dbo_yield()
+            failed_threads[0].join(timeout=5.0)
+            assert not failed_threads[0].is_alive()
+            dbo_register_recv_hook(lambda: None)
 
     model_inputs = _make_model_inputs(8, device)
     ubatch_state = _make_ubatch_state(
@@ -581,7 +730,7 @@ def test_ubatch_runner_names_the_microbatch_that_failed():
     assert not caller.is_alive(), "UBatchRunner.run hung on a failing microbatch"
 
     assert isinstance(result["error"], RuntimeError)
-    assert "Microbatch 0" in str(result["error"])
+    assert f"Microbatch {failed_ubatch}" in str(result["error"])
     assert isinstance(result["error"].__cause__, ValueError)
 
 
@@ -656,7 +805,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         [1, 1, 10, 1, 1], [64, 96, 512, 32, 48]
     )
     # execute_model has populated the merged batch's DCP metadata already.
-    input_batch.dcp_local_seq_lens = gpu_cp_utils.maybe_prepare_dcp_local_seq_lens(
+    input_batch.dcp_local_seq_lens = gpu_cp_utils.prepare_dcp_local_seq_lens(
         buffers.dcp_local_seq_lens,
         input_batch.seq_lens,
         input_batch.num_reqs,
@@ -665,6 +814,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
         CP_INTERLEAVE,
         num_reqs_padded=input_batch.num_reqs_after_padding,
     )
+    assert input_batch.dcp_local_seq_lens is not None
     parent_lens = input_batch.dcp_local_seq_lens.clone()
 
     ubatches, _ = _slice_with_dcp(input_batch, dcp_rank)
@@ -685,6 +835,7 @@ def test_microbatches_recompute_dcp_lens_from_truncated_seq_lens(dcp_rank: int):
     # the parent's row would ship the stale value.
     assert ubatches[0].num_reqs == 3
     assert ubatches[0].seq_lens[2].item() == 507
+    assert ubatches[0].dcp_local_seq_lens is not None
     assert ubatches[0].dcp_local_seq_lens[2].item() != parent_lens[2].item()
 
 
@@ -718,3 +869,183 @@ def test_slicing_drops_stale_dcp_metadata_when_dcp_is_off():
     ]
 
     assert all(ubatch.dcp_local_seq_lens is None for ubatch in ubatches)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="DBO needs a GPU")
+def test_capturable_run_replays_as_a_cudagraph():
+    """Microbatched graph replay reads updated persistent input buffers."""
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True, all2all_backend="deepep_low_latency"
+        ),
+    )
+    device = torch.device("cuda:0")
+    runner = _make_execution_runner(vllm_config)
+
+    num_tokens = 16
+    input_ids = torch.arange(num_tokens, device=device)
+    positions = torch.arange(num_tokens, device=device)
+    model_inputs = {
+        "input_ids": input_ids,
+        "positions": positions,
+        "inputs_embeds": None,
+        "intermediate_tensors": None,
+    }
+    ubatch_state = _make_ubatch_state(
+        vllm_config,
+        [
+            UBatchSlice(slice(0, 4), slice(0, 8)),
+            UBatchSlice(slice(4, 8), slice(8, 16)),
+        ],
+    )
+
+    capturer = _make_capturer(num_tokens, device)
+    model = _YieldingModel([], capturer)
+    graph = torch.cuda.CUDAGraph()
+    finish = runner.begin_capturable_run(
+        model, model_inputs, ubatch_state, for_capture=True
+    )
+    with torch.cuda.graph(graph, stream=runner.capture_stream):
+        captured = finish()
+
+    input_ids.fill_(3)
+    positions.fill_(5)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    expected = torch.full(
+        (num_tokens, 1), 3 * 2 + 5, dtype=torch.float32, device=device
+    )
+    torch.testing.assert_close(captured, expected)
+    assert (capturer.device_buffer == 3).all()
+
+
+def _request_slices(input_batch: InputBatch) -> list[slice]:
+    return [s.request_slice for s in create_ubatch_slices(input_batch, 2)]
+
+
+def test_captured_split_survives_a_replay_with_enough_requests():
+    """Replay preserves the captured split only if real requests reach it."""
+    buffers = _make_buffers()
+    captured = _request_slices(InputBatch.make_dummy(16, 16, buffers))
+
+    def replay(num_reqs: int) -> list[slice]:
+        return _request_slices(
+            _make_input_batch(
+                [1] * num_reqs,
+                [128] * num_reqs,
+                buffers,
+                num_reqs_padded=16,
+                num_tokens_padded=16,
+            )
+        )
+
+    assert replay(16) == captured
+    assert replay(9) == captured
+    assert replay(4) != captured
+
+
+def _make_cudagraph_manager(capture_sizes: list[int]) -> CudaGraphManager:
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(model="facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(
+            enable_dbo=True,
+            all2all_backend="deepep_low_latency",
+            dbo_decode_token_threshold=DECODE_THRESHOLD,
+            dbo_prefill_token_threshold=PREFILL_THRESHOLD,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL,
+            cudagraph_capture_sizes=capture_sizes,
+        ),
+    )
+    with patch.object(
+        cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    ):
+        manager = CudaGraphManager(
+            vllm_config,
+            torch.device("cuda:0"),
+            CUDAGraphMode.FULL,
+            decode_query_len=1,
+            ubatch_runner=cast(UBatchRunner, object()),
+        )
+    manager._graphs_captured = True
+    return manager
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
+def test_microbatched_graphs_are_only_offered_to_uniform_batches():
+    """Mixed batches cannot reuse graphs captured with uniform query lengths."""
+    manager = _make_cudagraph_manager([64, 128])
+
+    desc = manager.dispatch(
+        num_reqs=64,
+        num_tokens=64,
+        uniform_token_count=1,
+        num_active_loras=0,
+        num_ubatches=2,
+    )
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+
+    desc = manager.dispatch(
+        num_reqs=8,
+        num_tokens=64,
+        uniform_token_count=None,
+        num_active_loras=0,
+        num_ubatches=2,
+    )
+    assert desc.cg_mode == CUDAGraphMode.NONE
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a graph pool")
+def test_microbatched_graph_needs_every_rank_to_reach_the_split():
+    """Fall back to eager on all ranks if any rank cannot reach the captured split."""
+    manager = _make_cudagraph_manager([64, 128])
+    uniform = [1, 1]
+
+    desc, _ = _sync_dp([64, 64], uniform, cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.FULL
+    assert desc.num_ubatches == 2
+
+    # Rank 1 pads the group up to a 128-token graph, but rank 0 only reaches 33.
+    desc, dp_sync_state = _sync_dp([33, 128], uniform, cudagraph_manager=manager)
+    assert desc.cg_mode == CUDAGraphMode.NONE
+    assert desc.num_ubatches == 2
+    assert dp_sync_state is not None and dp_sync_state.eager
+
+
+@pytest.mark.parametrize("num_reqs", [3, 4, 5])
+def test_uniform_spec_decode_batches_split_on_request_boundaries(num_reqs: int):
+    # Verifying 2 drafts per request: 3 tokens each. A midpoint split would cut
+    # a request in two whenever num_reqs is odd, leaving neither microbatch a
+    # uniform decode.
+    query_len = 3
+    input_batch = _make_input_batch(
+        [query_len] * num_reqs, [64] * num_reqs, _make_buffers()
+    )
+    slices = create_ubatch_slices(input_batch, 2, uniform_token_count=query_len)
+    first, second = slices
+    assert first.token_slice.stop % query_len == 0
+    assert first.request_slice.stop == second.request_slice.start
+    assert first.num_tokens == query_len * (num_reqs // 2)
+    assert second.token_slice.stop == query_len * num_reqs
+
+
+def test_single_token_or_unknown_uniform_count_keeps_midpoint_split():
+    input_batch = _make_input_batch([3] * 5, [64] * 5, _make_buffers())
+    for uniform_token_count in (None, 1):
+        first, _ = create_ubatch_slices(
+            input_batch, 2, uniform_token_count=uniform_token_count
+        )
+        assert first.token_slice.stop == 15 // 2
+
+
+def test_too_few_requests_to_align_keeps_midpoint_split():
+    # One request cannot be split on a request boundary.
+    input_batch = _make_input_batch([4], [64], _make_buffers())
+    first, _ = create_ubatch_slices(input_batch, 2, uniform_token_count=4)
+    assert first.token_slice.stop == 2

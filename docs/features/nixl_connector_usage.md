@@ -63,6 +63,19 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+#### UCX backend parameters
+
+`kv_connector_extra_config.ucx_backend_params` passes extra init parameters to NIXL's UCX backend. Values are strings. For example, NIXL creates UCX with `ucx_error_handling_mode=peer` by default; UCX then uses only transports that can detect peer failure, which can exclude intra-node GPU transports such as `rocm_ipc`. To trade that error handling for those transports:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"ucx_backend_params":{"ucx_error_handling_mode":"none"}}
+  }'
+```
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
@@ -398,7 +411,7 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 ### For NVIDIA GB-series GPUs
 
-GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 
@@ -418,12 +431,13 @@ activity for the last reporting interval. Example output:
 ```text
 KV Transfer metrics: Num successful transfers=4, Avg xfer time (ms)=1.381,
 P90 xfer time (ms)=2.601, Avg post time (ms)=0.672, P90 post time (ms)=0.801,
-Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0
+Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0,
+Num failed transfers=0, Num KV expired reqs=0
 ```
 
 The table below describes each field. All timing values cover only the
-successful transfers recorded in the current interval; failed transfers are
-counted separately via Prometheus (see
+successful transfers recorded in the current interval; failures are reported
+as interval counts in the same line and via Prometheus (see
 [Prometheus metrics](#prometheus-metrics) below).
 
 | Metric | Unit | Description |
@@ -436,6 +450,8 @@ counted separately via Prometheus (see
 | `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
 | `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
 | `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
+| `Num failed transfers` | count | Failed NIXL transfers, handshakes, and completion notifications (`send_notif`) in the interval, grouped because all are sporadic lower-transport-layer events. |
+| `Num KV expired reqs` | count | Requests whose KV blocks expired before being read. Reported separately from the failure counts above because it is an autoscaler/lease-tuning signal rather than a transport issue. |
 
 ### Prometheus metrics
 
@@ -448,9 +464,10 @@ exported when NixlConnector is active:
 | `vllm:nixl_post_time_seconds` | Histogram | Time to submit the transfer request to the RDMA backend (seconds). |
 | `vllm:nixl_bytes_transferred` | Histogram | Bytes moved per transfer. |
 | `vllm:nixl_num_descriptors` | Histogram | Descriptor count per transfer. |
-| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers. |
-| `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed completion notifications (`send_notif`). |
-| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers, including handshake and notification (`send_notif`) failures. These are grouped because all are sporadic lower-transport-layer events. |
+| `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed notifications (`send_notif`), retained for compatibility. These failures are also included in `vllm:nixl_num_failed_transfers`; do not sum the two counters. |
+| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). Kept separate from the failure counters above: KV expiry is an autoscaler/lease-tuning signal, not a transport issue. |
+| `vllm:nixl_num_notifications_after_expiry` | Counter | Completion notifications that arrive for a request that is no longer tracked, usually because its KV lease expired first. Pull connector: counted on P, where it means the decoder may have read blocks that were already reused; each matches a "Potentially invalid KV blocks" error log. Push connector: counted on whichever instance tracks the request as neither a send nor a receive (P after the lease expired, or D after the receive completed or was abandoned); each matches an "Unrecognized request" error log. Counted per notification, not per request: each remote rank notifies separately, so with TP > 1 or heterogeneous TP one late request counts several times, and the value is not comparable to `vllm:nixl_num_kv_expired_reqs`. |
 
 !!! tip
     High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease

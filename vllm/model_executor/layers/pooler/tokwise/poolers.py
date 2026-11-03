@@ -28,6 +28,7 @@ from .heads import (
     TokenPoolerHeadOutputItem,
 )
 from .methods import (
+    AllPool,
     TokenPoolingMethod,
     TokenPoolingMethodOutputItem,
     get_tok_pooling_method,
@@ -46,8 +47,7 @@ TokenPoolerOutput: TypeAlias = list[torch.Tensor | None]
 
 
 class TokenPooler(Pooler):
-    """
-    A layer that pools specific information from hidden states.
+    """A layer that pools specific information from hidden states.
 
     This layer does the following:
     1. Extracts specific tokens or aggregates data based on pooling method.
@@ -92,6 +92,22 @@ class TokenPooler(Pooler):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
+        params = pooling_metadata.pooling_params
+        if (
+            params
+            and type(self.pooling) is AllPool
+            and not self.pooling.enable_chunked_prefill
+            and type(self.head) is TokenEmbeddingPoolerHead
+            and (
+                outputs := self.head.forward_batched(
+                    hidden_states,
+                    params,
+                    lambda embeddings: self.pooling(embeddings, pooling_metadata),
+                )
+            )
+            is not None
+        ):
+            return outputs
         pooled_data = self.pooling(hidden_states, pooling_metadata)
         if self.head is not None:
             pooled_data = self.head(pooled_data, pooling_metadata)

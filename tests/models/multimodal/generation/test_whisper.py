@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import pytest
+import torch
 from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.assets.audio import AudioAsset
@@ -262,6 +263,49 @@ def test_parse_language_detection_output():
     # Empty token_ids
     with pytest.raises((AssertionError, IndexError)):
         cls.parse_language_detection_output([], make_tokenizer("anything"))
+
+
+def test_create_fake_bias_for_k_proj_injects_out_features():
+    """Packed k_proj weights get a zeros bias of length ``out_features``."""
+    from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
+
+    packed = torch.ones(2, 16)
+    result = dict(
+        _create_fake_bias_for_k_proj(
+            [("model.encoder.layers.0.self_attn.k_proj.weight_packed", packed)],
+            ".k_proj.weight_packed",
+            out_features=8,
+        )
+    )
+    bias_name = "model.encoder.layers.0.self_attn.k_proj.bias"
+    assert bias_name in result
+    assert "model.encoder.layers.0.self_attn.k_proj.bias_packed" not in result
+    assert tuple(result[bias_name].shape) == (8,)
+    assert torch.equal(result[bias_name], torch.zeros(8))
+
+
+def test_create_fake_bias_for_k_proj_forwards_real_bias():
+    """A checkpoint bias is forwarded and no extra fake bias is emitted."""
+    from vllm.model_executor.models.whisper import _create_fake_bias_for_k_proj
+
+    weight = torch.ones(8, 16)
+    real_bias = torch.ones(8)
+    items = list(
+        _create_fake_bias_for_k_proj(
+            [
+                ("layers.0.self_attn.k_proj.weight", weight),
+                ("layers.0.self_attn.k_proj.bias", real_bias),
+            ],
+            ".k_proj.weight",
+            out_features=8,
+        )
+    )
+    names = [n for n, _ in items]
+    assert names == [
+        "layers.0.self_attn.k_proj.weight",
+        "layers.0.self_attn.k_proj.bias",
+    ]
+    assert items[1][1] is real_bias
 
 
 @pytest.mark.core_model

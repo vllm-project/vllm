@@ -143,6 +143,7 @@ class OlmoHybridAttention(nn.Module):
             rope_parameters["rope_theta"] is not None
         )
 
+        self.rotary_emb: nn.Module | None
         if self._use_rope:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -183,6 +184,7 @@ class OlmoHybridAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
         if self._use_rope:
+            assert self.rotary_emb is not None
             q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)

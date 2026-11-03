@@ -6,17 +6,21 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import (
+    gptq_linear_batch_invariant,
+)
 from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
-    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -46,7 +50,6 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
-    marlin_make_workspace_new,
     marlin_repeat_scales_on_all_ranks,
     verify_marlin_supported,
 )
@@ -275,7 +278,7 @@ class AutoGPTQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_in_block_to_quantize:
@@ -305,6 +308,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AutoGPTQ quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -313,12 +317,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
+        # The Marlin GEMM picks its tiling and K-split from the number of
+        # tokens, so its results depend on the batch size. In batch-invariant
+        # mode, dequantize the weight and use the batch-invariant matmul.
+        self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
+        self.kernel: MPLinearKernel | None = None
 
         # Verify supported on platform.
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
-        )
+        if not self.use_batch_invariant:
+            verify_marlin_supported(
+                quant_type=self.quant_config.quant_type,
+                group_size=self.quant_config.group_size,
+            )
 
     def create_weights(
         self,
@@ -347,11 +357,16 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             zero_points=False,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if self.use_batch_invariant:
+            kernel_type = None
+            backend_name = "dequantize + batch-invariant matmul"
+        else:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+            backend_name = kernel_type.__name__
 
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
+        if backend_name not in self._kernel_backends_being_used:
+            logger.info("Using %s for AutoGPTQLinearMethod", backend_name)
+            self._kernel_backends_being_used.add(backend_name)
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -429,14 +444,22 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        self.kernel = kernel_type(
-            mp_linear_kernel_config,
-            w_q_param_name="qweight",
-            w_s_param_name="scales",
-            w_zp_param_name="qzeros",
-        )
+        if kernel_type is not None:
+            self.kernel = kernel_type(
+                mp_linear_kernel_config,
+                w_q_param_name="qweight",
+                w_s_param_name="scales",
+                w_zp_param_name="qzeros",
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.use_batch_invariant:
+            # No Marlin repacking: apply() unpacks the checkpoint layout.
+            for name in ("qweight", "scales", "qzeros"):
+                replace_parameter(layer, name, getattr(layer, name).data)
+            return
+
+        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
@@ -445,6 +468,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_batch_invariant:
+            return gptq_linear_batch_invariant(
+                x,
+                layer.qweight,
+                layer.scales,
+                num_bits=self.quant_type.size_bits,
+                group_size=self.quant_config.group_size,
+                zero_bias=self.quant_type.bias,
+                bias=bias,
+            )
+
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
@@ -600,12 +635,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
-        if self.experts_cls is not None and issubclass(
-            self.experts_cls, FusedMoEExpertsModular
-        ):
-            device = layer.w13_qweight.device
-            layer.workspace = marlin_make_workspace_new(device, 4)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         def replace_or_register(name: str, val: torch.Tensor | None):
             if val is None:
@@ -633,19 +662,31 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_bias", None)
             w2_bias = None
 
+        # Normalize GPTQ K-first layout to canonical N-first format.
+        w13 = layer.w13_qweight.data.transpose(1, 2).contiguous()
+        w2 = layer.w2_qweight.data.transpose(1, 2).contiguous()
+        w13_scale = layer.w13_scales.data.transpose(1, 2).contiguous()
+        w2_scale = layer.w2_scales.data.transpose(1, 2).contiguous()
+        w13_qzeros = getattr(layer, "w13_qzeros", None)
+        w2_qzeros = getattr(layer, "w2_qzeros", None)
+        if w13_qzeros is not None:
+            w13_qzeros = w13_qzeros.data.transpose(1, 2).contiguous()
+        if w2_qzeros is not None:
+            w2_qzeros = w2_qzeros.data.transpose(1, 2).contiguous()
+
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
             input_dtype=self.input_dtype,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
-            w13_qzeros=getattr(layer, "w13_qzeros", None),
-            w2_qzeros=getattr(layer, "w2_qzeros", None),
+            w13_qzeros=w13_qzeros,
+            w2_qzeros=w2_qzeros,
         )
 
         if converted is None:
@@ -685,7 +726,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -697,7 +737,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            from vllm.model_executor.layers.quantization.utils.humming import (
                 get_humming_moe_quant_config,
             )
 
@@ -775,4 +815,5 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

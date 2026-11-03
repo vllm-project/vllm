@@ -18,6 +18,8 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_stream, make_fake_tensor
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+from vllm.platforms import current_platform
+
 _FAB_N = 144
 _FAB_K = 7168
 _FAB_VECTOR_WIDTH = 16
@@ -91,14 +93,61 @@ def _fma_f32_bf16(
     return Float32(result)
 
 
+@dsl_user_op
+def _fma_f32_bf16_portable(
+    a: BFloat16,
+    b: BFloat16,
+    acc: Float32,
+    *,
+    loc=None,
+    ip=None,
+) -> Float32:
+    """BF16 multiply with FP32 accumulation for pre-SM100 GPUs.
+
+    PTX ``fma.f32.bf16`` requires SM100 or newer. Converting the operands to
+    FP32 first keeps this kernel available on Hopper, where an unconditional
+    mixed-precision FMA fails libNVVM compilation for ``sm_90a``.
+    """
+    a_bits = llvm.bitcast(T.i16(), a.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    b_bits = llvm.bitcast(T.i16(), b.ir_value(loc=loc, ip=ip), loc=loc, ip=ip)
+    result = llvm.inline_asm(
+        T.f32(),
+        [a_bits, b_bits, acc.ir_value(loc=loc, ip=ip)],
+        "{\n\t"
+        ".reg .f32 a_f32, b_f32;\n\t"
+        "cvt.f32.bf16 a_f32, $1;\n\t"
+        "cvt.f32.bf16 b_f32, $2;\n\t"
+        "fma.rn.f32 $0, a_f32, b_f32, $3;\n\t"
+        "}",
+        "=f,h,h,f",
+        has_side_effects=False,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return Float32(result)
+
+
+def _has_mixed_precision_bf16_fma() -> bool:
+    """Whether PTX ``fma.f32.bf16`` is supported by the current GPU."""
+    return current_platform.has_device_capability(100)
+
+
 class _KdaSkinnyNGemm:
-    def __init__(self, num_rows: int, split_n: int) -> None:
+    def __init__(
+        self,
+        num_rows: int,
+        split_n: int,
+        use_mixed_precision_fma: bool,
+    ) -> None:
         if _FAB_N % split_n:
             raise ValueError("split_n must divide the FAB output size")
         if num_rows * split_n > _FAB_BLOCK_SIZE:
             raise ValueError("the FAB output tile must fit in one block")
         self.num_rows = num_rows
         self.split_n = split_n
+        self.use_mixed_precision_fma = use_mixed_precision_fma
 
     @cute.jit
     def __call__(
@@ -191,11 +240,18 @@ class _KdaSkinnyNGemm:
         for mi in cutlass.range_constexpr(num_rows):
             for ni in cutlass.range_constexpr(split_n):
                 for vi in cutlass.range_constexpr(_FAB_VECTOR_WIDTH):
-                    acc[mi, ni] = _fma_f32_bf16(
-                        a_regs[mi, vi],
-                        weight_regs[ni, vi],
-                        acc[mi, ni],
-                    )
+                    if cutlass.const_expr(self.use_mixed_precision_fma):
+                        acc[mi, ni] = _fma_f32_bf16(
+                            a_regs[mi, vi],
+                            weight_regs[ni, vi],
+                            acc[mi, ni],
+                        )
+                    else:
+                        acc[mi, ni] = _fma_f32_bf16_portable(
+                            a_regs[mi, vi],
+                            weight_regs[ni, vi],
+                            acc[mi, ni],
+                        )
                 acc[mi, ni] = cute.arch.warp_reduction_sum(acc[mi, ni])
 
         partials_layout = cute.make_layout(
@@ -232,13 +288,19 @@ class _KdaSkinnyNGemm:
 
 
 class _KdaSkinnyKGemm:
-    def __init__(self, num_rows: int, split_n: int) -> None:
+    def __init__(
+        self,
+        num_rows: int,
+        split_n: int,
+        use_mixed_precision_fma: bool,
+    ) -> None:
         if _FB_N % split_n:
             raise ValueError("split_n must divide the FB output size")
         if split_n * _FB_K_LANES > 1024:
             raise ValueError("the FB output tile exceeds the block-size limit")
         self.num_rows = num_rows
         self.split_n = split_n
+        self.use_mixed_precision_fma = use_mixed_precision_fma
 
     @cute.jit
     def __call__(
@@ -314,11 +376,18 @@ class _KdaSkinnyKGemm:
         for mi in cutlass.range_constexpr(num_rows):
             acc = Float32(0.0)
             for vi in cutlass.range_constexpr(_FB_VECTOR_WIDTH):
-                acc = _fma_f32_bf16(
-                    input_regs[mi, vi],
-                    weight_regs[vi],
-                    acc,
-                )
+                if cutlass.const_expr(self.use_mixed_precision_fma):
+                    acc = _fma_f32_bf16(
+                        input_regs[mi, vi],
+                        weight_regs[vi],
+                        acc,
+                    )
+                else:
+                    acc = _fma_f32_bf16_portable(
+                        input_regs[mi, vi],
+                        weight_regs[vi],
+                        acc,
+                    )
             for offset in (8, 4, 2, 1):
                 acc += cute.arch.shuffle_sync_bfly(acc, offset)
             output[mi, n_idx] = acc.to(BFloat16)
@@ -341,7 +410,11 @@ class KdaSkinnyGemm:
             return
         split_n = SKINNY_N_SPLIT_N[num_rows]
         self._compiled_n[key] = cute.compile(
-            _KdaSkinnyNGemm(num_rows, split_n),
+            _KdaSkinnyNGemm(
+                num_rows,
+                split_n,
+                use_mixed_precision_fma=_has_mixed_precision_bf16_fma(),
+            ),
             make_fake_tensor(
                 BFloat16,
                 (num_rows, _FAB_K),
@@ -371,7 +444,11 @@ class KdaSkinnyGemm:
             return
         split_n = SKINNY_K_SPLIT_N[num_rows]
         self._compiled_k[key] = cute.compile(
-            _KdaSkinnyKGemm(num_rows, split_n),
+            _KdaSkinnyKGemm(
+                num_rows,
+                split_n,
+                use_mixed_precision_fma=_has_mixed_precision_bf16_fma(),
+            ),
             make_fake_tensor(
                 BFloat16,
                 (num_rows, _FB_K),

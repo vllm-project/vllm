@@ -10,10 +10,14 @@ import torch.nn.functional as F
 from vllm.platforms import current_platform
 
 if not (
-    current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    current_platform.is_cuda()
+    and (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(110)
+    )
 ):
     pytest.skip(
-        reason="GDN CuteDSL prefill requires CUDA SM10x.",
+        reason="GDN CuteDSL prefill requires CUDA SM10x or SM11x.",
         allow_module_level=True,
     )
 
@@ -30,9 +34,13 @@ from vllm.third_party.flash_linear_attention.ops.index import (  # noqa: E402
 )
 
 
+# 160 v-heads exceeds the SM count of current GPUs (B200: 148, Thor: 20).
+@pytest.mark.parametrize("num_v_heads", [8, 160])
 @pytest.mark.parametrize("num_seqs", [1, 5, 257])
 @pytest.mark.parametrize("state_dtype", [torch.bfloat16, torch.float32])
-def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
+def test_gdn_chunk_cutedsl_correctness(
+    num_seqs: int, state_dtype: torch.dtype, num_v_heads: int
+):
     rng_cpu = torch.Generator("cpu").manual_seed(1234)
     rng = torch.Generator("cuda").manual_seed(2345)
 
@@ -42,7 +50,6 @@ def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
     total_tokens = int(cu_seqlens[-1].item())
 
     num_k_heads = 4
-    num_v_heads = 8
     head_k_dim = 128
     head_v_dim = 128
     dtype = torch.bfloat16
@@ -192,3 +199,86 @@ def test_gdn_chunk_cutedsl_correctness(num_seqs: int, state_dtype: torch.dtype):
     assert no_buffer_state_error.mean().item() < 6e-4
     assert buffer_o_error.max().item() == 0
     assert buffer_state_error.max().item() == 0
+
+
+def test_gdn_chunk_cutedsl_correlated_keys_stability():
+    """Cover a KKT block where three BF16 Newton rounds diverge."""
+    total_tokens = 64
+    num_k_heads = 4
+    num_v_heads = 8
+    head_dim = 128
+    rng = torch.Generator("cuda").manual_seed(3456)
+
+    q = torch.zeros(
+        1,
+        total_tokens,
+        num_k_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    k = torch.zeros_like(q)
+    q[..., 0] = 1
+    k[..., 0] = 1
+    v = torch.randn(
+        1,
+        total_tokens,
+        num_v_heads,
+        head_dim,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=rng,
+    )
+    g = torch.zeros(
+        1,
+        total_tokens,
+        num_v_heads,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    beta = torch.full_like(g, 0.9)
+    initial_state = torch.zeros(
+        1,
+        num_v_heads,
+        head_dim,
+        head_dim,
+        device="cuda",
+        dtype=torch.float32,
+    )
+    cu_seqlens = torch.tensor([0, total_tokens], device="cuda", dtype=torch.int32)
+    chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, total_tokens)
+
+    ref_o, ref_state = chunk_gated_delta_rule(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        output_final_state=True,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=False,
+    )
+    actual_o, actual_state = chunk_gated_delta_rule_cutedsl(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        initial_state=initial_state,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.isfinite(actual_o).all()
+    assert torch.isfinite(actual_state).all()
+    output_error = (actual_o.float() - ref_o.float()).abs()
+    state_error = (
+        actual_state.float() - ref_state.to(actual_state.dtype).float()
+    ).abs()
+    assert output_error.max().item() < 1e-1
+    assert output_error.mean().item() < 2e-3
+    assert state_error.max().item() < 2e-1
+    assert state_error.mean().item() < 6e-4
