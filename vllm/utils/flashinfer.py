@@ -1117,9 +1117,13 @@ if has_flashinfer():
         out_dtype: torch.dtype,
         backend: str = "cutlass",
         use_8x4_sf_layout: bool = False,
+        skip_check: bool = False,
     ) -> torch.Tensor:
         from flashinfer import mm_mxfp8 as mm_mxfp8_
 
+        # skip_check drops FlashInfer's per-call argument validation (a
+        # signature bind and backend/problem-size checks, ~35 us of host time)
+        # for callers that validated the layer shape when they were built.
         return mm_mxfp8_(
             A,
             B,
@@ -1129,6 +1133,7 @@ if has_flashinfer():
             out_dtype=out_dtype,
             backend=backend,
             use_8x4_sf_layout=use_8x4_sf_layout,
+            skip_check=skip_check,
         )
 
     def mm_mxfp8_fake(
@@ -1139,6 +1144,7 @@ if has_flashinfer():
         out_dtype: torch.dtype,
         backend: str = "cutlass",
         use_8x4_sf_layout: bool = False,
+        skip_check: bool = False,
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
