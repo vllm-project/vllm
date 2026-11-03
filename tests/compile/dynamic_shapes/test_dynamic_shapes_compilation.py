@@ -18,7 +18,6 @@ from vllm.config.compilation import (
     DynamicShapesType,
 )
 from vllm.forward_context import set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 def get_test_models():
@@ -108,7 +107,6 @@ def get_eager_outputs(vllm_runner):
 
 
 @pytest.mark.parametrize("test_case", get_dynamic_shapes_test_cases(), ids=str)
-@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_dynamic_shapes_compilation(
     monkeypatch,
     vllm_runner,
@@ -116,16 +114,6 @@ def test_dynamic_shapes_compilation(
     test_case,
 ):
     """Test representative dynamic-shapes configurations end to end."""
-    if (
-        test_case.shapes_type == DynamicShapesType.UNBACKED
-        and not is_torch_equal_or_newer("2.11.0")
-    ):
-        # NOTE[ROCm]: shape_id (used by Qwen2/Llama to relate input dims) only
-        # landed in torch 2.11, but the ROCm CI still runs torch 2.10.x. On
-        # older torch there's no way to express it, so unbacked shapes go
-        # data-dependent and compilation blows up -- nothing to test.
-        pytest.skip("unbacked dynamic shapes with shape_id require torch>=2.11")
-
     monkeypatch.setenv(
         "VLLM_USE_AOT_COMPILE", "1" if test_case.use_aot_compile else "0"
     )
@@ -267,7 +255,6 @@ def test_model_specialization_with_evaluate_guards(
     )
 
 
-@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_piecewise_backend_empty_sym_shape_indices(vllm_runner):
     """Test that PiecewiseBackend handles empty sym_shape_indices correctly.
 

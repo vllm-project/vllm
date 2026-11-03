@@ -31,7 +31,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
-    is_torch_equal_or_newer,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -798,11 +797,8 @@ class FlexAttentionMetadata:
             "full_kv_indices": None,
             "BLOCK_SIZE": (self.q_block_size, self.kv_block_size),
             "mask_mod": self.mask_mod,
+            "compute_q_blocks": False,
         }
-
-        # compute_q_blocks parameter is available in PyTorch 2.9+
-        if is_torch_equal_or_newer("2.9.0.dev0"):
-            block_mask_kwargs["compute_q_blocks"] = False
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
@@ -855,13 +851,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
         uses_paged_kv = not isinstance(kv_cache_spec, EncoderOnlyAttentionSpec)
-        self.direct_build: bool = supports_small_blocks
+        self.direct_build: bool = True
 
         self.q_block_size, self.kv_block_size = self._get_block_sizes(
             vllm_config.attention_config,
-            supports_small_blocks,
+            True,
             self.block_size,
             uses_paged_kv,
         )

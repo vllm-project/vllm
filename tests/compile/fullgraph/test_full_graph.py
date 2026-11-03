@@ -18,7 +18,6 @@ from vllm.config import (
     PassConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test, wait_for_memory_to_settle
 
@@ -111,7 +110,6 @@ def test_full_graph(
             *model_info,
         )
         for model_info in models_list(all=False)
-        if is_torch_equal_or_newer("2.9.0.dev")
     ]
     + [
         # Test get_raw_stream patch with compile_sizes
@@ -135,11 +133,6 @@ def test_custom_compile_config(
     model: str,
     model_kwargs: dict[str, Any],
 ):
-    if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
-        "2.9.0.dev"
-    ):
-        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
-
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
 

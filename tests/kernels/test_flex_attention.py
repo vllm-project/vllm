@@ -4,7 +4,6 @@
 
 import pytest
 import torch
-from packaging import version
 
 from tests.utils import set_random_seed
 from tests.v1.attention.utils import (
@@ -22,10 +21,6 @@ from vllm.v1.attention.backends.flex_attention import (
 )
 
 from ..models.utils import check_embeddings_close, check_logprobs_close
-
-TORCH_VERSION = version.parse(torch.__version__)
-MINIMUM_TORCH_VERSION = version.parse("2.7.0")
-DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
 
 
 @pytest.mark.parametrize(
@@ -65,7 +60,7 @@ def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_flex_attention_full_cudagraphs(vllm_runner):
@@ -122,7 +117,7 @@ def windowed_causal_mask_mod(b, h, q_idx, kv_idx):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
@@ -184,7 +179,7 @@ def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_flex_attention_vs_default_backend(vllm_runner):
@@ -240,7 +235,7 @@ def test_flex_attention_vs_default_backend(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_encoder_flex_attention_vs_default_backend(vllm_runner):
@@ -291,7 +286,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.7",
 )
 def test_block_mask_direct_vs_slow_path():
@@ -358,7 +353,7 @@ def test_block_mask_direct_vs_slow_path():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.9",
 )
 @pytest.mark.parametrize("direct_build", [True, False])
@@ -471,7 +466,7 @@ def test_physical_to_logical_mapping_handles_reused_blocks():
 
 
 @pytest.mark.skipif(
-    not torch.cuda.is_available() or TORCH_VERSION < DIRECT_BUILD_VERSION,
+    not torch.cuda.is_available(),
     reason="CUDA not available or PyTorch version < 2.9",
 )
 def test_block_sparsity_hint_prunes_blocks():

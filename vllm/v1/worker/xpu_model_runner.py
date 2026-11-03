@@ -6,7 +6,6 @@ from functools import partial
 import torch
 
 from vllm.config import VllmConfig
-from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.worker.gpu.model_runner import (
     GPUModelRunner as GPUModelRunnerV2,
 )
@@ -67,9 +66,8 @@ def _torch_cuda_wrapper():
         return torch.xpu.Event(*args, **kwargs)
 
     torch.cuda.Event = _xpu_event
-    if supports_xpu_graph():
-        torch.cuda.graph = partial(torch.xpu.graph)
-        torch.cuda.CUDAGraph = torch.xpu.XPUGraph
-        torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
-        torch.cuda.is_current_stream_capturing = torch.xpu.is_current_stream_capturing
+    torch.cuda.graph = partial(torch.xpu.graph)
+    torch.cuda.CUDAGraph = torch.xpu.XPUGraph
+    torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
+    torch.cuda.is_current_stream_capturing = torch.xpu.is_current_stream_capturing
     yield
