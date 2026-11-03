@@ -14,6 +14,7 @@ import json
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.streaming_helpers import simulate_tool_streaming
 from tests.parser.engine.trace_builder import _GRANITE_SCENARIOS, _build_granite
 from vllm.parser.granite import GraniteParser, _granite_arg_converter
 
@@ -50,27 +51,18 @@ def _tokenize(text: str) -> list[tuple[int, str]]:
 
 def _stream(parser, request, text: str, chunk_size: int):
     tokens = _tokenize(text)
-    results = []
-    previous_text = ""
-    previous_token_ids: list[int] = []
+    chunks = []
+    delta_token_ids_per_chunk = []
     for start in range(0, len(tokens), chunk_size):
         batch = tokens[start : start + chunk_size]
-        delta_text = "".join(t for _, t in batch)
-        delta_token_ids = [tid for tid, _ in batch]
-        current_text = previous_text + delta_text
-        current_token_ids = previous_token_ids + delta_token_ids
-        delta = parser.extract_tool_calls_streaming(
-            previous_text=previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=tuple(previous_token_ids),
-            current_token_ids=tuple(current_token_ids),
-            delta_token_ids=tuple(delta_token_ids),
-            request=request,
+        chunks.append("".join(t for _, t in batch))
+        delta_token_ids_per_chunk.append(tuple(tid for tid, _ in batch))
+    results = [
+        delta
+        for delta, _ in simulate_tool_streaming(
+            parser, request, chunks, delta_token_ids_per_chunk
         )
-        results.append(delta)
-        previous_text = current_text
-        previous_token_ids = current_token_ids
+    ]
     finish = parser.finish_streaming()
     if finish is not None:
         results.append(finish)
