@@ -821,6 +821,11 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     core.batch_queue = None
     core.engines_running = False
     core._idle_state_callbacks = []
+    core._pending_pause = None
+    # The scheduler's pause table: by default a pause may complete.
+    core.scheduler.quiesced.return_value = True
+    core.scheduler.ledger.needs_driving.return_value = False
+    core.scheduler.ledger.is_empty.return_value = True
     return core
 
 
@@ -1049,3 +1054,74 @@ def test_pause_synchronizes_device_before_cache_reset(deferred: bool):
     else:
         assert result is None
     assert order == ["synchronize_device", "reset_caches"]
+
+
+# ---- Pause table (ch.10 P2) and ledger-driven stepping (P3) -----------------
+
+
+def _core_with_retained_exports() -> EngineCoreProc:
+    """A paused prefiller still holding exports for a remote reader: the
+    engine has work (it keeps stepping to observe the reads), but a
+    cache-preserving keep pause must not wait for them."""
+    core = _pausable_engine_core_proc()
+    core.scheduler.has_requests.return_value = True
+    core.scheduler.finished_req_ids = set()
+
+    def quiesced(mode, clear_cache):
+        return mode == "keep" and not clear_cache
+
+    core.scheduler.quiesced.side_effect = quiesced
+    return core
+
+
+def test_keep_pause_without_clear_ignores_retained_exports():
+    core = _core_with_retained_exports()
+    order: list[str] = []
+    core.model_executor.collective_rpc.side_effect = lambda method: order.append(method)
+    core._reset_caches = lambda: order.append("reset_caches")
+
+    assert EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False) is None
+    assert order == ["synchronize_device"]
+    assert core._pending_pause is None
+
+
+@pytest.mark.parametrize("mode,clear_cache", [("keep", True), ("wait", True), ("abort", False)])
+def test_other_pauses_wait_for_the_ledger(mode, clear_cache):
+    core = _core_with_retained_exports()
+    core.scheduler.finish_requests.return_value = []
+    core._send_abort_outputs = MagicMock()
+    core._reset_caches = MagicMock()
+    core._set_kv_cache_reclaimable = MagicMock()
+    result = EngineCoreProc.pause_scheduler(core, mode=mode, clear_cache=clear_cache)
+    assert isinstance(result, Future) and not result.done()
+    assert core._pending_pause is not None
+    # The reads complete: the scheduler reports the row satisfied.
+    core.scheduler.quiesced.side_effect = None
+    core.scheduler.quiesced.return_value = True
+    core._maybe_finish_pause()
+    assert result.result(timeout=0) is None
+    assert core._pending_pause is None
+
+
+def test_pending_pause_waits_for_in_flight_compute_but_not_connector_batches():
+    core = _core_with_retained_exports()
+    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=8), None)])
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert isinstance(result, Future) and not result.done()
+    core.batch_queue = deque([(Future(), MagicMock(total_num_scheduled_tokens=0), None)])
+    core._maybe_finish_pause()
+    assert result.result(timeout=0) is None
+
+
+def test_resume_fails_pending_pause():
+    core = _core_with_retained_exports()
+    core.engines_running = True
+    core._checkpoint_state = MagicMock(is_restored=True)
+    core._kv_cache_reclaimable = False
+    core.reject_new_requests = True
+    result = EngineCoreProc.pause_scheduler(core, mode="keep", clear_cache=False)
+    assert isinstance(result, Future) and not result.done()
+    EngineCoreProc.resume_scheduler(core)
+    with pytest.raises(RuntimeError, match="Resumed before"):
+        result.result(timeout=0)
+    assert core._pending_pause is None

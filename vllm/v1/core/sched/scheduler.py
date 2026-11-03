@@ -3350,12 +3350,13 @@ class Scheduler(SchedulerInterface):
         return self.ledger.has_retained()
 
     def has_requests(self) -> bool:
-        # Override the interface default to also keep the engine alive while a
-        # connector still has pending push work (e.g. push-mode WRITE transfers
-        # in flight after all "live" requests have finished). Without this hook
-        # the engine would quiesce before the connector can drain completions.
-        # TODO: replace with a more general mechanism for connectors to keep
-        # the scheduler alive.
+        # The engine keeps stepping while there is anything to schedule, any
+        # finished request to flush, or any KV transfer to drive. Transfers
+        # need steps even when nothing is schedulable: a paused decoder must
+        # keep renewing its leases and collecting completions, a paused
+        # prefiller must keep observing the reads of its retained exports.
+        # has_pending_push_work() covers push-mode WRITEs the connector tracks
+        # on its own.
         return (
             self.has_unfinished_requests()
             or self.has_finished_requests()
@@ -3366,6 +3367,22 @@ class Scheduler(SchedulerInterface):
                 and self.ec_connector.has_pending_push_work()
             )
         )
+
+    def quiesced(self, mode: str, clear_cache: bool) -> bool:
+        """Whether a pause of this mode may complete, as far as the scheduler
+        is concerned (the engine core adds the device-side conditions).
+
+        mode     compute            outputs to flush   KV transfers (ledger)
+        keep     nothing scheduled  flushed            ignored: they outlive the pause
+        wait     drained            flushed            drained
+        abort    drained            flushed            drained
+        keep+clear behaves like wait here: a cache reset needs every block back.
+        """
+        if self.finished_req_ids or self.dropped_streaming_updates:
+            return False
+        if mode == "keep" and not clear_cache:
+            return True
+        return not self.has_requests()
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

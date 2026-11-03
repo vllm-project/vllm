@@ -11,7 +11,6 @@ from collections.abc import Callable, Generator, Sequence, Sized
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
-from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
@@ -273,6 +272,9 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        # A pause whose completion condition (scheduler.quiesced) is not met
+        # yet; re-checked after every step and whenever the engine is idle.
+        self._pending_pause: tuple[Future[Any], PauseMode, bool, bool] | None = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -1884,6 +1886,7 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(output)
         # Post-step hook.
         self.post_step(model_executed)
+        self._maybe_finish_pause()
 
         # If no model execution happened but there is still scheduler work
         # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
@@ -1894,6 +1897,7 @@ class EngineCoreProc(EngineCore):
         return model_executed
 
     def _notify_idle_state_callbacks(self) -> None:
+        self._maybe_finish_pause()
         while self._idle_state_callbacks:
             callback = self._idle_state_callbacks.pop()
             callback(self)
@@ -2454,14 +2458,6 @@ class EngineCoreProc(EngineCore):
         if mode not in get_args(PauseMode):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
-            try:
-                engine._finish_pause(clear_cache, reset_connector)
-            except Exception as e:
-                future.set_exception(e)
-            else:
-                future.set_result(None)
-
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
                 None, RequestStatus.FINISHED_ABORTED
@@ -2470,13 +2466,14 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._begin_pause()
 
-        if self._pause_complete():
+        if self._pause_ready(mode, clear_cache):
             self._finish_pause(clear_cache, reset_connector)
             return None
 
         future = Future[Any]()
-        self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
+        self._pending_pause = (future, mode, clear_cache, reset_connector)
         return future
 
     def pause_generation(
@@ -2493,6 +2490,13 @@ class EngineCoreProc(EngineCore):
         # After the checkpoint guard, so a refused resume keeps rejecting.
         super().resume_scheduler()
         self.reject_new_requests = False
+        if (pending := self._pending_pause) is not None:
+            # The operation waiting inside the pause ends with it; its caller
+            # must not see a success that never happened.
+            self._pending_pause = None
+            pending[0].set_exception(
+                RuntimeError("Resumed before the pause completed.")
+            )
 
     def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
         """Drain with `mode`, then release the KV cache and what a process
@@ -2538,12 +2542,41 @@ class EngineCoreProc(EngineCore):
             self._fail_checkpoint(e)
             raise
 
-    def _pause_complete(self) -> bool:
-        """Returns True if the pause has fully completed and the caller can
-        return `None` synchronously; False if the pause is still pending
-        and the caller should register an idle-state callback to finish it.
-        """
-        return not self.has_work()
+    def _begin_pause(self) -> None:
+        """Hook for engines that must agree on a pause before going idle."""
+
+    def _has_pending_compute(self) -> bool:
+        """An in-flight batch that scheduled tokens (async scheduling). The
+        zero-token connector-only batches that KV transfers keep producing
+        are not compute."""
+        return self.batch_queue is not None and any(
+            scheduler_output.total_num_scheduled_tokens > 0
+            for _, scheduler_output, *_ in self.batch_queue
+        )
+
+    def _pause_ready(self, mode: PauseMode, clear_cache: bool) -> bool:
+        """The pause table: no compute in flight, plus whatever the mode
+        requires of the scheduler (see Scheduler.quiesced)."""
+        return (
+            not self.engines_running
+            and not self._has_pending_compute()
+            and self.scheduler.quiesced(mode, clear_cache)
+        )
+
+    def _maybe_finish_pause(self) -> None:
+        """Complete a pending pause once its table row is satisfied."""
+        if self._pending_pause is None:
+            return
+        future, mode, clear_cache, reset_connector = self._pending_pause
+        if not self._pause_ready(mode, clear_cache):
+            return
+        self._pending_pause = None
+        try:
+            self._finish_pause(clear_cache, reset_connector)
+        except Exception as e:
+            future.set_exception(e)
+        else:
+            future.set_result(None)
 
     def _send_finish_outputs_to_client(
         self,
@@ -2651,7 +2684,7 @@ class DPEngineCoreProc(EngineCoreProc):
         if dp_group := getattr(self, "dp_group", None):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
-    def _pause_complete(self) -> bool:
+    def _begin_pause(self) -> None:
         """Two-phase DP-aware pause.
 
         Phase 1: Set local pause state and `pending_pause` flag. If the
@@ -2667,7 +2700,13 @@ class DPEngineCoreProc(EngineCoreProc):
         self.pending_pause = True
         self.engines_running = True
 
-        return False
+    def _pause_ready(self, mode: PauseMode, clear_cache: bool) -> bool:
+        # Only after every rank agreed to pause.
+        return (
+            not self.pending_pause
+            and self.ignore_start_dp_wave
+            and super()._pause_ready(mode, clear_cache)
+        )
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
