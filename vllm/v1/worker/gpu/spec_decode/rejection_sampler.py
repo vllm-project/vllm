@@ -275,6 +275,7 @@ class RejectionSampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
         )
+        temperature_np = self.sampler.sampling_states.temperature.np[idx_mapping_np]
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
@@ -296,6 +297,7 @@ class RejectionSampler:
             skip_masked_vocab_blocks=bool(
                 np.any(self.sampler.may_mask_logits[idx_mapping_np])
             ),
+            all_greedy=bool(np.all(temperature_np == 0.0)),
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),
