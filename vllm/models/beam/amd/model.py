@@ -366,15 +366,6 @@ class BeamForCausalLM(
             logits = beam_softcap_logits(logits, self.final_logit_softcapping)
         return logits
 
-    def _strip_lm_head_padding(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        hidden_size = self.config.hidden_size
-        for name, weight in weights:
-            if name.endswith("lm_head.weight") and weight.shape[-1] > hidden_size:
-                weight = weight[..., :hidden_size].contiguous()
-            yield name, weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(self._strip_lm_head_padding(weights))
+        return loader.load_weights(weights)

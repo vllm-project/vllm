@@ -166,7 +166,11 @@ def test_checkpoint_loads_into_merged_qkv_gate(
         attention, "get_tensor_model_parallel_world_size", lambda: tp_size
     )
     attention_stub = nn.Identity()
-    attention_stub.attn_backend = SimpleNamespace(get_name=lambda: "TEST")
+    attention_stub.attn_backend = SimpleNamespace(
+        get_name=lambda: "TEST",
+        forward_includes_kv_cache_update=True,
+        supports_kv_cache_update_bypass=False,
+    )
     monkeypatch.setattr(attention, "Attention", lambda *args, **kwargs: attention_stub)
     config = BeamConfig(
         hidden_size=64, num_attention_heads=48, num_key_value_heads=8, head_dim=8
