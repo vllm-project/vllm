@@ -1599,9 +1599,13 @@ def _derender_serving(engine, parser_cls=_StubParser, **kwargs):
     derenderer.enable_auto_tools = False
     derenderer.renderer = MagicMock()
     derenderer.model_config = engine.model_config
-    derenderer.make_stream_processor = functools.partial(
-        OnlineDerenderer.make_stream_processor, derenderer
-    )
+    derenderer._include_reasoning_tokens_details = False
+    for method in ("make_stream_processor", "stream_completion_tokens_details"):
+        setattr(
+            derenderer,
+            method,
+            functools.partial(getattr(OnlineDerenderer, method), derenderer),
+        )
     return serving
 
 

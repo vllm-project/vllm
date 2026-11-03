@@ -2264,7 +2264,7 @@ def test_generate_derender_role_is_response_role(tokenizer):
         finish_reason="stop",
     )
 
-    ((message, _),) = derenderer._derender_text_choices(
+    ((message, _),), _ = derenderer._derender_text_choices(
         [output], ParseContext().to_chat_request(), 0, None
     )
 
