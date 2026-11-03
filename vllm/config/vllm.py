@@ -39,7 +39,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -1960,23 +1960,6 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
                 )
-            if self.kv_transfer_config is not None and (
-                self.kv_transfer_config.kv_connector
-                not in (
-                    None,
-                    "NixlConnector",
-                    "MooncakeStoreConnector",
-                    "MultiConnector",
-                )
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (GPU-staged host imports) and "
-                    "MooncakeStoreConnector (shared-store offload) are the "
-                    "validated paths; other connectors are treated as "
-                    "debug/fallback paths.",
-                    self.kv_transfer_config.kv_connector,
-                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
@@ -2272,6 +2255,15 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        if (
+            self.attention_config.hisparse_config is not None
+            and hisparse_host_pool_gib(self.kv_transfer_config) is None
+        ):
+            raise ValueError(
+                "HiSparse requires a KV transfer config with HiSparseConnector "
+                "and host_pool_gib; to combine it with another connector, nest "
+                "both in MultiConnector instead of using --kv-offloading-size."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -3210,8 +3202,6 @@ class VllmConfig:
             )
         elif not self.use_v2_model_runner:
             unsupported = "it requires the V2 model runner"
-        elif self.attention_config.hisparse_config is not None:
-            unsupported = "HiSparse allocates its KV cache itself"
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
@@ -3747,11 +3737,6 @@ class VllmConfig:
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
-        elif self.use_v2_model_runner:
-            raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
             )
         if (
             self.kv_transfer_config is not None
