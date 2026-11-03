@@ -660,7 +660,7 @@ class Granite4VisionForConditionalGeneration(
 
     def _get_all_layer_features(
         self,
-        pixel_values: torch.Tensor,
+        pixel_values: torch.Tensor | list[torch.Tensor],
         image_sizes: torch.Tensor,
     ) -> tuple[list[int], list[torch.Tensor]]:
         """Extract deepstack + spatial features for all levels.
@@ -686,7 +686,12 @@ class Granite4VisionForConditionalGeneration(
             for imsize in image_sizes
         ]
 
-        if pixel_values.dim() == 5:
+        # Strip per-image padding tiles in both layouts. The HF processor pads every
+        # image in one call to that call's largest tile count, so a multi-image prompt
+        # whose images tile differently arrives with trailing zero tiles -- also when
+        # pixel_values is a list of per-image tensors (embed_multimodal), not only as a
+        # 5-D batch. Concatenating the list unsliced makes the per-image split fail.
+        if isinstance(pixel_values, list) or pixel_values.dim() == 5:
             pixel_values = torch.cat(
                 [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
                 dim=0,
@@ -774,9 +779,6 @@ class Granite4VisionForConditionalGeneration(
 
         pixel_values = image_input["pixel_values"]
         image_sizes = image_input.get("image_sizes")
-
-        if isinstance(pixel_values, list):
-            pixel_values = torch.cat(pixel_values, dim=0)
 
         llm_layer_indices, per_image_packed = self._get_all_layer_features(
             pixel_values, image_sizes
