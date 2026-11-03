@@ -1005,6 +1005,7 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
     supports_dcp = True
     can_return_lse_for_decode = True
     use_aiter_sparse_mla = False
+    uses_index_group: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -1156,11 +1157,6 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
             "elements"
         )
         store_mxfp4_mla(kv_c_normed, slot_mapping.flatten(), kv_cache)
-
-    def record_logical_topk_ready(self) -> None:
-        # This impl shares the top-k indices buffer via SharedTopkIndicesBuffer
-        # but does not participate in sparse-MLA index groups.
-        pass
 
     def _forward_mla(
         self,

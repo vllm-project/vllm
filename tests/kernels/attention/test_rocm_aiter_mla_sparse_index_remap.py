@@ -389,7 +389,11 @@ def _patch_init_deps(monkeypatch, *, speculative: bool = False):
         ),
         model_config=SimpleNamespace(dtype=torch.bfloat16),
         speculative_config=SimpleNamespace() if speculative else None,
-        attention_config=SimpleNamespace(hisparse_config=None, sparse_mla_shard_q=True),
+        attention_config=SimpleNamespace(
+            hisparse_config=None,
+            sparse_mla_shard_q=True,
+            sparse_mla_masked_mha_quantized_kv=False,
+        ),
         # One rank, so the layer takes neither the ShardQ nor the DCP path.
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
