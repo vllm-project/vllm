@@ -78,6 +78,17 @@ logger = init_logger(__name__)
 SWIGLU_LIMIT = 7.0
 SWIGLU_ALPHA = 1.702
 SWIGLU_BETA = 1.0
+# K tile and pipeline stages of the routed GEMMs (shared memory per CTA:
+# 21 KB per stage), their persistent CTAs (None: one per SM), and the shared
+# FC1's stages (36 KB per stage). Measured on B300 and B200 (four real layers,
+# 1, 4 and 8 rows) against FC1 4/6 stages, FC2 3/6/8, shared FC1 3-5 and 96-128
+# routed CTAs: FC2 at 4 stages gains 6% at one row; no other setting moves a
+# row count by 3% or more, and fewer routed CTAs slow eight rows.
+ROUTED_CTA_K = 256
+ROUTED_FC1_STAGES = 8
+ROUTED_FC2_STAGES = 4
+ROUTED_CTAS: int | None = None
+SHARED_FC1_STAGES = 6
 # Persistent CTAs of the shared expert's GEMMs (144 and 48 work items), which
 # leave SMs to the routed GEMMs beside them (the critical path). On B300 at
 # 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24 and 24/16.
@@ -181,7 +192,7 @@ class LowBatchFfn:
         h_pt = torch.empty(h_rows, dtype=torch.float32, device=device)
         output = torch.empty((h_rows, HIDDEN), dtype=torch.bfloat16, device=device)
         stream = current_cu_stream()
-        ctas = Int32(_sm_count(self.device_index))
+        ctas = Int32(ROUTED_CTAS or _sm_count(self.device_index))
         _front(self.device_index)(
             _ptr(cutlass.Float32, logits),
             _ptr(cutlass.Float32, self.bias),
@@ -359,7 +370,7 @@ def _fc2_input(device_index: int):
 def _fc1(device_index: int):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedFc1(HIDDEN, INTERMEDIATE),
+            RoutedFc1(HIDDEN, INTERMEDIATE, ROUTED_CTA_K, ROUTED_FC1_STAGES),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
@@ -381,7 +392,7 @@ def _fc1(device_index: int):
 def _fc2(device_index: int):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedFc2(HIDDEN, INTERMEDIATE),
+            RoutedFc2(HIDDEN, INTERMEDIATE, ROUTED_CTA_K, ROUTED_FC2_STAGES),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
@@ -415,7 +426,7 @@ def _shared_input(device_index: int):
 def _shared_fc1(device_index: int):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            SharedFc1(),
+            SharedFc1(num_ab_stage=SHARED_FC1_STAGES),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float8E8M0FNU),
             _fake(cutlass.Float8E4M3FN),
