@@ -5,6 +5,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+# Bumped whenever the peer payload changes shape. Peers refuse to transfer
+# across a mismatch instead of failing somewhere inside the engine.
+WIRE_VERSION = 1
+
+
+class TransferEngineKind(Enum):
+    TE = "te"
+    TENT = "tent"
+
 
 class TransferOp(Enum):
     READ = "read"
@@ -12,8 +21,18 @@ class TransferOp(Enum):
 
 
 class TransferState(Enum):
+    """Outcome of one range.
+
+    `IN_FLIGHT` is what a backend reports when it could not confirm that the
+    engine stopped touching the memory. The ranges were submitted and may still
+    be written, so the caller has to keep the memory reserved instead of
+    treating the ranges as finished and handing them to the next request.
+    """
+
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELED = "canceled"
+    IN_FLIGHT = "in_flight"
 
 
 @dataclass(frozen=True)
@@ -35,8 +54,24 @@ class TransferEvent:
     error: str | None = None
 
 
+def format_peer_address(hostname: str, port: int) -> str:
+    """Names a peer the way both engines parse it.
+
+    IPv6 addresses are bracketed, which is what the Transfer Engine's
+    `parseHostNameWithPort` and TENT's segment naming both expect.
+    """
+    if ":" in hostname:
+        return f"[{hostname}]:{port}"
+    return f"{hostname}:{port}"
+
+
 class TransferBackend(ABC):
     """Moves KV blocks between two workers and reports per-range outcomes."""
+
+    @property
+    @abstractmethod
+    def kind(self) -> TransferEngineKind:
+        """Engine backing this backend. Peers compare it during the handshake."""
 
     @property
     @abstractmethod
@@ -68,6 +103,10 @@ class TransferBackend(ABC):
         returns an empty list. Blocks until every range reached a terminal
         state. Called from worker threads, so an implementation must accept
         concurrent calls.
+
+        An engine fault is reported as an event, not raised: a caller books
+        the blocks it submitted against the outcome of every range, and an
+        exception escaping here would leave those blocks pinned.
         """
 
     @abstractmethod

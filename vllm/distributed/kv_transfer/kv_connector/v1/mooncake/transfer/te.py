@@ -7,6 +7,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine impor
     MemoryRegion,
     RangeRequest,
     TransferBackend,
+    TransferEngineKind,
     TransferEvent,
     TransferOp,
     TransferState,
@@ -37,6 +38,10 @@ class TransferEngineBackend(TransferBackend):
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
         self._rpc_port = self._engine.get_rpc_port()
+
+    @property
+    def kind(self) -> TransferEngineKind:
+        return TransferEngineKind.TE
 
     @property
     def rpc_port(self) -> int:
