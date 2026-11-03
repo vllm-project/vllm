@@ -31,11 +31,7 @@ class DecodeConfig:
 
 def decode_widths(vllm_config) -> tuple[int, ...]:
     sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
-    return tuple(
-        sorted(
-            s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS and s % 8 == 0
-        )
-    )
+    return tuple(sorted(s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS))
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -48,8 +44,8 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     widths = decode_widths(vllm_config)
     if not widths:
         reasons.append(
-            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS} (multiples "
-            "of 8): the wide kernels serve FULL decode graphs of those widths"
+            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS}: the wide "
+            "kernels serve FULL decode graphs of those widths"
         )
     if reasons:
         raise ValueError(

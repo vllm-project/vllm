@@ -88,8 +88,8 @@ class LayerBuild:
             raise ValueError(f"layer kind {self.kind!r}")
         if self.allreduce not in ex_.CODECS:
             raise ValueError(f"all-reduce codec {self.allreduce!r}")
-        if self.tokens % ex_.TOKENS:
-            raise ValueError(f"{self.tokens} rows: a multiple of {ex_.TOKENS}")
+        if not 1 <= self.tokens <= MAX_TOKENS:
+            raise ValueError(f"{self.tokens} rows: 1 to {MAX_TOKENS}")
 
 
 ABI = KernelAbi(

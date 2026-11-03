@@ -673,8 +673,9 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_liv
 @traced
 def combine(g, xch, route_buf, part, part2, flags, rows: int):
     """``y[b] = sum_j w[b, j] part[b, j]`` in slot order, a wave an exchange
-    line: lane ``l`` sums 8 columns of token ``l // 8`` and pushes them as four
-    packed bf16 dwords to every rank, then lane 0 the line's flag."""
+    line: lane ``l`` sums 8 columns of token ``l // 8`` and pushes them to
+    every rank (a partial line's lanes past the rows repeat the last row and
+    push nothing), then lane 0 the line's flag."""
     lpg = ex_.lines_per_group(rows)
     lines = ex_.GROUPS * lpg
     row = xch._row(xch.rank)
@@ -730,7 +731,7 @@ def combine(g, xch, route_buf, part, part2, flags, rows: int):
         drain_stores()
         if g.lane == 0:
             for base in xch.bases:
-                st(base, row + i32(xch.payload) + line, xch.tag, cm=CM_SYS)
+                st(base, row + i32(ex_.FLAGS_AT) + line, xch.tag, cm=CM_SYS)
 
 
 # --------------------------------------------------------------------------
@@ -1525,4 +1526,4 @@ def push_group(g, xch, y, grp, rows: int):
         drain_stores()
         if g.lane == 0:
             for base in xch.bases:
-                st(base, row + i32(xch.payload) + line, xch.tag, cm=CM_SYS)
+                st(base, row + i32(ex_.FLAGS_AT) + line, xch.tag, cm=CM_SYS)

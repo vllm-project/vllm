@@ -76,5 +76,5 @@ WAVES = THREADS // 64
 LDS_BYTES = 160 * 1024
 
 # rows a step: the CUDA graph capture sizes in this range get a build
-MIN_TOKENS = 32
+MIN_TOKENS = 1
 MAX_TOKENS = 128

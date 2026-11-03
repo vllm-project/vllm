@@ -35,6 +35,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 ROWS = 128
+# the step widths each stage is checked at: every width 1-5, the partial
+# exchange lines of 12 and the whole ones of 8, 16, 32, 128
+WIDTHS = [1, 2, 3, 4, 5, 8, 12, 16, 32, 128]
+SMALL = [w for w in WIDTHS if w <= 16]
+CODECS = ["bf16", "int4"]
 
 
 def rel(a, b):
@@ -84,21 +89,24 @@ class Harness:
 
     def exchange_y(self, rows, slot, codec="bf16"):
         """The rank's partial in exchange slot ``slot`` as [rows, HIDDEN]."""
-        from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
-        from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
-            exchange as ex,
-        )
+        return exchange_lines(self.mbox_t, 1, slot, 0, rows, codec)
 
-        words, lpg = ex.row_words(), ex.lines_per_group(rows)
-        row = self.mbox_t[slot * words : slot * words + ex.payload_words(rows, codec)]
-        if codec == "int4":
-            return ref.int4_lines(row, rows, ex.GROUPS, lpg, HIDDEN)
-        y = (
-            row.contiguous()
-            .view(torch.bfloat16)
-            .view(ex.GROUPS, lpg, ex.TOKENS, ex.COLS)
-        )
-        return y.permute(1, 2, 0, 3).reshape(lpg * ex.TOKENS, HIDDEN)[:rows]
+
+def exchange_lines(mbox, tp, slot, src, rows, codec):
+    """Source rank ``src``'s lines in exchange slot ``slot`` of a mailbox (i32
+    words) as [rows, HIDDEN]."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
+        exchange as ex,
+    )
+
+    words, lpg = ex.row_words(), ex.lines_per_group(rows)
+    at = (slot * tp + src) * words
+    row = mbox[at : at + ex.payload_words(rows, codec)]
+    if codec == "int4":
+        return ref.int4_lines(row, rows, ex.GROUPS, lpg, HIDDEN)
+    y = row.contiguous().view(torch.bfloat16).view(ex.GROUPS, lpg, ex.TOKENS, ex.COLS)
+    return y.permute(1, 2, 0, 3).reshape(lpg * ex.TOKENS, HIDDEN)[:rows]
 
 
 @pytest.fixture(scope="module")
@@ -237,13 +245,17 @@ def _check_gemm(harness, rows, n, k, splits, fmt, fold):
     assert rel(out[:, :n], x.double() @ wref.double().T) < 1e-5
 
 
-@pytest.mark.parametrize("fmt", ["bf16", "fp4_triton", "fp4_asm"])
+@pytest.mark.parametrize(
+    "rows, fmt",
+    [(ROWS, "fp4_triton"), (ROWS, "fp4_asm"), (1, "fp4_asm"), (12, "fp4_asm")]
+    + [(w, "bf16") for w in WIDTHS],
+)
 @pytest.mark.parametrize("fold", [False, True])
-def test_tiled_gemm(harness, fmt, fold):
+def test_tiled_gemm(harness, rows, fmt, fold):
     """``x @ W.T`` of the gated residual's down shape (split K, summed in order
     or folded by the last arriver), bf16 or MXFP4 weights in either AITER
     layout: f32 accumulation of exact bf16 products."""
-    _check_gemm(harness, ROWS, 352, 2560, 4, fmt, fold)
+    _check_gemm(harness, rows, 352, 2560, 4, fmt, fold)
 
 
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
@@ -438,7 +450,8 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
     return launch
 
 
-@pytest.mark.parametrize("rows, codec", [(32, "bf16"), (128, "bf16"), (128, "int4")])
+@pytest.mark.parametrize("codec", CODECS)
+@pytest.mark.parametrize("rows", WIDTHS)
 def test_gated_residual(harness, rows, codec):
     """The mix's normalized gated mean and injection scales, the combine's new
     state and its rrms; with ``int4`` exchange lines the combine adds the
@@ -450,8 +463,8 @@ def test_gated_residual(harness, rows, codec):
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
 def test_gated_residual_resident(harness, rows, cold):
     """The one-phase mix of the resident widths, its weights issued ahead or
-    (``cold``) in the phase (the combine at whole exchange lines)."""
-    _check_gated_residual(harness, rows, "bf16", rows % 8 == 0, cold)
+    (``cold``) in the phase, then the combine."""
+    _check_gated_residual(harness, rows, "bf16", True, cold)
 
 
 def _check_gated_residual(harness, rows, codec, combine, cold=False):
@@ -510,6 +523,222 @@ def _check_gated_residual(harness, rows, codec, combine, cold=False):
     if combine:
         assert rel(d["state"], new) < 1e-2
         assert rel(rrms2, rrms2_r) < 1e-3
+
+
+# --------------------------------------------------------------------------
+# the TP exchange between two ranks, both mailboxes on this GPU
+# --------------------------------------------------------------------------
+
+SENTINEL = 0x5A5A5A5A  # a mailbox word no launch wrote
+
+
+@pytest.fixture(scope="module")
+def mailboxes():
+    """Two ranks' mailboxes (uncached, as the peer-mapped ones) on one GPU."""
+    from aiter.ops.flydsl.quick_allreduce_int4_ipc import UncachedIpcHeap
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.peer import (
+        _DeviceBytes,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange
+
+    nbytes = exchange.mailbox_bytes(2)
+    ptrs = [UncachedIpcHeap.alloc_uncached(nbytes) for _ in range(2)]
+    views = [
+        torch.as_tensor(_DeviceBytes(p, nbytes), device="cuda").view(torch.int32)
+        for p in ptrs
+    ]
+    return ptrs, views
+
+
+def _exchange_kernel(rows, codec):
+    """Rank ``rank`` of a two-rank exchange in slot 1: with ``push``, its
+    partial ``y`` [rows, HIDDEN] into both mailboxes (a 64-column group a
+    CTA, as ``gdn.out``'s last arrivers push); with ``combine``, the combine
+    of both ranks' lines from its own mailbox into ``state``."""
+    import flydsl.compiler as flyc
+    import flydsl.expr as fx
+    from flydsl.expr.typing import Int32, Int64
+
+    default_stream = fx.Stream(None)
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
+        Grid,
+        prologue,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
+        CM_DEV,
+        ld_i32x4,
+        lds_st,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        BLOCKS,
+        HIDDEN,
+        THREADS,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import hc
+
+    @fx.struct
+    class Smem:
+        tile: fx.Array[fx.Int32, ex.GroupTile.words(rows), 16]
+        word: fx.Array[fx.Int32, 4, 16]
+
+    @flyc.kernel(name=f"t_xch_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
+    def kern(
+        y: Int64,
+        mbox0: Int64,
+        mbox1: Int64,
+        state: Int64,
+        inj: Int64,
+        rrms: Int64,
+        epoch: Int64,
+        rank: Int32,
+        push: Int32,
+        combine: Int32,
+        s0: Int64,
+        s1: Int64,
+        folds: Int64,
+        health: Int64,
+    ):
+        tid, bid = fx.thread_idx.x, fx.block_idx.x
+        sm = fx.SharedAllocator().allocate(Smem).peek()
+        g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
+        prologue(g)
+        bases = [fx.Int64(mbox0), fx.Int64(mbox1)]
+        own = (rank == 1).select(bases[1], bases[0])
+        tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 7
+        xch = ex.Exchange(bases, own, rank, 2, 1, tag, rows, codec)
+        tile = ex.GroupTile(sm.tile.ptr, rows)
+        if push != 0:
+            for grp in range(bid, ex.GROUPS, BLOCKS):
+                for idx in range(tid, rows * 8, THREADS):
+                    token, piece = idx // 8, idx % 8
+                    w = ld_i32x4(
+                        y, (token * HIDDEN + grp * 64 + piece * 8) // 2, CM_DEV
+                    )
+                    lds_st(tile.ptr + token * ex.GroupTile.STRIDE + piece * 4, w)
+                fx.barrier()
+                ex.push_tile(g, xch, tile, grp)
+                fx.barrier()
+        if combine != 0:
+            hc.combine(g, xch, state, inj, rrms, rows, EPS)
+
+    @flyc.jit
+    def launch(
+        y: Int64,
+        mbox0: Int64,
+        mbox1: Int64,
+        state: Int64,
+        inj: Int64,
+        rrms: Int64,
+        epoch: Int64,
+        rank: Int32,
+        push: Int32,
+        combine: Int32,
+        s0: Int64,
+        s1: Int64,
+        folds: Int64,
+        health: Int64,
+        stream: fx.Stream = default_stream,
+    ):
+        kern(
+            y,
+            mbox0,
+            mbox1,
+            state,
+            inj,
+            rrms,
+            epoch,
+            rank,
+            push,
+            combine,
+            s0,
+            s1,
+            folds,
+            health,
+        ).launch(grid=(BLOCKS,), block=(THREADS,), stream=stream)
+
+    return launch
+
+
+@pytest.mark.parametrize("codec", CODECS)
+@pytest.mark.parametrize("rows", WIDTHS)
+def test_exchange_two_ranks(harness, mailboxes, rows, codec):
+    """Rank 1 pushes, then rank 0 pushes and combines, then rank 1 combines:
+    both ranks' new states are the same bits (each decodes both copies, its
+    own included, and adds them in rank order) and match the reference; each
+    mailbox holds both ranks' lines and tagged flags, and nothing past a
+    partial line's rows, past the step's payload or past its flags."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        HC,
+        HC_HIDDEN,
+        HIDDEN,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
+
+    ptrs, views = mailboxes
+    gen = torch.Generator().manual_seed(4)
+    ys = [torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16) for _ in "01"]
+    state = (torch.randn(rows, HC_HIDDEN, generator=gen) * 2).to(torch.bfloat16)
+    inj = 0.5 + torch.rand(rows, HC, generator=gen)
+    lines = [ref.int4_roundtrip(y) if codec == "int4" else y.float() for y in ys]
+    y = ref.bf((lines[0] + lines[1]).double())
+    x = state.double().view(rows, HC, HIDDEN)
+    new = ref.bf(x + y[:, None, :] * inj[..., None]).view(rows, HC_HIDDEN)
+
+    for v in views:
+        v.fill_(SENTINEL)
+    yd = [y.cuda() for y in ys]
+    states = [state.cuda() for _ in "01"]
+    injd = inj.cuda()
+    rrms = [torch.zeros(rows, HC, device="cuda") for _ in "01"]
+    launch = _exchange_kernel(rows, codec)
+    for rank, push, combine in ((1, 1, 0), (0, 1, 1), (1, 0, 1)):
+        launch(
+            yd[rank].data_ptr(),
+            *ptrs,
+            states[rank].data_ptr(),
+            injd.data_ptr(),
+            rrms[rank].data_ptr(),
+            harness.epoch.data_ptr(),
+            rank,
+            push,
+            combine,
+            *harness.sync_args(),
+            torch.cuda.current_stream(),
+        )
+    torch.accelerator.synchronize()
+    assert harness.health[0].item() == 0
+    assert torch.equal(states[0], states[1])
+    assert torch.equal(rrms[0], rrms[1])
+    assert rel(states[0], new) < 1e-2
+
+    tag = harness.epoch[0].item() * 128 + 7
+    words, lpg, lw = ex.row_words(), ex.lines_per_group(rows), ex.line_words(codec)
+    live = torch.zeros(lpg * ex.TOKENS, dtype=torch.bool)
+    live[:rows] = True
+    for mbox in views:
+        for src in range(2):
+            got = exchange_lines(mbox, 2, 1, src, rows, codec).double().cpu()
+            if codec == "int4":
+                assert rel(got, lines[src]) < 1e-2
+            else:
+                assert torch.equal(got, ys[src].double())
+            row = mbox[(2 + src) * words : (3 + src) * words].cpu()
+            payload = row[: ex.payload_words(rows, codec)].view(ex.GROUPS, lpg, lw)
+            if codec == "bf16":
+                dead = payload.view(ex.GROUPS, lpg * ex.TOKENS, 32)[:, ~live]
+            else:
+                codes = payload[..., :64].reshape(ex.GROUPS, lpg * ex.TOKENS, 8)
+                scales = payload[..., 64:].reshape(ex.GROUPS, lpg * ex.TOKENS, 2)
+                dead = torch.cat([codes[:, ~live], scales[:, ~live]], -1)
+            assert (dead == SENTINEL).all()
+            rest = row[ex.payload_words(rows, codec) : ex.FLAGS_AT]
+            assert (rest == SENTINEL).all()
+            flags = row[ex.FLAGS_AT :]
+            assert (flags[: ex.flag_words(rows)] == tag).all()
+            assert (flags[ex.flag_words(rows) :] == SENTINEL).all()
 
 
 # --------------------------------------------------------------------------
@@ -702,19 +931,21 @@ def _gdn_kernel(rows, out=True):
     return launch
 
 
-@pytest.mark.parametrize("rows", [32, 128])
+@pytest.mark.parametrize("rows", WIDTHS)
 def test_gated_delta_net(harness, rows):
     """Conv outputs and states, z, the recurrent states, the gated-norm core
-    and out_proj through the exchange; two padding rows (slot 0) leave the
-    states alone and give a zero core."""
-    _check_gated_delta_net(harness, rows, [3, rows - 1], True)
+    and out_proj through the exchange; padding rows (slot 0: rows 3 and the
+    last, the last alone below five rows, none at one row) leave the states
+    alone and give a zero core."""
+    pads = sorted({min(3, rows - 1), rows - 1}) if rows > 1 else []
+    _check_gated_delta_net(harness, rows, pads, True)
 
 
 @pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
 def test_gated_delta_net_resident(harness, rows):
-    """The gated delta net at the resident widths (out_proj through the
-    exchange at whole exchange lines); the last row of two or more pads."""
-    _check_gated_delta_net(harness, rows, [rows - 1] if rows > 1 else [], rows % 8 == 0)
+    """The gated delta net at the resident widths, out_proj through the
+    exchange; the last row of two or more pads."""
+    _check_gated_delta_net(harness, rows, [rows - 1] if rows > 1 else [], True)
 
 
 def _check_gated_delta_net(harness, rows, pads, out):
@@ -1007,6 +1238,23 @@ def _routed_inputs(gen, rows, picks):
     return x.to(torch.bfloat16), gate.to(torch.bfloat16)
 
 
+def _split_assignments(ids):
+    """The (row, slot) assignments of a step's split units (``moe.pieces``):
+    units are (expert, <= 16 rows) in expert order, and a last round at most
+    half full (every unit below 129 units, so every row of a narrow step)
+    runs as two halves a unit."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        BLOCKS,
+        E_ALL,
+    )
+
+    counts = torch.bincount(ids.flatten().long(), minlength=E_ALL).tolist()
+    sizes = [min(16, c - k) for c in counts for k in range(0, c, 16)]
+    r = len(sizes) % BLOCKS
+    split = r if 0 < r <= BLOCKS // 2 else 0
+    return sum(sizes[len(sizes) - split :])
+
+
 def _skewed_picks(rows, gen):
     """A real-checkpoint-like B128 routing: 20 hot experts of 24 rows and 280
     of about 3 (328 units with the shared expert's 8: 72 run as halves)."""
@@ -1033,7 +1281,9 @@ def _skewed_picks(rows, gen):
         (32, "hot", "bf16"),
         (128, "skewed", "bf16"),
         (128, "random", "int4"),
-    ],
+    ]
+    + [(w, "random", c) for w in SMALL for c in CODECS]
+    + [(w, "hot", "bf16") for w in (1, 4, 12)],
 )
 def test_moe(harness, rows, routing, codec):
     """Routing (as sets: bf16 logits tie at the top-k boundary) and weights,
@@ -1110,9 +1360,13 @@ def test_moe(harness, rows, routing, codec):
         assert err.max().item() < 5e-2
     tag = harness.epoch[0].item() * 128 + 9
     marked = (flags == tag).sum().item()
-    if routing == "random":
+    if moe.small(rows):  # the small-batch path splits no units (test_moe_small)
         assert marked == 0
-    else:
+        return
+    assert marked == _split_assignments(ids)
+    if routing == "random" and rows >= 32:
+        assert marked == 0
+    if routing != "random":
         assert marked > 0
     if routing == "hot":
         assert marked == rows * SLOTS
@@ -1290,6 +1544,27 @@ def test_moe_small(harness, small_moe_weights, rows, routing, codec):
     assert (flags != 0).sum().item() == 0  # no split marks on this path
 
 
+def test_decode_widths_take_every_capture_size():
+    """Every CUDA graph capture size in 1-128 gets a build (vLLM pads a step
+    to the smallest captured width that holds it), and a build of any width
+    in that range is valid."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime import decode_widths
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layer import LayerBuild
+
+    sizes = [1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128, 136, 256]
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=sizes)
+    )
+    assert decode_widths(config) == (1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128)
+    for rows in (1, 3, 12, 128):
+        LayerBuild(kind="gdn", tokens=rows, tp=2)
+    for rows in (0, 129):
+        with pytest.raises(ValueError):
+            LayerBuild(kind="gdn", tokens=rows, tp=2)
+
+
 @pytest.mark.parametrize(
     "level, codec",
     [
@@ -1311,13 +1586,14 @@ def test_allreduce_codec_follows_quickreduce(monkeypatch, level, codec):
     assert allreduce_codec() == codec
 
 
-@pytest.mark.parametrize("rows", [32, 128])
+@pytest.mark.parametrize("rows", WIDTHS)
 def test_qsa_sparse_attention(rows):
     """``wide.attention`` over a strided paged K | V pool against float64
     softmax attention of each row's tokens: the selected compressed blocks
     (all of a row's complete blocks in any order up to 512, else 512 of them)
     and the open tail, from no context to past the 2048-token budget, with a
-    hole (-1) in a list and a padded row (request -1, zero output)."""
+    hole (-1) in a list and (from two rows) a padded row (request -1, zero
+    output)."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention
 
     gen = torch.Generator().manual_seed(rows)
@@ -1332,13 +1608,15 @@ def test_qsa_sparse_attention(rows):
         torch.randperm(blocks - 1, generator=gen)[: rows * pages_per_row] + 1
     ).view(rows, -1)
     t2r = torch.arange(rows, dtype=torch.int32)
-    t2r[1] = -1
+    pad = 1 if rows > 1 else None
+    if pad is not None:
+        t2r[pad] = -1
     sel = torch.full((rows, top), -1, dtype=torch.int32)
     for r, c in enumerate(contexts):
         sel[r, : min(c // ratio, top)] = torch.randperm(c // ratio, generator=gen)[
             :top
         ].int()
-    sel[4, 3] = -1  # a hole
+    sel[4 if rows > 4 else 0, 3] = -1  # a hole
     q = (torch.randn(rows, heads, hd, generator=gen) * 0.5).to(torch.bfloat16)
 
     expect = torch.zeros(rows, heads, hd, dtype=torch.float64)
@@ -1369,15 +1647,17 @@ def test_qsa_sparse_attention(rows):
         ratio,
         out,
     )
-    assert out[1].abs().max().item() == 0
+    if pad is not None:
+        assert out[pad].abs().max().item() == 0
     assert rel(out.float(), expect) < 1e-2
 
 
-@pytest.mark.parametrize("rows", [32, 128])
+@pytest.mark.parametrize("rows", WIDTHS)
 def test_qsa_indexer_scores(rows):
     """``wide.indexer.score`` over a strided paged compressed-key pool
     against float64 ``sum_h relu(q_h . k_c) / sqrt(128)`` on each row's
-    visible columns, and the visible counts exactly (a padded row sees none)."""
+    visible columns, and the visible counts exactly (a padded row, from three
+    rows, sees none)."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer
 
     gen = torch.Generator().manual_seed(rows)
@@ -1393,7 +1673,8 @@ def test_qsa_indexer_scores(rows):
         .int()
     )
     t2r = torch.arange(rows, dtype=torch.int32)
-    t2r[2] = -1
+    if rows > 2:
+        t2r[2] = -1
     q = torch.randn(rows, heads, dim, generator=gen).to(torch.bfloat16)
     seq = torch.tensor(contexts, dtype=torch.int32)
     positions = (seq - 1).clamp(min=0).long()

@@ -8,7 +8,10 @@ Lines: a partial is stored as lines ordered by
 (column group, token block): group ``g`` is columns ``64 g .. 64 g + 63`` (one
 row group of the output GEMM, whose last arriving unit pushes it), a line
 eight tokens of one group. Lane ``l`` of the wave that writes a line holds
-token ``l // 8`` of the block, columns ``8 (l % 8) ..``. A line's ``codec``:
+token ``l // 8`` of the block, columns ``8 (l % 8) ..``. A step whose rows are
+not a multiple of eight ends each group with a partial line: only its rows'
+tokens are stored and read (a one-row step moves 128 B a line), at the same
+addresses as in a whole line. A line's ``codec``:
 
 - ``bf16`` (exact): 256 dwords (1 KiB), a lane's four packed bf16 dwords;
 - ``int4`` (QuickReduce's INT4 codec, opt-in): 80 dwords (320 B), a lane's
@@ -23,7 +26,9 @@ needs and gates its payload loads on them. Payload and flags carry 99.6 %
 payload on the link (bf16 lines), where tagged pairs would carry half.
 
 A rank's mailbox (uncached, peer-mapped): ``SLOTS`` slots, a slot a row per
-source rank of ``payload_words`` dwords then one flag a line. A layer's two
+source rank of the widest step's payload, then one flag a line at a fixed
+offset (``FLAGS_AT``): a flag word is never a narrower or wider step's
+payload, so it only ever holds a tag. A layer's two
 exchanges (attention, MLP) and the layer's parity pick the slot: a rank can be
 at most one layer ahead of its peer, so a slot is never rewritten before every
 reader of its previous use is done.
@@ -87,10 +92,13 @@ def flag_words(rows: int = MAX_TOKENS) -> int:
     return GROUPS * lines_per_group(rows)
 
 
-def row_words(rows: int = MAX_TOKENS) -> int:
-    """A source rank's row of a slot: payload, flags, padded to 64 dwords (the
-    bf16 lines, the larger)."""
-    return (payload_words(rows) + flag_words(rows) + 63) // 64 * 64
+# a source rank's flags: past the widest payload (the bf16 lines, the larger)
+FLAGS_AT = payload_words()
+
+
+def row_words() -> int:
+    """A source rank's row of a slot: payload, flags, padded to 64 dwords."""
+    return (FLAGS_AT + flag_words() + 63) // 64 * 64
 
 
 def mailbox_bytes(tp: int) -> int:
@@ -116,13 +124,13 @@ class Exchange(TraceInvariant):
         self.slot, self.tag, self.rows = fx.Int32(slot), fx.Int32(tag), rows
         self.codec, self.words = codec, line_words(codec)
         self.lpg = lines_per_group(rows)
-        self.payload = payload_words(rows, codec)
+        self.partial = rows % TOKENS != 0  # each group's last line is partial
 
     def _row(self, src):
         return (self.slot * fx.Int32(self.tp) + src) * fx.Int32(row_words())
 
     def flag_index(self, src, line):
-        return self._row(src) + fx.Int32(self.payload) + line
+        return self._row(src) + fx.Int32(FLAGS_AT) + line
 
     def _line_at(self, group, token):
         line = group * fx.Int32(self.lpg) + token // fx.Int32(TOKENS)
@@ -132,10 +140,13 @@ class Exchange(TraceInvariant):
         """The lane's 8 values (f32) of ``token``, columns ``64 group + 8 seg
         ..``, into every rank's row of this rank. Lane ``l`` of the wave holds
         token ``l // 8`` of the line, ``seg = l % 8``; every lane of the wave
-        takes part (the int4 groups pair lanes)."""
+        takes part (the int4 groups pair lanes), and a token past the step's
+        rows (a partial line's) stores nothing."""
         row = self._row(self.rank)
         at, t8 = self._line_at(group, token)
-        if const_expr(self.codec == "bf16"):
+        if const_expr(self.partial):
+            _put_partial(self, row + at, t8, seg, vals, token < fx.Int32(self.rows))
+        elif const_expr(self.codec == "bf16"):
             words = pack_bf16x8(vals)
             for base in self.bases:
                 st(base, row + at + t8 * 32 + seg * 4, words, cm=CM_SYS)
@@ -166,6 +177,26 @@ def _put_int4(xch, code_at, scale_at, seg, vals):
     if seg % 4 == 0:
         for base in xch.bases:
             st(base, scale_at + seg // 4, scales, cm=CM_SYS)
+
+
+@traced
+def _put_partial(xch, line_at, t8, seg, vals, live):
+    """``put`` into a partial line (``line_at``: its first word in this rank's
+    row): every lane encodes (the int4 groups pair lanes), only the lanes of
+    the step's rows (``live``) store."""
+    if const_expr(xch.codec == "bf16"):
+        words = pack_bf16x8(vals)
+        if live:
+            for base in xch.bases:
+                st(base, line_at + t8 * 32 + seg * 4, words, cm=CM_SYS)
+    else:
+        codes, scales = _int4_encode(vals)
+        if live:
+            for base in xch.bases:
+                st(base, line_at + t8 * 8 + seg, codes, cm=CM_SYS)
+        if live & (seg % 4 == 0):
+            for base in xch.bases:
+                st(base, line_at + 64 + t8 * 2 + seg // 4, scales, cm=CM_SYS)
 
 
 def _int4_encode(vals):
@@ -263,7 +294,10 @@ def push_tile(g, xch, tile, group):
         line = g.wave + fx.Int32(k * WAVES)
         if line < lpg:
             token = line * TOKENS + g.lane // 8
-            words = lds_ld(tile.ptr + token * GroupTile.STRIDE + seg * 4, 4)
+            tk = token
+            if const_expr(xch.partial):
+                tk = fx.min(token, fx.Int32(tile.rows - 1))  # a partial line's tail
+            words = lds_ld(tile.ptr + tk * GroupTile.STRIDE + seg * 4, 4)
             xch.put(group, token, seg, unpack_bf16x8(words))
     drain_stores()
     for k in range_constexpr(-(-lpg // WAVES)):
@@ -272,7 +306,7 @@ def push_tile(g, xch, tile, group):
             for base in xch.bases:
                 st(
                     base,
-                    row + fx.Int32(xch.payload) + group * lpg + line,
+                    row + fx.Int32(FLAGS_AT) + group * lpg + line,
                     xch.tag,
                     cm=CM_SYS,
                 )
