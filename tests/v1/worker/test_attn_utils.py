@@ -523,7 +523,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache():
             registered_host_pool=pool.registered,
         )
         runtime.host_pool = pool
-        attn_utils_module.release_hisparse_profiling_cache({"layer": layer})
+        attn_utils_module.unbind_hisparse_caches({"layer": layer})
 
         assert not hasattr(runtime, "_host_cache")
         assert runtime.host_pool is None

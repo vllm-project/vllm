@@ -2363,7 +2363,7 @@ def test_hisparse_profiling_releases_device_storage():
     import gc
     import weakref
 
-    from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
+    from vllm.v1.hisparse.binding import unbind_hisparse_caches
 
     cache = _make_hisparse_cache_handle()
     layer = torch.nn.Module()
@@ -2400,13 +2400,13 @@ def test_hisparse_profiling_releases_device_storage():
     torch.accelerator.synchronize()
     bound = torch.accelerator.memory_allocated()
     try:
-        release_hisparse_profiling_cache(context)
+        unbind_hisparse_caches(context)
         gc.collect()
         torch.accelerator.synchronize()
         assert all(reference() is None for reference in views)
         assert bound - torch.accelerator.memory_allocated() >= 64 * 2**20
     finally:
-        release_hisparse_profiling_cache(context)
+        unbind_hisparse_caches(context)
 
 
 def _valid_rows(num_rows: int) -> torch.Tensor:
