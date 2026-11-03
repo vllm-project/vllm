@@ -41,33 +41,28 @@ def _install_prefill_hidden_capture(model):
     language_model.forward = forward
 
 
-def _install_hidden_recorder(model):
+def _record_hidden_states(model):
     model = getattr(model, "module", model)
-    model._recorded = []
+    model._hidden_by_position = {}
 
     language_model = model.language_model.model
     original_forward = language_model.forward
 
     def forward(input_ids, positions, *args, **kwargs):
         hidden_states = original_forward(input_ids, positions, *args, **kwargs)
-        # Recording hidden states for comparison is a deliberate D2H.
+        # A deliberate D2H, copied: the runner reuses its buffers next step.
         with gpu_sync_allowed():
-            # Copies: the runner reuses its input buffers in the next step.
-            model._recorded.append(
-                (
-                    positions.to("cpu", copy=True),
-                    hidden_states.to("cpu", torch.float32, copy=True),
-                )
-            )
+            rows = hidden_states.to("cpu", torch.float32, copy=True)
+            model._hidden_by_position.update(zip(positions.tolist(), rows))
         return hidden_states
 
     language_model.forward = forward
 
 
-def _pop_recorded(model):
+def _pop_recorded_hidden_states(model):
     model = getattr(model, "module", model)
-    recorded, model._recorded = model._recorded, []
-    return recorded
+    hidden, model._hidden_by_position = model._hidden_by_position, {}
+    return hidden
 
 
 def _get_prefill_hidden(model):
@@ -154,9 +149,6 @@ def test_mm_prefix_lm_e2e(
 
 
 @pytest.mark.core_model
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="ROCm attention has no mm prefix support"
-)
 def test_mm_prefix_lm_cache_hit_inside_image(
     vllm_runner: type[VllmRunner],
     image_assets: ImageTestAssets,
@@ -167,30 +159,20 @@ def test_mm_prefix_lm_cache_hit_inside_image(
     # One process, so that all requests of a generate() call share a step.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    # Exact fp32 dots in Triton attention (TF32 by default) keep both runs equal.
+    # Triton attention uses TF32 for fp32 by default.
     monkeypatch.setenv("TRITON_F32_DEFAULT", "ieee")
-    image = image_assets[0].pil_image
+    # The image tokens span [100, 356), so a two-block hit ends inside it.
+    prompt = {
+        "prompt": "<bos><start_of_turn>user\n"
+        + "word " * 92
+        + "<start_of_image>What color is it?<end_of_turn>\n<start_of_turn>model\n",
+        "multi_modal_data": {"image": image_assets[0].pil_image},
+    }
 
-    def request(question: str) -> dict[str, Any]:
-        # The 256 image tokens span [100, 356), so a hit of two 128-token
-        # blocks ends 100 tokens before the end of the image.
-        prompt = (
-            "<bos><start_of_turn>user\n"
-            + "word " * 92
-            + f"<start_of_image>{question}<end_of_turn>\n<start_of_turn>model\n"
-        )
-        return {"prompt": prompt, "multi_modal_data": {"image": image}}
+    def image_after_hit(vllm_model: VllmRunner) -> torch.Tensor:
+        hidden = vllm_model.apply_model(_pop_recorded_hidden_states)[0]
+        return torch.stack([hidden[position] for position in range(256, 356)])
 
-    def image_rows_after_hit(vllm_model: VllmRunner) -> torch.Tensor:
-        rows = {}
-        for positions, hidden in vllm_model.apply_model(_pop_recorded)[0]:
-            for i, position in enumerate(positions.tolist()):
-                if 256 <= position < 356:
-                    rows[position] = hidden[i]
-        return torch.stack([rows[position] for position in range(256, 356)])
-
-    hit = request("What color is it?")
-    params = SamplingParams(temperature=0.0, max_tokens=1)
     with vllm_runner(
         TINY_MODEL,
         dtype="float32",
@@ -199,23 +181,20 @@ def test_mm_prefix_lm_cache_hit_inside_image(
         enable_chunked_prefill=True,
         max_num_batched_tokens=512,
         enable_prefix_caching=True,
-        disable_chunked_mm_input=True,
         limit_mm_per_prompt={"image": 1},
     ) as vllm_model:
         llm = vllm_model.get_llm()
-        vllm_model.apply_model(_install_hidden_recorder)
+        vllm_model.apply_model(_record_hidden_states)
 
-        assert len(llm.generate([hit], params)[0].prompt_token_ids) == 368
-        expected = image_rows_after_hit(vllm_model)
+        # Prefilled in one step; caches the first two blocks for the hit below.
+        alone = SamplingParams(max_tokens=1, skip_reading_prefix_cache=True)
+        llm.generate([prompt], alone)
+        expected = image_after_hit(vllm_model)
 
-        llm.reset_prefix_cache()
-        llm.generate([request("What is in the image?")], params)
-        vllm_model.apply_model(_pop_recorded)
-
-        # Text-only requests take 472 of the 512-token budget (all at positions
-        # below 256), leaving 40 for the 112 tokens after the hit.
+        # Text-only requests below position 256 leave 40 tokens of budget for
+        # the 112 after the hit.
         fillers = [{"prompt_token_ids": [10 + i] * 118} for i in range(4)]
-        output = llm.generate([*fillers, hit], params)[-1]
+        output = llm.generate([*fillers, prompt], SamplingParams(max_tokens=1))[-1]
         assert output.num_cached_tokens == 256
 
-        torch.testing.assert_close(image_rows_after_hit(vllm_model), expected)
+        torch.testing.assert_close(image_after_hit(vllm_model), expected)
