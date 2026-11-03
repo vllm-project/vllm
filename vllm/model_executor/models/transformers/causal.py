@@ -17,9 +17,12 @@
 """Transformers modeling backend mixin for causal language models."""
 
 from collections.abc import Iterable
+from operator import attrgetter
 from typing import TYPE_CHECKING
 
 import torch
+from torch import nn
+from transformers import AutoModelForCausalLM
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -27,6 +30,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
+from vllm.model_executor.models.transformers.utils import attrsetter
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
 from .base import Base
@@ -45,21 +49,55 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         tie_word_embeddings = self._get_tie_word_embeddings()
 
         if self.pp_group.is_last_rank:
-            self.lm_head = ParallelLMHead(
-                self.text_config.vocab_size,
-                self.text_config.hidden_size,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
+            vocab_emb = next(
+                (
+                    module
+                    for module in self.model.get_input_embeddings().modules()
+                    if isinstance(module, VocabParallelEmbedding)
+                ),
+                None,
             )
-            if tie_word_embeddings:
-                for module in self.model.get_input_embeddings().modules():
-                    if isinstance(module, VocabParallelEmbedding):
-                        self.lm_head = self.lm_head.tie_weights(module)
-                        break
+            custom_lm_head = None
+            if vocab_emb is None:
+                with torch.device("meta"):
+                    causal_model = AutoModelForCausalLM.from_config(
+                        **self._from_config_kwargs
+                    )
+                candidate = getattr(causal_model, "lm_head", None)
+                if candidate is not None and not isinstance(candidate, nn.Linear):
+                    custom_lm_head = candidate
+
+            if custom_lm_head is not None:
+                self.lm_head = custom_lm_head
+                self.init_parameters(self.lm_head, dtype=self.model_config.head_dtype)
+                if tie_word_embeddings:
+                    bmp_prefix = f"{self.model.base_model_prefix}."
+                    for dst_key, src_key in (
+                        getattr(causal_model, "_tied_weights_keys", None) or {}
+                    ).items():
+                        if dst_key.startswith("lm_head.") and src_key.startswith(
+                            bmp_prefix
+                        ):
+                            attrsetter(dst_key.removeprefix("lm_head."))(
+                                self.lm_head,
+                                attrgetter(src_key.removeprefix(bmp_prefix))(
+                                    self.model
+                                ),
+                            )
+            else:
+                self.lm_head = ParallelLMHead(
+                    self.text_config.vocab_size,
+                    self.text_config.hidden_size,
+                    quant_config=self.quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
+                if tie_word_embeddings and vocab_emb is not None:
+                    self.lm_head = self.lm_head.tie_weights(vocab_emb)
 
             self.logits_processor = LogitsProcessor(
                 self.text_config.vocab_size,
                 scale=getattr(self.text_config, "logit_scale", 1.0),
+                logits_as_input=custom_lm_head is not None,
                 soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
             )
         else:
@@ -72,7 +110,11 @@ class CausalMixin(VllmModelForTextGeneration, Base):
 
         def auto_load_lm_head_bias(weights):
             for name, weight in weights:
-                if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
+                if (
+                    name.endswith("lm_head.bias")
+                    and self.pp_group.is_last_rank
+                    and isinstance(self.lm_head, ParallelLMHead)
+                ):
                     # load_weights is called outside vLLM's device context,
                     # so we must enter it again when registering the bias.
                     with torch.device(load_device):
@@ -85,5 +127,7 @@ class CausalMixin(VllmModelForTextGeneration, Base):
         return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
+        if not isinstance(self.lm_head, ParallelLMHead):
+            return self.logits_processor(None, self.lm_head(hidden_states))
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
