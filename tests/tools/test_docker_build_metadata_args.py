@@ -6,6 +6,8 @@ import shlex
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HELPER = REPO_ROOT / ".buildkite" / "scripts" / "docker-build-metadata-args.sh"
 
