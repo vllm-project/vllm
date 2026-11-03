@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Ownership and manifest checks for externally supplied Engram tables."""
 
+import hashlib
 import threading
-from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import save_file
-from torch import nn
 
-from vllm.models.deepseek_v41.common.engram import ParallelEngramEmbedding
+from vllm.models.deepseek_v41.common.engram import external_table_views
 from vllm.models.deepseek_v41.nvidia.ops import shared_engram_owner as owner
+from vllm.models.deepseek_v41.nvidia.ops import shared_engram_vmm as vmm
 from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
     _OwnerServer,
     _OwnerState,
@@ -117,6 +117,85 @@ def test_checkpoint_metadata_mismatch_detaches_without_import(tmp_path):
             thread.join()
 
 
+def test_failed_import_cleanup_keeps_owner_lease(tmp_path, monkeypatch):
+    token_file = tmp_path / "token"
+    token_file.write_text("private-token")
+    config = tmp_path / "config.json"
+    index = tmp_path / "model.safetensors.index.json"
+    config.write_text("{}")
+    index.write_text("{}")
+    table = TableHandles(198, 256, 0, (bytes(64),), 256)
+    manifest = {
+        "generation": "generation-1",
+        "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+        "index_sha256": hashlib.sha256(index.read_bytes()).hexdigest(),
+        "schema": 1,
+        "format": "FP8_E4M3FN_E8M0_BLOCK32",
+        "tables": {
+            "1": {
+                "rows": 3,
+                "dim": 64,
+                "scale_width": 2,
+                "head_sizes": [3],
+                "table": table.to_wire(),
+            }
+        },
+    }
+    state = _OwnerState(manifest, "private-token")
+
+    def failed_import(_table, _device):
+        raise vmm.IncompleteTableMapCleanup("mapping may remain")
+
+    monkeypatch.setattr(owner, "import_table", failed_import)
+    with _OwnerServer(("127.0.0.1", 0), state) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            endpoint = f"127.0.0.1:{server.server_address[1]}"
+            with pytest.raises(vmm.IncompleteTableMapCleanup):
+                owner.attach_table(
+                    endpoint,
+                    token_file,
+                    1,
+                    3,
+                    64,
+                    (3,),
+                    0,
+                    expected_generation="generation-1",
+                    checkpoint_dir=tmp_path,
+                )
+            with state.condition:
+                assert state.condition.wait_for(
+                    lambda: bool(state.uncertain), timeout=2
+                )
+                assert not state.active
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+def test_failed_vmm_map_cleanup_reports_uncertain_mapping(monkeypatch):
+    calls = []
+
+    def driver_call(fn, *_args):
+        name = fn.__name__
+        calls.append(name)
+        if name == "cuMemAddressReserve":
+            return 4096
+        if name == "cuMemMap" and calls.count(name) == 2:
+            raise RuntimeError("second map failed")
+        if name in ("cuMemUnmap", "cuMemAddressFree"):
+            raise RuntimeError(f"{name} failed")
+        return None
+
+    monkeypatch.setattr(vmm, "_call", driver_call)
+    table = TableHandles(128, 128, 0, (bytes(64), bytes(64)), 64)
+    with pytest.raises(vmm.IncompleteTableMapCleanup, match="retain the owner lease"):
+        vmm._map(table, [1, 2], 0, cpu_access=False)
+    assert calls.count("cuMemMap") == 2
+    assert calls.count("cuMemUnmap") == 1
+
+
 def test_owner_rejects_wrong_table_encoding_before_publication(tmp_path):
     name = "layers.1.engram.embed.scale"
     filename = tmp_path / "mixed.safetensors"
@@ -148,15 +227,9 @@ def test_external_table_views_follow_tp_head_ranges(tp_size):
         head_end = min(head_start + heads_per_rank, len(head_sizes))
         row_start = sum(head_sizes[:head_start])
         row_end = sum(head_sizes[:head_end])
-        embedding = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
-        nn.Module.__init__(embedding)
-        embedding._external_mapping = SimpleNamespace(cuda=packed)
-        embedding.num_embeddings = rows
-        embedding.dim = dim
-        embedding.block_size = 32
-        embedding.vocab_start_idx = row_start
-        embedding.part_num_embeddings = row_end - row_start
-        selected_weight, selected_scales = embedding._storage()
+        selected_weight, selected_scales = external_table_views(
+            packed, rows, dim, 32, row_start, row_end - row_start
+        )
         torch.testing.assert_close(
             selected_weight.view(torch.uint8), weight[row_start:row_end]
         )

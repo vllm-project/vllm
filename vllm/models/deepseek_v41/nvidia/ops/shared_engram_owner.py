@@ -28,6 +28,7 @@ from safetensors import safe_open
 
 from vllm.models.deepseek_v41.common.engram import EngramLayout
 from vllm.models.deepseek_v41.nvidia.ops.shared_engram_vmm import (
+    IncompleteTableMapCleanup,
     TableHandles,
     TableMapping,
     create_table,
@@ -454,7 +455,10 @@ def attach_table(
             raise ValueError("Engram owner table byte size mismatch")
         mapping = import_table(table, device)
         return connection, mapping, {"lease": lease, **manifest}
-    except BaseException:
+    except BaseException as error:
+        if isinstance(error, IncompleteTableMapCleanup):
+            connection.close()
+            raise
         if lease is not None:
             with suppress(OSError):
                 connection.sendall(

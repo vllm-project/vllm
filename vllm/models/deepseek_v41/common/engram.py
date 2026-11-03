@@ -1020,6 +1020,28 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     return tensor
 
 
+def external_table_views(
+    full: torch.Tensor,
+    num_embeddings: int,
+    dim: int,
+    block_size: int,
+    vocab_start_idx: int,
+    part_num_embeddings: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select this rank's rows from a shared weight-then-scale byte table."""
+    scale_width = dim // block_size
+    weight = full.narrow(0, vocab_start_idx * dim, part_num_embeddings * dim)
+    scales = full.narrow(
+        0,
+        num_embeddings * dim + vocab_start_idx * scale_width,
+        part_num_embeddings * scale_width,
+    )
+    return (
+        weight.view(torch.float8_e4m3fn).view(-1, dim),
+        scales.view(-1, scale_width),
+    )
+
+
 class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 rows and per-block E8M0 scales.
 
@@ -1313,19 +1335,13 @@ class ParallelEngramEmbedding(nn.Module):
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
         if (external_mapping := getattr(self, "_external_mapping", None)) is not None:
-            full = external_mapping.cuda
-            weight_bytes = self.num_embeddings * self.dim
-            weight = full.narrow(
-                0, self.vocab_start_idx * self.dim, self.part_num_embeddings * self.dim
-            )
-            scales = full.narrow(
-                0,
-                weight_bytes + self.vocab_start_idx * (self.dim // self.block_size),
-                self.part_num_embeddings * (self.dim // self.block_size),
-            )
-            return (
-                weight.view(torch.float8_e4m3fn).view(-1, self.dim),
-                scales.view(-1, self.dim // self.block_size),
+            return external_table_views(
+                external_mapping.cuda,
+                self.num_embeddings,
+                self.dim,
+                self.block_size,
+                self.vocab_start_idx,
+                self.part_num_embeddings,
             )
         if self._shared_memory is not None:
             return self._shared_memory.get_views(self.weight, self.weight_scale_inv)

@@ -23,6 +23,10 @@ CHUNK_BYTES = 2 << 30
 NUMA_RESERVE_FRACTION = 0.05
 
 
+class IncompleteTableMapCleanup(RuntimeError):
+    """A failed import may still have live mappings to owner backing."""
+
+
 def _call(fn, *args):
     error, *result = fn(*args)
     if error != cu.CUresult.CUDA_SUCCESS:
@@ -222,11 +226,26 @@ def _map(
                 )
             _call(cu.cuMemSetAccess, address + offset, length, access, len(access))
         return TableMapping(address, table, mapped, device, cpu_access=cpu_access)
-    except BaseException:
+    except BaseException as error:
+        cleanup_errors = []
         if address is not None:
             for offset, length in reversed(mapped):
-                cu.cuMemUnmap(address + offset, length)
-            cu.cuMemAddressFree(address, table.padded_bytes)
+                try:
+                    _call(cu.cuMemUnmap, address + offset, length)
+                except Exception as exc:
+                    cleanup_errors.append(exc)
+            try:
+                _call(cu.cuMemAddressFree, address, table.padded_bytes)
+            except Exception as exc:
+                cleanup_errors.append(exc)
+        if cleanup_errors:
+            error.add_note(
+                "shared Engram map cleanup failed: "
+                + "; ".join(map(str, cleanup_errors))
+            )
+            raise IncompleteTableMapCleanup(
+                "shared Engram mapping may remain; retain the owner lease"
+            ) from error
         raise
 
 
