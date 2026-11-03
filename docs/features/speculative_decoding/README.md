@@ -179,6 +179,21 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 
 ### Method-specific keys
 
+#### DSpark
+
+For Qwen3 DSpark, set `"dspark_draft_topk": 32` in `--speculative-config` to
+restrict the Markov projection to the union of the top-32 base-logit and
+top-32 Markov-bias candidates. This requires draft tensor parallel size 1.
+Omit the setting to use the full vocabulary.
+
+At each model load, vLLM computes the Markov candidates in chunks and caches
+their IDs and bias values on the GPU. It does not retain the full transition
+matrix. The cache holds `target_vocab_size * dspark_draft_topk` entries, each
+with an int64 ID and a bias in the Markov projection's output dtype. For
+151,936 target tokens, k=32, and BF16 biases, the cache uses about 46.4 MiB.
+Pruning can change acceptance length; measure throughput and latency on your
+workload before enabling it.
+
 #### N-gram
 
 | Key | Type | Default | Meaning |
