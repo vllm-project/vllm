@@ -251,7 +251,6 @@ class Qwen2DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -477,9 +476,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             )
 
         # Route the final norm through the residual-stream finalizer: it reduces
-        # only when the last decoder left its output PARTIAL (migrated/deferred
-        # decoders, e.g. Qwen3). Unmigrated decoders expose no output_scatter ->
-        # FULL -> plain norm, identical to the pre-fusion path.
+        # only when the last decoder left its output PARTIAL.
         last_layer = self.layers[self.end_layer - 1]
         hidden_states = finalize_norm(
             self.norm,

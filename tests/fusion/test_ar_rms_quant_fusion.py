@@ -2,26 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end check that manual fusion runs without compiler-driven passes.
 
-Port of the reference PR's ``test_tp1_manual_fusion``: drive a real engine with
-every compiler fusion pass disabled and prove the manual-fusion path still
-produces fused-kernel work inside model forward. The counts come from the
-worker-installed counters in ``conftest.py``.
+Drive an engine with every compiler fusion pass disabled and prove the
+manual-fusion path still produces fused-kernel work inside model forward.
+The counts come from the worker-installed counters in ``conftest.py``.
 
-Differences from the reference PR, forced by this branch's state:
+The model is Qwen3 (the decoder carrying the manual residual-stream fusion
+path here), so at TP=1 the observable is the fused add+RMSNorm op dispatched
+by the helper, plus the helper being entered at all. At TP>=2 the test
+asserts the FlashInfer fused all-reduce+RMSNorm wrapper fired instead of an
+unfused all-reduce at the stream boundary.
 
-- The model is Qwen3 (the only decoder migrated to the residual stream here)
-  instead of Llama-3.2-1B-FP8, so there is no activation-quant kernel to
-  assert on: at TP=1 the observable is the fused add+RMSNorm op dispatched by
-  the helper, plus the helper being entered at all.
-- ``ir_enable_torch_wrap`` is set so IR ops (``fused_add_rms_norm``) go
-  through torch op dispatch and the dispatch counter can observe them; in
-  eager mode they would otherwise route Python-direct. This changes how the
-  op is invoked, not which implementation runs.
-- The TP>=2 test asserts the FlashInfer fused-AR wrapper fired, which is the
-  reference PR's TODO.
-
-Tracks the AR+RMS+Quant bullet under
-https://github.com/vllm-project/vllm/issues/43224.
+``ir_enable_torch_wrap`` is set so IR ops (``fused_add_rms_norm``) go through
+torch op dispatch and the dispatch counter can observe them; in eager mode
+they would otherwise route Python-direct. This changes how the op is invoked,
+not which implementation runs.
 """
 
 import pytest
@@ -85,8 +79,8 @@ def test_tp2_flashinfer_fused_allreduce(ar_counter_session):
     """At TP>=2 the deferred all-reduce is absorbed by the FlashInfer fused kernel.
 
     The FlashInfer fused-AR entry point is a plain-Python resolution inside the
-    helper, so the spy key is the direct assertion (the reference PR's TODO);
-    the underlying torch op is also visible to the dispatch counter.
+    helper, so the spy key is the direct assertion; the underlying torch op
+    is also visible to the dispatch counter.
     """
     import vllm.model_executor.layers.fusion.ar_rms_quant as arq
 

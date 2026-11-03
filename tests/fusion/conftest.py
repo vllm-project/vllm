@@ -65,13 +65,15 @@ def _install_python_spies(worker_self):
         state["flashinfer_ar_calls"] += 1
         return orig_flashinfer_ar(**kwargs)
 
-    # ``residual_stream.py`` imported the symbol directly, so every binding must
-    # be patched for all call sites to be counted.
+    # ``residual_stream.py`` and ``ar_rms_quant.py`` imported the symbols
+    # directly, so every binding must be patched for all call sites to be
+    # counted -- including the all-reduce the helper itself falls back to.
     arq.fused_ar_rms_norm_quant = counting_fused
     rs.fused_ar_rms_norm_quant = counting_fused
     rs.finalize_norm = counting_finalize
     qwen2.finalize_norm = counting_finalize
     rs.tensor_model_parallel_all_reduce = counting_all_reduce
+    arq.tensor_model_parallel_all_reduce = counting_all_reduce
     arq.flashinfer_trtllm_fused_allreduce_norm = counting_flashinfer_ar
     worker_self._python_spy_counts = state
 

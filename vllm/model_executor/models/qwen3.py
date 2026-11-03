@@ -190,7 +190,6 @@ class Qwen3DecoderLayer(nn.Module):
         mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
-
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(

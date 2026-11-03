@@ -7,19 +7,13 @@ RMSNorm) and writes back into. ``ResidualStream`` owns that read point: at each
 sublayer boundary it performs the one transition the stream's distribution state
 requires -- (all-reduce +) residual-add + RMSNorm + optional activation-quant --
 and hands the (possibly pre-quantized) activation to the next consumer linear.
-This is the manual-fusion endgame shape for RFC #43224: model ``forward`` becomes
-``prepare_attn -> attn -> prepare_mlp -> mlp`` with no ``do_allreduce`` booleans
-or ``fuse_allreduce`` branch, and is the only abstraction model code touches (it
-subsumes the standalone ``fused_ar_rms_norm_quant`` kernel-dispatch helper).
 
-It receives the layer's norms and consumer linears directly at construction, so
-each model spells out which module is ``qkv_proj``/``gate_up_proj``/... instead of
-this file guessing by name. A layer that swaps one of those modules *after*
-building its stream (e.g. eagle replacing its layer-0 norm with ``nn.Identity()``,
-aria swapping in an MoE ``mlp``) must rebuild the stream so it captures the
-replacement. Whether the layer defers its reduce is read from the row-linear's
-existing ``reduce_results`` flag -- the single source of truth -- so there is no
-separate fusion flag:
+It receives the layer's norms and consumer linears at each :meth:`prepare`
+call, so each model spells out which module is ``qkv_proj``/``gate_up_proj``/
+... instead of this file guessing by name, and a layer may swap any of those
+modules between forwards. Whether the layer defers its reduce is read from
+the row-linear's existing ``reduce_results`` flag -- the single source of
+truth -- so there is no separate fusion flag:
 - linears defer (``reduce_results=False``): inputs arrive ``PARTIAL``; the stream
   reduces them once while normalizing.
 - linears reduce themselves (``reduce_results=True``): inputs arrive ``FULL``; the
