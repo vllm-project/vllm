@@ -35,7 +35,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
-from vllm.config.utils import compute_hash_cached
+from vllm.config.utils import hash_config_cached
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_ep_group,
@@ -553,7 +553,7 @@ class EplbState:
             communicator=communicator,
             num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
-        self.model_states[model_config.compute_hash()] = model_state
+        self.model_states[hash_config_cached(model_config)] = model_state
 
     def prepare_forward(
         self,
@@ -573,7 +573,7 @@ class EplbState:
                 token range.  When ``None``, only ``tensors[0]`` is filled.
 
         """
-        model_state = self.model_states.get(compute_hash_cached(model_config))
+        model_state = self.model_states.get(hash_config_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
             return
         tensors = model_state.num_unpadded_tokens_tensors
@@ -1165,7 +1165,7 @@ class EplbState:
         model_config: ModelConfig,
         expanded_physical_to_logical: torch.Tensor,
     ) -> None:
-        eplb_model_state = self.model_states[model_config.compute_hash()]
+        eplb_model_state = self.model_states[hash_config_cached(model_config)]
         eplb_model_state.physical_to_logical_map_buffer.copy_(
             expanded_physical_to_logical
         )
@@ -1200,7 +1200,7 @@ class EplbState:
         """Replace physical_to_logical_map and expert_load_pass with views
         covering the new active size.
         """
-        model_state = self.model_states[model_config.compute_hash()]
+        model_state = self.model_states[hash_config_cached(model_config)]
         old_num_physical_experts = model_state.model.num_physical_experts
         first_slot, last_slot = sorted((old_num_physical_experts, num_physical_experts))
         physical_to_logical_map_buffer = model_state.physical_to_logical_map_buffer
@@ -1222,7 +1222,7 @@ class EplbState:
     def create_communicator(
         self, model_config: ModelConfig, group_coordinator: GroupCoordinator
     ) -> EplbCommunicator:
-        model_state = self.model_states[model_config.compute_hash()]
+        model_state = self.model_states[hash_config_cached(model_config)]
         backend = self.parallel_config.eplb_config.communicator
         assert backend is not None
         return create_eplb_communicator(
@@ -1237,7 +1237,7 @@ class EplbState:
         model_config: ModelConfig,
         communicator: EplbCommunicator,
     ) -> None:
-        self.model_states[model_config.compute_hash()].communicator = communicator
+        self.model_states[hash_config_cached(model_config)].communicator = communicator
 
 
 @dataclass

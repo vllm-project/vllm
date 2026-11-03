@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Literal, Self
+from typing import Literal, Self
 
 from pydantic import model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
 
@@ -45,7 +44,7 @@ class StructuredOutputsConfig:
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
@@ -56,11 +55,8 @@ class StructuredOutputsConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        # This config does not affect the compiled graph.
+        return {}
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:

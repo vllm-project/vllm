@@ -15,11 +15,10 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import config, replace
+from vllm.config.utils import CompileFactors, config, normalize_value, replace
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
 from vllm.transformers_utils.repo_utils import get_subfolder_path
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
@@ -723,7 +722,7 @@ class SpeculativeConfig:
     fly_entropy_top_k: int = Field(default=3, ge=1)
     """Number of largest target probabilities used by FLy's entropy gate."""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
@@ -734,32 +733,27 @@ class SpeculativeConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        # Eagle3 and extract_hidden_states affect the computation graph because
-        # they return intermediate hidden states in addition to the final hidden state.
-        uses_aux_hidden_states = self.uses_aux_hidden_states
-        factors.append(uses_aux_hidden_states)
-
+        factors: CompileFactors = {
+            # Eagle3 and extract_hidden_states affect the computation graph because
+            # they return intermediate hidden states in addition to the final hidden
+            # state.
+            "uses_aux_hidden_states": self.uses_aux_hidden_states,
+            # A custom speculator may compile a different draft model graph.
+            "custom_method": self.custom_method,
+            "speculator_options": normalize_value(self.speculator_options),
+            "speculator": normalize_value(self.speculator_config.hash_factors()),
+        }
         if self.draft_model_config is not None:
-            factors.append(self.draft_model_config.compute_hash())
+            factors["draft_model"] = self.draft_model_config.compile_factors()
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
-            if layer_ids is not None and uses_aux_hidden_states:
-                # Convert to tuple to make it hashable
-                factors.append(tuple(layer_ids))
-
-        # A custom speculator may compile a different draft model graph.
-        factors.append(self.custom_method)
-        if self.speculator_options:
-            factors.append(sorted(self.speculator_options.items()))
-        factors.extend(self.speculator_config.hash_factors())
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+            if layer_ids is not None and self.uses_aux_hidden_states:
+                factors["aux_hidden_state_layer_ids"] = list(layer_ids)
+        return factors
 
     @staticmethod
     def hf_config_override(

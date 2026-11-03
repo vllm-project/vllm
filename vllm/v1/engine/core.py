@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.utils import hash_config
 from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
@@ -1504,8 +1505,8 @@ class EngineCoreProc(EngineCore):
             }
             # Include config hash for DP configuration validation
             if vllm_config.parallel_config.data_parallel_size > 1:
-                ready_msg["parallel_config_hash"] = (
-                    vllm_config.parallel_config.compute_hash()
+                ready_msg["parallel_config_hash"] = hash_config(
+                    vllm_config.parallel_config
                 )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (

@@ -13,10 +13,10 @@ from pydantic import Field, TypeAdapter, field_validator
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
+    CompileFactors,
     Range,
     config,
-    get_hash_factors,
-    hash_factors,
+    get_compile_factors,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -208,12 +208,12 @@ class PassConfig:
             return {}
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(capability.to_int(), {})
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
         Any future fields that don't affect compilation should be excluded.
         """
-        return hash_factors(get_hash_factors(self, set()))
+        return get_compile_factors(self, set())
 
     @field_validator(
         "fuse_norm_quant",
@@ -371,12 +371,9 @@ class DynamicShapesConfig:
     `True` requires PyTorch 2.10+
     """
 
-    def compute_hash(self) -> str:
-        """Provide a hash for DynamicShapesConfig."""
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, set())
-        return hash_factors(factors)
+    def compile_factors(self) -> CompileFactors:
+        """Provide the factors used for hashing DynamicShapesConfig."""
+        return get_compile_factors(self, set())
 
 
 @config
@@ -799,17 +796,16 @@ class CompilationConfig:
         "vllm::step5_csa_attention",
     ]
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
-        """
-        # Opt-out: default-include declared fields; keep a tiny exclude set;
-        # normalize types; keep SHA-256. For nested opaque configs, include a
-        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
 
+        WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
+        """
         ignored_factors = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
             "debug_dump_path",
@@ -821,17 +817,9 @@ class CompilationConfig:
             "enabled_custom_ops",
             "disabled_custom_ops",
             "static_forward_context",
-            "pass_config",  # handled separately below
-            "dynamic_shapes_config",  # handled separately below
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
-
-        factors["pass_config"] = self.pass_config.compute_hash()
-        factors["dynamic_shapes_config"] = self.dynamic_shapes_config.compute_hash()
-        return hash_factors(factors)
+        return get_compile_factors(self, ignored_factors)
 
     def __repr__(self) -> str:
         exclude: dict[str, bool | dict[str, bool]] = {

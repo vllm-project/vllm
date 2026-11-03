@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -255,7 +254,7 @@ class SchedulerConfig:
             return cast(type["SchedulerInterface"], self.scheduler_cls)
         return resolve_obj_by_qualname(self.scheduler_cls)
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
@@ -266,8 +265,6 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-
         # max_num_batched_tokens need to be included in the hash due
         # to two reasons:
         # 1. LoRA creates static buffers based on max_num_batched_tokens.
@@ -277,14 +274,12 @@ class SchedulerConfig:
         #   based on the data sizes. `max_num_batched_tokens` has an
         #   impact on that. For more details, please check
         #   https://github.com/vllm-project/vllm/issues/29585
-        factors.append(self.max_num_batched_tokens)
-
         # PLE and other model components allocate static per-request buffers.
         # Their shapes are captured in compiled graphs.
-        factors.append(self.max_num_seqs)
-
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {
+            "max_num_batched_tokens": self.max_num_batched_tokens,
+            "max_num_seqs": self.max_num_seqs,
+        }
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

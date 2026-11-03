@@ -18,9 +18,8 @@ from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import config
+from vllm.config.utils import CompileFactors, config, normalize_value
 from vllm.logger import init_logger
-from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -670,28 +669,19 @@ class MultiModalConfig:
             device_type,
         )
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """Factors of the multimodal encoder that affect its compiled graph.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        WARNING: Whenever a new field is added to this config, add it here if it
+        affects the encoder's computation graph.
         """
-        factors: list[Any] = [
-            self.mm_encoder_attn_backend.name
-            if self.mm_encoder_attn_backend is not None
-            else None,
-            self.mm_encoder_tp_mode,
-            self.mm_encoder_attn_dtype,
-            self.mm_encoder_fp8_scale_path,
-            self.mm_device_do_normalize,
-        ]
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
-        return hash_str
+        return {
+            "mm_encoder_attn_backend": normalize_value(self.mm_encoder_attn_backend),
+            "mm_encoder_tp_mode": self.mm_encoder_tp_mode,
+            "mm_encoder_attn_dtype": self.mm_encoder_attn_dtype,
+            "mm_encoder_fp8_scale_path": self.mm_encoder_fp8_scale_path,
+            "mm_device_do_normalize": self.mm_device_do_normalize,
+        }
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """Get the maximum number of input items allowed per prompt

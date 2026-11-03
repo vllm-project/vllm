@@ -24,7 +24,12 @@ from vllm.config.multimodal import (
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS, PoolerConfig
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
-from vllm.config.utils import config, getattr_iter
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    getattr_iter,
+)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
@@ -465,10 +470,9 @@ class ModelConfig:
     mm_device_do_normalize: InitVar[bool | None] = None
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
-    def compute_hash(self) -> str:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+    def compile_factors(self) -> CompileFactors:
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
 
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
@@ -514,13 +518,10 @@ class ModelConfig:
             "checkpoint_prepare_on_startup",
         }
 
-        from vllm.config.utils import get_hash_factors, hash_factors
-
-        factors = get_hash_factors(self, ignored_factors)
+        factors = get_compile_factors(self, ignored_factors)
 
         # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
-        # affects the computation graph of the language model, therefore we add it
-        # here early.
+        # affects the computation graph of the language model.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
             # Sizes Qwen3.5's M-RoPE cache.
@@ -534,7 +535,7 @@ class ModelConfig:
                 for modality, opts in self.multimodal_config.limit_per_prompt.items()
             }
             factors["mm_enable_mm_embeds"] = self.multimodal_config.enable_mm_embeds
-        return hash_factors(factors)
+        return factors
 
     def _update_nested(
         self,
