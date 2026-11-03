@@ -786,14 +786,20 @@ class NixlBaseConnectorWorker:
         # initialization with "mlx5dv_devx_alloc_uar" errors.
         # Ref: https://network.nvidia.com/files/doc-2020/ethernet-adapters-programming-manual.pdf#page=63
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
-            "num_threads", 4
+            "num_threads", None
         )
+        # The default of 4 is tuned for UCX, so it applies only to UCX alone.
+        if num_threads is None and not non_ucx_backends:
+            num_threads = 4
         if nixl_agent_config is None:
             config = None
         else:
+            thread_kwargs = {} if num_threads is None else {"num_threads": num_threads}
             # Enable telemetry by default for NIXL 0.7.1 and above.
             config = (
-                nixl_agent_config(backends=self.nixl_backends, capture_telemetry=True)
+                nixl_agent_config(
+                    backends=self.nixl_backends, capture_telemetry=True, **thread_kwargs
+                )
                 if len(non_ucx_backends) > 0
                 else nixl_agent_config(num_threads=num_threads, capture_telemetry=True)
             )
@@ -814,7 +820,7 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.create_backend(
                 "UCX",
                 {
-                    "num_threads": str(num_threads),
+                    "num_threads": str(4 if num_threads is None else num_threads),
                     "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
                     **ucx_backend_params,
                 },
@@ -822,9 +828,9 @@ class NixlBaseConnectorWorker:
         elif explicit_backends:
             for backend in self.nixl_backends:
                 nixl_params: dict[str, str] = {}
+                if num_threads is not None:
+                    nixl_params["num_threads"] = str(num_threads)
                 if backend == "UCX":
-                    if not non_ucx_backends:
-                        nixl_params["num_threads"] = str(num_threads)
                     nixl_params.update(ucx_backend_params)
                 self.nixl_wrapper.create_backend(backend, nixl_params)
         # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.

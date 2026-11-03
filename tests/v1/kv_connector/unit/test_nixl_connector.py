@@ -5202,6 +5202,19 @@ class _BackendRecordingNixlWrapper(FakeNixlWrapper):
             [],
             [("UCX", {"ucx_error_handling_mode": "none"}), ("LIBFABRIC", {})],
         ),
+        # An explicit num_threads reaches every backend.
+        (
+            {
+                "backends": ["UCX", "LIBFABRIC"],
+                "num_threads": 2,
+                "ucx_backend_params": {"ucx_error_handling_mode": "none"},
+            },
+            [],
+            [
+                ("UCX", {"num_threads": "2", "ucx_error_handling_mode": "none"}),
+                ("LIBFABRIC", {"num_threads": "2"}),
+            ],
+        ),
         # UCX not selected: the params have nothing to apply to.
         (
             {
@@ -5240,3 +5253,51 @@ def test_ucx_backend_params(dist_init, extra_config, agent_backends, created_bac
     wrapper = connector.connector_worker.nixl_wrapper
     assert wrapper.config.backends == agent_backends
     assert wrapper.created_backends == created_backends
+
+
+@pytest.mark.parametrize(
+    "extra_config, agent_backends, agent_num_threads",
+    [
+        # UCX alone gets the UCX-tuned default of 4.
+        ({}, ["UCX"], 4),
+        ({"num_threads": 8}, ["UCX"], 8),
+        # Other backends get num_threads only when it is set; otherwise it is
+        # not passed at all (None), leaving NIXL's defaults.
+        ({"backends": ["LIBFABRIC"]}, ["LIBFABRIC"], None),
+        ({"backends": ["LIBFABRIC"], "num_threads": 8}, ["LIBFABRIC"], 8),
+        ({"backends": ["UCX", "LIBFABRIC"]}, ["UCX", "LIBFABRIC"], None),
+        (
+            {"backends": ["UCX", "LIBFABRIC"], "num_threads": 2},
+            ["UCX", "LIBFABRIC"],
+            2,
+        ),
+    ],
+)
+def test_nixl_num_threads(dist_init, extra_config, agent_backends, agent_num_threads):
+    """num_threads reaches the NIXL agent config for UCX and non-UCX backends."""
+
+    def agent_config(backends=None, num_threads=None, capture_telemetry=False):
+        return SimpleNamespace(
+            backends=["UCX"] if backends is None else backends,
+            num_threads=num_threads,
+        )
+
+    vllm_config = create_vllm_config(kv_connector_extra_config=extra_config)
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+            _BackendRecordingNixlWrapper,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.nixl_agent_config",
+            agent_config,
+        ),
+        set_current_vllm_config(vllm_config),
+    ):
+        connector = NixlConnector(
+            vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+        )
+    wrapper = connector.connector_worker.nixl_wrapper
+    assert wrapper.config.backends == agent_backends
+    assert wrapper.config.num_threads == agent_num_threads
+    assert wrapper.created_backends == []
