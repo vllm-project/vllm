@@ -779,9 +779,7 @@ class MoRIIOWrapper:
             self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
         elif backend_type == BackendType.FABRIC:
             logger.info("Using MoRIIO backend: FABRIC (UALink)")
-            self.moriio_engine.create_backend(
-                BackendType.FABRIC, FabricBackendConfig()
-            )
+            self.moriio_engine.create_backend(BackendType.FABRIC, FabricBackendConfig())
         else:
             logger.info(
                 "Using MoRIIO backend: RDMA "

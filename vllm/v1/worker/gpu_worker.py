@@ -444,6 +444,7 @@ class Worker(WorkerBase):
         # fabric handles for UALink cross-node transfers.
         if tag == "kv_cache" and self._needs_fabric_kv_cache():
             from mori.io.fabric_allocator import fabric_mem_pool
+
             return fabric_mem_pool()
 
         if (
