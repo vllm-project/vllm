@@ -121,6 +121,7 @@ class KimiK3DSAIndexerKNorm(nn.Module):
         return F.layer_norm(x, self.normalized_shape, weight, bias, self.eps)
 
 
+@eager_break_during_capture
 def _indexer(
     hidden: torch.Tensor,
     q: torch.Tensor,
