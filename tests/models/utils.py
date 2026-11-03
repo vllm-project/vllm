@@ -414,6 +414,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
@@ -580,6 +583,9 @@ def dummy_hf_overrides(
                 "num_hidden_layers": 1,
             }
         )
+
+        if model_arch == "Step5ForConditionalGeneration":
+            vision_config.update({"layers": 1})
 
         # Keep per-layer metadata consistent with the reduced layer count.
         if layer_types := getattr(vision_config, "layer_types", None):

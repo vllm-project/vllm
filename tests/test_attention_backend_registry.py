@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
 
 from vllm.platforms.interface import DeviceCapability
@@ -68,6 +69,48 @@ class CustomMambaAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls():
         """Mock builder class."""
+        return None
+
+
+class StringDecoratorAttentionBackend(AttentionBackend):
+    """Mock backend defined at module level so get_class() can resolve
+    the auto-generated class path (local classes are not importable)."""
+
+    @staticmethod
+    def get_name():
+        return "DECORATED"
+
+    @staticmethod
+    def get_impl_cls():
+        return CustomAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        return None
+
+    @staticmethod
+    def get_required_kv_cache_layout():
+        return None
+
+
+class StringDecoratorMambaBackend(AttentionBackend):
+    """Mock mamba backend defined at module level so get_class() can
+    resolve the auto-generated class path."""
+
+    @staticmethod
+    def get_name():
+        return "DECORATED"
+
+    @staticmethod
+    def get_impl_cls():
+        return CustomMambaAttentionImpl
+
+    @staticmethod
+    def get_builder_cls():
+        return None
+
+    @staticmethod
+    def get_required_kv_cache_layout():
         return None
 
 
@@ -178,3 +221,101 @@ def test_register_custom_mamba_backend_with_class_path():
     backend_cls = MambaAttentionBackendEnum.CUSTOM.get_class()
     assert backend_cls.get_name() == "CUSTOM_MAMBA"
     assert backend_cls.get_impl_cls() == CustomMambaAttentionImpl
+
+
+@pytest.fixture(params=[AttentionBackendEnum, MambaAttentionBackendEnum])
+def _enum_cls(request):
+    return request.param
+
+
+def _remove_dynamic_member(enum_cls, member):
+    value = member.value
+    name = member.name
+    enum_cls._member_map_.pop(name, None)
+    enum_cls._member_names_.remove(name)
+    delattr(enum_cls, name)
+    if enum_cls._value2member_map_.get(value) is member:
+        del enum_cls._value2member_map_[value]
+
+
+def test_register_dynamic_enum_member(_enum_cls):
+    backend_path = {
+        AttentionBackendEnum: (
+            "tests.test_attention_backend_registry.CustomAttentionBackend"
+        ),
+        MambaAttentionBackendEnum: (
+            "tests.test_attention_backend_registry.CustomMambaAttentionBackend"
+        ),
+    }[_enum_cls]
+
+    member = _enum_cls.register("DYNAMIC_TEST", backend_path)
+    assert member.name == "DYNAMIC_TEST"
+    assert member.value == backend_path
+    assert member is _enum_cls.DYNAMIC_TEST
+    assert _enum_cls["DYNAMIC_TEST"] is member
+    _remove_dynamic_member(_enum_cls, member)
+
+
+def test_register_dynamic_enum_member_duplicate_raises(_enum_cls):
+    _enum_cls.register("DUP_TEST", "some.module.Class")
+    with pytest.raises(ValueError, match="already exists"):
+        _enum_cls.register("DUP_TEST", "other.module.OtherClass")
+    _remove_dynamic_member(_enum_cls, _enum_cls.DUP_TEST)
+
+
+def test_register_dynamic_enum_member_reserved_name_raises(_enum_cls):
+    with pytest.raises(ValueError, match="Invalid or reserved backend name"):
+        _enum_cls.register("get_path", "some.module.Class")
+
+
+@pytest.fixture(
+    params=[
+        pytest.param((AttentionBackendEnum, False), id="attention"),
+        pytest.param((MambaAttentionBackendEnum, True), id="mamba"),
+    ]
+)
+def _enum_is_mamba(request):
+    return request.param
+
+
+def _backend_path(enum_cls):
+    if enum_cls is AttentionBackendEnum:
+        return "tests.test_attention_backend_registry.CustomAttentionBackend"
+    return "tests.test_attention_backend_registry.CustomMambaAttentionBackend"
+
+
+def test_register_backend_with_string_name_direct(_enum_is_mamba):
+    enum_cls, is_mamba = _enum_is_mamba
+    path = _backend_path(enum_cls)
+    register_backend("STRING_DIRECT", path, is_mamba=is_mamba)
+
+    member = enum_cls.STRING_DIRECT
+    assert member.is_overridden()
+    assert member.get_path() == path
+    expected = "CUSTOM" if not is_mamba else "CUSTOM_MAMBA"
+    assert member.get_class().get_name() == expected
+    member.clear_override()
+    _remove_dynamic_member(enum_cls, member)
+
+
+def test_register_backend_with_string_name_decorator(_enum_is_mamba):
+    enum_cls, is_mamba = _enum_is_mamba
+    # The decorated class must be module-level: the decorator derives a
+    # class path from it, and get_class() re-imports that path. A class
+    # defined inside this test would have a non-importable <locals> path.
+    decorated_cls = (
+        StringDecoratorMambaBackend if is_mamba else StringDecoratorAttentionBackend
+    )
+
+    result = register_backend("STRING_DECORATOR", is_mamba=is_mamba)(decorated_cls)
+    assert result is decorated_cls
+
+    member = enum_cls.STRING_DECORATOR
+    assert member.is_overridden()
+    assert member.get_path() == (
+        f"{decorated_cls.__module__}.{decorated_cls.__qualname__}"
+    )
+    assert member.get_class() is decorated_cls
+    assert member.get_class().get_name() == "DECORATED"
+    member.clear_override()
+    _remove_dynamic_member(enum_cls, member)

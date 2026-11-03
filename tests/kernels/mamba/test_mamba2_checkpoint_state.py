@@ -114,23 +114,27 @@ def test_checkpoint_does_not_perturb_the_final_state():
     )
 
 
+@pytest.mark.parametrize("spec_slots", [0, 3])
 @pytest.mark.parametrize("dim_first", [True, False])
-def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first):
+def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slots):
     """The store reads the checkpoint row out of every chunk state.
 
     Row 0 checkpoints 32 tokens in, its state being chunk 3 rather than the
     program's own row, so the store only passes if ``chunk_idx`` is used.
     Row 1 declines and must write nothing. The conv input is a column slice of
     a wider projection, the SD conv layout is a transposed view, and SSM rows
-    are padded pages, matching the strides the mixer passes.
+    are padded pages, matching the strides the mixer passes. Spec decoding
+    widens the conv state, and the store must still fill only the first
+    ``state_len`` slots with the newest inputs.
     """
     dim, state_len, heads, head_dim, d_state = 16, 4, 2, 4, 8
     projection = torch.randn(64, dim + 8, device=DEVICE)
     conv_input = projection[:, :dim]
+    num_slots = state_len + spec_slots
     if dim_first:
-        conv_state = torch.zeros(3, dim, state_len, device=DEVICE)
+        conv_state = torch.zeros(3, dim, num_slots, device=DEVICE)
     else:
-        conv_state = torch.zeros(3, state_len, dim, device=DEVICE).transpose(-1, -2)
+        conv_state = torch.zeros(3, num_slots, dim, device=DEVICE).transpose(-1, -2)
     varlen_states = torch.randn(5, heads, head_dim, d_state, device=DEVICE)
     # Blocks are pages holding more than the SSM state, so rows are padded.
     row = heads * head_dim * d_state
@@ -152,12 +156,14 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first):
         varlen_states,
         ssm_state,
         torch.tensor([0, 40, 64], dtype=torch.int32, device=DEVICE),
+        state_len=state_len,
     )
 
     exact = dict(rtol=0, atol=0)
     torch.testing.assert_close(
-        conv_state[2], conv_input[32 - state_len : 32].T, **exact
+        conv_state[2, :, :state_len], conv_input[32 - state_len : 32].T, **exact
     )
+    assert not conv_state[2, :, state_len:].any(), "wrote into the spec slots"
     torch.testing.assert_close(ssm_state[2], varlen_states[3], **exact)
     assert not conv_state[:2].any() and not ssm_storage[:2].any()
     assert not ssm_storage[:, row:].any(), "wrote into the page padding"

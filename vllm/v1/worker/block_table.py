@@ -29,24 +29,16 @@ logger = init_logger(__name__)
 def get_block_table_width(
     max_num_blocks: int,
     block_size: int,
-    kernel_block_size: int | None = None,
     *,
     token_alignment: int | None = 128,
 ) -> int:
-    """Return the width after optional alignment and virtual block splitting."""
-    if kernel_block_size is None:
-        kernel_block_size = block_size
-    if block_size % kernel_block_size != 0:
-        raise ValueError(
-            f"kernel_block_size {kernel_block_size} must divide "
-            f"block_size {block_size} evenly"
-        )
+    """Return the width after optional alignment."""
     if token_alignment is not None:
         if token_alignment <= 0:
             raise ValueError("token_alignment must be positive")
         block_alignment = token_alignment // math.gcd(token_alignment, block_size)
         max_num_blocks = cdiv(max_num_blocks, block_alignment) * block_alignment
-    return max_num_blocks * block_size // kernel_block_size
+    return max_num_blocks
 
 
 class SlotMappingMode(Enum):
@@ -63,7 +55,6 @@ class BlockTable:
         max_num_batched_tokens: int,
         pin_memory: bool,
         device: torch.device,
-        kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
         slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
     ):
@@ -74,9 +65,6 @@ class BlockTable:
         max_num_batched_tokens: Maximum number of tokens in a batch.
         pin_memory: Whether to pin memory for faster GPU transfers.
         device: Target device for the block table.
-        kernel_block_size: The block_size of underlying attention kernel.
-            Will be the same as `block_size` if `block_size` is supported
-            by the attention kernel.
         slot_mapping_mode: How this cache group maps scheduled tokens to
             cache slots. Mamba-like state caches do not use token slot
             mappings and should use SlotMappingMode.NONE.
@@ -86,30 +74,8 @@ class BlockTable:
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
-        self.kv_cache_block_size = block_size
-
-        if kernel_block_size == block_size:
-            # Standard case: allocation and computation use same block size
-            # No block splitting needed, direct mapping
-            self.block_size = block_size
-            self.blocks_per_kv_block = 1
-            self.use_hybrid_blocks = False
-        else:
-            # Hybrid case: allocation block size differs from kernel block size
-            # Memory blocks are subdivided to match kernel requirements
-            # Example: 32-token memory blocks with 16-token kernel blocks
-            # → Each memory block corresponds to 2 kernel blocks
-            if block_size % kernel_block_size != 0:
-                raise ValueError(
-                    f"kernel_block_size {kernel_block_size} must divide "
-                    f"kv_manager_block_size size {block_size} evenly"
-                )
-
-            self.block_size = kernel_block_size
-            self.blocks_per_kv_block = block_size // kernel_block_size
-            self.use_hybrid_blocks = True
-
-        self.max_num_blocks_per_req = max_num_blocks_per_req * self.blocks_per_kv_block
+        self.block_size = block_size
+        self.max_num_blocks_per_req = max_num_blocks_per_req
 
         self.block_table = self._make_buffer(
             self.max_num_reqs, self.max_num_blocks_per_req, dtype=torch.int32
@@ -119,13 +85,6 @@ class BlockTable:
         self.slot_mapping = self._make_buffer(
             self.max_num_batched_tokens, dtype=torch.int64
         )
-
-        if self.use_hybrid_blocks:
-            self._kernel_block_arange = np.arange(0, self.blocks_per_kv_block).reshape(
-                1, -1
-            )
-        else:
-            self._kernel_block_arange = None
 
         try:
             self.pcp_world_size = get_pcp_group().world_size
@@ -145,13 +104,11 @@ class BlockTable:
         self.slot_mapping_mode = slot_mapping_mode
         if self.slot_mapping_mode == SlotMappingMode.TOKEN_TO_KV_SLOT:
             _COMPUTE_SLOT_MAPPING_KERNEL.register_warmup(
-                kv_cache_block_size=self.kv_cache_block_size,
-                blocks_per_kv_block=self.blocks_per_kv_block,
+                kv_cache_block_size=self.block_size,
                 total_cp_world_size=self.dcp_world_size,
                 total_cp_rank=self.dcp_rank,
                 cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 block_table_stride=self.block_table.gpu.stride(0),
-                block_size=self.block_size,
             )
 
     def append_row(
@@ -161,11 +118,6 @@ class BlockTable:
     ) -> None:
         if not block_ids:
             return
-
-        if self.use_hybrid_blocks:
-            block_ids = self.map_to_kernel_blocks(
-                np.array(block_ids), self.blocks_per_kv_block, self._kernel_block_arange
-            )
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
@@ -219,10 +171,8 @@ class BlockTable:
             positions,
             self.block_table.gpu,
             self.block_table.gpu.stride(0),
-            self.block_size,
             self.slot_mapping.gpu,
-            self.kv_cache_block_size,
-            self.blocks_per_kv_block,
+            self.block_size,
             self.dcp_world_size,
             self.dcp_rank,
             self.cp_kv_cache_interleave_size,
@@ -234,37 +184,6 @@ class BlockTable:
     def clear(self) -> None:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
-
-    @staticmethod
-    def map_to_kernel_blocks(
-        kv_manager_block_ids: np.ndarray,
-        blocks_per_kv_block: int,
-        kernel_block_arange: np.ndarray,
-    ) -> np.ndarray:
-        """Convert kv_manager_block_id IDs to kernel block IDs.
-
-        Example:
-            # kv_manager_block_ids: 32 tokens,
-            # Kernel block size: 16 tokens
-            # blocks_per_kv_block = 2
-            >>> kv_manager_block_ids = np.array([0, 1, 2])
-            >>> Result: [0, 1, 2, 3, 4, 5]
-
-            # Each kv_manager_block_id maps to 2 kernel block id:
-            # kv_manager_block_id 0 → kernel block id [0, 1]
-            # kv_manager_block_id 1 → kernel block id [2, 3]
-            # kv_manager_block_id 2 → kernel block id [4, 5]
-
-        """
-        if blocks_per_kv_block == 1:
-            return kv_manager_block_ids
-
-        kernel_block_ids = (
-            kv_manager_block_ids.reshape(-1, 1) * blocks_per_kv_block
-            + kernel_block_arange
-        )
-
-        return kernel_block_ids.reshape(-1)
 
     def get_device_tensor(self, num_reqs: int) -> torch.Tensor:
         """Returns the device tensor of the block table."""
@@ -296,16 +215,10 @@ class MultiGroupBlockTable:
         pin_memory: bool,
         device: torch.device,
         block_sizes: list[int],
-        kernel_block_sizes: list[int],
         max_num_blocks: list[int],
         cp_kv_cache_interleave_size: int = 1,
         slot_mapping_modes: list[SlotMappingMode] | None = None,
     ) -> None:
-        if len(kernel_block_sizes) != len(block_sizes):
-            raise ValueError(
-                f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
-                f"must match block_sizes length ({len(block_sizes)})"
-            )
         if slot_mapping_modes is None:
             slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT] * len(block_sizes)
         if len(slot_mapping_modes) != len(block_sizes):
@@ -339,17 +252,11 @@ class MultiGroupBlockTable:
                 max_num_batched_tokens,
                 pin_memory,
                 device,
-                kernel_block_size,
                 cp_kv_cache_interleave_size,
                 slot_mapping_mode=slot_mapping_mode,
             )
-            for (
-                block_size,
-                kernel_block_size,
-                max_num_blocks_per_req,
-                slot_mapping_mode,
-            ) in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks, slot_mapping_modes
+            for block_size, max_num_blocks_per_req, slot_mapping_mode in zip(
+                block_sizes, max_num_blocks, slot_mapping_modes
             )
         ]
 
@@ -403,12 +310,10 @@ class ComputeSlotMappingKernel(
     @dataclass(frozen=True)
     class CompileKey:
         kv_cache_block_size: int
-        blocks_per_kv_block: int
         total_cp_world_size: int
         total_cp_rank: int
         cp_kv_cache_interleave_size: int
         block_table_stride: int
-        block_size: int
 
     @staticmethod
     @triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
@@ -419,10 +324,8 @@ class ComputeSlotMappingKernel(
         positions_ptr,  # [num_tokens], int64
         block_table_ptr,  # [max_num_reqs, max_num_blocks_per_req], int32 (flat)
         block_table_stride,  # max_num_blocks_per_req
-        block_size,
         slot_mapping_ptr,  # [max_num_tokens], int64
         KV_CACHE_BLOCK_SIZE: tl.constexpr,
-        BLOCKS_PER_KV_BLOCK: tl.constexpr,
         TOTAL_CP_WORLD_SIZE: tl.constexpr,
         TOTAL_CP_RANK: tl.constexpr,
         CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
@@ -463,17 +366,12 @@ class ComputeSlotMappingKernel(
                 virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
             )
 
-            block_indices = (
-                virtual_block_indices * BLOCKS_PER_KV_BLOCK
-                + local_block_offsets // block_size
-            )
             block_numbers = tl.load(
-                block_table_ptr + row_offset + block_indices,
+                block_table_ptr + row_offset + virtual_block_indices,
                 mask=mask & is_local,
                 other=0,
             ).to(tl.int64)
-            slot_offsets = local_block_offsets % block_size
-            slot_ids = block_numbers * block_size + slot_offsets
+            slot_ids = block_numbers * KV_CACHE_BLOCK_SIZE + local_block_offsets
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
             tl.store(slot_mapping_ptr + offsets, slot_ids, mask=mask)
 
@@ -481,13 +379,11 @@ class ComputeSlotMappingKernel(
         self,
         *,
         block_table_stride: int,
-        block_size: int,
         **compile_key_fields: int,
     ) -> CompileKey:
         return self.CompileKey(
             **compile_key_fields,
             block_table_stride=triton_scalar_specialization_rep(block_table_stride),
-            block_size=triton_scalar_specialization_rep(block_size),
         )
 
     def get_warmup_keys(self, **dispatch_kwargs: int) -> list[CompileKey]:
@@ -507,10 +403,8 @@ class ComputeSlotMappingKernel(
                 shape=(1, compile_key.block_table_stride),
             ),
             block_table_stride=compile_key.block_table_stride,
-            block_size=compile_key.block_size,
             slot_mapping=int64_ptr,
             kv_cache_block_size=compile_key.kv_cache_block_size,
-            blocks_per_kv_block=compile_key.blocks_per_kv_block,
             total_cp_world_size=compile_key.total_cp_world_size,
             total_cp_rank=compile_key.total_cp_rank,
             cp_kv_cache_interleave_size=compile_key.cp_kv_cache_interleave_size,
@@ -526,17 +420,14 @@ class ComputeSlotMappingKernel(
         positions: torch.Tensor,
         block_table: torch.Tensor,
         block_table_stride: int,
-        block_size: int,
         slot_mapping: torch.Tensor,
         kv_cache_block_size: int,
-        blocks_per_kv_block: int,
         total_cp_world_size: int,
         total_cp_rank: int,
         cp_kv_cache_interleave_size: int,
     ) -> LaunchSpec:
         return (num_reqs + 1,), dict(
             KV_CACHE_BLOCK_SIZE=kv_cache_block_size,
-            BLOCKS_PER_KV_BLOCK=blocks_per_kv_block,
             TOTAL_CP_WORLD_SIZE=total_cp_world_size,
             TOTAL_CP_RANK=total_cp_rank,
             CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
