@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
     MemoryRegion,
     RangeRequest,
     TransferBackend,
