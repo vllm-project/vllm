@@ -345,15 +345,18 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     return out
 
 
-def _decode_chunk_ranges(rows: int, width: int, budget: int) -> list[tuple[int, int]]:
-    """Partition independent Q rows under a BF16 payload budget."""
+def _decode_chunk_ranges(
+    rows: int, width: int, budget: int, itemsize: int
+) -> list[tuple[int, int]]:
+    """Partition independent Q rows under a payload budget of logits whose
+    elements take ``itemsize`` bytes."""
     if budget < 0:
         raise ValueError("Decode logits budget must be nonnegative")
-    if not rows or not budget or rows * width * 2 <= budget:
+    if not rows or not budget or rows * width * itemsize <= budget:
         return []
-    limit = budget // (2 * width) // 16 * 16
+    limit = budget // (itemsize * width) // 16 * 16
     if limit < 16:
-        raise ValueError("Decode logits budget must fit at least 16 BF16 rows")
+        raise ValueError("Decode logits budget must fit at least 16 logits rows")
     units = (rows + 15) // 16
     count = (units + limit // 16 - 1) // (limit // 16)
     base, extra = divmod(units, count)
@@ -381,6 +384,7 @@ def _varlen_decode_rows(
     candidate_blocks: torch.Tensor | None,
     candidate_block_size: int,
     candidate_write: bool,
+    logits_dtype: torch.dtype,
     start: int,
     end: int,
 ) -> None:
@@ -402,6 +406,7 @@ def _varlen_decode_rows(
         decode.block_table[start:end],
         schedule,
         max_model_len=max_model_len,
+        logits_dtype=logits_dtype,
         indices=indices,
     )
     row_ends = seq_lens.view(-1)
@@ -660,9 +665,10 @@ def sparse_attn_indexer(
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
         decode_copy_bytes = copy_bytes if fp32_decode_logits else 0
         if chunk_decode:
-            # A decode chunk holds at most the budget, read as BF16 by top-k.
+            # A decode chunk holds at most the budget, read in place by top-k.
             max_decode_tokens = min(
-                max_decode_tokens, decode_budget // (2 * max_model_len)
+                max_decode_tokens,
+                decode_budget // (logits_dtype.itemsize * max_model_len),
             )
             decode_copy_bytes = 0
         prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
@@ -1091,11 +1097,17 @@ def sparse_attn_indexer(
             assert decode_metadata.global_seq_lens is None
             assert not needs_padded_path
             ranges = _decode_chunk_ranges(
-                num_padded_tokens, max_model_len, decode_budget
+                num_padded_tokens,
+                max_model_len,
+                decode_budget,
+                logits_dtype.itemsize,
             )
             if ranges:
                 padded_q_scale, decode_weights = mqa_logits_mx_inputs(
-                    padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
+                    padded_q_quant_cast,
+                    padded_q_scale,
+                    weights[:num_padded_tokens],
+                    logits_dtype,
                 )
                 for start, end in ranges:
                     _varlen_decode_rows(
@@ -1112,6 +1124,7 @@ def sparse_attn_indexer(
                         candidate_blocks,
                         candidate_block_size,
                         candidate_write,
+                        logits_dtype,
                         start,
                         end,
                     )
