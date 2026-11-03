@@ -3,6 +3,7 @@
 
 from io import BytesIO
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pybase64
@@ -10,19 +11,33 @@ import torch
 from PIL import Image
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.utils.serial_utils import tensor2base64
 from vllm.utils.sparse_utils import (
     check_sparse_tensor_invariants_threadsafe,
     safe_to_dense,
 )
 
-from ..image import convert_image_mode, normalize_image, open_image
+from ..image import (
+    can_decode_with_torchcodec,
+    convert_image_mode,
+    decode_image_torchcodec,
+    has_torchcodec_image_decoding,
+    normalize_image,
+    open_image,
+)
 from .base import MediaDecodedBudget, MediaIO, MediaWithBytes
+
+logger = init_logger(__name__)
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
+# Image decoding backends selectable via
+# `--media-io-kwargs '{"image": {"image_backend": ...}}'`.
+IMAGE_BACKENDS = ("pil", "torchcodec")
 
-class ImageMediaIO(MediaIO[Image.Image]):
+
+class ImageMediaIO(MediaIO[Image.Image | torch.Tensor]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -41,6 +56,23 @@ class ImageMediaIO(MediaIO[Image.Image]):
         # (i.e. no conversion, alpha channel is preserved as-is).
         self.image_mode = image_mode
         self.decoded_budget = decoded_budget
+
+        # The torchcodec backend returns CHW uint8 tensors instead of PIL
+        # images, for the images it supports.
+        backend = kwargs.pop("image_backend", "pil")
+        if backend not in IMAGE_BACKENDS:
+            raise ValueError(
+                f"Unknown image_backend {backend!r}. "
+                f"Available backends: {list(IMAGE_BACKENDS)}"
+            )
+        if backend == "torchcodec" and not has_torchcodec_image_decoding():
+            logger.warning_once(
+                "image_backend='torchcodec' requires torchcodec >= 0.16; "
+                "falling back to Pillow."
+            )
+            backend = "pil"
+        self.image_backend = backend
+
         # `kwargs` contains custom arguments from
         # --media-io-kwargs for this modality, merged with
         # per-request runtime media_io_kwargs via merge_kwargs().
@@ -78,8 +110,18 @@ class ImageMediaIO(MediaIO[Image.Image]):
             return image
         return convert_image_mode(image, self.image_mode, self.rgba_background_color)
 
-    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
+    def _io_config(self, mode_converted: bool) -> dict[str, Any] | None:
+        if not mode_converted:
+            return None
+        return {
+            "image_mode": self.image_mode,
+            "rgba_background_color": self.rgba_background_color,
+        }
+
+    def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image | torch.Tensor]:
         try:
+            # Opening only parses the header, so the limits below are checked
+            # before any pixel data is decoded.
             image = open_image(BytesIO(data))
             w, h = image.size
             max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
@@ -91,6 +133,14 @@ class ImageMediaIO(MediaIO[Image.Image]):
                 )
             if self.decoded_budget is not None:
                 self.decoded_budget.charge(w * h * 4)
+            if (
+                self.image_backend == "torchcodec"
+                and self.image_mode == "RGB"
+                and can_decode_with_torchcodec(image, data)
+                and (tensor := decode_image_torchcodec(data)) is not None
+            ):
+                io_config = self._io_config(image.mode != self.image_mode)
+                return MediaWithBytes(tensor, data, io_config)
             image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
@@ -106,18 +156,14 @@ class ImageMediaIO(MediaIO[Image.Image]):
         ) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
-        io_config = None
-        if converted is not image:
-            io_config = {
-                "image_mode": self.image_mode,
-                "rgba_background_color": self.rgba_background_color,
-            }
-        return MediaWithBytes(converted, data, io_config)
+        return MediaWithBytes(converted, data, self._io_config(converted is not image))
 
-    def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
+    def load_base64(
+        self, media_type: str, data: str
+    ) -> MediaWithBytes[Image.Image | torch.Tensor]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
-    def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
+    def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image | torch.Tensor]:
         return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(

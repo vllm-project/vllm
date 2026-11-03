@@ -1302,7 +1302,7 @@ torchaudio==2.11.0+cu130
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
-torchcodec==0.14.0+cu130
+torchcodec==0.17.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
