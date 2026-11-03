@@ -103,16 +103,21 @@ def _shared_dp_dma_process(
         _make_kv_cache_config,
         _make_vllm_config,
     )
-    from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.distributed.parallel_state import (
+        GroupCoordinator,
+        destroy_distributed_environment,
+        init_distributed_environment,
+    )
     from vllm.v1.core.kv_cache_utils import BlockHashWithGroupId
     from vllm.v1.simple_kv_offload.shared_block_pool import SharedCPUBlockPool
 
     torch.accelerator.set_device_index(0)
-    torch.distributed.init_process_group(
-        "gloo",
-        init_method=f"file://{rendezvous}",
+    init_distributed_environment(
         world_size=2,
         rank=rank,
+        local_rank=0,
+        distributed_init_method=f"file://{rendezvous}",
+        backend="gloo",
         timeout=timedelta(seconds=60),
     )
     group = GroupCoordinator([[0, 1]], 0, "gloo", use_device_communicator=False)
@@ -121,21 +126,19 @@ def _shared_dp_dma_process(
     config.parallel_config.data_parallel_size = 2
     if mismatch and rank == 1:
         config.cache_config.prefix_caching_hash_algo = "sha256_cbor"
+    kv_cache_config = _make_kv_cache_config(4, num_groups=2)
     worker = SimpleCPUOffloadWorker(
         config,
-        _make_kv_cache_config(4, num_groups=2),
+        kv_cache_config,
         _BYTES_PER_BLOCK * 8,
         cpu_offload_shared=True,
     )
-    gpu_caches = {
-        f"layer_{layer}": torch.full(
-            (4, _BYTES_PER_BLOCK),
-            31 + rank + layer * 10,
-            dtype=torch.int8,
-            device="cuda",
-        )
-        for layer in range(2)
-    }
+    gpu_caches = allocate_kv_cache(
+        kv_cache_config, torch.device("cuda"), KVCacheLayout.LBNHC
+    )
+    for layer, (name, cache) in enumerate(gpu_caches.items()):
+        gpu_caches[name] = cache.view(torch.int8).view(4, _BYTES_PER_BLOCK)
+        gpu_caches[name].fill_(31 + rank + layer * 10)
     pool = None
     try:
         with patch(
@@ -218,7 +221,7 @@ def _shared_dp_dma_process(
         if pool is not None:
             pool.close()
         group.destroy()
-        torch.distributed.destroy_process_group()
+        destroy_distributed_environment()
 
 
 @pytest.mark.parametrize(
