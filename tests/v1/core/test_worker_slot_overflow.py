@@ -202,6 +202,7 @@ def test_reset_prefix_cache_same_step_resume_purges_then_re_adds():
 
     out = scheduler.schedule()
     # A is force-preempted AND resumed in this one step.
+    assert out.preempted_req_ids is not None
     assert "A" in out.preempted_req_ids
     assert "A" in [r.req_id for r in out.scheduled_new_reqs]
     # WorkerSlots mirrors finish-before-add: purge frees the slot, re-add fills

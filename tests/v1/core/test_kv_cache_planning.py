@@ -44,6 +44,7 @@ from vllm.v1.hisparse.layout import (
     get_hisparse_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     CircularBufferSpec,
     FullAttentionSpec,
@@ -138,15 +139,19 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
             (name in host_layers) == tensor.host_resident for name in tensor.layers
         )
     host_tensor = next(t for t in cache_config.kv_cache_tensors if t.host_resident)
-    host_spec = host_group.kv_cache_spec.kv_cache_specs[host_tensor.layers[0]]
+    host_unified_spec = host_group.kv_cache_spec
+    indexer_unified_spec = indexer_group.kv_cache_spec
+    assert isinstance(host_unified_spec, UniformTypeKVCacheSpecs)
+    assert isinstance(indexer_unified_spec, UniformTypeKVCacheSpecs)
+    host_spec = host_unified_spec.kv_cache_specs[host_tensor.layers[0]]
     assert host_tensor.block_stride == host_spec.page_size_bytes
     assert host_tensor.layer_stride == (
         host_spec.page_size_bytes * cache_config.hisparse_host_num_blocks
     )
-    assert host_group.kv_cache_spec.block_size == gpu_block_size
-    assert indexer_group.kv_cache_spec.block_size == gpu_block_size
-    host_specs = host_group.kv_cache_spec.kv_cache_specs
-    gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
+    assert host_unified_spec.block_size == gpu_block_size
+    assert indexer_unified_spec.block_size == gpu_block_size
+    host_specs = host_unified_spec.kv_cache_specs
+    gpu_indexer_specs = indexer_unified_spec.kv_cache_specs
     assert set(host_specs) == {"model.layers.0.self_attn"}
     assert set(gpu_indexer_specs) == {"model.layers.0.self_attn.indexer"}
     assert indexer_group.kv_cache_spec.prefix_cacheable
@@ -1741,6 +1746,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
     assert unified_specs["target_attn"] == target_spec
     unified_draft_spec = unified_specs["draft_attn"]
+    assert isinstance(unified_draft_spec, AttentionSpec)
     assert unified_draft_spec.block_size == draft_spec.block_size
     assert unified_draft_spec.real_page_size_bytes == draft_spec.real_page_size_bytes
     assert unified_draft_spec.page_size_padded == target_spec.page_size_bytes
@@ -1854,13 +1860,17 @@ def test_unify_kv_cache_spec_page_size_mamba():
         }
     )
     # Mamba page is padded; block_size (caching granularity) is unchanged.
-    assert unified["mamba_layer"].page_size_bytes == 32768
-    assert unified["mamba_layer"].page_size_padded == 32768
-    assert unified["mamba_layer"].block_size == mamba_spec.block_size
+    unified_mamba = unified["mamba_layer"]
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
+    assert unified_mamba.block_size == mamba_spec.block_size
     # Attention layer with smaller page still unifies by scaling block_size.
-    assert unified["main_attn_layer"].page_size_bytes == 32768
-    assert unified["main_attn_layer"].block_size == 2 * main_attn_spec.block_size
-    assert unified["main_attn_layer"].page_size_padded is None
+    unified_main = unified["main_attn_layer"]
+    assert isinstance(unified_main, AttentionSpec)
+    assert unified_main.page_size_bytes == 32768
+    assert unified_main.block_size == 2 * main_attn_spec.block_size
+    assert unified_main.page_size_padded is None
     # Layer already at max page size is unchanged.
     assert unified["draft_attn_layer"] == draft_attn_spec
 
@@ -1876,8 +1886,10 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": draft_attn_spec,
         }
     )
-    assert unified["mamba_layer"].page_size_bytes == 32768
-    assert unified["mamba_layer"].page_size_padded == 32768
+    unified_mamba = unified["mamba_layer"]
+    assert isinstance(unified_mamba, MambaSpec)
+    assert unified_mamba.page_size_bytes == 32768
+    assert unified_mamba.page_size_padded == 32768
 
     # 3. Mamba page that does not evenly divide the maximum page size is
     # padded as well (the divisibility constraint only applies to block_size
@@ -1902,9 +1914,11 @@ def test_unify_kv_cache_spec_page_size_mamba():
             "draft_attn_layer": draft_attn_spec,  # 32768
         }
     )
-    assert unified["attn_layer"].page_size_padded == 32768
-    assert unified["attn_layer"].page_size_bytes == 32768
-    assert unified["attn_layer"].block_size == 24
+    unified_attn = unified["attn_layer"]
+    assert isinstance(unified_attn, AttentionSpec)
+    assert unified_attn.page_size_padded == 32768
+    assert unified_attn.page_size_bytes == 32768
+    assert unified_attn.block_size == 24
 
     # 5. Uniform page sizes are returned unchanged.
     specs = {

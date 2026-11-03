@@ -58,12 +58,13 @@ def test_reset_prefix_cache_e2e(monkeypatch):
         step_id += 1
 
     for i in range(len(PROMPTS)):
-        assert (
-            ground_truth_results["ground_truth_" + str(i)].outputs[0].text
-            == preempted_results["preempted_" + str(i)].outputs[0].text
-        ), (
+        ground_truth_outputs = ground_truth_results["ground_truth_" + str(i)].outputs
+        preempted_outputs = preempted_results["preempted_" + str(i)].outputs
+        assert isinstance(ground_truth_outputs, list)
+        assert isinstance(preempted_outputs, list)
+        assert ground_truth_outputs[0].text == preempted_outputs[0].text, (
             f"ground_truth_results['ground_truth_{i}'].outputs[0].text="
-            f"{ground_truth_results['ground_truth_' + str(i)].outputs[0].text} "
+            f"{ground_truth_outputs[0].text} "
             f"preempted_results['preempted_{i}'].outputs[0].text="
-            f"{preempted_results['preempted_' + str(i)].outputs[0].text}"
+            f"{preempted_outputs[0].text}"
         )

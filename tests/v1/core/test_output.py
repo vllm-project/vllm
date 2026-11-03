@@ -123,6 +123,7 @@ def test_strip_covered_mm_data_mrope() -> None:
     assert stripped[1].data is not None
     assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
     # original list is not mutated
+    assert covered.data is not None
     assert set(covered.data.keys()) == {"pixel_values", "image_grid_thw"}
 
 

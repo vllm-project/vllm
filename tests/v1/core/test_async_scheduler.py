@@ -271,9 +271,9 @@ def test_prefix_caching_for_multi_turn():
         block_size=BLOCK_SIZE,
     )
     for i, req in enumerate(next_turn_requests):
-        req.prompt_token_ids = requests[i].prompt_token_ids + list(
-            requests[i].output_token_ids
-        )
+        prompt_token_ids = requests[i].prompt_token_ids
+        assert prompt_token_ids is not None
+        req.prompt_token_ids = prompt_token_ids + list(requests[i].output_token_ids)
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
@@ -324,7 +324,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.num_spec_tokens = 0
-    scheduler.make_stats = Mock(return_value=None)
+    scheduler.make_stats = Mock(return_value=None)  # type: ignore[method-assign]
     scheduler.max_model_len = 128
 
     def free_request(req, delay_free_blocks=False):
@@ -332,7 +332,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
         scheduler.requests.pop(req.request_id, None)
         return None, None
 
-    scheduler._free_request = Mock(side_effect=free_request)
+    scheduler._free_request = Mock(  # type: ignore[method-assign]
+        side_effect=free_request
+    )
 
     output = SchedulerOutput(
         scheduled_new_reqs=[],
@@ -506,6 +508,7 @@ def _create_async_pp_scheduler(
         block_size=16,
         max_num_batched_tokens=512,
     )
+    assert isinstance(scheduler, AsyncScheduler)
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
@@ -571,7 +574,7 @@ def test_kv_pressure_preemption_with_inflight_output(num_spec: int):
             preempts_with_inflight_output += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     def add_requests(step: int, engine: PipelinedEngine):
         if pending:
@@ -632,7 +635,7 @@ def test_reset_prefix_cache_with_inflight_output_under_kv_pressure(pp_size: int)
             repreempts_with_stale += 1
         return orig_preempt(request, timestamp, **kwargs)
 
-    scheduler._preempt_request = counting_preempt
+    scheduler._preempt_request = counting_preempt  # type: ignore[method-assign]
 
     resets = 0
     reset_steps = {6, 14} if pp_size == 1 else {6, 7, 18, 19}

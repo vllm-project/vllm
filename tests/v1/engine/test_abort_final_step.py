@@ -68,6 +68,7 @@ class DummyKVConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         # Get the status file path from extra config
+        assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
         self.status_file = extra_config.get("status_file")
         # Log that we were initialized

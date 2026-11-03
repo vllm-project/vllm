@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
 from types import MethodType, SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -46,6 +47,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -60,7 +62,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import HiSparseSourceManager
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+from vllm.v1.hisparse.types import SparseKVOffloadCommand
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -307,6 +311,18 @@ def _resident_block_ids(manager: KVCacheManager, request_id: str) -> list[int]:
     return [block.block_id for block in resident.get_residency_row(request_id)]
 
 
+def _build_offload_command(manager: KVCacheManager) -> SparseKVOffloadCommand:
+    command = get_hisparse_coordinator(manager).build_offload_command()
+    assert command is not None
+    return command
+
+
+def _host_manager(manager: KVCacheManager) -> HiSparseSourceManager:
+    host_manager = get_hisparse_coordinator(manager).host_manager
+    assert host_manager is not None
+    return host_manager
+
+
 def test_hisparse_does_not_write_back_reprefillable_tokens():
     """Multi-module MTP re-prefills the last tokens, so they are not final."""
     manager = make_hisparse_kv_cache_manager(32, 16, num_prefill_lookahead=3)
@@ -314,7 +330,7 @@ def test_hisparse_does_not_write_back_reprefillable_tokens():
         "request", list(range(2 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
     )
     assert _allocate_scheduled(manager, request, 2 * HISPARSE_BLOCK_SIZE)
-    transfers = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    transfers = _build_offload_command(manager).page_transfers
     assert len(transfers) == 1
 
 
@@ -329,6 +345,7 @@ def test_hisparse_builds_dma_row_mirrors_across_pages():
     assert _allocate_scheduled(manager, request, num_new_tokens=32) is not None
     coordinator = get_hisparse_coordinator(manager)
     resident_blocks = coordinator.resident_managers[0].req_to_blocks[request.request_id]
+    assert coordinator.host_manager is not None
     host_blocks = coordinator.host_manager.req_to_blocks[request.request_id]
 
     mirrors = coordinator.build_row_mirrors([(request.request_id, 14, 4)])
@@ -502,7 +519,7 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert (
         _allocate_scheduled(manager, original, num_new_tokens=len(tokens)) is not None
     )
-    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    spills = _build_offload_command(manager).page_transfers
     spill_counts = {spill.transfer_id: 1 for spill in spills}
     get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
     _, indexer_blocks, _, _ = manager.get_blocks(original.request_id).blocks
@@ -531,9 +548,9 @@ def test_hisparse_host_prefix_can_be_completed_by_indexer_offload():
     assert len(hot) == 2
     assert 0 not in _resident_block_ids(manager, resumed.request_id)
     coordinator = get_hisparse_coordinator(manager)
-    assert not coordinator.build_offload_command().page_transfers
+    assert not _build_offload_command(manager).page_transfers
     coordinator.finish_host_import(resumed.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
+    transfers = _build_offload_command(manager).page_transfers
     assert len(transfers) == 1 and transfers[0].restore
     assert transfers[0].resident_block_ids == (resident[2].block_id,)
 
@@ -549,15 +566,13 @@ def test_hisparse_indexer_offload_is_capped_by_missing_host_prefix():
     assert (
         _allocate_scheduled(manager, original, num_new_tokens=len(tokens)) is not None
     )
-    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    spills = _build_offload_command(manager).page_transfers
     spill_counts = {spill.transfer_id: 1 for spill in spills}
     get_hisparse_coordinator(manager).update_spills(spill_counts, spill_counts)
     host_blocks, _, _, _ = manager.get_blocks(original.request_id).blocks
     evicted_host_id = host_blocks[0].block_id
     manager.free(original)
-    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
-        {evicted_host_id}
-    )
+    _host_manager(manager).block_pool.evict_blocks({evicted_host_id})
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, num_local, _ = manager.get_computed_blocks(resumed)
@@ -623,6 +638,7 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     )
     external, asynchronous = connector.get_num_new_matched_tokens(resumed, local)
     assert external == imported_tokens
+    assert external is not None
     assert asynchronous == (external > 0)
     assert [len(group) for group in blocks.blocks] == [3, 1, 0, 0]
     assert (
@@ -644,9 +660,7 @@ def test_connector_completes_partial_prefix_without_importing_missing_host_kv(
     manager.free(resumed)
 
     # A surviving indexer offload must not make absent host KV look computed.
-    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
-        {missing_host}
-    )
+    _host_manager(manager).block_pool.evict_blocks({missing_host})
     retry = make_request("retry", tokens, HISPARSE_BLOCK_SIZE, sha256)
     _, local, _, _ = Scheduler._get_local_prefix_cache_hit(scheduler, retry)
     assert local == 0
@@ -689,10 +703,10 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null
     coordinator = get_hisparse_coordinator(manager)
-    assert not coordinator.build_offload_command().page_transfers
+    assert not _build_offload_command(manager).page_transfers
 
     coordinator.finish_host_import(request.request_id, failed=False)
-    transfers = coordinator.build_offload_command().page_transfers
+    transfers = _build_offload_command(manager).page_transfers
     assert len(transfers) == 1
     restore = transfers[0]
     assert restore.restore
@@ -729,7 +743,9 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     if num_tokens % HISPARSE_BLOCK_SIZE:
         assert source[-1].block_hash is None
     else:
-        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+        block_hash = source[-1].block_hash
+        assert block_hash is not None
+        assert coordinator.copies[block_hash] == (resident[-1],)
 
 
 def test_hisparse_aborted_tail_restore_retains_both_endpoints():
@@ -741,7 +757,7 @@ def test_hisparse_aborted_tail_restore_retains_both_endpoints():
     host_tail, gpu_tail = source[-1], resident[-1]
     coordinator = get_hisparse_coordinator(manager)
     coordinator.finish_host_import(request.request_id, failed=False)
-    restore = coordinator.build_offload_command().page_transfers[0]
+    restore = _build_offload_command(manager).page_transfers[0]
     manager.free(request)
     assert host_tail.ref_cnt == gpu_tail.ref_cnt == 1
     coordinator.update_spills({restore.transfer_id: 2}, {restore.transfer_id: 1})
@@ -822,7 +838,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
     assert len(blocks[2]) == 2
     assert blocks[3] == []
 
-    spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
+    spills = _build_offload_command(manager).page_transfers
     assert len(spills) == 2
     assert not any(spill.restore for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
@@ -870,11 +886,11 @@ def test_hisparse_materialization_respects_per_step_spill_budget(num_resident_gr
     request = make_request("bounded", tokens, HISPARSE_BLOCK_SIZE, sha256)
 
     assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens)) is not None
-    first = coordinator.build_offload_command().page_transfers
+    first = _build_offload_command(manager).page_transfers
     assert len(first) == 1
 
     coordinator.plan_prefix_materialization(request.request_id, len(tokens))
-    second = coordinator.build_offload_command().page_transfers
+    second = _build_offload_command(manager).page_transfers
     assert len(second) == 1
     assert first[0].transfer_id != second[0].transfer_id
 
@@ -1087,11 +1103,15 @@ def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
     # one, so gating the local request's two pages on the reservation fails.
     scheduler, _ = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
     _add_hisparse_request(scheduler, "import", 6)
-    match_external = scheduler.connector.get_num_new_matched_tokens
-    scheduler.connector.get_num_new_matched_tokens = lambda request, num_computed: (
-        (0, False)
-        if request.request_id == "local"
-        else match_external(request, num_computed)
+    connector = scheduler.connector
+    assert connector is not None
+    match_external = connector.get_num_new_matched_tokens
+    connector.get_num_new_matched_tokens = (  # type: ignore[method-assign]
+        lambda request, num_computed: (
+            (0, False)
+            if request.request_id == "local"
+            else match_external(request, num_computed)
+        )
     )
     local = _add_hisparse_request(scheduler, "local", 2, offset=1000)
     assert local in scheduler.running
@@ -1118,6 +1138,7 @@ def test_hisparse_import_capacity_includes_hits_and_cow(
     if evictable:
         host_pool.free_blocks([hit])
     assert host_pool.get_num_free_blocks() == free_blocks
+    assert coordinator.host_manager is not None
     assert (
         coordinator.host_manager.get_num_blocks_to_allocate(
             "waiting", 32, [hit], 32, local_tokens, 32
@@ -1263,7 +1284,7 @@ def test_hisparse_capacity_query_does_not_require_hot_blocks():
 
 def _publish_hisparse_pages(manager: KVCacheManager) -> None:
     """Ack all planned spills so host pages publish to the prefix cache."""
-    command = get_hisparse_coordinator(manager).build_offload_command()
+    command = _build_offload_command(manager)
     counts = {spill.transfer_id: 1 for spill in command.page_transfers}
     get_hisparse_coordinator(manager).update_spills(counts, counts)
 
@@ -1290,9 +1311,7 @@ def test_hisparse_events_report_host_and_device_placement():
     }
 
     host_block = manager.get_blocks(request.request_id).blocks[0][0]
-    get_hisparse_coordinator(manager).host_manager.block_pool.evict_blocks(
-        {host_block.block_id}
-    )
+    _host_manager(manager).block_pool.evict_blocks({host_block.block_id})
     [removed] = manager.take_events()
     assert isinstance(removed, BlockRemoved)
     assert removed.medium == MEDIUM_CPU
@@ -1476,7 +1495,7 @@ def test_hisparse_cleanup_publishes_only_finalized_terminal_pages(
         _allocate_scheduled(manager, request, 49, num_lookahead_tokens=16) is not None
     )
     host_blocks = list(manager.get_blocks(request.request_id).blocks[0])
-    command = coordinator.build_offload_command()
+    command = _build_offload_command(manager)
     counts = {transfer.transfer_id: 1 for transfer in command.page_transfers}
     assert len(counts) == 2
     request.status = status
@@ -1541,7 +1560,7 @@ def test_hisparse_preempted_prefill_resumes_from_durable_prefix():
     request = make_request("long", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert _allocate_scheduled(manager, request, chunk) is not None
     request.num_computed_tokens = chunk
-    first_chunk_writes = coordinator.build_offload_command().page_transfers
+    first_chunk_writes = _build_offload_command(manager).page_transfers
     assert _allocate_scheduled(manager, request, chunk) is not None
     request.num_computed_tokens = 2 * chunk
     acks = {transfer.transfer_id: 1 for transfer in first_chunk_writes}
@@ -1557,11 +1576,12 @@ def test_hisparse_terminal_prefix_waits_for_all_workers_and_preserves_identity()
     manager = make_hisparse_kv_cache_manager(32, 8, enable_caching=True)
     coordinator = get_hisparse_coordinator(manager)
     host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
     tokens = list(range(2 * HISPARSE_BLOCK_SIZE + 1))
     request = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert _allocate_scheduled(manager, request, len(tokens)) is not None
     old_blocks = list(manager.get_blocks(request.request_id).blocks[0])
-    command = coordinator.build_offload_command()
+    command = _build_offload_command(manager)
     counts = {transfer.transfer_id: 2 for transfer in command.page_transfers}
     partial = dict.fromkeys(counts, 1)
     first_completions = partial.copy()
@@ -3849,7 +3869,7 @@ def test_null_parent_block_hash():
     # still exists in `request.block_hashes[num_cached_blocks - 1]`.
     assert pool.null_block.block_hash is None
     new_blocks = pool.get_new_blocks(num_full_blocks - 1)
-    blocks = [
+    blocks: list[Any] = [
         new_blocks[: num_cached_blocks - 1],
         pool.null_block,  # physical parent
         *new_blocks[num_cached_blocks - 1 :],
@@ -4467,8 +4487,10 @@ def test_lookahead_checkpoint_has_available_hash(
     config.kv_cache_groups[0].kv_cache_spec = replace(
         config.kv_cache_groups[0].kv_cache_spec, block_size=full_block_size
     )
+    mamba_spec = config.kv_cache_groups[1].kv_cache_spec
+    assert isinstance(mamba_spec, MambaSpec)
     config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec,
+        mamba_spec,
         block_size=512,
         num_prefill_checkpoint_blocks=checkpoint_blocks,
         prefill_checkpoint_alignment=64 if checkpoint_blocks else None,
@@ -4564,7 +4586,9 @@ def test_eagle_hybrid_mamba_hits_partial_prompt_boundary():
 
     assert num_computed == 1248
     # Per-group lookup must not add the legacy EAGLE drop margin.
-    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+    coordinator = manager.coordinator
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
+    _, per_group_hits = coordinator.find_longest_cache_hit_per_group(
         second.block_hashes, 2 * hash_block_size
     )
     assert per_group_hits[0] == 2 * hash_block_size
@@ -4935,6 +4959,7 @@ def test_different_block_size():
     blocks = manager.allocate_slots(
         req0, 7 * block_size, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
+    assert blocks is not None
     assert blocks.get_block_ids() == ([1, 2, 3, 4], [5, 6, 7, 8, 9, 10, 11])
     req1 = make_request("1", common_token_ids[: 7 * block_size + 1], block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
@@ -5555,8 +5580,10 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
     """Sparse retention keeps the last boundary covered by lookahead hashes."""
     block_size = 32
     kv_cache_config = _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"])
+    mamba_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+    assert isinstance(mamba_spec, MambaSpec)
     kv_cache_config.kv_cache_groups[1].kv_cache_spec = replace(
-        kv_cache_config.kv_cache_groups[1].kv_cache_spec,
+        mamba_spec,
         num_speculative_blocks=1,
     )
     manager = make_kv_cache_manager(

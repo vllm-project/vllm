@@ -9,7 +9,11 @@ import dataclasses
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import MockKVConfig, create_model_runner_output
+from tests.v1.kv_connector.unit.utils import (
+    MockKVConfig,
+    MockKVConnector,
+    create_model_runner_output,
+)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -259,7 +263,10 @@ def test_kv_load_carrying_window_does_not_replay(is_async, matched):
     request = create_requests(
         num_requests=1, num_tokens=NUM_PROMPT_TOKENS, block_size=BLOCK_SIZE
     )[0]
-    scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+    assert scheduler.connector is not None
+    scheduler.connector.get_loaded_kv_cache_group_ids = (  # type: ignore[method-assign]
+        lambda request: (FULL, SWA)
+    )
     scheduler.add_request(request)
     out = scheduler.schedule()
     if is_async:
@@ -328,15 +335,19 @@ def test_kv_load_zeroing_respects_loaded_groups(is_async, loads_window):
     the non-cacheable window; stores leave it to be initialized locally."""
     local = 5 * BLOCK_SIZE
     scheduler = _replay_scheduler(use_kv_connector=MockKVConfig())
+    connector = scheduler.connector
+    assert isinstance(connector, MockKVConnector)
     if loads_window:
-        scheduler.connector.get_loaded_kv_cache_group_ids = lambda request: (FULL, SWA)
+        connector.get_loaded_kv_cache_group_ids = (  # type: ignore[method-assign]
+            lambda request: (FULL, SWA)
+        )
     assert scheduler.needs_kv_cache_zeroing
     first = create_requests(
         num_requests=1, num_tokens=local, same_prompt=True, block_size=BLOCK_SIZE
     )[0]
     _prefill(scheduler, first)
-    scheduler.connector.config = dataclasses.replace(
-        scheduler.connector.config,
+    connector.config = dataclasses.replace(
+        connector.config,
         matched_tokens=NUM_PROMPT_TOKENS - 1 - local,
         is_async=is_async,
     )

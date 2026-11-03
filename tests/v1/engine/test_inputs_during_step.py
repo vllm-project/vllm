@@ -56,14 +56,14 @@ def make_engine(handle: bool = True) -> tuple[EngineCoreProc, list[Any]]:
     engine = object.__new__(EngineCoreProc)
     engine.input_queue = queue.Queue()
     engine._deferred_inputs = deque()
-    engine.has_work = lambda: True  # type: ignore[method-assign]
+    engine.has_work = lambda: True
     handled: list[Any] = []
     if handle:
 
         def record(request_type: EngineCoreRequestType, request: Any) -> None:
             handled.append((request_type, request))
 
-        engine._handle_client_request = record  # type: ignore[method-assign]
+        engine._handle_client_request = record
     return engine, handled
 
 

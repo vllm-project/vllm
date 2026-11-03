@@ -107,7 +107,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
         engine._initialize_kv_caches(config)
 
 
-def _make_engine_core_with_dcp_manager() -> EngineCore:
+def _make_engine_core_with_dcp_manager() -> tuple[EngineCore, KVCacheManager]:
     mla_spec = MLAAttentionSpec(
         block_size=BASE_BLOCK_SIZE,
         num_kv_heads=1,
@@ -138,11 +138,11 @@ def _make_engine_core_with_dcp_manager() -> EngineCore:
     scheduler = SimpleNamespace(kv_cache_config=config, kv_cache_manager=manager)
     engine_core = object.__new__(EngineCore)
     engine_core.scheduler = scheduler
-    return engine_core
+    return engine_core, manager
 
 
 def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
-    engine_core = _make_engine_core_with_dcp_manager()
+    engine_core, manager = _make_engine_core_with_dcp_manager()
 
     metadata = engine_core.get_kv_cache_group_metadata()
 
@@ -150,7 +150,7 @@ def test_kv_cache_group_metadata_uses_effective_dcp_block_sizes() -> None:
     assert [item["block_size"] for item in metadata] == [12288, 1536]
     assert [item["kind"] for item in metadata] == ["mla_attention", "mamba"]
 
-    managers = engine_core.scheduler.kv_cache_manager.coordinator.single_type_managers
+    managers = manager.coordinator.single_type_managers
     assert [item["block_size"] for item in metadata] == [
         manager.block_size for manager in managers
     ]

@@ -4,8 +4,10 @@
 import os
 from contextlib import nullcontext
 from multiprocessing import connection
+from multiprocessing.process import BaseProcess
 from threading import Event
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 import torch
@@ -180,7 +182,7 @@ def test_engine_core_process_shutdown_timeout(
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
-    manager.processes = [object()]
+    manager.processes = cast("list[BaseProcess]", [object()])
     detach_results = iter((object(), None))
     manager._finalizer = SimpleNamespace(detach=lambda: next(detach_results))
 
@@ -322,7 +324,9 @@ def test_wait_for_engine_startup_reports_watched_process_exit():
             addresses=EngineZmqAddresses(inputs=[], outputs=[]),
             tensor_queue=None,
         )
-        launch.watched_frontend_processes = [_FinishedProcess(recv)]
+        launch.watched_frontend_processes = cast(
+            "list[BaseProcess]", [_FinishedProcess(recv)]
+        )
         with pytest.raises(RuntimeError) as exc_info:
             wait_for_engine_startup(
                 handshake_socket,
