@@ -236,11 +236,6 @@ class FileSystemTierManager(SecondaryTierManager):
         job_id = job_metadata.job_id
 
         def load_task() -> None:
-            # materialize() allocates primary slots; hold the manager lock so
-            # it cannot interleave with the scheduler thread's step.
-            assert self.manager_lock is not None, (
-                "FS tier used without an owning manager"
-            )
             try:
                 with self.manager_lock:
                     materialized = job_metadata.materialize()

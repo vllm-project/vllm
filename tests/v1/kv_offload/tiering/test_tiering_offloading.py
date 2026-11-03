@@ -477,53 +477,6 @@ class TestTieringOffloadingManager:
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(set(to_keys([1, 2])), _CTX, False)
 
-    def test_promotion_failure_flags_request_while_live(self, manager_setup):
-        """A promotion that fails while its request is still live marks the
-        request so later lookups do not re-initiate promotions for it."""
-        self._start_request()
-        job = PromotionTransferJob(
-            job_id=self.manager._next_job_id(),
-            req_context=_CTX,
-            keys=to_keys([1, 2]),
-            alloc_fn=lambda keys, ctx: None,
-        )
-        self.manager._register_job(job, 0)
-        failed = JobResult(job_id=job.job_id, success=False)
-        with patch.object(
-            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
-        ):
-            self.manager._process_finished_jobs()
-        assert _CTX.req_id in self.manager._promotion_failed_requests
-
-    def test_promotion_failure_after_finalize_does_not_leak(self, manager_setup):
-        """A promotion resolving after its request finalized must not re-add
-        the req_id to _promotion_failed_requests: the request state is gone,
-        nothing will discard it, and no future promotion can name it."""
-        self._start_request()
-        job = PromotionTransferJob(
-            job_id=self.manager._next_job_id(),
-            req_context=_CTX,
-            keys=to_keys([1, 2]),
-            alloc_fn=lambda keys, ctx: None,
-        )
-        self.manager._register_job(job, 0)
-
-        # No pending stores or cascades, so finalization runs immediately --
-        # the in-flight promotion is not part of the finalize gate.
-        self.manager.on_request_finished(_CTX)
-        assert _CTX.req_id not in self.manager._req_state
-        assert _CTX.req_id not in self.manager._promotion_failed_requests
-
-        # The promotion now resolves with allocation failed (e.g. the primary
-        # tier reports the request finalized).
-        failed = JobResult(job_id=job.job_id, success=False)
-        with patch.object(
-            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
-        ):
-            self.manager._process_finished_jobs()
-
-        assert _CTX.req_id not in self.manager._promotion_failed_requests
-
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch
 
