@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -278,3 +279,141 @@ def test_asm_mxfp4_gemm_on_a_plain_input_is_not_rewritten(
         activation = gemm_node.args[6] if len(gemm_node.args) > 6 else None
         assert activation is None and "activation" not in gemm_node.kwargs
         torch.testing.assert_close(out, ref)
+
+
+@contextmanager
+def _act_mul_pass_built_with(
+    custom_ops: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator["RocmAiterActMulMxfp4GemmFusionPass"]:
+    """Yield the act fusion pass built with the given custom ops.
+
+    Unlike _fusion_pass_under_test this leaves the torch default device and dtype
+    alone and builds no TestBackend, so the pass can be inspected without a GPU
+    device.
+    """
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops,
+            backend="eager",
+            pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with set_current_vllm_config(config), monkeypatch.context() as m:
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+            RocmAiterActMulMxfp4GemmFusionPass,
+        )
+
+        yield RocmAiterActMulMxfp4GemmFusionPass(config)
+
+
+def _record_gelu_builds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Return a list collecting the approximate mode of every GeluAndMul built.
+
+    Install the spy before the pass is built: the pass constructs its matchers, and
+    with them the activation layers, in its own __init__.
+    """
+    built: list[str] = []
+    original_init = GeluAndMul.__init__
+
+    def recording_init(self: GeluAndMul, approximate: str = "none") -> None:
+        built.append(approximate)
+        original_init(self, approximate)
+
+    monkeypatch.setattr(GeluAndMul, "__init__", recording_init)
+    return built
+
+
+def _registered_activations(
+    fusion_pass: "RocmAiterActMulMxfp4GemmFusionPass",
+) -> list[str]:
+    """The activation names the pass registered patterns for, sorted.
+
+    The pass keeps every pattern replacement it registered in _pattern_replacements,
+    and the isinstance check gives the type checker the activation attribute.
+    """
+    from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+        AiterActMulMxfp4GemmPattern,
+    )
+
+    return sorted(
+        pr.activation
+        for pr in fusion_pass._pattern_replacements
+        if isinstance(pr, AiterActMulMxfp4GemmPattern)
+    )
+
+
+# Input: custom_ops = ["none"], so the gelu_and_mul custom op is off and only the
+# native GELU graph can ever be matched. Expected: no GeluAndMul is built with the
+# tanh approximation. Why: the pass built MatcherGeluAndMul("tanh") anyway, which
+# constructs GeluAndMul("tanh") and logs ROCm's tanh warning, even though the matcher
+# is later dropped when its key collapses onto "gelu".
+def test_act_mul_pass_builds_no_tanh_gelu_when_gelu_custom_op_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    built = _record_gelu_builds(monkeypatch)
+    with _act_mul_pass_built_with(["none"], monkeypatch):
+        assert "tanh" not in built
+
+
+# Input: custom_ops = ["none"], so both GELU matchers trace to the same native graph.
+# Expected: the pass registers exactly the "gelu" and "silu" patterns. Why: guard for
+# the fix, dropping the tanh build must not drop the exact GELU fusion, the only GELU
+# one ROCm can match.
+def test_act_mul_pass_registers_only_silu_and_gelu_when_gelu_custom_op_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with _act_mul_pass_built_with(["none"], monkeypatch) as fusion_pass:
+        assert _registered_activations(fusion_pass) == ["gelu", "silu"]
+
+
+# Input: custom_ops = ["none", "+gelu_and_mul"], so the custom-op form of GELU is
+# matched and tanh is a graph of its own. Expected: a GeluAndMul with the tanh
+# approximation is built and the pass registers "gelu", "gelu_tanh" and "silu".
+# Why: guard for the fix, the tanh build is only wrong while the custom op is off.
+def test_act_mul_pass_registers_gelu_tanh_when_gelu_custom_op_is_on(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    built = _record_gelu_builds(monkeypatch)
+    with _act_mul_pass_built_with(
+        ["none", "+gelu_and_mul"], monkeypatch
+    ) as fusion_pass:
+        assert "tanh" in built
+        assert _registered_activations(fusion_pass) == ["gelu", "gelu_tanh", "silu"]
+
+
+# Input: the pass built with custom_ops ["none"], and the base __call__ reporting 3
+# rewritten sites.
+# Expected: exactly one INFO record from the pass logger, with the text "AITER act-mul
+# + MXFP4 GEMM fusion: replaced 3 pattern(s)".
+# Why: the count is the pass's only log line. A level change back to debug would hide
+# it on every start, and this test must fail then.
+def test_act_mul_pass_call_logs_rewritten_count_at_info(
+    monkeypatch: pytest.MonkeyPatch, caplog_vllm: pytest.LogCaptureFixture
+):
+    from vllm.compilation.passes.vllm_inductor_pass import (
+        VllmFusionPatternMatcherPass,
+    )
+
+    def count_three_sites(
+        self: VllmFusionPatternMatcherPass, graph: torch.fx.Graph
+    ) -> None:
+        self.matched_count = 3
+
+    monkeypatch.setattr(VllmFusionPatternMatcherPass, "__call__", count_three_sites)
+
+    pass_logger = "vllm.compilation.passes.fusion.rocm_aiter_fusion"
+    with (
+        _act_mul_pass_built_with(["none"], monkeypatch) as fusion_pass,
+        caplog_vllm.at_level(logging.INFO, logger=pass_logger),
+    ):
+        fusion_pass(torch.fx.Graph())
+
+    records = [r for r in caplog_vllm.records if r.name == pass_logger]
+    assert [(r.levelno, r.getMessage()) for r in records] == [
+        (logging.INFO, "AITER act-mul + MXFP4 GEMM fusion: replaced 3 pattern(s)")
+    ]

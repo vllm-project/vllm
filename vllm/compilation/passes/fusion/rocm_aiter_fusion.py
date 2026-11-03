@@ -16,6 +16,7 @@ from vllm._aiter_ops import MXFP4_PRESHUFFLE_MAX_M, rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import GeluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -968,9 +969,12 @@ class RocmAiterActMulMxfp4GemmFusionPass(VllmFusionPatternMatcherPass):
         matchers: dict[tuple[bool, str], MatcherGeluAndMul | MatcherSiluAndMul] = {}
         silu = MatcherSiluAndMul()
         matchers[(silu.enabled, "silu")] = silu
-        for approximate in ("none", "tanh"):
+        # gelu_and_mul off: on ROCm MatcherGeluAndMul.activation falls back
+        # to exact GELU, so tanh and "none" share a key. Building tanh just
+        # instantiates GeluAndMul("tanh") and logs its ROCm tanh warning on each start.
+        approximations = ("none", "tanh") if GeluAndMul.enabled() else ("none",)
+        for approximate in approximations:
             gelu = MatcherGeluAndMul(approximate)
-            # On ROCm both approximations trace to the same native graph.
             matchers.setdefault((gelu.enabled, gelu.activation), gelu)
         for (_, activation), matcher in matchers.items():
             self.register(AiterActMulMxfp4GemmPattern(matcher, activation, out_dtype))
@@ -987,7 +991,10 @@ class RocmAiterActMulMxfp4GemmFusionPass(VllmFusionPatternMatcherPass):
 
     def __call__(self, graph: torch.fx.Graph) -> None:
         super().__call__(graph)
-        logger.debug("Fused act+mxfp4 quant at %d sites", self.matched_count)
+        logger.info(
+            "AITER act-mul + MXFP4 GEMM fusion: replaced %s pattern(s)",
+            self.matched_count,
+        )
 
 
 class AddAiterRMSNormPadPattern:
