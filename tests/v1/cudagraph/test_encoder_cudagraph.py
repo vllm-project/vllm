@@ -9,6 +9,7 @@ Test organization:
     - TestGetInputModality     — modality routing from mm_kwargs keys
   GPU required:
     - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters, chunking
+    - TestEncoderCudaGraphSharedBuffers — capture buffers shared across budgets
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
@@ -173,6 +174,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
         out_hidden_size=32,
     )
     mgr.budget_graphs = {"default": {}}
+    mgr._shared_buffers = {}
     mgr.graph_pool = None
     mgr._capture_axes = ()
     mgr.graph_hits = 0
@@ -622,6 +624,7 @@ def _make_manager_for_gpu(
     )
     mgr.use_dp = False
     mgr.budget_graphs = {"default": {}}
+    mgr._shared_buffers = {}
     mgr.graph_pool = None
     mgr._capture_axes = ()
     mgr.graph_hits = 0
@@ -760,6 +763,139 @@ class TestEncoderCudaGraphCaptureReplay:
         assert len(result) == n_images
         for out in result:
             assert out.shape == (4, _HIDDEN)
+
+
+# ---------------------------------------------------------------------------
+# Capture buffers shared across token budgets
+# ---------------------------------------------------------------------------
+
+_SHARED_BUDGETS = [16, 32, 64]
+
+
+class SharedBufferMockViTModel(SimpleMockViTModel):
+    """Lists pixel_values as a buffer key, plus keys that must not be shared:
+    a CPU scalar and a buffer whose trailing dim depends on the budget."""
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values", "dummy_buf", "max_seqlen", "row_buf"],
+            out_hidden_size=_HIDDEN,
+        )
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
+    ) -> EncoderCudaGraphCaptureInputs:
+        inputs = super().prepare_encoder_cudagraph_capture_inputs(
+            token_budget, max_batch_size, max_frames_per_batch, device, dtype
+        )
+        inputs.values["max_seqlen"] = torch.tensor(token_budget, dtype=torch.int32)
+        inputs.values["row_buf"] = torch.zeros(
+            1, token_budget, device=device, dtype=dtype
+        )
+        return inputs
+
+
+class _NoReplayDummyBufModel(SharedBufferMockViTModel):
+    """Omits the shared dummy_buf from replay values."""
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> EncoderCudaGraphReplayBuffers:
+        replay = super().prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs, max_batch_size, max_frames_per_batch, path
+        )
+        replay.values["dummy_buf"] = None
+        return replay
+
+
+@pytest.mark.skipif(not HAS_DEVICE_GRAPH, reason="Requires CUDA, ROCm or XPU graph")
+class TestEncoderCudaGraphSharedBuffers:
+    def setup_method(self):
+        self.device = torch.device(current_platform.device_type, 0)
+        self.dtype = torch.float16
+        torch.manual_seed(0)
+        self.model = SharedBufferMockViTModel().to(self.device).half()
+
+    def _capture(self, model=None, share: bool = True) -> EncoderCudaGraphManager:
+        mgr = _make_manager_for_gpu(
+            model or self.model,
+            _SHARED_BUDGETS,
+            _MAX_BATCH,
+            self.device,
+            self.dtype,
+        )
+        graph_pool = current_platform.graph_pool_handle()
+        if share:
+            mgr.capture(graph_pool=graph_pool)
+        else:
+            with patch.object(mgr, "_get_shared_buffer", return_value=None):
+                mgr.capture(graph_pool=graph_pool)
+        return mgr
+
+    def test_smaller_budgets_view_largest_budget_buffers(self):
+        mgr = self._capture()
+        graphs = mgr.budget_graphs["default"]
+        largest = graphs[max(_SHARED_BUDGETS)]
+        for meta in graphs.values():
+            budget = meta.token_budget
+            assert meta.shared_keys == {"pixel_values", "dummy_buf"}
+            for key in meta.shared_keys:
+                buf = meta.input_buffers[key]
+                assert buf.data_ptr() == largest.input_buffers[key].data_ptr()
+                # Each graph records a prefix view sized for its own budget.
+                assert buf.shape[0] == budget // _MAX_BATCH * _MAX_BATCH * (
+                    _SPATIAL_MERGE**2 if key == "pixel_values" else 1
+                )
+            assert meta.output_buffer.data_ptr() == largest.output_buffer.data_ptr()
+            assert meta.output_buffer.shape[0] == budget
+
+    def test_ineligible_buffers_stay_per_budget(self):
+        mgr = self._capture()
+        graphs = mgr.budget_graphs["default"]
+        # CPU scalar keeps the budget value baked at capture.
+        assert {int(m.input_buffers["max_seqlen"]) for m in graphs.values()} == set(
+            _SHARED_BUDGETS
+        )
+        # A trailing dim that varies with the budget cannot be a prefix view.
+        row_ptrs = {m.input_buffers["row_buf"].data_ptr() for m in graphs.values()}
+        assert len(row_ptrs) == len(_SHARED_BUDGETS)
+
+    def test_interleaved_budget_replay_matches_unshared_capture(self):
+        shared = self._capture()
+        reference = self._capture(share=False)
+        # 49, 4, 25, 16, 4, 49 tokens: alternate between the largest budget,
+        # whose buffers the others view, and the smaller budgets.
+        sizes = [14, 4, 10, 8, 4, 14]
+        for size in sizes:
+            mm_kwargs = _make_mm_kwargs([[1, size, size]], self.device, self.dtype)
+            out = shared.execute(mm_kwargs)
+            ref = reference.execute(mm_kwargs)
+            assert torch.equal(out[0], ref[0])
+        assert shared.graph_misses == 0
+
+    def test_replay_without_shared_key_values_raises(self):
+        mgr = self._capture(model=_NoReplayDummyBufModel().to(self.device).half())
+        mm_kwargs = _make_mm_kwargs([[1, 4, 4]], self.device, self.dtype)
+        with pytest.raises(RuntimeError, match="'dummy_buf' is shared"):
+            mgr.execute(mm_kwargs)
+
+    def test_clear_releases_shared_buffers(self):
+        mgr = self._capture()
+        assert mgr._shared_buffers
+        mgr.clear()
+        assert mgr._shared_buffers == {}
 
 
 # ---------------------------------------------------------------------------
