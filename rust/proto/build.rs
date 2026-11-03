@@ -20,8 +20,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         // Both variants are large messages.
-        .boxed(".vllm.DetokenizeStreamRequest.request.start")
-        .boxed(".vllm.DetokenizeStreamRequest.request.output")
+        .boxed(".vllm.DerenderChatStreamRequest.request.start")
+        .boxed(".vllm.DerenderChatStreamRequest.request.output")
         .compile_fds(file_descriptor_set)?;
 
     Ok(())
