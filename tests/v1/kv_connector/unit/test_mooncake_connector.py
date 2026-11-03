@@ -462,6 +462,77 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
 
 
 @pytest.mark.asyncio
+async def test_build_transfer_params_handles_addresses_above_int64():
+    """Device addresses above 2**63 (Intel XPU USM pointers) must not overflow."""
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = True
+    worker.tp_rank = 0
+    worker.tp_size = 1
+    worker.use_mla = False
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
+    worker.transfer_topo = SimpleNamespace(
+        local_replicates_kv_cache=False,
+        total_num_kv_heads=4,
+    )
+
+    block_len = 256
+    local_base = 0xFF00_0000_0020_0000
+    remote_base = 0xFF00_0001_0000_0000
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=local_base,
+            block_len=block_len,
+            kv_block_len=block_len,
+        )
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.0.self_attn",
+            layer_index=0,
+            base_addr=remote_base,
+            block_len=block_len,
+            kv_block_len=block_len,
+        )
+    ]
+    transfer_id = "xfer-high-addr"
+    send_meta = SendBlockMeta(
+        p_req_id="p-req-high-addr",
+        transfer_id=transfer_id,
+        # Non-contiguous on both sides, so each block is its own descriptor.
+        local_block_ids=[[10, 12]],
+        ready=asyncio.Event(),
+    )
+    xfer_meta = _xfer_meta(
+        remote_regions, {"d-req-high-addr": (transfer_id, [[20, 23]])}
+    )
+
+    (
+        src_ptrs,
+        dst_ptrs,
+        lengths,
+        err_reqs,
+        err_msg,
+    ) = await worker._build_transfer_params(
+        ready_reqs=[("d-req-high-addr", send_meta)],
+        agent_meta=xfer_meta,
+        local_regions=local_regions,
+        remote_regions=remote_regions,
+    )
+
+    assert err_reqs == []
+    assert err_msg is None
+    assert src_ptrs == [local_base + 10 * block_len, local_base + 12 * block_len]
+    assert dst_ptrs == [remote_base + 20 * block_len, remote_base + 23 * block_len]
+    assert all(isinstance(p, int) for p in src_ptrs + dst_ptrs)
+    assert lengths == [block_len, block_len]
+
+
+@pytest.mark.asyncio
 async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
     monkeypatch,
 ):
