@@ -643,6 +643,17 @@ class CompilationConfig:
     Warning: This flag is new and subject to change in addition
     more modes may be added.
     """
+    use_breakable_cudagraph: bool | None = None
+    """Whether to use breakable CUDA graphs (runtime stream-capture breaks
+    instead of torch.compile FX graph splitting).
+
+    Resolved by VllmConfig.__post_init__: an explicit
+    VLLM_USE_BREAKABLE_CUDAGRAPH env var takes precedence, otherwise it is
+    auto-enabled for breakable-by-default architectures (and for tuned
+    batch-invariant setups). None means unresolved; readers fall back to
+    envs.VLLM_USE_BREAKABLE_CUDAGRAPH so standalone CompilationConfig users
+    keep working. Stored per-config (and pickled to workers) rather than
+    written back to os.environ."""
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
     It means the first several runs will be treated as warmup runs.
@@ -785,6 +796,7 @@ class CompilationConfig:
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
         "vllm::hpc_rope_norm_forward",
+        "vllm::step5_csa_attention",
     ]
 
     def compute_hash(self) -> str:
