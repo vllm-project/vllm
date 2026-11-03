@@ -108,7 +108,10 @@ class HYV4MoEFused(nn.Module):
         router_scaling_factor = getattr(config, "router_scaling_factor", 1.0)
         vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
-        self.enable_eplb = enable_eplb
+        # The decoder layer does not pass enable_eplb, so take it from the
+        # engine config: with False the runner gets no EPLB state and neither
+        # load recording nor the committed placement reach the router.
+        self.enable_eplb = enable_eplb or vllm_config.parallel_config.enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
