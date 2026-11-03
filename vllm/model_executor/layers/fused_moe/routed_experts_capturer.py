@@ -28,6 +28,21 @@ class RoutedExpertsCaptureSource(Protocol):
     capture_fn: Callable[[torch.Tensor], None] | None
 
 
+@runtime_checkable
+class RoutedExpertsRowRestorer(Protocol):
+    def restore_routed_experts_rows(
+        self, topk_ids: torch.Tensor, ctx: ForwardContext
+    ) -> torch.Tensor:
+        """Restore local token-ordered logical IDs for all captured MoE layers.
+
+        Binding selects the first provider. Read current metadata from ``ctx``;
+        do not depend on the provider's layer-specific state or modify input.
+        Return a 2-D tensor with the input device, dtype and top-k width.
+        Collectives must be rank-consistent and graph-replay safe.
+        """
+        ...
+
+
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
     model_config = vllm_config.model_config
     num_layers = model_config.get_total_num_hidden_layers()
@@ -84,6 +99,9 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.restore_rows: Callable[[torch.Tensor, ForwardContext], torch.Tensor] = (
+            self._restore_local_topk_ids
+        )
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -93,7 +111,7 @@ class RoutedExpertsCapturer:
             )
 
         ctx = get_forward_context()
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        local_topk_ids = self.restore_rows(topk_ids, ctx)
         offset = dbo_current_ubatch_token_offset()
         self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
             local_topk_ids
@@ -192,12 +210,16 @@ def bind_routed_experts_capturer(
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
     num_bound = 0
+    restorer_bound = False
     for module in model.modules():
+        if not isinstance(module, (MoERunner, RoutedExpertsCaptureSource)):
+            continue
+        if not restorer_bound and isinstance(module, RoutedExpertsRowRestorer):
+            capturer.restore_rows = module.restore_routed_experts_rows
+            restorer_bound = True
         if isinstance(module, RoutedExpertsCaptureSource):
             module.capture_fn = partial(capturer.capture, module.layer_id)
             num_bound += 1
-            continue
-        if not isinstance(module, MoERunner):
             continue
         capture_fn = partial(capturer.capture, module.layer_id)
         quant_method = module._quant_method
