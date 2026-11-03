@@ -6,7 +6,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.mrope import apply_interleaved_rope
+from vllm.model_executor.layers.rotary_embedding.mrope import (
+    apply_interleaved_rope,
+    triton_mrope,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.torch_utils import set_random_seed
@@ -173,6 +176,75 @@ def test_mrope(
 
     torch.testing.assert_close(query_native, query_cuda, atol=atol, rtol=rtol)
     torch.testing.assert_close(key_native, key_cuda, atol=atol, rtol=rtol)
+
+    # Strided q/k views of a packed buffer (the MiniMax M3 ViT usage):
+    # bitwise-identical to the contiguous run, neighboring columns untouched.
+    pad = 16
+    packed = torch.zeros(
+        num_tokens,
+        query.shape[1] + key.shape[1] + pad,
+        dtype=dtype,
+        device=device,
+    )
+    packed[:, : query.shape[1]] = query
+    packed[:, query.shape[1] : query.shape[1] + key.shape[1]] = key
+    sentinel = packed[:, -pad:].clone()
+    q_strided = packed[:, : query.shape[1]]
+    k_strided = packed[:, query.shape[1] : query.shape[1] + key.shape[1]]
+    mrope_helper_class.forward_cuda(positions, q_strided, k_strided)
+    torch.testing.assert_close(q_strided, query_cuda, atol=0, rtol=0)
+    torch.testing.assert_close(k_strided, key_cuda, atol=0, rtol=0)
+    torch.testing.assert_close(packed[:, -pad:], sentinel, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skipping CUDA/ROCm only tests."
+)
+def test_mrope_row_offset_int64():
+    # MiniMax M3 ViT worst case: a max-size video item packs ~768k patches,
+    # and num_tokens * packed-qkv row stride (3840) exceeds 2^31 at 559,241
+    # rows. Row-base math must be int64 or those rows wrap to negative
+    # offsets (illegal memory access at startup profiling).
+    set_random_seed(0)
+    n_qh, n_kh, hd, rd = 16, 16, 80, 78
+    mrope_section = [13, 13, 13]
+    row_stride = (n_qh + n_kh + n_kh) * hd  # packed qkv row
+    num_tokens = 2**31 // row_stride + 8
+    free, _ = current_platform.mem_get_info()
+    if free < 2 * num_tokens * row_stride * 2:
+        pytest.skip("not enough free device memory")
+
+    packed = torch.empty(num_tokens, row_stride, dtype=torch.bfloat16, device=device)
+    q_fill = torch.randn(n_qh * hd, dtype=torch.bfloat16, device=device)
+    k_fill = torch.randn(n_kh * hd, dtype=torch.bfloat16, device=device)
+    packed[:, : n_qh * hd] = q_fill
+    packed[:, n_qh * hd : (n_qh + n_kh) * hd] = k_fill
+    half_rd = rd // 2
+    cos = torch.randn(3, num_tokens, half_rd, dtype=torch.float32, device=device)
+    sin = torch.randn(3, num_tokens, half_rd, dtype=torch.float32, device=device)
+    q = packed[:, : n_qh * hd]
+    k = packed[:, n_qh * hd : (n_qh + n_kh) * hd]
+    triton_mrope(q, k, cos, sin, mrope_section, hd, rd, False, True)
+
+    t_end = mrope_section[0]
+    h_end = t_end + mrope_section[1]
+    for r in (0, num_tokens - 8, num_tokens - 1):
+        cos_row = torch.cat(
+            [cos[0, r, :t_end], cos[1, r, t_end:h_end], cos[2, r, h_end:]]
+        )
+        sin_row = torch.cat(
+            [sin[0, r, :t_end], sin[1, r, t_end:h_end], sin[2, r, h_end:]]
+        )
+        for fill, out in ((q_fill, q[r]), (k_fill, k[r])):
+            row = fill.view(-1, hd).float()
+            r1, r2 = row[:, :half_rd], row[:, half_rd:rd]
+            exp = torch.cat(
+                [r1 * cos_row - r2 * sin_row, r2 * cos_row + r1 * sin_row, row[:, rd:]],
+                dim=1,
+            )
+            torch.testing.assert_close(
+                out, exp.view(-1).to(torch.bfloat16), atol=1e-2, rtol=1.6e-2
+            )
 
 
 @pytest.mark.skipif(

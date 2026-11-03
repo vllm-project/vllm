@@ -91,6 +91,10 @@ def _discover_pairings() -> list[_PairingInfo]:
             # It is covered by tests/parser/mistral/ instead.
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
+        if cfg.name == "llama_json":
+            # Llama JSON has no TOOL_END terminal; dedicated coverage lives
+            # in test_llama_json.py.
+            continue
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{engine_cls.__name__} (config.name={cfg.name!r})")
             continue
@@ -98,6 +102,10 @@ def _discover_pairings() -> list[_PairingInfo]:
             # Inkling uses typed structural blocks and opts out of token-id
             # terminal matching; combined-parser replay coverage lives in
             # test_inkling.py.
+            continue
+        if cfg.name == "granite":
+            # Granite has a JSON-array tool body with no TOOL_END terminal;
+            # its replay coverage lives in test_granite.py.
             continue
 
         parser_cls = type(

@@ -9,6 +9,8 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
 class LongcatFlashToolParser(Hermes2ProToolParser):
+    structural_tag_model = "longcat"
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 

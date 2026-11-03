@@ -16,7 +16,7 @@ from einops import rearrange
 from transformers import (
     BaseImageProcessor,
     BatchFeature,
-    PretrainedConfig,
+    PreTrainedConfig,
 )
 
 from vllm.compilation.decorators import support_torch_compile
@@ -405,7 +405,7 @@ class MolmoAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -515,7 +515,7 @@ class LanguageModelMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -557,7 +557,7 @@ class ImageProjectorMLP(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -598,7 +598,7 @@ class ImageProjectorMLP(nn.Module):
 class MolmoDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -681,7 +681,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         vision_config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

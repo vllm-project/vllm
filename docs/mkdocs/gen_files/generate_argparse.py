@@ -145,6 +145,7 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
     )
 
 
+bench_forward = auto_mock("vllm.benchmarks.forward", "main")
 bench_latency = auto_mock("vllm.benchmarks", "latency")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_startup = auto_mock("vllm.benchmarks", "startup")
@@ -177,8 +178,12 @@ BenchmarkMMProcessorSubcommand = auto_mock(
 LaunchSubcommandBase = auto_mock("vllm.entrypoints.cli.launch", "LaunchSubcommandBase")
 launch_description = auto_mock("vllm.entrypoints.cli.launch", "DESCRIPTION")
 RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
+PreloadSubcommand = auto_mock("vllm.entrypoints.cli.preload", "PreloadSubcommand")
+DownloadKernelsSubcommand = auto_mock(
+    "vllm.entrypoints.cli.download_kernels", "DownloadKernelsSubcommand"
+)
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
-openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
+openai_cli_args = auto_mock("vllm.entrypoints.common", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
 
 if TYPE_CHECKING:
@@ -330,7 +335,13 @@ pages = {
     "cli/chat.md": (create_parser(ChatCommand.add_cli_args), False),
     "cli/complete.md": (create_parser(CompleteCommand.add_cli_args), False),
     "cli/run-batch.md": (create_parser(run_batch.make_arg_parser), True),
+    "cli/preload.md": (create_parser(PreloadSubcommand.add_cli_args), True),
+    "cli/download-kernels.md": (
+        create_parser(DownloadKernelsSubcommand.add_cli_args),
+        False,
+    ),
     "cli/launch/render.md": (create_parser(RenderSubcommand.add_cli_args), True),
+    "cli/bench/forward.md": (create_parser(bench_forward.add_cli_args), True),
     "cli/bench/latency.md": (create_parser(bench_latency.add_cli_args), True),
     # URL kept as `mm_processor` for back-compat; command name is `mm-processor`
     "cli/bench/mm_processor.md": (

@@ -23,6 +23,23 @@ from vllm.utils.math_utils import cdiv
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
+# TileLang's HIP AllReduce shuffle phase ignores a nonzero reduction-group
+# offset, so the 64-thread RMSNorm reduction must be wave64-aligned and use
+# threads 0..63.
+_MIX_ON_TRAILING_THREADS = current_platform.is_rocm()
+
+
+def _is_mix_thread():
+    if _MIX_ON_TRAILING_THREADS:
+        return T.get_thread_binding() >= 64
+    return T.get_thread_binding() < 32
+
+
+def _is_collapse_thread():
+    if _MIX_ON_TRAILING_THREADS:
+        return T.get_thread_binding() < 64
+    return T.get_thread_binding() >= 32
+
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
@@ -45,6 +62,18 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
 # range.
 _FUSED_POST_PRE_N_THR = 128
 _FUSED_POST_PRE_MAX_TOKENS = 32
+# At up to this many tokens the grid is too small to hide the latency of each
+# thread's serial loads, so when the hidden size allows, a twice wider block
+# over twice as many k-slices gives every thread a single pass instead of four
+# (hidden_size 4096, fused post + pre op on GB300 and SM120: 1.11-1.19x at one
+# token, 0.99-1.05x at four, no gain from five on). Tuned on SM100+ only.
+_FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS = 4
+_FUSED_POST_PRE_SINGLE_PASS = (2, 16, 256)
+
+
+@cache
+def _fused_post_pre_single_pass_supported() -> bool:
+    return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
 def mhc_fused_post_pre_split_config(
@@ -59,6 +88,14 @@ def mhc_fused_post_pre_split_config(
     """
     if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
         return None
+    tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
+    if (
+        num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
+        and hidden_size == n_splits * n_thr
+        and (hc_mult * (hc_mult + 2)) % tile_n == 0
+        and _fused_post_pre_single_pass_supported()
+    ):
+        return tile_n, n_splits, n_thr
     n_thr = _FUSED_POST_PRE_N_THR
     if hidden_size % n_thr:
         return None
@@ -353,7 +390,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
                 mixes[j] *= rms[0]
             T.copy(mixes, mixes_shared)
 
-        if split_mode != "input" and T.get_thread_binding() < 32:
+        if split_mode != "input" and _is_mix_thread():
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 if save_pre_mix:
@@ -388,18 +425,23 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             for j, k in T.Parallel(hc_mult, hc_mult):
                 cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
-            for _ in T.serial(sinkhorn_repeat - 1):
-                T.reduce_sum(cm, row_sum, dim=1)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
+            # A NaN input row (e.g. CUDA-graph padding) has a NaN RMS, so every
+            # logit and the whole result is NaN already. Skip the remaining
+            # iterations: IEEE division takes a slow path on NaN. rms is an
+            # rsqrt, so it is >= 0 unless NaN (T.isfinite does not lower on HIP).
+            if rms[0] >= 0.0:
+                for _ in T.serial(sinkhorn_repeat - 1):
+                    T.reduce_sum(cm, row_sum, dim=1)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (row_sum[j] + hc_sinkhorn_eps)
 
-                T.reduce_sum(cm, col_sum, dim=0)
-                for j, k in T.Parallel(hc_mult, hc_mult):
-                    cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
+                    T.reduce_sum(cm, col_sum, dim=0)
+                    for j, k in T.Parallel(hc_mult, hc_mult):
+                        cm[j, k] = cm[j, k] / (col_sum[k] + hc_sinkhorn_eps)
 
             for j, k in T.Parallel(hc_mult, hc_mult):
                 comb_mix[i, j * hc_mult + k] = cm[j, k]
-        elif split_mode != "stats" and T.get_thread_binding() >= 32:
+        elif split_mode != "stats" and _is_collapse_thread():
             pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
             for j in T.Parallel(hc_mult):
                 if use_pre_mix_in:
@@ -546,7 +588,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
         mixes_shared = T.alloc_shared(hc_mult3, T.float32)
         T.copy(mixes, mixes_shared)
 
-        if T.get_thread_binding() < 32:
+        if _is_mix_thread():
             cm = T.alloc_fragment((hc_mult, hc_mult), T.float32)
             for j in T.Parallel(hc_mult):
                 post_mix[i, j] = (
@@ -1689,9 +1731,16 @@ class MhcFusedTileLangKernel(
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
-        num_tokens = 1 if compile_key.tile_n == 2 else 16
         hidden_size = compile_key.hidden_size
         hc_mult = compile_key.hc_mult
+        # __call__ derives the config from the token count, so warm with one
+        # that selects this key's config.
+        config = (compile_key.tile_n, compile_key.n_splits, compile_key.n_thr)
+        num_tokens = next(
+            t
+            for t in range(1, _FUSED_POST_PRE_MAX_TOKENS + 1)
+            if mhc_fused_post_pre_split_config(t, hidden_size, hc_mult) == config
+        )
         hc_mult3 = hc_mult * (2 + hc_mult)
         comb_mix = make_tilelang_warmup_tensor(
             torch.float32, num_tokens, hc_mult, hc_mult

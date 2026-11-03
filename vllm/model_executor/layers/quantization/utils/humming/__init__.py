@@ -19,6 +19,10 @@ from vllm.model_executor.layers.quantization.utils.humming.moe import (
     make_humming_moe_quant_config,
     select_humming_moe_experts,
 )
+from vllm.model_executor.layers.quantization.utils.humming.priority import (
+    prefers_humming,
+    prioritize_humming,
+)
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     check_and_fallback_input_schema,
     humming_is_layer_skipped,
@@ -41,6 +45,8 @@ __all__ = [
     "convert_linear_layer_to_humming_standard",
     "get_humming_linear_compute_config",
     "prepare_humming_linear_layer_config",
+    "prefers_humming",
+    "prioritize_humming",
     "make_humming_moe_kernel",
     "select_humming_moe_experts",
     "input_schema_to_quant_key",

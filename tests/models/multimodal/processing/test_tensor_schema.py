@@ -45,11 +45,10 @@ VideoInput: TypeAlias = (
     list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
 )
 AudioInput = list[tuple[np.ndarray, int]]
+ResizedData: TypeAlias = Image.Image | np.ndarray | list[Image.Image]
 
 
-def _resize_data(
-    _data: Image.Image | np.ndarray, size_factor: float
-) -> Image.Image | np.ndarray:
+def _resize_data(_data: ResizedData, size_factor: float) -> ResizedData:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -75,7 +74,7 @@ def _resize_data(
 
 def resize_mm_data(
     data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
-) -> ImageInput | VideoInput | AudioInput:
+) -> list[ResizedData]:
     size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
@@ -90,13 +89,12 @@ def create_batched_mm_kwargs(
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
-    dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
     mm_counts = {
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
-    processor_inputs = dummy_inputs.get_dummy_processor_inputs(
+    processor_inputs = processor.get_dummy_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
         mm_options=MultiModalDummyOptions(),

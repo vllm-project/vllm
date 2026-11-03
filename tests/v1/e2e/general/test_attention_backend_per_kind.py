@@ -13,6 +13,7 @@ import pytest
 from vllm import LLM
 from vllm.config.attention import AttentionConfig
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 MODEL = "google/gemma-3-1b-it"
 
@@ -78,7 +79,7 @@ def test_backend_per_kind_overrides_global_backend(monkeypatch):
         model=MODEL,
         attention_config=AttentionConfig(
             backend="FLASH_ATTN",
-            backend_per_kind={"sliding_window": "TRITON_ATTN"},
+            backend_per_kind={"sliding_window": AttentionBackendEnum.TRITON_ATTN},
         ),
         enforce_eager=True,
         max_model_len=2048,

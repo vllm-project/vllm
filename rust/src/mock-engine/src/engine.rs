@@ -94,6 +94,7 @@ fn utility_response(
     let result = match request.method_name.as_str() {
         "get_supported_tasks" => utility_envelope(vec!["generate"]),
         "is_sleeping" => utility_envelope(false),
+        "is_inference_ready" => utility_envelope(true),
         "reset_prefix_cache" => utility_envelope(true),
         "wake_up" => utility_envelope(true),
         "reset_mm_cache" | "reset_encoder_cache" | "profile" | "sleep" | "execute_dummy_batch" => {
@@ -201,7 +202,7 @@ impl ActiveRequest {
 
         let finished = self.generated >= self.max_tokens;
         EngineCoreOutput {
-            prefill_stats,
+            prefill_stats: prefill_stats.map(Box::new),
             ..request_output(
                 self.request_id.clone(),
                 new_token_ids,
