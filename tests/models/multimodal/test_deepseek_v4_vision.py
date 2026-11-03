@@ -7,7 +7,6 @@ from transformers import AutoConfig
 
 import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from vllm.models.deepseek_v4.common.vision import (
-    MAX_IMAGES_PER_PACKED_PASS,
     DeepseekV4Aligner,
     DeepseekV4ViT,
     encode_images,
@@ -68,23 +67,6 @@ def test_encode_images_matches_per_image_encoding(
     assert len(num_rows) == 1
     items = patches.split([h * w for h, w in GRIDS])
     for embeds, item, grid in zip(together, items, GRIDS, strict=True):
-        alone = encode_images(vision, aligner, item, [grid])[0]
-        torch.testing.assert_close(embeds, alone, rtol=0.05, atol=0.05)
-
-
-def test_encode_images_caps_images_per_packed_pass(
-    default_vllm_config, dist_init
-) -> None:
-    vision, aligner = _tiny_tower(torch.bfloat16)
-    grids = (GRIDS * MAX_IMAGES_PER_PACKED_PASS)[: MAX_IMAGES_PER_PACKED_PASS + 1]
-    patches = _patches(grids, torch.bfloat16)
-    num_rows = _count_aligner_calls(aligner)
-
-    together = encode_images(vision, aligner, patches, grids)
-
-    assert len(num_rows) == 2
-    items = patches.split([h * w for h, w in grids])
-    for embeds, item, grid in zip(together, items, grids, strict=True):
         alone = encode_images(vision, aligner, item, [grid])[0]
         torch.testing.assert_close(embeds, alone, rtol=0.05, atol=0.05)
 

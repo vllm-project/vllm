@@ -66,9 +66,6 @@ def apply_rotary(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch
     return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1).to(dtype)
 
 
-MAX_IMAGES_PER_PACKED_PASS = 8
-
-
 class DeepseekV4RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -397,47 +394,16 @@ class DeepseekV4Aligner(nn.Module):
         return out
 
 
-def _encode_images_packed(
-    vision_model: DeepseekV4ViT,
-    aligner: DeepseekV4Aligner,
-    patches: torch.Tensor,
-    vit_grid: list[list[int]],
-) -> torch.Tensor:
-    vit_metadata = build_packed_vit_metadata(
-        vit_grid,
-        rope_dim=vision_model.rope_dim,
-        rope_theta=vision_model.rope_theta,
-        device=patches.device,
-    )
-    merge_metadata = build_packed_merge_metadata(
-        vit_grid,
-        aligner.downsample_ratio,
-        device=patches.device,
-        dtype=aligner.w1.weight.dtype,
-    )
-    hidden_states = vision_model.forward_packed(
-        patches,
-        vit_metadata["vit_cos"],
-        vit_metadata["vit_sin"],
-        vit_metadata["cu_seqlens"],
-        vit_metadata["max_seqlen"],
-    )
-    return aligner.forward_packed(
-        hidden_states, merge_metadata["merge_idx"], merge_metadata["merge_mask"]
-    )
-
-
 def encode_images(
     vision_model: DeepseekV4ViT,
     aligner: DeepseekV4Aligner,
     patches: torch.Tensor,
     vit_grid: list[list[int]],
 ) -> list[torch.Tensor]:
-    """Run the ViT + aligner over a call's images, in packed passes when possible.
+    """Run the ViT + aligner over a call's images, packed into one pass if possible.
 
-    Up to ``MAX_IMAGES_PER_PACKED_PASS`` images share one FlashAttention varlen
-    run. The cap bounds peak memory. Rows can differ from the per-image path by
-    rounding, since each matmul sees more rows.
+    With FlashAttention, all images share one varlen run. Rows can differ from
+    the per-image path by rounding, since each matmul sees more rows.
 
     Args:
         vision_model: The ViT tower.
@@ -458,17 +424,26 @@ def encode_images(
         ]
 
     r = aligner.downsample_ratio
-    embeds: list[torch.Tensor] = []
-    offset = 0
-    for start in range(0, len(vit_grid), MAX_IMAGES_PER_PACKED_PASS):
-        grids = vit_grid[start : start + MAX_IMAGES_PER_PACKED_PASS]
-        num_patches = sum(h * w for h, w in grids)
-        rows = _encode_images_packed(
-            vision_model, aligner, patches[offset : offset + num_patches], grids
-        )
-        embeds.extend(rows.split([-(-h // r) * -(-w // r) for h, w in grids]))
-        offset += num_patches
-    return embeds
+    vit_metadata = build_packed_vit_metadata(
+        vit_grid,
+        rope_dim=vision_model.rope_dim,
+        rope_theta=vision_model.rope_theta,
+        device=patches.device,
+    )
+    merge_metadata = build_packed_merge_metadata(
+        vit_grid, r, device=patches.device, dtype=aligner.w1.weight.dtype
+    )
+    hidden_states = vision_model.forward_packed(
+        patches,
+        vit_metadata["vit_cos"],
+        vit_metadata["vit_sin"],
+        vit_metadata["cu_seqlens"],
+        vit_metadata["max_seqlen"],
+    )
+    rows = aligner.forward_packed(
+        hidden_states, merge_metadata["merge_idx"], merge_metadata["merge_mask"]
+    )
+    return list(rows.split([-(-h // r) * -(-w // r) for h, w in vit_grid]))
 
 
 def run_dp_sharded_vision_tower(
