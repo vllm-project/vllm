@@ -18,6 +18,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.ops.triton_ops import fused_moe_lora
+from vllm.lora.ops.triton_ops.utils import FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
@@ -146,6 +147,8 @@ def use_fused_moe_lora_kernel(
     fully_sharded=False,
     offset=0,
     add_inputs=True,
+    shrink_split_k=1,
+    expert_map=None,
 ):
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -174,6 +177,7 @@ def use_fused_moe_lora_kernel(
         num_tokens_post_padded,
         adapter_enabled,
         lora_ids,
+        expert_map,
     )
 
     config = {
@@ -216,7 +220,7 @@ def use_fused_moe_lora_kernel(
         config["GROUP_SIZE_M"],
         config["NUM_WARPS"],
         config["NUM_STAGES"],
-        config["SPLIT_K"],
+        shrink_split_k,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
@@ -471,6 +475,7 @@ def use_fused_moe_lora_kernel_naive(
     fully_sharded=False,
     offset=0,
     add_inputs=True,
+    shrink_split_k=1,
 ):
     """Test helper for naive_block_assignment path.
     Skips moe_lora_align_block_size and uses flattened topk_ids as expert_ids.
@@ -523,7 +528,7 @@ def use_fused_moe_lora_kernel_naive(
         config["GROUP_SIZE_M"],
         config["NUM_WARPS"],
         config["NUM_STAGES"],
-        config["SPLIT_K"],
+        shrink_split_k,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
@@ -935,7 +940,7 @@ def test_fused_moe_lora_kernel_small_rank(
     torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize("num_tokens", [16, 64])
+@pytest.mark.parametrize("num_tokens", [288, 320])
 @pytest.mark.parametrize("top_k_num", [2])
 @pytest.mark.parametrize("num_experts", [8])
 @pytest.mark.parametrize("max_loras", [4])
@@ -961,7 +966,7 @@ def test_fused_moe_lora_kernel_npid_path(
     device,
     seed,
 ):
-    """Exercise the small-batch / NPID > 1 branch of the one-shot fast path.
+    """Exercise the NPID > 1 branch of the one-shot fast path.
 
     With these sizes the one-shot wrapper computes NPID_FACTOR > 1 (base CTA count
     < SM count), so each program covers only an outer chunk of N. The
@@ -1016,6 +1021,216 @@ def test_fused_moe_lora_kernel_npid_path(
         num_slices,
     )
     torch.testing.assert_close(output, output_ref, atol=2e-2, rtol=2e-2)
+
+
+def _record_fast_paths(monkeypatch):
+    from vllm.lora.ops.triton_ops import fused_moe_lora_op
+
+    calls = []
+
+    def record(name):
+        original = getattr(fused_moe_lora_op, name)
+
+        def wrapper(*args, **kwargs):
+            calls.append(name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(fused_moe_lora_op, name, wrapper)
+
+    record("_run_fused_moe_lora_one_shot")
+    record("_run_fused_moe_lora_small_batch")
+    return calls
+
+
+BF16, FP16 = torch.bfloat16, torch.float16
+
+
+@pytest.mark.parametrize(
+    "num_tokens,top_k_num,num_experts,max_loras,max_lora_rank,K,N,num_slices,dtype,"
+    "shrink_split_k",
+    [
+        (1, 2, 64, 4, 32, 2048, 1024, 1, BF16, 1),
+        (4, 2, 64, 4, 32, 2048, 1024, 2, BF16, 1),
+        (16, 2, 8, 4, 32, 2048, 1024, 1, BF16, 1),
+        (16, 1, 64, 4, 4, 2048, 1024, 1, BF16, 1),
+        (32, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (64, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (65, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (96, 2, 128, 16, 32, 2048, 1024, 1, BF16, 1),
+        (96, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (256, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (257, 2, 8, 4, 32, 2048, 1024, 2, BF16, 1),
+        (300, 1, 256, 16, 4, 2048, 1024, 1, BF16, 1),
+        (300, 1, 256, 16, 8, 2048, 1024, 2, FP16, 1),
+        (8, 6, 64, 4, 16, 2048, 1024, 2, FP16, 1),
+        (4, 8, 128, 4, 64, 2048, 1024, 1, BF16, 1),
+        (32, 8, 64, 4, 128, 1024, 1024, 2, FP16, 1),
+        (1, 6, 64, 4, 128, 2048, 1024, 1, BF16, 1),
+        (16, 8, 128, 4, 32, 6144, 1536, 2, BF16, 1),
+        (2, 8, 128, 4, 16, 6144, 1536, 2, FP16, 1),
+        (64, 8, 128, 4, 64, 768, 6144, 1, FP16, 1),
+        (4, 8, 128, 4, 128, 768, 6144, 1, BF16, 1),
+        (4, 2, 64, 4, 32, 2048, 1024, 2, BF16, 4),
+        (32, 2, 8, 4, 32, 2048, 1024, 1, BF16, 4),
+    ],
+    ids=[
+        "m1-naive",
+        "m4-naive",
+        "m16-sorted",
+        "m16-topk1-r4-naive",
+        "m32-sorted",
+        "m64-sorted",
+        "m65-sorted",
+        "m96-naive",
+        "m96-sorted",
+        "m256-sorted",
+        "m257-sorted-one-shot",
+        "m300-topk1-r4-naive-one-shot",
+        "m300-topk1-r8-naive-one-shot-fp16",
+        "m8-topk6-r16-fp16",
+        "m4-topk8-r64-naive",
+        "m32-topk8-r128-fp16",
+        "m1-topk6-r128-naive",
+        "w13-m16-r32",
+        "w13-m2-r16-fp16-naive",
+        "w2-m64-r64-fp16",
+        "w2-m4-r128-naive",
+        "splitk4-m4-naive",
+        "splitk4-m32-sorted",
+    ],
+)
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_token_threshold_dispatch(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    max_lora_rank,
+    K,
+    N,
+    num_slices,
+    dtype,
+    shrink_split_k,
+    device,
+    monkeypatch,
+):
+    fast_calls = _record_fast_paths(monkeypatch)
+    torch.set_default_device(device)
+    set_random_seed(0)
+    block_size = 16
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, min(num_tokens, 4), max_loras, num_experts, top_k_num
+    )
+    lora_a_stacked = [
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
+    args = (
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+    )
+    if num_tokens * top_k_num * 8 <= num_experts * max_loras:
+        use_fused_moe_lora_kernel_naive(
+            *args, block_size, shrink_split_k=shrink_split_k
+        )
+    else:
+        use_fused_moe_lora_kernel(
+            *args, num_experts, block_size, shrink_split_k=shrink_split_k
+        )
+    assert bool(fast_calls) == (num_tokens > FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS), (
+        fast_calls
+    )
+    output_ref = use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        num_slices,
+    )
+    torch.testing.assert_close(output, output_ref, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [4, 64, 300], ids=["m4", "m64", "m300"])
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_expert_parallel(num_tokens, device, monkeypatch):
+    fast_calls = _record_fast_paths(monkeypatch)
+    torch.set_default_device(device)
+    set_random_seed(0)
+    top_k_num, num_experts, max_loras, max_lora_rank = 2, 16, 4, 32
+    K, N, num_slices, block_size, dtype = 2048, 1024, 2, 16, torch.bfloat16
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, min(num_tokens, 4), max_loras, num_experts, top_k_num
+    )
+    topk_ids[0] = torch.tensor([1, 3], dtype=torch.int32)
+    local_experts = torch.arange(0, num_experts, 2)
+    expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+    expert_map[local_experts] = torch.arange(local_experts.numel(), dtype=torch.int32)
+    is_local = expert_map[topk_ids.long()] >= 0
+    lora_a_stacked = [
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
+        )
+        for _ in range(num_slices)
+    ]
+    for lora_a, lora_b in zip(lora_a_stacked, lora_b_stacked):
+        lora_a[:, expert_map < 0] = 0
+        lora_b[:, expert_map < 0] = 0
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+    residual = torch.randn((num_tokens, top_k_num, N), dtype=dtype)
+    output = residual.clone()
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        [lora_a[:, local_experts].contiguous() for lora_a in lora_a_stacked],
+        [lora_b[:, local_experts].contiguous() for lora_b in lora_b_stacked],
+        hidden_states,
+        output,
+        max_loras,
+        num_experts,
+        block_size,
+        expert_map=expert_map,
+    )
+    assert bool(fast_calls) == (num_tokens > FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS), (
+        fast_calls
+    )
+    expected = residual + use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        num_slices,
+    )
+    torch.testing.assert_close(output, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(output[~is_local], residual[~is_local], atol=0, rtol=0)
 
 
 # -- one-shot corner-case coverage ------------------------------------------
@@ -1133,15 +1348,20 @@ def _call_one_shot(
     "trigger",
     ["sorted_lora_ids_neg", "naive_mapping_neg", "naive_all_disabled"],
 )
+@pytest.mark.parametrize("one_shot", [False, True], ids=["two_kernel", "one_shot"])
 @pytest.mark.parametrize("device", DEVICES)
-def test_fused_moe_lora_kernel_one_shot_early_exit(trigger, device):
-    """one-shot must leave the residual byte-identical when every program
-    must early-exit. Three trigger conditions are covered:
+def test_fused_moe_lora_kernel_one_shot_early_exit(
+    trigger, one_shot, device, monkeypatch
+):
+    """Both the one-shot and two-kernel paths must leave the residual
+    byte-identical when every program must early-exit. Three trigger
+    conditions are covered:
 
       - "sorted_lora_ids_neg":  sorted path, lora_ids all -1 (lora_id<0 check)
       - "naive_mapping_neg":    naive path, token_lora_mapping all -1
       - "naive_all_disabled":   naive path, adapter_enabled all 0
     """
+    fast_calls = _record_fast_paths(monkeypatch)
     torch.set_default_device(device)
     set_random_seed(0)
 
@@ -1150,10 +1370,14 @@ def test_fused_moe_lora_kernel_one_shot_early_exit(trigger, device):
     # larger E/max_loras and smaller num_tokens.
     if trigger == "naive_mapping_neg":
         num_tokens, top_k, E, max_loras, R = 8, 2, 64, 8, 16
+        if one_shot:
+            top_k, E, max_loras = 1, 256, 16
     elif trigger == "naive_all_disabled":
         num_tokens, top_k, E, max_loras, R = 32, 2, 8, 4, 32
     else:  # sorted_lora_ids_neg
         num_tokens, top_k, E, max_loras, R = 32, 2, 8, 4, 16
+    if one_shot:
+        num_tokens = 300
     K, N = 1024, 1024
     block_size, num_slices, dtype = 16, 2, torch.bfloat16
 
@@ -1210,16 +1434,19 @@ def test_fused_moe_lora_kernel_one_shot_early_exit(trigger, device):
         adapter_enabled,
         block_size,
     )
+    assert bool(fast_calls) == one_shot, fast_calls
     torch.testing.assert_close(output, residual, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("num_tokens", [8, 300], ids=["two_kernel", "one_shot"])
 @pytest.mark.parametrize("device", DEVICES)
-def test_fused_moe_lora_kernel_zero_grid_no_crash(device):
+def test_fused_moe_lora_kernel_zero_grid_no_crash(num_tokens, device, monkeypatch):
     """num_active_loras=0 (or num_slices=0) would otherwise launch a grid
-    with a zero dimension. one-shot wrapper must short-circuit before launch."""
+    with a zero dimension. Both paths must short-circuit before launch."""
+    fast_calls = _record_fast_paths(monkeypatch)
     torch.set_default_device(device)
     set_random_seed(0)
-    num_tokens, top_k, E, max_loras, R, K, N = 8, 2, 8, 4, 16, 1024, 1024
+    top_k, E, max_loras, R, K, N = 2, 8, 4, 16, 1024, 1024
     block_size, num_slices, dtype = 16, 2, torch.bfloat16
 
     (
@@ -1271,6 +1498,9 @@ def test_fused_moe_lora_kernel_zero_grid_no_crash(device):
         adapter_enabled,
         block_size,
     )
+    assert bool(fast_calls) == (num_tokens > FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS), (
+        fast_calls
+    )
     torch.testing.assert_close(output, residual, atol=0, rtol=0)
 
 
@@ -1281,7 +1511,7 @@ def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
     failure (`arange's range must be a power of 2`)."""
     torch.set_default_device(device)
     set_random_seed(0)
-    num_tokens, top_k, E, max_loras, R, K, N = 32, 2, 8, 4, 16, 1024, 1024
+    num_tokens, top_k, E, max_loras, R, K, N = 300, 2, 8, 4, 16, 1024, 1024
     num_slices, dtype = 2, torch.bfloat16
     block_size = 24  # NOT a power of 2
 
