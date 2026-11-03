@@ -384,6 +384,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
+            # The layout FlashInfer otherwise infers, with a DeprecationWarning
+            # on every call.
+            hidden_states_scale_layout=flashinfer.SfLayout.layout_linear,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
@@ -597,6 +600,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             hidden_states_scale=block_scale.view(torch.float8_e4m3fn).reshape(
                 *hidden_states.shape[:-1], -1
             ),
+            # The layout FlashInfer otherwise infers, with a DeprecationWarning
+            # on every call.
+            hidden_states_scale_layout=flashinfer.SfLayout.layout_linear,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
