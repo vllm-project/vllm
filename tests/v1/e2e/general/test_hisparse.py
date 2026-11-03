@@ -279,7 +279,7 @@ def test_hisparse_extensible_kv_cache(
     Warmup must commit the hot blocks the FlashInfer decode autotune reads (a
     top-k of 2048 reaches past the blocks backed at allocation) and keep the
     hot group within its fixed-size block-table rows. The host pool stays in
-    host memory.
+    host memory, and the caches passed to connectors match the fixed path's.
     """
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
@@ -292,7 +292,7 @@ def test_hisparse_extensible_kv_cache(
         config.update({"index_topk": 2048})
         return config
 
-    def run(**kwargs) -> tuple[int, list]:
+    def run(**kwargs) -> tuple[int, dict, list]:
         with vllm_runner(
             MODEL,
             load_format="dummy",
@@ -323,15 +323,22 @@ def test_hisparse_extensible_kv_cache(
             assert not any(cache.is_cuda for cache in worker.host_caches)
             engine_core = runner.llm.llm_engine.engine_core.engine_core
             model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            caches = {
+                name: (cache.dtype, cache.device.type)
+                for name, cache in model_runner.kv_caches_by_layer.items()
+            }
             outputs = [
                 runner.generate_greedy([prompt], max_tokens=16)[0] for prompt in prompts
             ]
-            return model_runner.kv_cache_config.num_blocks, outputs
+            return model_runner.kv_cache_config.num_blocks, caches, outputs
 
     prompts = [[1000 + i % 64 for i in range(2500)], [7, 8, 9]]
-    num_blocks, extensible = run(enable_extensible_kv_cache=True)
-    _, fixed = run(enable_extensible_kv_cache=False, num_gpu_blocks_override=num_blocks)
+    num_blocks, extensible_caches, extensible = run(enable_extensible_kv_cache=True)
+    _, fixed_caches, fixed = run(
+        enable_extensible_kv_cache=False, num_gpu_blocks_override=num_blocks
+    )
 
+    assert extensible_caches == fixed_caches
     assert extensible == fixed
 
 

@@ -212,21 +212,17 @@ class ExtensibleKVCache:
 
         `kv_cache_config.num_blocks` must equal the committed count. Connectors
         derive extents from `untyped_storage().nbytes()`, so they must not see the
-        reservation. None for layouts whose layers span several segments.
+        reservation. Host-resident layers and layers laid out over the raw
+        buffer keep their allocation-time views and are omitted. None for
+        layouts whose layers span several segments.
         """
         if not layout.is_block_compact:
             return None
         assert kv_cache_config.num_blocks == self.num_committed_blocks
         kv_caches: dict[str, torch.Tensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
-            if tensor.host_resident:
-                continue
             group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
-            if not spec.has_layer_views:
-                # Laid out by the layer itself over the raw buffer; as at
-                # allocation, it keeps the whole reservation.
-                full_view = self.buffer.full_view()
-                kv_caches.update((name, full_view) for name in tensor.layers)
+            if tensor.host_resident or not spec.has_layer_views:
                 continue
             kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
             for layer_idx, layer_name in enumerate(tensor.layers):
@@ -479,13 +475,12 @@ def extend_kv_cache(
         kv_cache.num_committed_blocks,
         kv_cache.physical_bytes / (1 << 30),
     )
-    forward_context = runner.compilation_config.static_forward_context
-    kv_caches = kv_cache.committed_views(
+    committed = kv_cache.committed_views(
         runner.kv_cache_config,
         runner.cache_config.get_resolved_kv_cache_layout(),
         runner.kernel_block_sizes,
     )
-    if kv_caches is not None:
+    if committed is not None:
         # As in `initialize_kv_cache`, draft groups map their views too.
         attn_groups = [
             group
@@ -494,29 +489,24 @@ def extend_kv_cache(
             for group in groups
         ]
         bind_kv_caches(
-            kv_caches,
-            forward_context,
+            committed,
+            runner.compilation_config.static_forward_context,
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
         )
-        runner.kv_caches = [
-            cache for cache in kv_caches.values() if cache.device == runner.device
-        ]
-    else:
-        kv_caches = {
-            layer_name: layer.kv_cache
-            for layer_name, layer in forward_context.items()
-            if isinstance(getattr(layer, "kv_cache", None), torch.Tensor)
+        runner.kv_caches_by_layer = {
+            name: committed.get(name, view)
+            for name, view in runner.kv_caches_by_layer.items()
         }
-    # Host-resident layers keep the views they were allocated with.
-    kv_caches.update(
-        (layer_name, forward_context[layer_name].kv_cache)
-        for tensor in runner.kv_cache_config.kv_cache_tensors
-        if tensor.host_resident
-        for layer_name in tensor.layers
+        runner.kv_caches = [
+            cache
+            for cache in runner.kv_caches_by_layer.values()
+            if cache.device == runner.device
+        ]
+    runner.kv_connector = get_kv_connector(
+        runner.vllm_config, runner.kv_caches_by_layer
     )
-    runner.kv_connector = get_kv_connector(runner.vllm_config, kv_caches)
 
 
 def measure_kv_cache_bytes(

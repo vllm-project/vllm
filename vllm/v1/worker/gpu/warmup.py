@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm import PoolingParams, SamplingParams
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.utils.math_utils import cdiv
@@ -21,7 +22,6 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     CrossAttentionSpec,
-    HiSparseHotSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -40,6 +40,7 @@ def _reserved_block_count(
     num_tokens: int,
     kvcache_spec: KVCacheSpec,
     *,
+    vllm_config: VllmConfig,
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
@@ -72,10 +73,9 @@ def _reserved_block_count(
         block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
     num_blocks = cdiv(num_tokens, block_size) + num_speculative_blocks
-    if isinstance(kvcache_spec, HiSparseHotSpec):
-        # A request's hot buffer has a fixed size, whatever its length.
-        return min(num_blocks, kvcache_spec.blocks_per_request)
-    return num_blocks
+    return min(
+        num_blocks, kvcache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    )
 
 
 def _warmup_token_ids(model_runner: GPUModelRunner, num_tokens: int) -> list[int]:
@@ -99,6 +99,7 @@ def _warmup_block_counter(
         return _reserved_block_count(
             num_tokens,
             kvcache_spec,
+            vllm_config=vllm_config,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
