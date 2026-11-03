@@ -19,7 +19,7 @@ from vllm import (
     TokensPrompt,
 )
 from vllm import logger as vllm_logger
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, WatermarkConfig
 from vllm.entrypoints.generate.beam_search.offline import BeamSearchOfflineMixin
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
 from vllm.entrypoints.generate.beam_search.utils import (
@@ -59,7 +59,7 @@ class _Renderer:
 
 class _VllmConfig:
     use_v2_model_runner = True
-    watermark_config = object()
+    watermark_config = WatermarkConfig(key=42)
     speculative_config = None
     model_config = SimpleNamespace(is_diffusion=False)
 
