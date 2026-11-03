@@ -1166,7 +1166,7 @@ class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
             cache(compile_key.extra_page, compile_key.extra_record),
             slots(compile_key.extra_width),
             vec(Int32),
-            vec(Int32),
+            make_fake_tensor(Int64, (cute.sym_int(),), (1,), assumed_align=8),
             make_fake_tensor(
                 Float32,
                 (cute.sym_int(), _ROPE_DIM),
@@ -1216,7 +1216,7 @@ class SwapABDecodeKernel(VllmCuTeDSLJitKernel["SwapABDecodeKernel.CompileKey"]):
         of V4.1 records (a token's data, then its scales) whose pages may be
         further apart than ``page * record`` bytes; the slot lists are
         ``[s_q, width]`` int32 slot ids (``block * page + offset``, ``-1``
-        invalid) with ``[s_q]`` int32 lengths; ``positions`` is int32. Only
+        invalid) with ``[s_q]`` int32 lengths; ``positions`` is int64. Only
         the live heads' groups of ``out_data`` / ``out_scale`` are written.
         """
         assert q.shape[1] >= heads

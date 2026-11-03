@@ -468,7 +468,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 extra_cache=extra_cache.squeeze(-2),
                 extra_idx=extra_idx,
                 extra_len=extra_len,
-                positions=positions_int32,
+                positions=positions,
                 cos_sin_cache=self.rotary_emb.cos_sin_cache,
                 sink=self.attn_sink,
                 heads=self.n_local_heads,

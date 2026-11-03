@@ -249,7 +249,7 @@ def bench_decode(s_q, device, topk_extra, extra_bytes, local_heads):
             extra_cache=extra,
             extra_idx=ex_idx,
             extra_len=ex_len,
-            positions=pos32,
+            positions=positions,
             cos_sin_cache=cos_sin,
             sink=sink,
             heads=local_heads,

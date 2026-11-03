@@ -70,7 +70,7 @@ class Case:
     heads: int
     q: torch.Tensor  # [s_q, heads, 512] bf16, head-major
     q_fused: torch.Tensor  # [s_q, 64, 512] bf16, zero-padded, chunk-interleaved
-    positions: torch.Tensor  # [s_q] int32
+    positions: torch.Tensor  # [s_q] int64
     sink: torch.Tensor  # [64] fp32, -inf past the live heads
     cos_sin: torch.Tensor  # [MAX_POS, 64] fp32
     swa: torch.Tensor  # [num_blocks, SWA_BLOCK, 528] uint8 view of padded blocks
@@ -188,7 +188,7 @@ def _make_case(
         heads=heads,
         q=q,
         q_fused=permute_q_to_fused(q_padded),
-        positions=randint(0, MAX_POS, s_q),
+        positions=randint(0, MAX_POS, s_q).long(),
         sink=sink,
         cos_sin=cos_sin,
         swa=swa,
@@ -439,6 +439,9 @@ def _cpu_layer(
 ) -> DeepseekV4MegaAttnAttention:
     """A mega-attention layer with just what its decode dispatch reads."""
     layer = object.__new__(DeepseekV4MegaAttnAttention)
+    # Module bookkeeping only, so attributes set and deleted (monkeypatch's
+    # undo) go through nn.Module as they do on a constructed layer.
+    torch.nn.Module.__init__(layer)
     layer.n_local_heads = heads
     layer.compress_ratio = compress_ratio
     layer.window_size = SWA_WIDTH
@@ -464,7 +467,7 @@ def _decode_step(
     )
     layer._forward_decode_mega(
         torch.zeros(num_tokens, PADDED_HEADS, HEAD_DIM, dtype=torch.bfloat16),
-        torch.zeros(num_tokens, dtype=torch.int32),
+        torch.zeros(num_tokens, dtype=torch.int64),
         None,
         swa_metadata,
         alloc_mega_attn_output(num_tokens, layer.n_wv_group, torch.device("cpu")),
