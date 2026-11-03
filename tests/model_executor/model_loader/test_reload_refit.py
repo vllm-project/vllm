@@ -4,9 +4,10 @@
 captured, reloads B, A, then B again the way NCCL/IPC weight transfer does
 (device tensors in batches through the model's own `load_weights`, between
 `start_reload` and `finish_reload`), so every reload writes new values.
-Afterwards every tensor the model holds must equal a fresh load of B and none
-may have moved, appeared or disappeared: captured graphs read the old
-addresses. No reload may leave device memory held.
+After reloading A every tensor the model holds must equal its cold start on A,
+and after the last reload a fresh load of B; none may have moved, appeared or
+disappeared: captured graphs read the old addresses. No reload may leave
+PyTorch-allocated device memory held.
 
 "Every tensor" is the registered parameters and buffers plus the device
 tensors reachable from module attributes (quant methods, kernels, quant
@@ -87,7 +88,6 @@ def _digest(t: torch.Tensor) -> str:
 
 
 def _checksums(worker) -> dict[str, str]:
-    torch.accelerator.synchronize()
     tensors = _model_tensors(worker.model_runner.get_model())
     return {name: _digest(t) for name, t in tensors.items()}
 
@@ -208,23 +208,28 @@ def test_refit_equals_fresh(vllm_runner, monkeypatch, mode, model_a, model_b, kw
 
     with vllm_runner(model_a, **engine_kwargs) as llm:
         ptrs = llm.collective_rpc(_ptrs)
+        cold_a = llm.collective_rpc(_checksums)
         # B, A, B: the later reloads run on reloaded kernels and still change
         # every tensor that differs between A and B
-        reloads = [
-            llm.collective_rpc(_stream_reload, args=(path,))
-            for path in (model_b, model_a, model_b)
-        ]
+        reloads = [llm.collective_rpc(_stream_reload, args=(model_b,))]
+        reloads.append(llm.collective_rpc(_stream_reload, args=(model_a,)))
+        reloaded_a = llm.collective_rpc(_checksums)
+        reloads.append(llm.collective_rpc(_stream_reload, args=(model_b,)))
         moved = [_diff(b, a) for b, a in zip(ptrs, llm.collective_rpc(_ptrs))]
         got = llm.collective_rpc(_checksums)
 
     # one assert, so a failure reports everything
     result = {
+        "reloaded_a_differs_from_cold_a": [
+            _diff(c, r) for c, r in zip(cold_a, reloaded_a)
+        ],
         "differ_from_fresh": [_diff(e, g) for e, g in zip(expected, got)],
         "moved": moved,
         "mode_and_held_bytes": reloads,
     }
     workers = len(got)
     assert result == {
+        "reloaded_a_differs_from_cold_a": [{}] * workers,
         "differ_from_fresh": [{}] * workers,
         "moved": [{}] * workers,
         "mode_and_held_bytes": [[(mode, 0)] * workers] * len(reloads),
