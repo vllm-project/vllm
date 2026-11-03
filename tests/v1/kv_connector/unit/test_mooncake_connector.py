@@ -1382,6 +1382,7 @@ def test_mooncake_compressed_kernel_split(kernel_block_size, raises):
         worker = MooncakeConnector(
             config, KVConnectorRole.WORKER, _make_compressed_kv_cache_config()
         ).connector_worker
+        assert worker is not None
         worker.shutdown()
 
 

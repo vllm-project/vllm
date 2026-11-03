@@ -1472,7 +1472,7 @@ def test_selective_lease_with_partial_hash_hits(monkeypatch):
         can_save=True,
         num_prompt_tokens=12,
         completed_token_len=12,
-        boundary_puts=[(1, 7, 8)],
+        boundary_puts=[BoundaryPut(1, 7, 8)],
     )
     send_thread._maybe_offload_boundary_states(_resolve_partial_tail(send_thread, req))
     store.lease_calls.clear()

@@ -325,7 +325,7 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
         tracker,
         block_size=8,
         hash_block_size=8,
-        block_hashes=[b"h0", b"h1"],
+        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
     )
     assert first is None
     assert tracker.num_saved_tokens == 8
@@ -335,7 +335,7 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
         tracker,
         block_size=8,
         hash_block_size=8,
-        block_hashes=[b"h0", b"h1"],
+        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
     )
     assert second is not None
     assert second.token_ids_start == 8
