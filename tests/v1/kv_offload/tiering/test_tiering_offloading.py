@@ -712,6 +712,43 @@ class TestTieringOffloadingManager:
             for chunk in chunks
         )
 
+    def test_finished_request_drops_queued_promotion(self, manager_setup):
+        """A finished request's already-submitted promotion runs to
+        completion, while its queued-but-unsubmitted promotion is dropped
+        outright. No promotion book-keeping is left behind."""
+        req1_chunk, req2_chunk = to_keys([1, 2])
+        self.secondary_tier1.chunks[req1_chunk] = True
+        self.secondary_tier1.chunks[req2_chunk] = True
+
+        req1_ctx = ReqContext(req_id="req1")
+        self._start_request(req1_ctx)
+        assert self.manager.lookup(req1_chunk, req1_ctx) is LookupResult.HIT_PENDING
+
+        # Synchronous tier: the flush submits and materializes req1's
+        # promotion; its completion is not reaped yet.
+        self._simulate_on_schedule_end()
+
+        # req2's promotion is still queued when the requests finish: no
+        # schedule end runs between its lookup and finalization.
+        req2_ctx = ReqContext(req_id="req2")
+        self._start_request(req2_ctx)
+        assert self.manager.lookup(req2_chunk, req2_ctx) is LookupResult.HIT_PENDING
+
+        # Both requests finish: req1's promotion is submitted and
+        # materialized, req2's is queued.
+        self.manager.on_request_finished(req1_ctx)
+        self.manager.on_request_finished(req2_ctx)
+
+        # req2's queued promotion is dropped outright.
+        assert not self.manager._pending_load_submissions
+
+        # req1's submitted promotion runs to completion despite the
+        # finalization.
+        self._simulate_on_schedule_end()
+        assert count_hits(self.primary_tier, [req1_chunk]) == 1
+        assert not self.manager._jobs
+        assert not self.manager.has_pending_work()
+
     @pytest.mark.parametrize(
         "source",
         [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
@@ -2036,30 +2073,6 @@ class TestPromotionAllocation:
         assert len(chunk_ids_out) > 0
         assert tier_state.primary_write_chunk_count == len(chunk_ids_out)
 
-    def test_promotion_fails_for_finalized_request(self):
-        from vllm.v1.kv_offload.tiering.manager import CPUPrimaryTierOffloadingManager
-
-        primary = CPUPrimaryTierOffloadingManager(
-            num_chunks=4, mmap_region=_mock_mmap_region(4)
-        )
-        req_ctx = ReqContext(req_id="finished-req")
-
-        # Warm up request state so the manager knows about this request.
-        primary.on_new_request(req_ctx)
-        key = to_keys([1])[0]
-        out = primary.prepare_store([key], req_ctx)
-        assert out is not None
-        primary.complete_store([key], req_ctx, success=True)
-
-        # Finalize the request — sets state.finished = True.
-        primary.on_request_finished(req_ctx)
-
-        new_key = to_keys([99])[0]
-        result = primary.safe_prepare_write([new_key], req_ctx)
-        assert isinstance(result, CPUPrimaryTierOffloadingManager._RequestFinalized), (
-            f"Expected REQUEST_FINALIZED sentinel, got {result!r}"
-        )
-
 
 def test_tiering_manager_reports_one_config_info_series_for_each_tier(manager_lock):
     """The info metric holds one series for each tier, and the tier label tells
@@ -2440,6 +2453,65 @@ class TestTieringOffloadingManagerWithFsTier:
 
         fs_tier0.shutdown()
         fs_tier1.shutdown()
+
+    def test_finished_request_cancels_submitted_fs_promotion(
+        self, fs_manager_setup, monkeypatch
+    ):
+        """Test FSTier promotion job cancellation."""
+        manager, primary_tier, fs_tier = fs_manager_setup
+        req1_chunk, req2_chunk = to_keys([1, 2])
+        self._write_keys_to_fs(fs_tier, [req1_chunk, req2_chunk])
+
+        req1_ctx = ReqContext(req_id="req1")
+        manager.on_new_request(req1_ctx)
+        req2_ctx = ReqContext(req_id="req2")
+        manager.on_new_request(req2_ctx)
+        assert manager.lookup(req1_chunk, req1_ctx) is LookupResult.RETRY
+        assert manager.lookup(req2_chunk, req2_ctx) is LookupResult.RETRY
+
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=["req1", "req2"], preempted_req_ids=[])
+        )
+        self._wait_lookup_workers(fs_tier)
+
+        # Gate fs tier threadpool's enqueue_load so we control when materialization
+        # happens.
+        load_gate = threading.Event()
+        real_enqueue_load = fs_tier._pool.enqueue_load
+
+        def gated_enqueue_load(job_id, n_tasks, tasks):
+            real_enqueue_load(job_id, n_tasks + 1, [load_gate.wait] + list(tasks))
+
+        monkeypatch.setattr(fs_tier._pool, "enqueue_load", gated_enqueue_load)
+
+        # req1's chunk is submitted for promotion below.
+        assert manager.lookup(req1_chunk, req1_ctx) is LookupResult.HIT_PENDING
+        manager.on_schedule_end(
+            ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+        )
+        # req2's chunk enters pending_load_submissions
+        assert manager.lookup(req2_chunk, req2_ctx) is LookupResult.HIT_PENDING
+
+        # finalize both requests
+        manager.on_request_finished(req1_ctx)
+        manager.on_request_finished(req2_ctx)
+
+        # req2's queued promotion is dropped outright.
+        assert not manager._pending_load_submissions
+
+        # Release the gate: allowing load_task to run materialize().
+        load_gate.set()
+        fs_tier.drain_jobs()
+        for _ in range(2):
+            manager.on_schedule_end(
+                ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+            )
+
+        assert count_hits(primary_tier, [req1_chunk]) == 0
+        assert not manager._inflight_promotion_keys
+        assert not manager._jobs
+        assert not manager.has_pending_work()
+        manager._metrics.assert_idle()
 
 
 if __name__ == "__main__":

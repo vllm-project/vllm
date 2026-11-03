@@ -70,8 +70,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import StoreDrainResult
 # ---------------------------------------------------------------------------
 
 
-def _parent_ctx(view):
-    return ParentContext(threading.Lock(), view)
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _remote_prefiller_kv_params(
@@ -3304,7 +3304,7 @@ def drain_transports():
 
 
 @pytest.fixture
-def drain_peers(monkeypatch, drain_transports):
+def drain_peers(monkeypatch, drain_transports, manager_lock):
     """Real managers and sessions; only the wire transports are in memory."""
     init_none_hash(sha256)
     a = _LoopbackControl("A:1")
@@ -3321,7 +3321,10 @@ def drain_peers(monkeypatch, drain_transports):
     spec = CPUOffloadingSpec(make_offloading_config())
     peers = [
         P2PSecondaryTierManager(
-            spec, _parent_ctx(memoryview(bytearray(65536))), host=host, port=port
+            spec,
+            _parent_ctx(memoryview(bytearray(65536)), manager_lock),
+            host=host,
+            port=port,
         )
         for host, port in [("A", 1), ("B", 2)]
     ]
@@ -3372,7 +3375,7 @@ def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound)
     assert list(producer.get_finished_jobs()) == [JobResult(31, False)]
 
 
-def test_reset_cache_releases_parked_p2p_slots(drain_peers):
+def test_reset_cache_releases_parked_p2p_slots(drain_peers, manager_lock):
     """The real tiering reset can reclaim every slot held for an absent decoder."""
     _, producer = drain_peers
     region = SharedOffloadRegion(
@@ -3383,8 +3386,9 @@ def test_reset_cache_releases_parked_p2p_slots(drain_peers):
         cpu_page_size=mmap.PAGESIZE,
     )
     tiering = TieringOffloadingManager(
-        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
-        [producer],
+        lock=manager_lock,
+        primary_tier=CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        secondary_tiers=[producer],
         tier_poll_interval_s=0,
     )
     ctx = _req_context(_remote_decoder_kv_params())
@@ -3452,7 +3456,7 @@ def test_drain_rejects_fetch_arriving_mid_poll(drain_peers, drain_transports):
 
 
 @pytest.mark.parametrize("fetch_before_reset", [False, True])
-def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
+def test_reset_symmetric_lookup_rounds(drain_peers, manager_lock, fetch_before_reset):
     """Old HITs fail promptly after reset; fresh lookups can reuse a completed id."""
     consumer, producer = drain_peers
     region = SharedOffloadRegion(
@@ -3463,8 +3467,9 @@ def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
         cpu_page_size=mmap.PAGESIZE,
     )
     tiering = TieringOffloadingManager(
-        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
-        [producer],
+        lock=manager_lock,
+        primary_tier=CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        secondary_tiers=[producer],
         tier_poll_interval_s=0,
     )
     key = OffloadKey(b"symmetric")

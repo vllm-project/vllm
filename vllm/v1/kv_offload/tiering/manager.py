@@ -131,6 +131,7 @@ class TieringTransferJob(TransferJob):
         self.requested_keys = keys
         self._alloc_fn = alloc_fn
         self._is_alloc_failed = False
+        self._is_cancelled = False
         self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
 
         if is_promotion:
@@ -148,10 +149,21 @@ class TieringTransferJob(TransferJob):
     def is_materialized(self) -> bool:
         return self._keys_chunks is not None
 
+    def cancel(self) -> None:
+        """Refuse later materialization: the request is finished.
+
+        Checked under the manager lock, so it cannot race a tier worker's
+        materialize() call.
+        """
+        self._is_cancelled = True
+
     def materialize(self) -> bool:
         if not self.is_promotion:
             # Cascade jobs materialize at construction
             return True
+
+        if self._is_cancelled:
+            return False
 
         assert self._keys_chunks is None and not self._is_alloc_failed, (
             f"TransferJob {self.job_id} materialized more than once"
@@ -198,15 +210,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
     accessing primary. This avoids confusion when reading TieringOffloadingManager
     code (e.g. calling prepare_load inside a cascade/store path would be misleading).
     """
-
-    class _RequestFinalized:
-        """Sentinel returned by safe_prepare_write when the request has already
-        been finalized. Distinct from None (allocation failure) so callers can
-        handle the two cases differently without recording a failure metric."""
-
-        __slots__ = ()
-
-    REQUEST_FINALIZED = _RequestFinalized()
 
     def __init__(
         self,
@@ -294,26 +297,6 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             "reset_cache with deferred-release chunks: a tier may still write to them"
         )
         super().reset_cache()
-
-    def safe_prepare_write(
-        self,
-        keys: Collection[OffloadKey],
-        req_context: ReqContext,
-    ) -> (
-        "PrepareStoreOutput | None | CPUPrimaryTierOffloadingManager._RequestFinalized"
-    ):
-        """prepare_write that handles finalized requests gracefully.
-
-        Returns:
-            PrepareStoreOutput  — allocation succeeded.
-            None                — allocation failed (primary tier full).
-            REQUEST_FINALIZED   — request already finalized; skip silently,
-                                  do not record a promotion failure metric.
-
-        """
-        if self._is_request_cache_access_finished(req_context):
-            return CPUPrimaryTierOffloadingManager.REQUEST_FINALIZED
-        return self.prepare_write(keys, req_context)
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -917,16 +900,10 @@ class TieringOffloadingManager(OffloadingManager):
         req_context: ReqContext,
     ) -> tuple[list[OffloadKey], np.ndarray] | None:
         """Allocate primary tier slots for promotion"""
-        primary_write_result = self.primary_tier.safe_prepare_write(
+        primary_write_result = self.primary_tier.prepare_write(
             offload_keys, req_context
         )
 
-        if isinstance(
-            primary_write_result, CPUPrimaryTierOffloadingManager._RequestFinalized
-        ):
-            # Request finished before the promotion could allocate; skip
-            # silently.
-            return None
         if primary_write_result is None:
             # Primary tier is full
             self._metrics.on_promotion_allocation_failure()
@@ -1285,7 +1262,24 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
+        self._cancel_request_promotions(req_context.req_id)
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
+
+    def _cancel_request_promotions(self, req_id: str) -> None:
+        """Stop a finished request's promotions before they materialize.
+
+        Drops queued (not yet submitted) promotions and cancels in-flight
+        promotion jobs.
+        """
+        for tier_idx, pending_by_ctx in list(self._pending_load_submissions.items()):
+            entry = pending_by_ctx.pop(req_id, None)
+            if entry is not None:
+                self._inflight_promotion_keys.difference_update(entry.keys)
+            if not pending_by_ctx:
+                del self._pending_load_submissions[tier_idx]
+        for job_metadata in self._jobs.values():
+            if job_metadata.transfer_job.req_context.req_id == req_id:
+                job_metadata.transfer_job.cancel()
 
     def _maybe_finalize_request(
         self,
