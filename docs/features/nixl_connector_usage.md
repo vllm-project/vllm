@@ -431,7 +431,7 @@ A decoder normally learns that a NIXL pull finished from the output of a later s
 --kv-transfer-config '{..., "enable_early_recv": true}'
 ```
 
-- **Supported**: the `uni` executor or single-node `mp`, sync or async scheduling, TP, and NIXL pull inside MultiConnector. PP must be 1, for any KV role.
+- **Supported**: the `uni` executor or single-node `mp`, sync or async scheduling, and TP, with NixlConnector (pull) or MooncakeStoreConnector, used directly or inside MultiConnector. NIXL pull requires PP to be 1 regardless of the KV role; MooncakeStoreConnector also works with PP > 1.
 - **Unchanged**: a request still waits for every rank and for free KV blocks, and transfer failures follow `kv_load_failure_policy`. Unexpected polling errors stop the engine, even while it is paused.
 - **Overhead**: with `mp`, workers poll every 0.2 ms between RPCs while pulls are pending. An RPC that arrives during a poll waits for it to finish.
 - **Streams and metrics**: KV post-processing runs on the worker's current stream before the next forward pass. Transfer metrics are still reported with regular step outputs.
