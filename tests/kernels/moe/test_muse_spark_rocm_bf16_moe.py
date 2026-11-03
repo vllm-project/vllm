@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
 from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-    derive_aiter_quant_method,
+    derive_aiter_quant_type,
     mxfp4_w4a16_extra_kwargs,
     rocm_aiter_fused_experts,
 )
@@ -637,7 +637,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         moe_config=config,
         activation=MoEActivation.SILU,
         quant_config=quant_config,
-        quant_method=derive_aiter_quant_method(quant_config),
+        quant_type=derive_aiter_quant_type(quant_config),
         output_dtype=dtype,
         **mxfp4_w4a16_extra_kwargs(quant_config, config),
     ).clone()
