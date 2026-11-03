@@ -2498,5 +2498,3 @@ def test_uniform_page_size_groups_ignore_draft_bucket_size():
     # + 5 draft SWA (1 group of 5) + 1 draft FullAttn (1 group of 1) = 6 groups.
     assert len(groups) == 6
     assert [len(g.layer_names) for g in groups] == [8, 8, 8, 8, 5, 1]
-
-
