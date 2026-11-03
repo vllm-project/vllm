@@ -847,10 +847,11 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "num_heads,spec_method,parallel_drafting,group_cache_dtype,needs_row_map",
+    "num_heads,spec_method,parallel_drafting,global_cache_dtype,group_cache_dtype,"
+    "needs_row_map",
     [
         *[
-            (num_heads, method, parallel, None, True)
+            (num_heads, method, parallel, "fp8_e4m3", None, True)
             for num_heads in [8, 16, 24, 32, 64, 128]
             for method, parallel in [
                 ("deepseek_mtp", False),
@@ -859,8 +860,33 @@ def test_segmented_dcp_verify_matches_causal_attention(monkeypatch):
                 ("eagle", False),
             ]
         ],
-        pytest.param(16, "deepseek_mtp", False, "auto", False, id="bf16-group"),
-        pytest.param(16, "deepseek_mtp", False, "fp8_e5m2", False, id="e5m2-group"),
+        # A speculative draft with its own kv_cache_dtype gets builders built
+        # from the target's VllmConfig.
+        pytest.param(
+            16,
+            "deepseek_mtp",
+            False,
+            "fp8_e4m3",
+            "auto",
+            False,
+            id="draft-bf16-kv-under-fp8-target",
+        ),
+        pytest.param(
+            16,
+            "deepseek_mtp",
+            False,
+            "auto",
+            "fp8",
+            True,
+            id="draft-fp8-kv-under-bf16-target",
+        ),
+        # kv_cache_dtype_skip_layers keeps an MLA layer in bf16 under an fp8 cache.
+        pytest.param(
+            16, None, False, "fp8_e4m3", "auto", False, id="skip-layer-bf16-kv"
+        ),
+        pytest.param(
+            16, "deepseek_mtp", False, "fp8_e4m3", "fp8_e5m2", False, id="e5m2-group"
+        ),
     ],
 )
 def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
@@ -868,12 +894,13 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     num_heads,
     spec_method,
     parallel_drafting,
+    global_cache_dtype,
     group_cache_dtype,
     needs_row_map,
 ):
     """Size decode metadata for padded heads/qlen; skip unsupported DCP maps.
 
-    The group's raw cache format must override the global FP8 configuration.
+    The group's raw cache format must override the global cache configuration.
     """
     dtypes = SimpleNamespace(fp8="fp8", fp16="fp16", bf16="bf16")
     info_calls = []
@@ -917,7 +944,9 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
         # would size for qlen=1 and hide the very mismatch this test covers.
         spec = config.speculative_config
         self.reorder_batch_threshold = (
-            1 + (2 if spec.parallel_drafting else 1) * spec.num_speculative_tokens
+            1
+            if spec is None
+            else 1 + (2 if spec.parallel_drafting else 1) * spec.num_speculative_tokens
         )
 
     monkeypatch.setitem(
@@ -937,7 +966,9 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     monkeypatch.setattr(rocm_aiter_mla, "is_aiter_found_and_supported", lambda: True)
 
     config = SimpleNamespace(
-        speculative_config=SimpleNamespace(
+        speculative_config=None
+        if spec_method is None
+        else SimpleNamespace(
             method=spec_method,
             num_speculative_tokens=3,
             parallel_drafting=parallel_drafting,
@@ -953,7 +984,9 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
             get_num_attention_heads=lambda parallel_config: num_heads,
         ),
         scheduler_config=SimpleNamespace(max_num_seqs=2),
-        cache_config=SimpleNamespace(cache_dtype="fp8_e4m3", num_gpu_blocks=None),
+        cache_config=SimpleNamespace(
+            cache_dtype=global_cache_dtype, num_gpu_blocks=None
+        ),
         compilation_config=SimpleNamespace(
             cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: False),
             # Empty: the per-layer head-count probe finds no attention layer and
@@ -961,16 +994,19 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
             static_forward_context={},
         ),
     )
+    # A group without its own format falls back to the global one.
+    fp8_group = (group_cache_dtype or global_cache_dtype).startswith("fp8")
     builder = AiterMLAMetadataBuilder(
         kv_cache_spec=SimpleNamespace(
-            block_size=1, dtype=torch.bfloat16, cache_dtype_str=group_cache_dtype
+            block_size=1,
+            dtype=torch.uint8 if fp8_group else torch.bfloat16,
+            cache_dtype_str=group_cache_dtype,
         ),
         layer_names=["layer.0"],
         vllm_config=config,
         device=torch.device("cpu"),
     )
 
-    fp8_group = group_cache_dtype != "auto"
     q_dtype = dtypes.fp8 if fp8_group else torch.bfloat16
     kv_dtype = dtypes.fp8 if fp8_group else dtypes.bf16
     assert info_calls == [
@@ -987,6 +1023,7 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     ]
     assert builder._mla_q_dtype == q_dtype
     assert builder._mla_kv_dtype == kv_dtype
+    assert builder._kv_cache_dtype_str == ("fp8" if fp8_group else group_cache_dtype)
 
     builder.dcp_world_size = 2
     chunk = object()
