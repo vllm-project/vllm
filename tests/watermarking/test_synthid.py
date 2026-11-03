@@ -477,7 +477,7 @@ def test_synthid_detector_recognizes_fused_samples():
 
 def _fake_fused_sampler(monkeypatch, sample_fn):
     monkeypatch.setattr(SynthIDWatermarker, "_use_fused", lambda self, logits: True)
-    monkeypatch.setattr("vllm.v1.watermarking.synthid.synthid_sample", sample_fn)
+    monkeypatch.setattr("vllm.v1.worker.gpu.sample.synthid.synthid_sample", sample_fn)
 
 
 def _cpu_sampler_inputs():
@@ -509,9 +509,9 @@ def test_cpu_tensors_use_the_torch_tournament(monkeypatch):
     def failing_synthid_sample(*args, **kwargs):
         raise AssertionError("the fused kernels need CUDA tensors")
 
-    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: True)
+    monkeypatch.setattr("vllm.v1.worker.gpu.sample.synthid.is_supported", lambda: True)
     monkeypatch.setattr(
-        "vllm.v1.watermarking.synthid.synthid_sample", failing_synthid_sample
+        "vllm.v1.worker.gpu.sample.synthid.synthid_sample", failing_synthid_sample
     )
     monkeypatch.setattr(
         RandomSampler, "__call__", lambda self, scores: scores.argmax(dim=-1)
@@ -545,7 +545,7 @@ def test_fused_failure_after_the_first_call_is_not_swallowed(monkeypatch):
 
 
 def test_torch_tournament_sampling_warns_once(monkeypatch, caplog):
-    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: False)
+    monkeypatch.setattr("vllm.v1.worker.gpu.sample.synthid.is_supported", lambda: False)
     monkeypatch.setattr(
         RandomSampler, "__call__", lambda self, scores: scores.argmax(dim=-1)
     )
@@ -638,7 +638,7 @@ def test_engine_fails_at_startup_when_fused_kernels_fail(
     # The patch reaches the worker only when the engine runs in-process.
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setattr(
-        "vllm.v1.watermarking.synthid.synthid_sample", failing_synthid_sample
+        "vllm.v1.worker.gpu.sample.synthid.synthid_sample", failing_synthid_sample
     )
     with (
         pytest.raises(RuntimeError, match="Triton 3.8 or newer") as error,

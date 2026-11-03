@@ -19,7 +19,6 @@ from vllm.v1.watermarking.watermarker import (
     WatermarkSample,
     _validate_context_width,
 )
-from vllm.v1.worker.gpu.sample.synthid import is_supported, synthid_sample
 
 logger = init_logger(__name__)
 
@@ -50,6 +49,9 @@ def check_synthid_text_platform() -> None:
         return
     if current_platform.is_cuda() and not current_platform.has_device_capability(80):
         return
+    # The kernels import vllm.v1.watermarking, so import them lazily.
+    from vllm.v1.worker.gpu.sample.synthid import is_supported
+
     if not is_supported():
         raise ValueError(_fused_kernels_error())
 
@@ -172,6 +174,8 @@ class SynthIDWatermarker(Watermarker):
         )
 
     def _use_fused(self, logits: torch.Tensor) -> bool:
+        from vllm.v1.worker.gpu.sample.synthid import is_supported
+
         # Tensors on the CPU, as in tests, keep the torch tournament.
         return logits.is_cuda and is_supported()
 
@@ -182,6 +186,8 @@ class SynthIDWatermarker(Watermarker):
         random_sampler: RandomSampler,
         skip_mask: torch.Tensor | None,
     ) -> WatermarkSample:
+        from vllm.v1.worker.gpu.sample.synthid import synthid_sample
+
         token_ids = synthid_sample(
             logits,
             contexts,

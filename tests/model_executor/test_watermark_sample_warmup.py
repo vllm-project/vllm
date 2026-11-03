@@ -138,7 +138,7 @@ def _capture_synthid_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
 
     monkeypatch.setattr(SynthIDWatermarker, "_use_fused", lambda self, logits: True)
     monkeypatch.setattr(
-        "vllm.v1.watermarking.synthid.synthid_sample", fake_synthid_sample
+        "vllm.v1.worker.gpu.sample.synthid.synthid_sample", fake_synthid_sample
     )
     return calls
 
