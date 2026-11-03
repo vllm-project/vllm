@@ -58,6 +58,11 @@ steps:
   device: l4
   num_devices: 4
   source_file_dependencies:
+  - vllm/v1/engine/
+  - vllm/v1/core/sched/
+  - vllm/config/lora.py
+  - vllm/config/vllm.py
+  - vllm/engine/arg_utils.py
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
   - vllm/model_executor/models/transformers/moe.py
@@ -95,6 +100,11 @@ steps:
       depends_on:
       - image-build-amd
       source_file_dependencies:
+      - vllm/v1/engine/
+      - vllm/v1/core/sched/
+      - vllm/config/lora.py
+      - vllm/config/vllm.py
+      - vllm/engine/arg_utils.py
       - vllm/lora
       - vllm/model_executor/layers/fused_moe/
       - vllm/model_executor/models/transformers/moe.py

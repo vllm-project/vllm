@@ -90,7 +90,11 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.extensible_tensor import granule_size
 from vllm.utils.flashinfer import warn_if_flashinfer_kernels_missing
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
-from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
+from vllm.utils.gpu_sync_debug import (
+    enable_gpu_sync_check,
+    gpu_sync_allowed,
+    with_gpu_sync_check,
+)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import (
     MemoryProfilingResult,
@@ -1652,6 +1656,14 @@ class Worker(WorkerBase):
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
+
+    def update_lora_group(self, method: str, argument: Any) -> dict:
+        # Completion of CPU scheduling does not retire asynchronous GPU readers.
+        with gpu_sync_allowed():
+            self.synchronize_device()
+            report = self.model_runner.lora_manager.group_update(method, argument)
+            self.synchronize_device()
+            return report
 
     def remove_lora(self, lora_id: int) -> bool:
         return self.model_runner.remove_lora(lora_id)

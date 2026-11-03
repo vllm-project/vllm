@@ -4,7 +4,9 @@
 
 import shutil
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -18,6 +20,7 @@ from vllm.lora.request import LoRARequest
 from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 MODEL_PATH = "allenai/OLMoE-1B-7B-0125-Instruct"
@@ -207,23 +210,245 @@ def test_olmoe_lora_idle_peer(olmoe_lora_files, use_v2):
 
 
 class LoRASlotOrderWorkerExtension:
+    def start_lora_trace(self):
+        worker = cast("Worker", self)
+        runner = cast("GPUModelRunner", worker.model_runner)
+        manager = runner.cudagraph_manager
+        assert manager is not None and manager.graphs
+        self.lora_graph_replays = 0
+
+        def count_replay(graph):
+            self.lora_graph_replays += 1
+
+        self.lora_graph_handles = [
+            graph.register_replay_end_hook(count_replay)
+            for graph in manager.graphs.values()
+        ]
+
+    def finish_lora_trace(self):
+        from vllm.distributed import get_dp_group
+
+        for handle in self.lora_graph_handles:
+            handle.remove()
+        group = get_dp_group()
+        reports = [None] * group.world_size
+        torch.distributed.all_gather_object(
+            reports, self.lora_graph_replays, group=group.cpu_group
+        )
+        return reports
+
     def preload_lora_slots(self, paths: list[str], reverse_peer: bool):
+        reports = self.configure_lora_residency(
+            paths, [[1, 2], [2, 1] if reverse_peer else [1, 2]]
+        )
+        return [report["slots"] for report in reports]
+
+    def configure_lora_residency(self, paths: list[str], orders: list[list[int]]):
         from vllm.distributed import get_dp_group
 
         worker = cast("Worker", self)
         group = get_dp_group()
         for adapter_id in list(worker.list_loras()):
             worker.remove_lora(adapter_id)
-        order = [1, 2]
-        if reverse_peer and group.rank_in_group == 1:
-            order.reverse()
+        order = orders[group.rank_in_group]
         for adapter_id in order:
             assert worker.add_lora(
                 LoRARequest(str(adapter_id), adapter_id, paths[adapter_id - 1])
             )
-        orders = [None] * group.world_size
-        torch.distributed.all_gather_object(orders, order, group=group.cpu_group)
-        return orders
+        slots = list(worker.model_runner.get_model().lora_manager.lora_index_to_id)
+        assert {item for item in slots if item is not None} == set(order)
+        report = {
+            "rank": group.rank_in_group,
+            "slots": [x for x in slots if x is not None],
+        }
+        reports = [None] * group.world_size
+        torch.distributed.all_gather_object(reports, report, group=group.cpu_group)
+        return reports
+
+
+def run_group_admission_server(
+    model: str, paths: list[str], tp: int, graph: bool = False
+):
+    """Compare repaired cold/divergent receivers and concurrent adapter cohorts."""
+    args = [
+        "--host",
+        "127.0.0.1",
+        "--api-server-count",
+        "1",
+        "--data-parallel-size",
+        "2",
+        "--tensor-parallel-size",
+        str(tp),
+        "--all2all-backend",
+        "allgather_reducescatter",
+        "--enable-lora",
+        "--enable-group-lora-admission",
+        "--max-loras",
+        "2",
+        "--max-cpu-loras",
+        "4",
+        "--max-lora-rank",
+        "8",
+        "--lora-modules",
+        *[f"adapter-{i}={p}" for i, p in enumerate(paths, 1)],
+        "--max-model-len",
+        "256",
+        "--max-num-batched-tokens",
+        "128",
+        "--max-num-seqs",
+        "8",
+        "--no-enable-prefix-caching",
+        "--worker-extension-cls",
+        "tests.lora.test_olmoe_tp.LoRASlotOrderWorkerExtension",
+    ]
+    if not graph:
+        args.append("--enforce-eager")
+    with (
+        RemoteOpenAIServer(
+            model,
+            args,
+            max_wait_seconds=300,
+            env_dict={
+                "VLLM_USE_V2_MODEL_RUNNER": "1",
+                "VLLM_SERVER_DEV_MODE": "1",
+                "VLLM_BATCH_INVARIANT": "1",
+                "VLLM_GPU_SYNC_CHECK": "error",
+                "OMP_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+            },
+        ) as server,
+        server.get_client(timeout=90) as client,
+    ):
+
+        def score(adapter, rank, tokens=None, start=None):
+            if start is not None:
+                start.wait(timeout=30)
+            if tokens is None:
+                tokens = {1: 64, 2: 8, 3: 16, 4: 32}[adapter]
+            response = client.completions.create(
+                model=f"adapter-{adapter}",
+                prompt=[[1, 42, 67, 105, 325, 556, 880, 1042]],
+                temperature=0,
+                max_tokens=tokens,
+                extra_headers={"X-data-parallel-rank": str(rank)},
+                extra_body={"prompt_logprobs": 0, "ignore_eos": True},
+            )
+            logprobs = [
+                next(iter(item.values()))["logprob"]
+                for choice in response.choices
+                for item in choice.model_dump()["prompt_logprobs"]
+                if item is not None
+            ]
+            assert len(logprobs) == 7
+            return {
+                "scores": logprobs,
+                "text": response.choices[0].text,
+                "finish_reason": response.choices[0].finish_reason,
+            }
+
+        reference = {adapter: score(adapter, 0) for adapter in range(1, 5)}
+        assert reference[1]["scores"] != reference[2]["scores"]
+        for orders in ([[1, 2], [2, 1]], [[1], []], [[1, 2], [3, 4]]):
+            requests.post(
+                server.url_for("pause"), params={"mode": "wait"}, timeout=60
+            ).raise_for_status()
+            configured = requests.post(
+                server.url_for("collective_rpc"),
+                json={
+                    "method": "configure_lora_residency",
+                    "args": [paths, orders],
+                    "timeout": 60,
+                },
+                timeout=90,
+            )
+            configured.raise_for_status()
+            requests.post(server.url_for("resume"), timeout=30).raise_for_status()
+            assert score(1, 0) == reference[1]
+            assert score(2, 1) == reference[2]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            start = Barrier(4)
+            futures = {
+                adapter: pool.submit(score, adapter, (adapter - 1) // 2, None, start)
+                for adapter in range(1, 5)
+            }
+            assert {
+                adapter: future.result() for adapter, future in futures.items()
+            } == reference
+        replays = []
+        if graph:
+            requests.post(
+                server.url_for("pause"), params={"mode": "wait"}, timeout=60
+            ).raise_for_status()
+            requests.post(
+                server.url_for("collective_rpc"),
+                json={"method": "start_lora_trace"},
+                timeout=90,
+            ).raise_for_status()
+            requests.post(server.url_for("resume"), timeout=30).raise_for_status()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                start = Barrier(2)
+                probes = {
+                    adapter: pool.submit(score, adapter, adapter - 1, None, start)
+                    for adapter in (1, 2)
+                }
+                assert {
+                    adapter: future.result() for adapter, future in probes.items()
+                } == {adapter: reference[adapter] for adapter in (1, 2)}
+            requests.post(
+                server.url_for("pause"), params={"mode": "wait"}, timeout=60
+            ).raise_for_status()
+            replay = requests.post(
+                server.url_for("collective_rpc"),
+                json={
+                    "method": "finish_lora_trace",
+                    "timeout": 60,
+                },
+                timeout=90,
+            )
+            replay.raise_for_status()
+            replays = [count for lane in replay.json()["results"] for count in lane]
+            assert len(replays) == 2 * tp and all(count > 0 for count in replays), (
+                replays
+            )
+        return {
+            "dp": 2,
+            "tp": tp,
+            "graph_requested": graph,
+            "completed_graph_replays_by_worker": replays,
+            "reference": reference,
+            "common_permuted_cold_divergent_and_concurrent": "passed_exact_scores",
+        }
+
+
+def _group_adapters(source: str, destination: Path) -> list[str]:
+    weights = load_file(str(Path(source) / "adapter_model.safetensors"))
+    expert_b = [name for name in weights if "experts" in name and "lora_B" in name]
+    assert any(weights[name].count_nonzero().item() for name in expert_b)
+    paths = []
+    for index, scale in enumerate((1, -1, 0.5, -0.5), 1):
+        target = destination / str(index)
+        shutil.copytree(source, target)
+        scaled = {
+            name: value * scale if name in expert_b else value
+            for name, value in weights.items()
+        }
+        save_file(scaled, str(target / "adapter_model.safetensors"))
+        paths.append(str(target))
+    return paths
+
+
+@multi_gpu_test(num_gpus=2)
+def test_olmoe_group_lora_admission(olmoe_lora_files, tmp_path):
+    run_group_admission_server(
+        MODEL_PATH, _group_adapters(olmoe_lora_files, tmp_path), 1
+    )
+
+
+@multi_gpu_test(num_gpus=4)
+def test_olmoe_group_lora_admission_dp2_tp2(olmoe_lora_files, tmp_path):
+    run_group_admission_server(
+        MODEL_PATH, _group_adapters(olmoe_lora_files, tmp_path), 2
+    )
 
 
 @multi_gpu_test(num_gpus=2)
