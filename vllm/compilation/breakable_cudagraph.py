@@ -34,9 +34,11 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cudagraph_launch import new_cuda_graph
 from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.compilation import CUDAGraphLaunchMode
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -148,8 +150,11 @@ class BreakableCUDAGraphCapture:
     def is_active(cls) -> bool:
         return cls.current() is not None
 
-    def __init__(self, pool: Any | None = None) -> None:
+    def __init__(
+        self, pool: Any | None = None, launch_mode: CUDAGraphLaunchMode = "host"
+    ) -> None:
         self.pool = pool
+        self.launch_mode = launch_mode
         self.segments: list[Callable[[], Any]] = []
         self._num_graphs: int = 0
         self._num_eager_breaks: int = 0
@@ -175,7 +180,7 @@ class BreakableCUDAGraphCapture:
 
     def _begin_segment(self) -> None:
         assert not self._capturing
-        g = torch.cuda.CUDAGraph()
+        g = new_cuda_graph(self.launch_mode)
         if self.pool is not None:
             g.capture_begin(pool=self.pool)
         else:
@@ -387,7 +392,10 @@ class BreakableCUDAGraphWrapper:
 
         with (
             capture_pool(self.graph_pool, self.vllm_config) as pool,
-            BreakableCUDAGraphCapture(pool=pool) as capture,
+            BreakableCUDAGraphCapture(
+                pool=pool,
+                launch_mode=self.compilation_config.cudagraph_launch_mode,
+            ) as capture,
         ):
             output = self.runnable(*args, **kwargs)
             # Join the offloader's copy stream while we still hold the last
