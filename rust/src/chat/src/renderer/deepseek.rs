@@ -233,7 +233,7 @@ pub(super) fn render_request_with_media_order(
         }
 
         if is_user_like_entry(message, current_render_index as usize, dialect)
-            || (dialect == DsDialect::V4 && matches!(message, ChatMessage::System { .. }))
+            || matches!(message, ChatMessage::System { .. })
         {
             // Skip the opener only at the last rendered entry when
             // add_generation_prompt is off. Inspect the next rendered

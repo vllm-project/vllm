@@ -206,6 +206,40 @@ def test_mid_system_gets_its_own_marker_and_generation_header():
     )
 
 
+def test_system_only_request_opens_generation_turn():
+    assert render(
+        [{"role": "system", "content": "You are helpful."}], thinking=False
+    ) == (
+        "<｜begin▁of▁sentence｜><｜System｜>You are helpful."
+        "<｜Assistant｜></think>"
+    )
+
+
+def test_system_only_request_opens_thinking_turn():
+    assert render(
+        [{"role": "system", "content": "You are helpful."}],
+        thinking=True,
+        reasoning_effort="low",
+    ) == (
+        "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 "
+        "(range 1-100, the higher the value, the more thorough the reasoning)\n\n"
+        "You are helpful.<｜Assistant｜><think>"
+    )
+
+
+def test_leading_system_before_assistant_gets_assistant_header():
+    assert render(
+        [
+            {"role": "system", "content": "rules"},
+            {"role": "assistant", "content": "answer"},
+        ],
+        thinking=False,
+    ) == (
+        "<｜begin▁of▁sentence｜><｜System｜>rules<｜Assistant｜></think>"
+        "answer<｜end▁of▁sentence｜>"
+    )
+
+
 def test_top_level_effort_overrides_template_effort():
     request = ChatCompletionRequest(
         model="deepseek-ai/DeepSeek-V4.1-Flash",
