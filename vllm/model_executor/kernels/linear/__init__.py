@@ -1195,6 +1195,22 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
+    if (
+        use_a16
+        and not envs.VLLM_BATCH_INVARIANT
+        and envs.VLLM_NVFP4_W4A16_DISPATCH_M > 0
+    ):
+        from vllm.model_executor.kernels.linear.nvfp4.dispatch import (
+            MarlinCuteDslNvFp4W4A16DispatchKernel,
+        )
+
+        _ok, _why = MarlinCuteDslNvFp4W4A16DispatchKernel.is_supported()
+        if _ok:
+            logger.info_once(
+                "Using MarlinCuteDslNvFp4W4A16DispatchKernel for NVFP4 GEMM"
+            )
+            return MarlinCuteDslNvFp4W4A16DispatchKernel(config)
+        logger.warning_once("NVFP4 W4A16 dispatch requested but unavailable: %s", _why)
     a16_kernels = (
         B12xNvFp4W4A16LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,

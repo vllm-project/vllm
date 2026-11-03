@@ -286,6 +286,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC: bool = False
+    VLLM_NVFP4_W4A16_DISPATCH_M: int = 0
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -2041,6 +2042,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # integration is being qualified.
     "VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC", "0"))
+    ),
+    # Number of tokens in a step from which the NVFP4 W4A16 linear layers use the
+    # FlashInfer CuTe-DSL kernel instead of Marlin. Marlin is faster for few tokens
+    # and CuTe-DSL for many. Both weight formats are kept in memory. 0 (default)
+    # disables the dispatch and keeps the automatically selected kernel.
+    "VLLM_NVFP4_W4A16_DISPATCH_M": lambda: int(
+        os.getenv("VLLM_NVFP4_W4A16_DISPATCH_M", "0")
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
