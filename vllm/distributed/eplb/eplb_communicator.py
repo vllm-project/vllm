@@ -396,10 +396,17 @@ class NixlEplbCommunicator(EplbCommunicator):
         # memory again with a new agent. NIXL deregisters everything when the
         # last communicator drops the agent.
         if nixl_wrapper is None:
+            # A replacement communicator adds its peers to an agent the outgoing
+            # one may still be running transfers on, which the NIXL default of
+            # NIXL_THREAD_SYNC_NONE leaves unguarded.
             nixl_agent_config = nixl_utils.nixl_agent_config
+            sync_mode = nixl_utils.nixl_thread_sync_t
             config = (
-                nixl_agent_config(capture_telemetry=False)
-                if nixl_agent_config is not None
+                nixl_agent_config(
+                    capture_telemetry=False,
+                    sync_mode=sync_mode.NIXL_THREAD_SYNC_STRICT,
+                )
+                if nixl_agent_config is not None and sync_mode is not None
                 else None
             )
             self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
