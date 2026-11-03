@@ -822,14 +822,11 @@ steps:
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H200) [Nightly] Distributed Preload with Mooncake Store"
+- label: ":nvidia: (H100) Distributed Preload with Mooncake Store"
   key: preload-mooncake-store-2-gpus
-  # Nightly only: H200 pods and the runtime mooncake install are too heavy
-  # for per-PR runs.
-  optional: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace"
-  device: h200_35gb
+  device: h100
   num_devices: 2
   source_file_dependencies:
   - vllm/entrypoints/cli/preload.py
