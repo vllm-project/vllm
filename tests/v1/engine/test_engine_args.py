@@ -432,6 +432,7 @@ def test_extensible_kv_cache_off_with_fixed_kv_cache_size(
         ("MooncakeConnector", "cuda", True),
         ("MooncakeStoreConnector", "cuda", True),
         ("MoRIIOConnector", "cuda", True),
+        ("UMBPStoreConnector", "cuda", True),
         ("OffloadingConnector", "cuda", False),
         ("LMCacheConnectorV1", "cuda", False),
     ],
