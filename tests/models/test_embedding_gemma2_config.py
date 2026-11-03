@@ -25,7 +25,9 @@ def test_sets_matryoshka_dimensions_from_model_card() -> None:
     "fields",
     [
         {"matryoshka_dimensions": [768, 256]},
+        {"matryoshka_dimensions": None},
         {"is_matryoshka": True},
+        {"is_matryoshka": False},
     ],
 )
 def test_keeps_declared_matryoshka_config(fields) -> None:

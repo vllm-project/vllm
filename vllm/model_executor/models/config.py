@@ -388,9 +388,10 @@ class EmbeddingGemma2ModelConfig(Gemma4Config):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         # Trained with Matryoshka Representation Learning (see the model card),
         # but the published configs don't declare the supported dimensions.
+        # Only fill in the default; keep explicit settings such as overrides.
         hf_config = model_config.hf_config
-        if not getattr(hf_config, "matryoshka_dimensions", None) and not getattr(
-            hf_config, "is_matryoshka", False
+        if not hasattr(hf_config, "matryoshka_dimensions") and not hasattr(
+            hf_config, "is_matryoshka"
         ):
             hf_config.matryoshka_dimensions = [128, 256, 512, 768]
 
