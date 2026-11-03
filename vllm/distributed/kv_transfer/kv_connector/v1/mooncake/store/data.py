@@ -134,6 +134,7 @@ class ChunkedTokenDatabase:
         mask_num: int = 0,
         *,
         chunk_mask: list[bool] | None = None,
+        tail_key_boundary: int | None = None,
         put_step: int = 1,
         put_step_rank: int = 0,
     ) -> Iterable[tuple[int, int, BlockHash]]:
@@ -151,6 +152,8 @@ class ChunkedTokenDatabase:
                 A chunk spanning multiple hashes is keyed by its last hash.
             mask_num: Number of tokens to skip from the beginning.
             chunk_mask: Optional mask over chunks after ``mask_num``.
+            tail_key_boundary: Token boundary whose prefix hash keys the final
+                chunk (the stored tail key). Defaults to the chunk's own end.
             put_step: Stride for distributing chunks across ranks.
             put_step_rank: ``chunk_id % put_step`` value this rank stores.
 
@@ -171,7 +174,12 @@ class ChunkedTokenDatabase:
                 continue
             start_idx = chunk_id * self.chunk_size
             end_idx = min(start_idx + self.chunk_size, token_len)
-            h = block_hashes[end_idx // self.hash_block_size - 1]
+            key_end = (
+                tail_key_boundary
+                if end_idx == token_len and tail_key_boundary is not None
+                else end_idx
+            )
+            h = block_hashes[key_end // self.hash_block_size - 1]
             yield start_idx, end_idx, h
 
 

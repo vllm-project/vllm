@@ -237,6 +237,15 @@ _DEFAULT_LAYOUT_PREFERENCE = (
 )
 
 
+def get_flashinfer_kv_cache_layouts() -> tuple[KVCacheLayout, ...]:
+    """The default preference, minus layouts FlashInfer has no name for."""
+    return tuple(
+        layout
+        for layout in _DEFAULT_LAYOUT_PREFERENCE
+        if layout.name in _FLASHINFER_LAYOUT_NAMES
+    )
+
+
 def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
 
@@ -374,6 +383,19 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
+            )
+
+    # An extensible KV cache commits one contiguous run per layer only under a
+    # block-compact layout, which KV connectors need to register its memory.
+    if (
+        cache_config.enable_extensible_kv_cache
+        and vllm_config.kv_transfer_config is not None
+    ):
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "KV connectors with the extensible KV cache need a block-compact "
+                f"layout, but none is in every supported set: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
