@@ -35,9 +35,10 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics, TransferJob
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
+    CHECKSUM_FAILURES,
     FileSystemTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -883,7 +884,7 @@ def test_checksum_is_recorded_and_verified(
 def test_checksum_mismatch_fails_load_and_removes_block(
     fs_tier_with_checksums, monkeypatch, use_c_ext, bad_record
 ):
-    """A corrupt block or record is removed and flagged; earlier blocks are kept."""
+    """A corrupt block or record is removed and counted; earlier blocks are kept."""
     import vllm.v1.kv_offload.tiering.fs.io as io_mod
 
     if use_c_ext and not io_mod._HAS_FSIO_C:
@@ -911,8 +912,11 @@ def test_checksum_mismatch_fails_load_and_removes_block(
     results = drain(tier)
     assert len(results) == 1 and not results[0].success
     assert tuple(results[0].successful_keys) == (key(1),)
-    assert results[0].checksum_failed
     assert not os.path.exists(bad_path)
+
+    stats = tier.get_stats()
+    assert stats is not None
+    assert stats.data["data"][CHECKSUM_FAILURES] == {(): 1}
 
 
 @pytest.mark.parametrize("use_c_ext", [True, False])
@@ -981,7 +985,7 @@ def test_checksum_failure_metric_is_defined_only_when_enabled():
     """Registered only when enabled, since only then can checksum_failed be set."""
     assert FileSystemTierManager.build_metric_definitions({}) == {}
     metrics = FileSystemTierManager.build_metric_definitions({"checksum_blocks": True})
-    assert metrics[TieringOffloadingMetrics.CHECKSUM_FAILURES].labelnames == ("tier",)
+    assert metrics[CHECKSUM_FAILURES].labelnames == ()
 
 
 def test_ebadmsg_from_filesystem_is_not_a_checksum_failure(
@@ -998,7 +1002,8 @@ def test_ebadmsg_from_filesystem_is_not_a_checksum_failure(
     tier.submit_load(make_job(1, [key(1)], [0], is_promotion=True))
     results = drain(tier)
     assert len(results) == 1
-    assert not any(r.success or r.checksum_failed for r in results)
+    assert not any(r.success for r in results)
+    assert tier.get_stats() is None
 
 
 # ---------------------------------------------------------------------------

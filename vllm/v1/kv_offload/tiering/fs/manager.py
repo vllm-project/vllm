@@ -29,6 +29,9 @@ except ImportError:
 
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     Locality,
@@ -49,7 +52,6 @@ from vllm.v1.kv_offload.tiering.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
-    TieringOffloadingMetrics,
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
@@ -64,6 +66,8 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+CHECKSUM_FAILURES = "vllm:kv_offload_tiering_checksum_failures"
 
 
 class FsAsyncLookupManager(AsyncLookupManager):
@@ -118,12 +122,8 @@ class FileSystemTierManager(SecondaryTierManager):
         if not extra_config.get("checksum_blocks", False):
             return {}
         return {
-            TieringOffloadingMetrics.CHECKSUM_FAILURES: OffloadingCounterMetadata(
-                documentation=(
-                    "Number of blocks that failed checksum verification, "
-                    "labeled by tier."
-                ),
-                labelnames=("tier",),
+            CHECKSUM_FAILURES: OffloadingCounterMetadata(
+                documentation="Number of blocks that failed checksum verification."
             )
         }
 
@@ -190,6 +190,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._load_progress: dict[JobId, int] = {}
         # Load jobs that failed checksum verification (as _load_progress).
         self._checksum_failed_jobs: set[JobId] = set()
+        self._stats = OffloadingConnectorStats()
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -334,8 +335,9 @@ class FileSystemTierManager(SecondaryTierManager):
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
             num_succeeded = self._load_progress.pop(job_id, 0)
-            checksum_failed = job_id in self._checksum_failed_jobs
-            self._checksum_failed_jobs.discard(job_id)
+            if job_id in self._checksum_failed_jobs:
+                self._checksum_failed_jobs.discard(job_id)
+                self._stats.increase_counter(CHECKSUM_FAILURES)
             if load_keys is not None and not success:
                 # A batched load stops at the first bad block and reports how
                 # many loaded before it. Those earlier blocks are kept in the
@@ -351,7 +353,6 @@ class FileSystemTierManager(SecondaryTierManager):
                         successful_keys=tuple(successful) if successful else None,
                         transfer_time=transfer_time,
                         transfer_bytes=transfer_bytes,
-                        checksum_failed=checksum_failed,
                     )
                 )
                 continue
@@ -364,6 +365,13 @@ class FileSystemTierManager(SecondaryTierManager):
                 )
             )
         return results
+
+    @override
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        if self._stats.is_empty():
+            return None
+        stats, self._stats = self._stats, OffloadingConnectorStats()
+        return stats
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
