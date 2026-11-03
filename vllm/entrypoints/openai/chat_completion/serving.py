@@ -631,6 +631,14 @@ class OpenAIServingChat(GenerateBaseServing):
                                     if self._include_reasoning_tokens_details
                                     else None
                                 ),
+                                # Known from the first output, so the first
+                                # chunk's prompt split matches the final one.
+                                prompt_tokens_details=_make_prompt_tokens_details(
+                                    self.enable_prompt_tokens_details,
+                                    num_cached_tokens,
+                                    num_cache_creation_tokens,
+                                    mm_token_counts,
+                                ),
                             )
 
                         yield chunk
