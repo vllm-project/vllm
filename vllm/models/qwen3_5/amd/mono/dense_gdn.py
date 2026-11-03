@@ -37,9 +37,11 @@ of the heads (``Geo``) on the full input; nothing crosses ranks. One launch,
 The CTA counts above are the 256-CTA grid (``K1Build.grid``, MI355X). On 128
 CTAs (MI350P, ``tiling``) a CTA takes 8 [4] qkvz groups, at TP1 in two passes
 of 4; 6 S [3 S] GDN tasks, in one pass at TP1 and in passes of whole tokens
-above 24 tasks at TP2 (``tiling.gdn_passes``: S > 8); and front's / out_proj's owners 128 +
-b (b < 32) in a second pass. Each task's arithmetic is the same at either
-width.
+above 24 tasks at TP2 (``tiling.gdn_passes``: S > 8); and front's / out_proj's
+owners 128 + b (b < 32) in a second pass. Up to ``LOCAL_NORM_ROWS`` rows the
+front has no owners: every CTA runs the input norm on the whole rows itself
+(``dense_ffn.run_norm``, the owners' reduction order) and writes x to its own
+LDS. Each task's arithmetic is the same at either width.
 
 Bit-exact with the stock decode path (the Triton conv update,
 ``fused_recurrent_gated_delta_rule_packed_decode``, RMSNormGated): the same
@@ -149,6 +151,7 @@ def o_splits(s: int) -> int:
 
 
 _STREAM = fx.Stream(None)
+LOCAL_NORM_ROWS = 4
 
 
 @dataclass(frozen=True)
@@ -897,6 +900,12 @@ def build(key: K1Build):
     assert not key.oproj or (key.tp == 2 and geo.val // D.STEP % o_splits(s) == 0)
     # the LDS of the widest GDN pass (every pass on 256 CTAs: one)
     nt = max(n for _, n in gdn_passes(geo, s))
+    # Front: below 256 CTAs every CTA runs the input norm itself from the whole
+    # rows (``dense_ffn.run_norm``, the same reduction order as the owners) in
+    # place of the owners' two grid-wide hand-offs and their second pass. Up to
+    # LOCAL_NORM_ROWS rows: wider, the rows it keeps next to the in-flight qkvz
+    # weights spill.
+    local_norm = not key.normed and key.grid != DEFAULT_GRID and s <= LOCAL_NORM_ROWS
 
     @fx.struct
     class XLds:
@@ -920,10 +929,20 @@ def build(key: K1Build):
         g: GLds
         o: OLds
 
-    @fx.struct
-    class Smem:
-        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-        rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
+    if local_norm:
+
+        @fx.struct
+        class Smem:
+            red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
+            rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
+            nrm: fx.Array[fx.Float32, D.MAX_ROUNDS * WAVES, 16]
+
+    else:
+
+        @fx.struct
+        class Smem:
+            red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
+            rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
 
     keyed = key_tuple(key, digest())
     name = (
@@ -987,6 +1006,7 @@ def build(key: K1Build):
             "poll": mb.poll,
             "red": lds.red.ptr,
             "rst": lds.rst.ptr,
+            "nrm": lds.nrm.ptr if local_norm else None,
             "xq": xl.xq.ptr,
             "xs": xl.xs.ptr,
             "qkl": gl.qkl.ptr,
@@ -1029,6 +1049,11 @@ def build(key: K1Build):
             qops = qkvz_loads(c)
             bops = ba_loads(c)
             x_quant(c, xraw)
+        elif const_expr(local_norm):
+            nraw = D.norm_loads(c, first=key.first)
+            qops = qkvz_loads(c)
+            bops = ba_loads(c)
+            D.run_norm(c, nraw, marks=False)
         else:
             raw = front_loads(c)
             # owners past the CTA's first (128 CTAs), ahead of the weights

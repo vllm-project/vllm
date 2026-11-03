@@ -403,29 +403,27 @@ def silu_mul_bf(g, u):
 
 
 # ---------------------------------------------------------------- norm
-def norm_loads(c):
+def norm_loads(c, first=False):
     """Chunk ``tid + 512 i`` of the S rows (8 columns; every round's live chunks
-    of a wave in one row): raw h / residual words and the 1 + w words."""
+    of a wave in one row): raw h / residual words and the 1 + w words. ``first``:
+    no residual (the model's first layer)."""
     s, tid, a = c["S"], c["tid"], c["args"]
     n = s * CHUNKS
     out = []
     for i in range((n + THREADS - 1) // THREADS):
         ch = fx.min(tid + THREADS * i, n - 1)
-        out.append(
-            (
-                ld4(rsrc(a["hidden"]), ch * 4),
-                ld4(rsrc(a["residual"]), ch * 4),
-                ld4(rsrc(a["ln_w"]), ch % CHUNKS * 4),
-            )
-        )
+        hw = ld4(rsrc(a["hidden"]), ch * 4)
+        rw = None if first else ld4(rsrc(a["residual"]), ch * 4)
+        out.append((hw, rw, ld4(rsrc(a["ln_w"]), ch % CHUNKS * 4)))
     return out
 
 
 @traced
-def run_norm(c, raw):
-    """Z = h + residual -> res_out (chunk run ch / 16 by CTA run % grid); every
-    row's sum of squares (a wave's 64 chunks a run, as the stock norm) -> rstd
-    -> bf16 x -> qdq by 32 columns (four lanes a block) -> the LDS x rows."""
+def run_norm(c, raw, marks=True):
+    """Z = h + residual (h alone without a residual) -> res_out (chunk run
+    ch / 16 by CTA run % grid); every row's sum of squares (a wave's 64 chunks a
+    run, as the stock norm) -> rstd -> bf16 x -> qdq by 32 columns (four lanes
+    a block) -> the LDS x rows. ``marks``: debug stamps 5 and 6."""
     s, tid, lane, wave, bid = c["S"], c["tid"], c["lane"], c["wave"], c["bid"]
     nrm, rst = c["nrm"], c["rst"]
     a = c["args"]
@@ -436,20 +434,25 @@ def run_norm(c, raw):
         hw, rw, _ = raw[i]
         z = []
         for d in range_constexpr(4):
-            z += [bf_lo(hw[d]) + bf_lo(rw[d]), bf_hi(hw[d]) + bf_hi(rw[d])]
+            if const_expr(rw is None):
+                z += [bf_lo(hw[d]), bf_hi(hw[d])]
+            else:
+                z += [bf_lo(hw[d]) + bf_lo(rw[d]), bf_hi(hw[d]) + bf_hi(rw[d])]
         zs.append(z)
         ss = butterfly(chunk_ss(z), WAVE_ORDER)
         if lane == 0:
             fx.ptr_store(ss, nrm + (i * WAVES + wave))
     gpu.barrier()
-    stamp(c, 5)
+    if const_expr(marks):
+        stamp(c, 5)
     if tid < s:
         tot = runs_total(
             [fx.ptr_load(nrm + (tid * CH_WAVES + k)) for k in range(CH_WAVES)]
         )
         fx.ptr_store(stock_rstd(tot, c["eps"]), rst + tid)
     gpu.barrier()
-    stamp(c, 6)
+    if const_expr(marks):
+        stamp(c, 6)
     for i in range_constexpr(len(raw)):
         ch_raw = tid + THREADS * i
         live = ch_raw < n
