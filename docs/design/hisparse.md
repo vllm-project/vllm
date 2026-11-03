@@ -206,6 +206,36 @@ coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
 
+### Speculative decode group prefetch
+
+HiSparse prefetches historical KV for layers sharing an indexer during pure
+decode batches, including multi-token verification with speculative decoding
+such as MTP. It uses the existing speculative-decoding configuration and swap
+capacity; no additional switch or backend capability flag is required.
+
+The index-producing layer resolves the current top-k once and queues each
+layer's missing rows on the group's copy stream. Each layer waits on its own
+completion event before consuming those rows, allowing later layers' copies to
+overlap earlier layers' computation. Prefill and mixed prefill/decode batches
+retain per-layer staging.
+
+This prefetch eligibility is separate from single-token resident-write and host
+mirror policy. Current verification tokens remain in resident KV, are excluded
+from the historical host-row swap plan, and are written by each layer before
+its attention runs. Prefetching does not publish rejected draft tokens as
+durable host KV. The benefit depends on host misses, shared-index group size,
+and how much copy work can overlap computation.
+
+The CUDA compact gather uses at most 64 thread blocks per launch. Workers loop
+over additional rows when verification expands the batch beyond that limit;
+the existing column parallelism is retained for smaller batches. This bounds
+copy-kernel occupancy while later layers are prefetched, without reading miss
+counts back to the CPU or launching a separate compaction kernel. Actual copy
+bandwidth and end-to-end latency must be measured together, since bounding the
+grid can trade peak copy throughput for compute overlap.
+
+### Row resolution
+
 The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 
 ```text
