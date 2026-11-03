@@ -162,6 +162,7 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     if backend is not None and backend not in (
         AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV4,
         AttentionBackendEnum.ROCM_FLASHMLA_SPARSE_DSV41,
+        AttentionBackendEnum.ROCM_FLASHMLA_MEGA_ATTN_DSV41,
     ):
         raise ValueError(
             f"{backend.name} is not supported for DeepSeek V4.1 on ROCm; "
@@ -174,6 +175,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "and will be removed in a future release. "
             "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
+    if backend is AttentionBackendEnum.ROCM_FLASHMLA_MEGA_ATTN_DSV41:
+        return DeepseekV41ROCMAiterMegaAttnAttention
     if DeepseekV41ROCMAiterMegaAttnAttention.is_available_for(vllm_config):
         return DeepseekV41ROCMAiterMegaAttnAttention
     return DeepseekV41ROCMAiterMLAAttention

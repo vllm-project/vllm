@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import cast
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.models.deepseek_v41.amd.rocm import (
     DeepseekV41ROCMAiterMLAAttention,
     DeepseekV41ROCMAiterMLASparseBackend,
@@ -21,7 +18,7 @@ from vllm.platforms.rocm import on_gfx950
 class DeepseekV41ROCMAiterMLAMegaAttnBackend(DeepseekV41ROCMAiterMLASparseBackend):
     @staticmethod
     def get_name() -> str:
-        return "ROCM_FLASHMLA_MEGA_ATTN_DSV4"
+        return "ROCM_FLASHMLA_MEGA_ATTN_DSV41"
 
 
 class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
@@ -39,11 +36,6 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
         """Conservatively select the prefill kernel on MI355X."""
         if not current_platform.is_rocm() or not on_gfx950():
-            return False
-        if current_platform.get_device_name() not in (
-            "AMD Instinct MI355X",
-            "AMD Instinct MI355X VF",
-        ):
             return False
         if not hasattr(torch.ops._rocm_C, "fused_norm_rope_attn_rope_cast_prefill"):
             return False
@@ -79,116 +71,16 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
             and n_local_heads % n_local_groups == 0
         )
 
-    def forward_mqa(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        positions: torch.Tensor,
-        output: QuantizedActivation,
-    ) -> None:
-        attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is None:
-            output.data.zero_()
-            output.scale.zero_()
-            return
-
-        assert isinstance(attn_metadata, dict)
-        assert q.shape[1] == self.padded_heads
-        rocm_metadata = cast(
-            DeepseekV4FlashMLAMetadata | None,
-            attn_metadata.get(self.compressed_cache_prefix)
-            if self.compressed_cache_prefix is not None
-            else None,
-        )
-        swa_metadata = cast(
-            DeepseekV41ROCMAiterSparseSWAMetadata,
-            attn_metadata[self.swa_cache_layer.prefix],
-        )
-
-        swa_only = self.compress_ratio == 0
-        self_kv_cache = None if swa_only else self._compressed_kv_cache()
-        swa_kv_cache = self.swa_cache_layer.kv_cache
-
-        num_decode_tokens = swa_metadata.num_decode_tokens
-
-        if swa_metadata.num_prefills > 0:
-            self._forward_prefill_mega(
-                q=q[num_decode_tokens:],
-                positions=positions[num_decode_tokens:],
-                compressed_k_cache=self_kv_cache,
-                swa_k_cache=swa_kv_cache,
-                attn_metadata=rocm_metadata,
-                swa_metadata=swa_metadata,
-                output=(
-                    output.data[num_decode_tokens:],
-                    output.scale[num_decode_tokens:],
-                ),
-            )
-        if swa_metadata.num_decodes > 0:
-            self._forward_decode(
-                q=q[:num_decode_tokens],
-                positions=positions[:num_decode_tokens],
-                kv_cache=self_kv_cache,
-                swa_metadata=swa_metadata,
-                attn_metadata=rocm_metadata,
-                swa_only=swa_only,
-                output=None,
-                output_mxfp8=(
-                    output.data[:num_decode_tokens],
-                    output.scale[:num_decode_tokens],
-                ),
-            )
-
-    def _forward_decode_mega(
-        self,
-        q: torch.Tensor,
-        positions: torch.Tensor,
-        kv_cache: torch.Tensor | None,
-        swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
-        attn_metadata: DeepseekV4FlashMLAMetadata | None,
-        swa_only: bool,
-        output: tuple[torch.Tensor, torch.Tensor],
-    ) -> int:
-        """Read paged KV and fuse attention, inverse RoPE and MXFP8 cast."""
-        indices = swa_metadata.decode_swa_ragged_indices
-        indptr = swa_metadata.decode_swa_ragged_indptr
-        assert indices is not None and indptr is not None
-        extra_indices = extra_indptr = None
-        if not swa_only:
-            assert kv_cache is not None
-            extra_indices, extra_indptr, _ = self._decode_topk_ragged(
-                swa_metadata,
-                attn_metadata,
-                swa_metadata.num_decodes,
-                swa_metadata.num_decode_tokens,
-            )
-        torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_decode(
-            q,
-            self.swa_cache_layer.kv_cache,
-            indices,
-            indptr,
-            None if swa_only else kv_cache,
-            extra_indices,
-            extra_indptr,
-            self.attn_sink[: q.shape[1]],
-            self.scale,
-            positions,
-            self.rotary_emb.cos_sin_cache,
-            current_platform.is_fp8_fnuz(),
-            output[0],
-            output[1],
-        )
-        return q.shape[0]
-
-    def _forward_prefill_mega(
+    def _forward_prefill(
         self,
         q: torch.Tensor,
         positions: torch.Tensor,
         compressed_k_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
+        output: torch.Tensor | None,
         attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
-        output: tuple[torch.Tensor, torch.Tensor],
+        mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         """Resolve paged KV and fuse dequantization, attention and MXFP8 output."""
         num_decodes = swa_metadata.num_decodes
@@ -200,6 +92,7 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
         starts = swa_metadata.query_start_loc
         assert seq_lens is not None and gather_lens is not None and starts is not None
         assert self.topk_indices_buffer is not None
+        assert mxfp8_out
         extra_table = None
         if self.compress_ratio:
             assert attn_metadata is not None and compressed_k_cache is not None
@@ -223,6 +116,6 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
             positions[:tokens],
             self.rotary_emb.cos_sin_cache,
             current_platform.is_fp8_fnuz(),
-            output[0][:tokens],
-            output[1][:tokens],
+            mxfp8_out[0][:tokens],
+            mxfp8_out[1][:tokens],
         )
