@@ -66,10 +66,18 @@ class TestUnclosedParameterFlush:
         if finish is not None:
             results.append((finish, ""))
 
-        args = collect_tool_arguments(results)
-        assert args, "no arguments were streamed"
-        assert args.startswith('{"path": "README.md"'), args[:60]
-        json.loads(args)
+        # The reopened call streams as its own tool call, so check each one.
+        per_call: dict[int, str] = {}
+        for delta, _ in results:
+            for tc in (delta.tool_calls if delta else None) or []:
+                if tc.function and tc.function.arguments:
+                    per_call[tc.index] = (
+                        per_call.get(tc.index, "") + tc.function.arguments
+                    )
+        assert per_call, "no arguments were streamed"
+        assert per_call[0].startswith('{"path": "README.md"'), per_call[0][:60]
+        for args in per_call.values():
+            json.loads(args)
 
     def test_truncated_parameter_still_streams_valid_json(self, parser, mock_request):
         """The common trigger: generation simply stops inside a parameter."""
