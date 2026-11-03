@@ -13,6 +13,7 @@ steps:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
   - vllm/model_executor/layers/logits_processor.py
+  - vllm/v1/worker/gpu/spec_decode/dspark/speculator.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
