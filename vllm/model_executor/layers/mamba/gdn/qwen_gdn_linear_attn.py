@@ -89,6 +89,7 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     aux_stream,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backends.gdn_attn import (
     FLASHINFER_GDN_CHECKPOINT_ALIGNMENT,
@@ -1274,7 +1275,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 device=projected_states_qkvz.device,
             )
 
-            torch.ops.vllm.qwen_gdn_attention_core(
+            vllm_ops.qwen_gdn_attention_core(
                 projected_states_qkvz,
                 projected_states_ba,
                 z,
@@ -1335,7 +1336,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-            torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+            vllm_ops.qwen_gdn_attention_core_fused_norm_packed(
                 mixed_qkvz,
                 ba,
                 core_attn_out,
@@ -1378,7 +1379,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # (fused_post_conv_prep) and ROCm fallback kernels consume row strides
         # directly, and fused_sigmoid_gating_delta_rule_update contiguous()
         # internally where needed.
-        torch.ops.vllm.qwen_gdn_attention_core(
+        vllm_ops.qwen_gdn_attention_core(
             mixed_qkv,
             b,
             a,
@@ -1443,7 +1444,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv, z, b, a = self.prepare_gdn_attention_core_inputs(
                 projected_states_qkvz, projected_states_ba, num_tokens
             )
-            torch.ops.vllm.qwen_gdn_attention_core(
+            vllm_ops.qwen_gdn_attention_core(
                 mixed_qkv,
                 b.contiguous(),
                 a.contiguous(),
@@ -1452,7 +1453,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
         else:
             z = torch.empty_like(core_attn_out)
-            torch.ops.vllm.gdn_attention_core_xpu(
+            vllm_ops.gdn_attention_core_xpu(
                 core_attn_out,
                 z,
                 projected_states_qkvz,
@@ -1498,7 +1499,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.cpu_gdn_attention_core(
+        vllm_ops.cpu_gdn_attention_core(
             mixed_qkv,
             b,
             a,

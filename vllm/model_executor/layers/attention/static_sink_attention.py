@@ -15,6 +15,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -171,7 +172,7 @@ class StaticSinkAttention(Attention, CustomOp):
         )
         if not self.sink_populated:
             self_kv_cache = self.kv_cache
-            torch.ops.vllm.maybe_populate_sink(
+            vllm_ops.maybe_populate_sink(
                 self_kv_cache, _encode_layer_name(self.layer_name)
             )
 

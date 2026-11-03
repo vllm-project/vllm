@@ -8,7 +8,11 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import get_triton_kernels_version, has_triton_kernels
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    is_torch_equal_or_newer,
+    vllm_ops,
+)
 
 logger = init_logger(__name__)
 
@@ -230,7 +234,7 @@ try:
         op_func=_dequant_mxfp4,
         fake_impl=_dequant_mxfp4_fake,
     )
-    dequant_mxfp4 = torch.ops.vllm.dequant_mxfp4
+    dequant_mxfp4 = vllm_ops.dequant_mxfp4
 except AttributeError as error:
     raise error
 
@@ -240,13 +244,13 @@ try:
         op_func=_quant_dequant_mxfp4,
         fake_impl=_quant_dequant_mxfp4_fake,
     )
-    quant_dequant_mxfp4 = torch.ops.vllm.quant_dequant_mxfp4
+    quant_dequant_mxfp4 = vllm_ops.quant_dequant_mxfp4
 except AttributeError as error:
     raise error
 
 
 def xpu_mxfp4_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.vllm.xpu_mxfp4_quantize(x)
+    return vllm_ops.xpu_mxfp4_quantize(x)
 
 
 def permute_shape(shape: tuple[int, ...], permute_order: list[int]) -> tuple[int, ...]:

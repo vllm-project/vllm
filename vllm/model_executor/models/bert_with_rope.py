@@ -43,6 +43,7 @@ from vllm.model_executor.models.utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import vllm_ops
 
 from .bert import BertPooler
 from .interfaces import SupportsCrossEncoding, SupportsQuant
@@ -329,7 +330,7 @@ class NomicMoE(nn.Module):
             hidden_states, router_logits, self.top_k, renormalize=False
         )
 
-        final_hidden_states = torch.ops.vllm.fused_experts(
+        final_hidden_states = vllm_ops.fused_experts(
             hidden_states=hidden_states,
             w1=self.w1,
             w2=self.w2,

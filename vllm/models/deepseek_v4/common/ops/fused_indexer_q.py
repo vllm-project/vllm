@@ -15,6 +15,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+from vllm.utils.torch_utils import vllm_ops
 
 # MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
 MXFP4_BLOCK_SIZE = 32
@@ -634,7 +635,7 @@ def fused_indexer_q_rope_quant(
             )
         elif current_platform.is_xpu():
             assert weights_out_dtype == torch.float32, weights_out_dtype
-            torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_mxfp4(
+            vllm_ops.xpu_deepseek_fused_indexer_q_rope_mxfp4(
                 index_q,
                 positions,
                 index_q_cos_sin_cache,
@@ -690,7 +691,7 @@ def fused_indexer_q_rope_quant(
             weights_out=index_weights_out,
         )
     elif current_platform.is_xpu():
-        torch.ops.vllm.xpu_deepseek_fused_indexer_q_rope_fp8(
+        vllm_ops.xpu_deepseek_fused_indexer_q_rope_fp8(
             index_q,
             positions,
             index_q_cos_sin_cache,

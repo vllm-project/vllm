@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 def _bgmv_shrink_impl(
@@ -111,7 +111,7 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ) -> None:
-    torch.ops.vllm.xpu_bgmv_shrink(
+    vllm_ops.xpu_bgmv_shrink(
         inputs, lora_a_weights, output_tensor, lora_indices_tensor, scaling
     )
 
@@ -123,7 +123,7 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ) -> None:
-    torch.ops.vllm.xpu_bgmv_expand(
+    vllm_ops.xpu_bgmv_expand(
         inputs, lora_b_weights, output_tensor, lora_indices_tensor, add_inputs
     )
 
@@ -137,7 +137,7 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ) -> None:
-    torch.ops.vllm.xpu_bgmv_expand_slice(
+    vllm_ops.xpu_bgmv_expand_slice(
         inputs,
         lora_b_weights,
         output_tensor,

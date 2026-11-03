@@ -18,6 +18,7 @@ from torch.library import wrap_triton
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -84,8 +85,7 @@ def triton_scale_swizzle(
     )
 
 
-@torch.library.custom_op("vllm::triton_mx_block_rearrange", mutates_args=())
-def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
+def _triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     """Rearranges an E8M0 tensor scale from row-major format to
     block-scaled swizzle format.
 
@@ -143,12 +143,18 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     return out
 
 
-@triton_mx_block_rearrange.register_fake
 def _triton_mx_block_rearrange_fake(scale_tensor: torch.Tensor) -> torch.Tensor:
     rows, cols = scale_tensor.shape
     padded_rows = cdiv(rows, 128) * 128
     padded_cols = cdiv(cols, 4) * 4
     return scale_tensor.new_empty((padded_rows, padded_cols))
+
+
+triton_mx_block_rearrange = direct_register_custom_op(
+    op_name="triton_mx_block_rearrange",
+    op_func=_triton_mx_block_rearrange,
+    fake_impl=_triton_mx_block_rearrange_fake,
+)
 
 
 def to_blocked(

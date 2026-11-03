@@ -15,6 +15,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -5173,10 +5174,7 @@ def fusedQuantizeNv(
     return xh_e2m1, xh_e4m3
 
 
-@torch.library.custom_op(
-    "vllm::safeFusedQuantizeNv", mutates_args=("xh_e2m1", "xh_e4m3")
-)
-def safeFusedQuantizeNv(
+def _safe_fused_quantize_nv(
     a: torch.Tensor,
     b: torch.Tensor,
     xh_e2m1: torch.Tensor,
@@ -5189,6 +5187,13 @@ def safeFusedQuantizeNv(
     """
     torch.ops._qutlass_C.fusedQuantizeNvAbsMax(a, b, xh_e2m1, xh_e4m3, global_scale)
     return
+
+
+safeFusedQuantizeNv = direct_register_custom_op(
+    op_name="safeFusedQuantizeNv",
+    op_func=_safe_fused_quantize_nv,
+    mutates_args=["xh_e2m1", "xh_e4m3"],
+)
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:

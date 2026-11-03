@@ -44,7 +44,7 @@ from vllm.third_party.flash_linear_attention.ops import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.triton_utils.allocation import set_triton_allocator
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
@@ -245,7 +245,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         # the MLP and transformer attention layers that are NOT wrapped
         # in custom ops -- their small precision differences propagate
         # as inputs to the GDN layers from outside.
-        torch.ops.vllm.olmo_hybrid_gdn_full_forward(
+        vllm_ops.olmo_hybrid_gdn_full_forward(
             hidden_states,
             output,
             self.prefix,

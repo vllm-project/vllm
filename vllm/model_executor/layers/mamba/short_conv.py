@@ -26,7 +26,7 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
@@ -207,7 +207,7 @@ class ShortConv(MambaBase, PluggableLayer):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        torch.ops.vllm.short_conv(
+        vllm_ops.short_conv(
             hidden_states,
             output,
             self.prefix,

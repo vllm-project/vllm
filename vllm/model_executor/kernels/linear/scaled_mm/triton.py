@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
@@ -128,7 +128,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
-        out = torch.ops.vllm.int8_scaled_mm_func(x_q, w_q, x_s, w_s, x.dtype, bias)
+        out = vllm_ops.int8_scaled_mm_func(x_q, w_q, x_s, w_s, x.dtype, bias)
 
         if azp_adj is not None:
             # Asymmetric quantization: subtract the zero-point correction.
@@ -205,7 +205,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
+        return vllm_ops.w8a8_triton_block_scaled_mm_func(
             A,
             B,
             As,

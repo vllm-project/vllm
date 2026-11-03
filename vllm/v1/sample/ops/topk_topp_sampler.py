@@ -14,6 +14,7 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import vllm_ops
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -215,7 +216,7 @@ def xpu_sample(
     # stores top_k as int32. Cast here to avoid dtype mismatch.
     if k is not None:
         k = k.to(torch.int64)
-    torch.ops.vllm.xpu_topk_topp_sampler(
+    vllm_ops.xpu_topk_topp_sampler(
         sampled, logits_to_return, logits, k, p, logprobs_mode, seeds
     )
     # The custom XPU sampler kernel consumes RNG values internally, so advance

@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op, vllm_ops
 
 
 class FPQuantConfig(QuantizationConfig):
@@ -369,10 +369,10 @@ def quantized_forward(
     x_flat = x.contiguous().flatten(end_dim=-2)
 
     if forward_dtype == "mxfp4":
-        x_flat_q, x_flat_scales = torch.ops.vllm.fused_quantize_mx(
+        x_flat_q, x_flat_scales = vllm_ops.fused_quantize_mx(
             x_flat, forward_hadamard_matrix, forward_method
         )
-        y = torch.ops.vllm.matmul_mxf4_bf16(
+        y = vllm_ops.matmul_mxf4_bf16(
             x_flat_q,
             qweight,
             x_flat_scales,
@@ -380,10 +380,10 @@ def quantized_forward(
             1 / (weight_global_scale * act_global_scale),
         )
     elif forward_dtype == "nvfp4":
-        x_flat_q, x_flat_scales = torch.ops.vllm.fused_quantize_nv(
+        x_flat_q, x_flat_scales = vllm_ops.fused_quantize_nv(
             x_flat, forward_hadamard_matrix, act_global_scale
         )
-        y = torch.ops.vllm.matmul_nvf4_bf16(
+        y = vllm_ops.matmul_nvf4_bf16(
             x_flat_q,
             qweight,
             x_flat_scales,

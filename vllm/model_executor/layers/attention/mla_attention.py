@@ -273,6 +273,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
+    vllm_ops,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -879,7 +880,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+            kv_cache_dummy_dep = vllm_ops.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
                 encoded,
@@ -887,7 +888,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
             )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            torch.ops.vllm.unified_mla_attention_with_output(
+            vllm_ops.unified_mla_attention_with_output(
                 q,
                 kv_c_normed,
                 k_pe,
@@ -1199,7 +1200,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
                 if self._aiter_output_quant:
-                    torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                    vllm_ops.rocm_aiter_per_tensor_quant(
                         quant_output[:quant_idx], actual, output_scale, False
                     )
                 else:
@@ -2959,7 +2960,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         )
 
         if self._use_flashinfer_concat_mla_k:
-            torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
+            vllm_ops.flashinfer_concat_mla_k(k, k_nope, k_pe)
         else:
             # Fallback: Direct copies with efficient broadcasting
             k[..., : k_nope.shape[-1]] = k_nope

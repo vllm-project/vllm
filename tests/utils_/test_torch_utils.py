@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import torch
+from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
@@ -11,12 +12,14 @@ from vllm.utils.torch_utils import (
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
+    direct_register_custom_op,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
     set_default_torch_dtype,
     set_random_seed,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
+    vllm_ops,
     weak_ref_tensors,
 )
 
@@ -261,3 +264,45 @@ def test_set_random_seed_differs_per_data_parallel_index():
     assert draws(42, 1) == draws(42, 1)
     assert len({str(draws(42, i)) for i in range(4)}) == 4
     assert draws(42, 1) != draws(43, 1)
+
+
+def _add_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y
+
+
+_test_add = direct_register_custom_op(
+    "test_eager_bypass_add",
+    _add_impl,
+    fake_impl=lambda x, y: torch.empty_like(x),
+    dispatch_key="CPU",
+)
+
+
+def _graph_of(tracer: str, fn) -> str:
+    x = torch.ones(4)
+    if tracer == "dynamo":
+        graphs = []
+
+        def backend(gm, _):
+            graphs.append(str(gm.graph))
+            return gm
+
+        torch.compile(fn, backend=backend, fullgraph=True)(x)
+        return graphs[0]
+    if tracer == "symbolic_trace":
+        return str(torch.fx.symbolic_trace(fn).graph)
+    return str(make_fx(fn, tracing_mode=tracer)(x).graph)
+
+
+@pytest.mark.parametrize("tracer", ["dynamo", "real", "fake", "symbolic_trace"])
+def test_custom_op_handle_stays_an_op_under_tracing(tracer):
+    """Eager calls skip the dispatcher, but every tracer must still record the
+    op so compilation passes can match it."""
+    assert _test_add is vllm_ops.test_eager_bypass_add
+    x = torch.ones(4)
+    with torch.profiler.profile() as prof:
+        torch.testing.assert_close(_test_add(x, x), x + x)
+    assert not any("test_eager_bypass_add" in e.name for e in prof.events())
+
+    graph = _graph_of(tracer, lambda a: _test_add(a, a))
+    assert "test_eager_bypass_add" in graph, graph
