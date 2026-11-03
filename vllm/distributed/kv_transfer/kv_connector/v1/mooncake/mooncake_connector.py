@@ -2528,6 +2528,10 @@ class MooncakeConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self.seen_base_addresses:
             return
+        # Glue (B2): a sleeping decoder cannot pull; stop renewing P's leases.
+        if hasattr(self, "_lease_cache_lock"):
+            with self._lease_cache_lock:
+                self._lease_cache.clear()
         ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory unregistration failed.")

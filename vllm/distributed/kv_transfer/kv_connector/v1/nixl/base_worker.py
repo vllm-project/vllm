@@ -2040,6 +2040,11 @@ class NixlBaseConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self._registered_descs:
             return
+        # Glue (B2): a sleeping decoder cannot read, so stop renewing P's leases
+        # for it; otherwise the background thread keeps P's blocks alive forever.
+        if hasattr(self, "_hb_lock"):
+            with self._hb_lock:
+                self._hb_cache.clear()
         self._release_local_xfer_handles()
         # Remote engines hold local handles too; they handshake again on demand.
         for engine_id in list(self._remote_agents):
