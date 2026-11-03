@@ -148,7 +148,7 @@ def _topk_gating_launch(
     ids_width: int | None = None,
     contiguous: bool = True,
 ) -> dict:
-    """Tensors for one softmax top-k launch, as dispatch_topk_softmax_func sees them."""
+    """Tensors for one top-k launch, as the topk dispatch functions see them."""
     width = topk + num_shared_experts
     weights = torch.empty(num_tokens, weights_width or width)
     ids = torch.empty(num_tokens, ids_width or width, dtype=torch.int32)
