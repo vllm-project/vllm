@@ -1563,6 +1563,11 @@ class ToolArgCoercionTest(unittest.TestCase):
         self.assertEqual(_coerce("inf", ("integer",)), "inf")
         self.assertEqual(_coerce("NaN", ("integer",)), "NaN")
 
+    def test_coerce_number_keeps_large_integers_exact(self):
+        self.assertEqual(_coerce("9223372036854775807", ("number",)), 9223372036854775807)
+        self.assertEqual(_coerce("1e3", ("number",)), 1000)
+        self.assertEqual(_coerce("2.5", ("number",)), 2.5)
+
     def test_coerce_handles_any_of_and_null(self):
         self.assertEqual(_coerce("5", ("integer", "null")), 5)
         self.assertIsNone(_coerce("null", ("integer", "null")))
