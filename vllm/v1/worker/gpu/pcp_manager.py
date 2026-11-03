@@ -11,6 +11,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backend import PCPAttentionContext
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID, get_dcp_local_seq_lens
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import (
@@ -75,6 +76,7 @@ class PCPManager:
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
+        self.attention_context = PCPAttentionContext(pcp_world_size, pcp_rank)
         self.device = device
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
@@ -702,6 +704,7 @@ class PCPManager:
                 ],
                 dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             ),
+            pcp_context=self.attention_context,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
@@ -729,6 +732,7 @@ class PCPManager:
         num_tokens = input_batch.num_tokens_after_padding
         input_batch = replace(
             input_batch,
+            pcp_context=self.attention_context,
             input_ids=input_buffers.input_ids[:num_tokens].copy_(input_batch.input_ids),
             positions=input_buffers.positions[:num_tokens].copy_(input_batch.positions),
             is_padding=self.moe_is_padding(

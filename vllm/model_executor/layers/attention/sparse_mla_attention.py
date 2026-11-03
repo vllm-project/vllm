@@ -342,7 +342,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold or 1,
-            treat_short_extends_as_decodes=not self.use_pcp,
+            treat_short_extends_as_decodes=common_attn_metadata.pcp_context is None,
             require_uniform=self.require_uniform_decodes,
         )
         (
@@ -424,6 +424,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             query_start_loc=common_attn_metadata.query_start_loc,
             slot_mapping=common_attn_metadata.slot_mapping,
+            uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
             block_table=common_attn_metadata.block_table_tensor,
             req_id_per_token=req_id_per_token,
             seq_lens=common_attn_metadata.seq_lens,

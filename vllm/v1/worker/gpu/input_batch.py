@@ -12,6 +12,7 @@ from vllm.utils import random_uuid
 from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backend import PCPAttentionContext
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
     from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
@@ -109,6 +110,8 @@ class InputBatch:
 
     # [num_reqs] only populated for non-dummy pipeline-parallel batches.
     max_seq_len_np: np.ndarray | None = None
+
+    pcp_context: "PCPAttentionContext | None" = None
 
     # Longest query the batch may contain. Set when a cudagraph descriptor promises
     # a query length this batch's own split does not reach, so attention metadata

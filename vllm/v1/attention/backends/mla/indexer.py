@@ -755,6 +755,7 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
     positions: torch.Tensor | None = None
+    uses_pcp_sharded_layout: bool = False
     block_table: torch.Tensor | None = None
 
 
@@ -896,6 +897,7 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=slot_mapping,
+            uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
@@ -1497,12 +1499,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if self.compress_ratio > 1:
             padded_num_tokens = num_tokens
             local_slot_mapping = slot_mapping
-            if self.use_pcp:
+            if common_attn_metadata.pcp_context is not None:
                 # The gathered layout holds each rank's local tokens, padded, in
                 # rank order, so this rank's segment lines up with query_start_loc.
-                padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
+                pcp_context = common_attn_metadata.pcp_context
+                assert slot_mapping.shape[0] % pcp_context.world_size == 0
+                padded_num_tokens = slot_mapping.shape[0] // pcp_context.world_size
                 local_slot_mapping = slot_mapping[
-                    self.pcp_rank * padded_num_tokens : (self.pcp_rank + 1)
+                    pcp_context.rank * padded_num_tokens : (pcp_context.rank + 1)
                     * padded_num_tokens
                 ]
             compressed_slot_mapping = get_compressed_slot_mapping(
@@ -1517,7 +1521,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dcp_world_size=self.dcp_world_size,
                 cp_interleave=self.cp_kv_cache_interleave_size,
             )
-            if self.pcp_world_size > 1:
+            if common_attn_metadata.pcp_context is not None:
                 compressed_slot_mapping = get_pcp_group().all_gather(
                     self.compressed_slot_mapping_buffer[:padded_num_tokens],
                     dim=0,
@@ -1531,6 +1535,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens=seq_lens,
                 max_seq_len=common_attn_metadata.max_seq_len,
                 slot_mapping=compressed_slot_mapping,
+                uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
                 num_decodes=0,
                 num_decode_tokens=0,
                 num_prefills=0,
@@ -1544,7 +1549,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 require_uniform=not (self.use_flattening or self.supports_varlen),
-                treat_short_extends_as_decodes=not self.use_pcp,
+                treat_short_extends_as_decodes=common_attn_metadata.pcp_context is None,
             )
         )
 
@@ -1848,6 +1853,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=compressed_slot_mapping,
+            uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,

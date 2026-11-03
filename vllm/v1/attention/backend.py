@@ -391,6 +391,18 @@ class AttentionMetadata:
 T = TypeVar("T", bound=AttentionMetadata)
 
 
+@dataclass(frozen=True)
+class PCPAttentionContext:
+    """PCP partition layout for one forward, independent of model topology."""
+
+    world_size: int
+    rank: int
+
+    def __post_init__(self) -> None:
+        if self.world_size <= 1 or not 0 <= self.rank < self.world_size:
+            raise ValueError("A PCP layout requires multiple ranks and a valid rank.")
+
+
 @dataclass
 class CommonAttentionMetadata:
     """Per-batch attention metadata, shared across layers and backends.
@@ -420,6 +432,10 @@ class CommonAttentionMetadata:
     slot_mapping: torch.Tensor
 
     causal: bool | torch.Tensor = True
+
+    # None means rank-local inputs, including replicated drafts on PCP workers.
+    # DCP cache ownership is independent of this query/cache-update layout.
+    pcp_context: PCPAttentionContext | None = None
 
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None

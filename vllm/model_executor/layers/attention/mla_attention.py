@@ -798,7 +798,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_pe,
             slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
-            self.use_pcp,
+            attn_metadata is not None and attn_metadata.uses_pcp_sharded_layout,
             pcp_shard_decode_requests=self.pcp_shard_decode_requests,
         )
         assert slot_mapping is not None
@@ -1208,7 +1208,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
-        if self.use_pcp and output_padded.shape[0] > num_actual_toks:
+        if (
+            attn_metadata.uses_pcp_sharded_layout
+            and output_padded.shape[0] > num_actual_toks
+        ):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
@@ -1726,6 +1729,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[D]):
     num_prefills: int
 
     causal: bool = True
+    uses_pcp_sharded_layout: bool = False
 
     # The dimension of the attention heads
     head_dim: int | None = None
@@ -2610,7 +2614,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     common_attn_metadata,
                     decode_threshold=self.reorder_batch_threshold,
                     require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
-                    treat_short_extends_as_decodes=not self.use_pcp,
+                    treat_short_extends_as_decodes=common_attn_metadata.pcp_context
+                    is None,
                 )
             )
 
@@ -2721,6 +2726,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
             causal=not non_causal_decode,
             prefill=prefill_metadata,
             decode=decode_metadata,

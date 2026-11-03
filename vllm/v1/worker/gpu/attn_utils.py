@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
+    PCPAttentionContext,
 )
 from vllm.v1.attention.backends.utils import create_fast_prefill_custom_backend
 from vllm.v1.hisparse.binding import (
@@ -495,6 +496,7 @@ def build_attn_metadata(
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
+    pcp_context: PCPAttentionContext | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -540,6 +542,7 @@ def build_attn_metadata(
                 max_logits_per_req=fast_prefill.max_logits_per_req,
             )
         common_attn_metadata = CommonAttentionMetadata(
+            pcp_context=pcp_context,
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=seq_lens,

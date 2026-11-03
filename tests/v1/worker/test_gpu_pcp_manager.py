@@ -150,6 +150,40 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_capture_layout_does_not_leak_into_replicated_draft(rank):
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=rank,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    draft_batch = InputBatch.make_dummy(
+        num_reqs=2,
+        num_tokens=4,
+        input_buffers=InputBuffers(4, 8, torch.device("cpu")),
+        max_query_len=2,
+    )
+    draft_batch.input_ids.copy_(torch.tensor([11, 12, 21, 22]))
+    target_batch = manager.prepare_inputs_for_capture_or_profile(draft_batch)
+    assert target_batch.pcp_context is not None
+    assert target_batch.pcp_context.world_size == 2
+    assert target_batch.pcp_context.rank == rank
+    assert draft_batch.pcp_context is None
+    torch.testing.assert_close(target_batch.input_ids, draft_batch.input_ids)
+
+    # Replicated draft inputs retain every query row, including prefills.
+    kv = torch.tensor([[11.0], [12.0], [21.0], [22.0]])
+    slots = torch.tensor([10, 11, 20, 21])
+    cache_kv, cache_slots = attention_pcp.maybe_gather_indexer_k(
+        kv, slots, num_decode_tokens=0, use_pcp=draft_batch.pcp_context is not None
+    )
+    torch.testing.assert_close(cache_kv, kv)
+    torch.testing.assert_close(cache_slots, slots)
+
+
 def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     """Rank 0's draft logits land in each batch request's persistent slot."""
     manager = PCPManager(
@@ -295,6 +329,10 @@ def test_capture_uses_pcp_persistent_inputs():
     input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
 
     assert input_batch is not dummy_batch
+    assert input_batch.pcp_context is not None
+    assert input_batch.pcp_context.world_size == 2
+    assert input_batch.pcp_context.rank == 0
+    assert dummy_batch.pcp_context is None
     assert input_batch.req_ids == dummy_batch.req_ids
     for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens"):
         actual = getattr(input_batch, name)
@@ -508,16 +546,16 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
     assert torch.equal(cache_slot_mapping, torch.tensor([123, 789, 456, PAD_SLOT_ID]))
 
 
-def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch):
-    def unexpected_gather():
-        pytest.fail("replicated draft decode must not gather PCP cache inputs")
-
-    monkeypatch.setattr(attention_pcp, "get_pcp_group", unexpected_gather)
+def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping():
     kv = torch.tensor([[11.0], [22.0], [0.0]])
     slot_mapping = torch.tensor([123, 456])
 
-    (cache_kv,), cache_slot_mapping = attention_pcp._gather_prefill_cache_inputs(
-        (kv,), slot_mapping, num_decode_tokens=2, shard_decode_requests=True
+    cache_kv, cache_slot_mapping = attention_pcp.maybe_gather_indexer_k(
+        kv,
+        slot_mapping,
+        num_decode_tokens=2,
+        use_pcp=False,
+        pcp_shard_decode_requests=True,
     )
 
     assert torch.equal(cache_kv, kv[:2])
