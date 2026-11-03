@@ -124,11 +124,26 @@ def run_mixed_prefill_decode_warmup(
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs,
     requesting prompt_logprobs on the prefill request."""
-    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
-        return False
-
     decode_req_id = f"{req_id_prefix}_decode_"
     prefill_req_id = f"{req_id_prefix}_prefill_"
+    num_warmup_reqs = 2
+
+    # This synthetic batch has one decode and one prefill request, and bypasses
+    # the scheduler's correction-slot reservation.
+    speculator = model_runner.speculator
+    if speculator is not None:
+        num_tokens = min(
+            num_tokens,
+            model_runner.max_num_tokens
+            - num_warmup_reqs * speculator.num_extra_query_per_req,
+        )
+    if (
+        model_runner.is_pooling_model
+        or model_runner.max_num_reqs < num_warmup_reqs
+        or num_tokens < 3
+    ):
+        return False
+
     decode_prompt_len = 2
     decode_scheduled_tokens = 1
     prefill_len = num_tokens - decode_scheduled_tokens
