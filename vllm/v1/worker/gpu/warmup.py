@@ -73,6 +73,9 @@ def _reserved_block_count(
         block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
     num_blocks = cdiv(num_tokens, block_size) + num_speculative_blocks
+    if isinstance(kvcache_spec, MambaSpec):
+        # MambaManager may hold more blocks than its block-table row length.
+        return num_blocks
     return min(
         num_blocks, kvcache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
     )
