@@ -3385,15 +3385,26 @@ class Scheduler(SchedulerInterface):
 
         mode     compute            outputs to flush   KV transfers (ledger)
         keep     nothing scheduled  flushed            ignored: they outlive the pause
-        wait     drained            flushed            drained
-        abort    drained            flushed            drained
+        wait     drained            flushed            nothing pins a block
+        abort    drained            flushed            nothing pins a block (exports dropped)
         keep+clear behaves like wait here: a cache reset needs every block back.
         """
         if self.finished_req_ids or self.dropped_streaming_updates:
             return False
         if mode == "keep" and not clear_cache:
             return True
-        return not self.has_requests()
+        # Nothing schedulable under this pause state, no block pinned by a
+        # transfer, no push-mode write in flight. Pending imports (requests
+        # not yet allocated) pin nothing and keep waiting through the pause.
+        return not (
+            self.has_unfinished_requests()
+            or self.ledger.pins_blocks()
+            or (self.connector is not None and self.connector.has_pending_push_work())
+            or (
+                self.ec_connector is not None
+                and self.ec_connector.has_pending_push_work()
+            )
+        )
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

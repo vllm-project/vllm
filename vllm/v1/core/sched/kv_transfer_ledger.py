@@ -68,6 +68,8 @@ class KVTransferLedger:
         # Imports that are PENDING or OPEN: the remote still holds or writes
         # KV for us, so the engine must keep stepping (renewals, completions).
         self._num_live_imports = 0
+        # Imports whose load is in flight: local blocks are pinned by it.
+        self._num_open_imports = 0
 
     # ---- open ------------------------------------------------------------
 
@@ -98,6 +100,7 @@ class KVTransferLedger:
         entry = self.open_import(request)
         if entry.state == TransferState.PENDING:
             entry.state = TransferState.OPEN
+            self._num_open_imports += 1
         return entry
 
     # ---- transitions -----------------------------------------------------
@@ -116,6 +119,8 @@ class KVTransferLedger:
             # Received: the blocks are the request's own now; nothing is left
             # to drive until the scheduler promotes it.
             self._num_live_imports -= 1
+            if entry.state == TransferState.OPEN:
+                self._num_open_imports -= 1
         entry.state = TransferState.CLOSING
         entry.outcome = outcome
         return entry
@@ -133,6 +138,8 @@ class KVTransferLedger:
         else:
             if entry.state != TransferState.CLOSING:
                 self._num_live_imports -= 1
+            if entry.state == TransferState.OPEN:
+                self._num_open_imports -= 1
             if entry.request_finished:
                 self._num_finished_imports -= 1
         return entry
@@ -187,6 +194,13 @@ class KVTransferLedger:
         the request finished. This is what ``has_finished_requests()`` used
         to infer from ``len(requests) > running + waiting``."""
         return self._num_exports > 0 or self._num_finished_imports > 0
+
+    def pins_blocks(self) -> bool:
+        """Some transfer still references local blocks: an export a remote
+        reads, or an import a remote writes. A pending import (nothing
+        allocated yet) and a received one (blocks now the request's own) do
+        not. This is what a cache reset or a memory release must wait for."""
+        return self._num_exports > 0 or self._num_open_imports > 0
 
     def needs_driving(self) -> bool:
         """Some transfer needs the engine to keep stepping: to collect its
