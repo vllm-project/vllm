@@ -533,7 +533,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     )
     pools = []
 
-    def allocate(*args):
+    def allocate(*args, **kwargs):
         pools.append(args[-1])
         if shared:
             args[-1].shared_region = region
