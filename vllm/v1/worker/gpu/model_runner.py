@@ -655,7 +655,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.extensible_kv_cache: ExtensibleKVCache | None = None
         if extensible:
-            self.extensible_kv_cache = ExtensibleKVCache(kv_cache_config, self.device)
+            self.extensible_kv_cache = ExtensibleKVCache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+            )
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -1237,6 +1241,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
+        if self.speculator is not None and finished_req_ids:
+            self.speculator.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
@@ -1281,6 +1287,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
+            if self.speculator is not None:
+                self.speculator.add_request(req_index)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
@@ -1845,9 +1853,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if batch_req_state is not None:
             num_toks = batch_req_state.num_tokens
-            if batch_req_state.has_prefill:
-                # Varlen decode graphs replay decodes only, and their bound
-                # alone would admit a short prefill.
+            if not batch_req_state.decode_graph_eligible:
+                # A query-length bound alone would admit a short prefill.
                 max_query_len = None
             if self.pcp_manager is not None:
                 num_toks = self.pcp_manager.get_num_tokens_for_dispatch(
