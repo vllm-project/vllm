@@ -47,7 +47,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -299,6 +303,7 @@ class HYV4Model(nn.Module):
                 example_layer = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
+        self.num_shared_experts = int(getattr(config, "num_shared_experts", 0) or 0)
         if example_layer is None:
             self.num_moe_layers = 0
             self.num_logical_experts = 0
@@ -597,7 +602,7 @@ class HYV4Model(nn.Module):
         return loaded_params
 
 
-class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             ".q_a_proj": (".fused_qkv_a_proj", 0),
@@ -633,6 +638,20 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.model = HYV4Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # EPLB looks for ``MixtureOfExperts`` on the top-level module
+        # (``get_mixture_of_experts_model``); without these the backbone's MoE
+        # bookkeeping is never registered and ``--enable-eplb`` is a silent no-op.
+        backbone = self.model
+        self.expert_weights = backbone.expert_weights
+        self.moe_layers = backbone.moe_layers
+        self.num_moe_layers = backbone.num_moe_layers
+        self.num_expert_groups = backbone.num_expert_groups
+        self.num_logical_experts = backbone.num_logical_experts
+        self.num_physical_experts = backbone.num_physical_experts
+        self.num_local_physical_experts = backbone.num_local_physical_experts
+        self.num_routed_experts = backbone.num_routed_experts
+        self.num_shared_experts = backbone.num_shared_experts
+        self.num_redundant_experts = backbone.num_redundant_experts
         if get_pp_group().is_last_rank:
             # The head stays in the model dtype; ``enable_lm_head_fp32`` is
             # surfaced as ``head_dtype`` on the config (see HYV4Config), which
@@ -657,6 +676,31 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        # The protocol's default collects ``expert_weights`` from ``moe_layers``
+        # and hands every layer its EPLB views; keep the backbone's copy in sync.
+        MixtureOfExperts.set_eplb_state(
+            self, expert_load_view, logical_to_physical_map, logical_replica_count
+        )
+        self.model.expert_weights = self.expert_weights
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.model.update_physical_experts_metadata(
+            num_physical_experts, num_local_physical_experts
+        )
+        self.num_physical_experts = self.model.num_physical_experts
+        self.num_local_physical_experts = self.model.num_local_physical_experts
+        self.num_redundant_experts = self.model.num_redundant_experts
 
     def forward(
         self,
