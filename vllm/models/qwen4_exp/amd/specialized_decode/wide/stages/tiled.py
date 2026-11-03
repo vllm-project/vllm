@@ -703,14 +703,16 @@ def sum_partials4(part, plan, tokens: int, token, row):
     return total
 
 
-def fold(g, gemm, plan, part, counter0, finish, done=None, other=None):
+def fold(g, gemm, plan, part, counter0, finish, done=None, other=None, begin=None):
     """Split-K units whose row group's last arriving unit sums the group's
     partials and finishes them: ``finish(group, first_row, lane, acc)`` with the
     summed accumulators of each weight tile, in the epilogue's layout, then
-    ``done(group)`` (CTA-uniform, when given). With two splits, ``other(group)``
-    (CTA-uniform, when given) runs on the group's first arriver instead.
-    Returns the (epilogue, after) pair of ``gemm_units``; ``counter0`` is the
-    first of the plan's ``groups`` fold counters."""
+    ``done(group)`` (CTA-uniform, when given). ``begin(group, first_row,
+    lane)`` (when given) runs on the last arriver before each tile's partial
+    loads, to issue loads ``finish`` needs alongside them. With two splits,
+    ``other(group)`` (CTA-uniform, when given) runs on the group's first
+    arriver instead. Returns the (epilogue, after) pair of ``gemm_units``;
+    ``counter0`` is the first of the plan's ``groups`` fold counters."""
     assert other is None or plan.splits == 2, plan.splits
     epilogue = partial_epilogue(gemm, plan, part)
 
@@ -720,6 +722,8 @@ def fold(g, gemm, plan, part, counter0, finish, done=None, other=None):
         for mt in range_constexpr(plan.mtiles):
             first = group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(TILE)
             row = first + lane // i32(TILE) * i32(4)
+            if const_expr(begin is not None):
+                begin(group, first, lane)
             acc = []
             for t in range_constexpr(gemm.tiles):
                 token = i32(t * TILE) + lane % i32(TILE)
