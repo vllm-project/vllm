@@ -1374,6 +1374,64 @@ class VllmConfig:
                 "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
             )
 
+    def _verify_parked_elastic_ep(self) -> None:
+        """Reject configurations that a parked elastic EP rank cannot support."""
+        if not envs.VLLM_ELASTIC_EP_JOIN_FILE:
+            return
+        parallel = self.parallel_config
+        kv_events = self.kv_events_config
+        unsupported = [
+            (
+                not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH,
+                "it requires VLLM_ELASTIC_EP_SCALE_UP_LAUNCH=1",
+            ),
+            (not parallel.enable_elastic_ep, "it requires --enable-elastic-ep"),
+            (
+                not parallel.data_parallel_external_lb,
+                "it requires external data parallel load balancing",
+            ),
+            (
+                parallel.all2all_backend != "nixl_ep",
+                "it requires --all2all-backend nixl_ep, whose CUDA graphs stay "
+                "valid when the rank joins",
+            ),
+            (parallel.data_parallel_rank == 0, "DP rank 0 cannot be parked"),
+            (
+                parallel.tensor_parallel_size > 1,
+                "it supports tensor_parallel_size=1 only",
+            ),
+            (
+                self.cache_config.kv_cache_memory_bytes is None,
+                "it requires --kv-cache-memory-bytes, since it has no peers to "
+                "agree on a KV cache size with",
+            ),
+            (
+                parallel.eplb_config.communicator == "symm_mem",
+                "the symm_mem EPLB communicator needs its peers to allocate",
+            ),
+            (
+                parallel.enable_fault_tolerance,
+                "fault tolerance is not supported",
+            ),
+            (
+                self.speculative_config is not None,
+                "speculative decoding is not supported",
+            ),
+            (
+                self.kv_transfer_config is not None,
+                "KV transfer connectors are not supported",
+            ),
+            (
+                kv_events is not None and kv_events.enable_kv_cache_events,
+                "KV cache events are not supported",
+            ),
+        ]
+        for failed, reason in unsupported:
+            if failed:
+                raise ValueError(
+                    f"VLLM_ELASTIC_EP_JOIN_FILE cannot park this rank: {reason}."
+                )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -1739,6 +1797,7 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
         self._verify_direct_reload_compat()
+        self._verify_parked_elastic_ep()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.

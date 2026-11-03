@@ -443,6 +443,8 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     _lock = threading.RLock()
     _mask: torch.Tensor | None = None
     _last_mask: torch.Tensor | None = None
+    # A parked rank's manager: no peers and no transport until it joins.
+    _detached = False
 
     def __init__(self, cpu_group, tcp_store_group=None):
         if tcp_store_group is None:
@@ -471,13 +473,14 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         manager.world_size = world_size
         manager.internode = False
         manager.support_fault_tolerance = True
+        manager._detached = True
         return manager
 
     def rebind_rank(self, rank: int) -> None:
         """Move a detached manager and its buffer to another EP rank. The
         dispatch and combine kernels read the rank from device memory, so
         CUDA graphs captured at the old rank stay valid."""
-        assert self.tcp_store_group is None, "only a detached rank can move"
+        assert self._detached, "only a detached rank can move"
         if NixlEPAll2AllManager._buffer is not None:
             NixlEPAll2AllManager._buffer.buffer.set_rank(rank)
         self.rank = rank
@@ -513,7 +516,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         assert NixlEPAll2AllManager._buffer is None, (
             "NIXL EP buffer already initialized"
         )
-        detached = self.tcp_store_group is None
+        detached = self._detached
         if detached and not hasattr(Buffer, "init_transport"):
             raise RuntimeError(
                 "Parking an elastic EP rank needs a nixl_ep build with "

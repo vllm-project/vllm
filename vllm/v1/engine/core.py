@@ -171,9 +171,7 @@ class EngineCore:
         if envs.VLLM_ELASTIC_EP_JOIN_FILE:
             # A parked rank has no peers to agree on a KV cache size with.
             kv_cache_memory_bytes = vllm_config.cache_config.kv_cache_memory_bytes
-            assert kv_cache_memory_bytes, (
-                "VLLM_ELASTIC_EP_JOIN_FILE requires --kv-cache-memory-bytes"
-            )
+            assert kv_cache_memory_bytes is not None
             self.available_gpu_memory_for_kv_cache = kv_cache_memory_bytes
         elif envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self._eep_scale_up_before_kv_init()

@@ -424,9 +424,7 @@ class DetachedGroupCoordinator(StatelessGroupCoordinator):
         self.world_size = len(self.ranks)
         self.rank_in_group = self.ranks.index(global_rank)
         self.backend = "nccl"
-        self.cpu_group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
-        self.device_group = self.cpu_group
-        self.tcp_store_group = None  # type: ignore[assignment]
+        self._set_detached_groups()
 
         from vllm.platforms import current_platform
 
@@ -454,8 +452,14 @@ class DetachedGroupCoordinator(StatelessGroupCoordinator):
         )
         self.rank = global_rank
         self.rank_in_group = self.ranks.index(global_rank)
-        self.cpu_group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
-        self.device_group = self.cpu_group
+        self._set_detached_groups()
+
+    def _set_detached_groups(self) -> None:
+        # Collectives on any of these fail instead of waiting for peers.
+        group = _DetachedProcessGroup(self.rank_in_group, self.world_size)
+        self.cpu_group = group  # type: ignore[assignment]
+        self.device_group = group  # type: ignore[assignment]
+        self.tcp_store_group = group  # type: ignore[assignment]
 
     def destroy(self):
         pass
