@@ -22,8 +22,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 class AiterFlydslMxfp4Experts(AiterExperts):
     """MXFP4 weights with BF16 activations through AITER's FlyDSL MoE on
-    gfx1250. AITER quantizes activations internally to FP8 (a8w4) when
-    AITER_FORCE_A8W4=1 is set, otherwise FP4 (a4w4)."""
+    gfx1250. AITER quantizes activations internally to FP8 (a8w4) or FP4
+    (a4w4), selected by VLLM_ROCM_USE_AITER_MOE_SITUV2."""
 
     @staticmethod
     def _supports_quant_scheme(
@@ -75,14 +75,17 @@ class AiterFlydslMxfp4Experts(AiterExperts):
     ):
         from aiter.ops.flydsl.moe_common import GateMode
 
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
+        if activation_method is None:
+            raise ValueError("AITER does not support activation: situ")
         moe_config = self.moe_config
         quant_config = self.quant_config
         assert moe_config.hidden_dim_unpadded is not None
         assert moe_config.intermediate_size_per_partition_unpadded is not None
+        assert hidden_states.dtype != torch.float4_e2m1fn_x2, (
+            "FlyDSL MXFP4 MoE expects BF16 activations, not MoRI FP4 dispatch"
+        )
         hidden_size = hidden_states.shape[1]
-        if hidden_states.dtype == torch.float4_e2m1fn_x2:
-            # Pre-quantized MXFP4 from MoRI dispatch, packed two per byte.
-            hidden_size *= 2
         # SiTU's FlyDSL kernel pads per gate/up half, so pads stay unrounded.
         intermediate_pad = (
             moe_config.intermediate_size_per_partition
@@ -100,7 +103,7 @@ class AiterFlydslMxfp4Experts(AiterExperts):
             # RoutedExperts hands AITER experts the 0/1 expert_mask here.
             expert_mask=expert_map,
             quant_method=QuantMethod.BLOCK_1X32.value,
-            activation_method=rocm_aiter_ops.get_aiter_activation_type("situ"),
+            activation_method=activation_method,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,
             a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
