@@ -40,12 +40,22 @@ SHAPES = dict(
 ARCHITECTURES = ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
 # rows of the decode kernels (one token a request)
 DECODE_ROWS = (1, 2, 4, 8)
+# (rows, tokens a request) of the verify kernels: rows = requests x tokens
+VERIFY = frozenset({(2, 2), (3, 3), (4, 2), (4, 4), (6, 3), (8, 2), (8, 4), (8, 8)})
+# speculative tokens the verify kernels serve: 1 .. 7 (8 tokens a request)
+MAX_SPEC_TOKENS = 7
 
 
 @dataclass(frozen=True)
 class DecodeConfig:
-    # tokens a request (one-token decode steps)
+    # tokens a request verifies (num_speculative_tokens + 1), 1 without
+    # speculative decoding
     q: int = 1
+
+    @property
+    def verify(self) -> frozenset[tuple[int, int]]:
+        """The verify rows served at this q."""
+        return frozenset(r for r in VERIFY if r[1] == self.q)
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -61,7 +71,8 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             + "; ".join(reasons)
             + " (without --monokernel vLLM's decode runs)"
         )
-    return DecodeConfig()
+    spec = vllm_config.speculative_config
+    return DecodeConfig(q=spec.num_speculative_tokens + 1 if spec is not None else 1)
 
 
 def unsupported(vllm_config, ops=None) -> list[str]:
@@ -123,7 +134,24 @@ def unsupported(vllm_config, ops=None) -> list[str]:
             cc.mamba_ssm_cache_dtype not in ("auto", "float32"),
             f"recurrent state dtype {cc.mamba_ssm_cache_dtype} (float32 only)",
         ),
-        (spec is not None, "speculative decoding"),
+        (
+            spec is not None and spec.method != "mtp",
+            f"speculative method {spec.method if spec else None!r} (mtp only)",
+        ),
+        (
+            spec is not None
+            and not 1 <= spec.num_speculative_tokens <= MAX_SPEC_TOKENS,
+            f"{spec.num_speculative_tokens if spec else 0} speculative tokens "
+            f"(1 .. {MAX_SPEC_TOKENS})",
+        ),
+        (
+            spec is not None and spec.enable_adaptive_verification,
+            "adaptive verification",
+        ),
+        (
+            spec is not None and spec.uses_dynamic_speculative_decoding(),
+            "dynamic speculative decoding",
+        ),
         # the model state builds the executor and binds it to each KV cache
         (
             not vllm_config.use_v2_model_runner,
@@ -180,6 +208,7 @@ OPS = (
     "mono_mbox_bytes",
     "mono_register_layer",
     "mono_decode_layer",
+    "mono_decode_layer_spec",
 )
 
 

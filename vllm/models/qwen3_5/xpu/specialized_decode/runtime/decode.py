@@ -32,9 +32,10 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned decode step of ``rows`` rows (one token a request)."""
+    """A planned step: ``rows`` rows of ``q`` tokens a request (q 1: decode)."""
 
     rows: int
+    q: int
     attn_metadata: Mapping[str, Any]  # by layer name
     kernels: Mapping[int, MonoLayer]  # by decoder layer
 
@@ -46,7 +47,7 @@ class Step(NamedTuple):
 
 
 def _launch(kernel: MonoLayer, step: Step, positions, hidden_states, residual):
-    return kernel.launch(step.attn_metadata, positions, hidden_states, residual)
+    return kernel.launch(step.q, step.attn_metadata, positions, hidden_states, residual)
 
 
 def agree(reasons: list[str], what: str) -> None:
@@ -60,16 +61,26 @@ def agree(reasons: list[str], what: str) -> None:
         )
 
 
-def step_kind(md, gdn_prefix: str, attn_prefix: str, rows: int) -> int | None:
-    """1 if a step's GatedDeltaNet and attention metadata (host fields, the same
-    on every TP rank) are a pure one-token decode step of ``rows`` rows, else
-    None."""
+def step_kind(md, gdn_prefix: str, attn_prefix: str, rows: int, q: int) -> int | None:
+    """Q if a step's GatedDeltaNet and attention metadata (host fields, the same
+    on every TP rank) are a pure verify step of whole requests of q tokens
+    filling ``rows`` rows, 1 if they are a pure one-token decode step of
+    ``rows`` rows, else None."""
     if not isinstance(md, dict):
         return None
     g: Any = md.get(gdn_prefix)
     a: Any = md.get(attn_prefix)
     if g is None or a is None or g.num_prefills:
         return None
+    if q > 1:
+        s = g.spec_state_indices_tensor
+        if g.num_decodes or not g.num_spec_decodes or s is None or s.size(-1) != q:
+            return None
+        if g.uniform_spec_sequence_length != q:
+            return None
+        if rows % q or g.num_spec_decodes * q > rows or a.max_query_len != q:
+            return None
+        return q
     if g.num_spec_decodes or not 1 <= g.num_decodes <= rows:
         return None
     return 1 if a.max_query_len == 1 else None
@@ -112,9 +123,10 @@ class SpecializedDecode:
         self._bound: tuple | None = None
         self.binds = 0
         logger.info(
-            "Qwen3.5 XPU mono decode: %d decoder layers, decode; other steps run "
+            "Qwen3.5 XPU mono decode: %d decoder layers, %s; other steps run "
             "vLLM's layers",
             len(layers),
+            f"verify of {config.q} tokens a request" if config.q > 1 else "decode",
         )
 
     def _all(self) -> list[MonoLayer]:
@@ -170,7 +182,8 @@ class SpecializedDecode:
 
     def plan(self, positions: torch.Tensor, intermediate_tensors) -> Step | None:
         """This step's plan for the target model, or None to run vLLM's layers:
-        a pure decode step of 1 / 2 / 4 / 8 rows. Every predicate is the same on all
+        a pure decode step of 1 / 2 / 4 / 8 rows, or a pure verify step of
+        whole requests with a verify kernel. Every predicate is the same on all
         TP ranks: the kernels' mailboxes need every rank on one path. Under
         FULL graphs this runs at capture only and the plan is baked in."""
         if intermediate_tensors is not None:
@@ -179,12 +192,16 @@ class SpecializedDecode:
         if context is None:
             return None
         rows = positions.size(-1)
-        if rows not in DECODE_ROWS:
+        q = self.config.q
+        if q == 1 and rows not in DECODE_ROWS:
+            return None
+        if q > 1 and (rows, q) not in self.config.verify:
             return None
         md = context.attn_metadata
-        if step_kind(md, self.gdn_prefix, self.attn_prefix, rows) is None:
+        kind = step_kind(md, self.gdn_prefix, self.attn_prefix, rows, q)
+        if kind is None:
             return None
-        return Step(rows, md, self.kernels)
+        return Step(rows, kind, md, self.kernels)
 
     def after_step(self) -> None:
         """Once per executed step on every TP rank: raises on every rank once a

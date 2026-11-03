@@ -83,29 +83,40 @@ class MonoLayer:
             self.kid, self.attn, own, peer, self.weights() + self.caches()
         )
 
-    def _metadata(self, md):
+    def _metadata(self, md, verify: bool):
         m = md[self.prefix]
         if self.attn:
             return m.block_table, m.seq_lens, m.slot_mapping
+        if verify:
+            return m.spec_state_indices_tensor, m.num_accepted_tokens, None
         return m.non_spec_state_indices_tensor, None, None
 
     def launch(
         self,
+        q: int,
         md,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """The layer's (hidden_states, residual) out, like the stock layer's
-        forward, for a decode step (the plan checked the metadata and the
-        width)."""
+        forward: ``q`` 1 is a decode step, else a verify step of q tokens a
+        request (the plan checked the metadata and the width)."""
         if residual is None:
             # layer 0: the stock layer takes the input as the residual
             residual = torch.zeros_like(hidden_states)
         out = torch.empty_like(hidden_states)
         res = torch.empty_like(hidden_states)
-        m0, m1, m2 = self._metadata(md)
-        torch.ops._xpu_C.mono_decode_layer(
-            self.kid, hidden_states, residual, out, res, positions, m0, m1, m2
-        )
+        m0, m1, m2 = self._metadata(md, q > 1)
+        ops = torch.ops._xpu_C
+        if q > 1:
+            served = ops.mono_decode_layer_spec(
+                self.kid, q, hidden_states, residual, out, res, positions, m0, m1, m2
+            )
+            # the plan only picks widths the verify kernels have
+            assert served, f"no verify kernel for {hidden_states.shape[0]} rows x {q}"
+        else:
+            ops.mono_decode_layer(
+                self.kid, hidden_states, residual, out, res, positions, m0, m1, m2
+            )
         return out, res
