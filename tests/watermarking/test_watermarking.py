@@ -37,6 +37,7 @@ from vllm.v1.worker.gpu.sample.watermark import (
     repeated_context_mask,
 )
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
@@ -1387,7 +1388,9 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
         temperature=torch.ones(2),
         seeds=torch.zeros(2, dtype=torch.int64),
         draft_step=torch.tensor(0),
-        draft_logits=torch.zeros(2, 1, 8),
+        draft_logits=DraftLogitsCache(
+            2, 1, 8, dtype=torch.float32, fill=0.0, device="cpu"
+        ),
     )
 
     assert torch.equal(sampled, torch.tensor([7, 4]))
@@ -1755,7 +1758,9 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
     speculator.acceptance_estimator = None
     batch_slots = torch.tensor([2, 0, 1])
     logits = torch.arange(num_reqs * num_steps * vocab_size, dtype=torch.float32)
-    draft_logits = torch.zeros(num_reqs, num_steps, vocab_size)
+    draft_logits = DraftLogitsCache(
+        num_reqs, num_steps, vocab_size, dtype=torch.float32, fill=0.0, device="cpu"
+    )
 
     sampled = speculator.sample_draft(
         hidden_states=logits.view(-1, vocab_size),
@@ -1769,7 +1774,9 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
     )
 
     assert torch.equal(sampled, torch.tensor([3, 4, 102, 103, 204, 205]))
-    assert torch.equal(draft_logits[batch_slots], logits.view(num_reqs, num_steps, -1))
+    assert torch.equal(
+        draft_logits.values[batch_slots], logits.view(num_reqs, num_steps, -1)
+    )
 
 
 @pytest.mark.skipif(
@@ -1860,7 +1867,9 @@ def test_dflash_draft_sampler_matches_step_loop_on_cuda(deduplicate_contexts, dt
 
 def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
-    speculator.draft_logits = torch.zeros(2, 1, 8)
+    speculator.draft_logits = DraftLogitsCache(
+        2, 1, 8, dtype=torch.float32, fill=0.0, device="cpu"
+    )
     speculator._d2t_scatter_index = torch.tensor([1, 5])
     speculator._draft_scatter_buf = torch.full((2, 8), float("-inf"))
     speculator.temperature = torch.ones(2)
@@ -1904,7 +1913,9 @@ def test_dspark_reduced_vocab_draft_sampler_applies_watermarking(monkeypatch):
 
 def test_dspark_target_only_watermarking_leaves_drafts_unwatermarked(monkeypatch):
     speculator = object.__new__(DSparkSpeculator)
-    speculator.draft_logits = torch.zeros(2, 1, 8)
+    speculator.draft_logits = DraftLogitsCache(
+        2, 1, 8, dtype=torch.float32, fill=0.0, device="cpu"
+    )
     speculator._d2t_scatter_index = None
     speculator.temperature = torch.ones(2)
     speculator.seeds = torch.zeros(2, dtype=torch.int64)

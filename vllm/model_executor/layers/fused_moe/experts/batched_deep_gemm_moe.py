@@ -162,10 +162,8 @@ def persistent_masked_m_silu_mul_quant(
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
     silu-activated, multiplied by the second half, then quantized into FP8.
-    `clamp_limit` is the model's SwiGLU limit (``swiglu_limit``): when set,
-    the gate is clamped to ``(-inf, clamp_limit]`` and the up projection to
-    ``[-clamp_limit, clamp_limit]`` before the activation, exactly as the
-    dense DeepGemmExperts quantizers do.
+    In BI mode, `clamp_limit` applies the model's SwiGLU limit before
+    activation, matching the dense DeepGemmExperts quantizers.
 
     Under ``VLLM_BATCH_INVARIANT`` on CUDA the work is done by a Triton kernel
     that shares its arithmetic with the dense quantizers, so a token produces
@@ -255,15 +253,13 @@ def persistent_masked_m_silu_mul_quant(
             group_size=group_size,
         )
     elif current_platform.is_cuda() and current_platform.has_device_capability(80):
-        # The C++ kernel requires sm_80+; ROCm and XPU take the Triton path
-        # below. A negative clamp_limit disables the clamp in the kernel.
+        # Preserve the existing C++ path outside BI mode.
         torch.ops._C.persistent_masked_m_silu_mul_quant(
             y,
             tokens_per_expert,
             y_q,
             y_s,
             ceil_ue8m0,
-            -1.0 if clamp_limit is None else float(clamp_limit),
         )
     else:
         # Triton fallback for ROCm and XPU -- the C++ kernel is guarded by
