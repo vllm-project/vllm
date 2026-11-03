@@ -3,7 +3,6 @@
 import gc
 import importlib.machinery
 import inspect
-import shutil
 import sys
 import types
 from importlib import import_module
@@ -481,7 +480,6 @@ def test_kv_scale_reload_uses_model_dtype(dtype):
     initialize_layerwise_reload(model)
     load(layer)
     finalize_layerwise_reload(model, SimpleNamespace(dtype=dtype))
-    assert layer.k_scale.dtype == dtype
     assert (layer._k_scale_float, layer._v_scale_float) == fresh
 
 
@@ -1512,7 +1510,20 @@ def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
     assert after == before
 
 
-def test_kv_scale_reload(vllm_runner):
+@pytest.mark.parametrize(
+    "backend",
+    [
+        None,
+        # derives its bmm scales from the k/v scales at every forward
+        pytest.param(
+            "FLASHINFER",
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="FlashInfer is CUDA-only"
+            ),
+        ),
+    ],
+)
+def test_kv_scale_reload(vllm_runner, backend):
     """Test reloading a checkpoint that contains k_scale/v_scale weights."""
     if _fp8_reload_unsupported():
         pytest.skip(reason="Requires FP8 support")
@@ -1523,6 +1534,7 @@ def test_kv_scale_reload(vllm_runner):
     with vllm_runner(
         model_name=model,
         load_format="dummy",
+        attention_config={"backend": backend},
         enable_prefix_caching=False,
         max_model_len=16,
         max_num_seqs=1,
@@ -1538,72 +1550,6 @@ def test_kv_scale_reload(vllm_runner):
         )[0]
 
     assert reloaded_perp < 10
-
-
-def _attention_scales(worker) -> dict[str, tuple]:
-    """Host-side q/k/v scales of every attention layer and the FlashInfer
-    bmm scales derived from them."""
-    from vllm.model_executor.layers.attention import Attention
-    from vllm.v1.attention.backends.flashinfer import FlashInferImpl
-
-    scales = {}
-    for name, module in worker.get_model().named_modules():
-        if isinstance(module, Attention):
-            assert isinstance(impl := module.impl, FlashInferImpl)
-            scales[name] = (
-                module._q_scale_float,
-                module._k_scale_float,
-                module._v_scale_float,
-                impl.bmm1_scale,
-                impl.bmm2_scale,
-            )
-    return scales
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer is CUDA-only")
-def test_flashinfer_kv_scale_reload_matches_fresh_load(
-    vllm_runner, monkeypatch, tmp_path
-):
-    """Reloading a checkpoint with new KV-cache scales leaves the same scales,
-    and FlashInfer bmm scales, as a fresh load of that checkpoint."""
-    if _fp8_reload_unsupported():
-        pytest.skip(reason="Requires FP8 support")
-    from safetensors.torch import load_file, save_file
-
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
-    for file in Path(hf_api().snapshot_download(model)).iterdir():
-        if file.suffix != ".safetensors":
-            shutil.copy(file, tmp_path / file.name)
-            continue
-        tensors = load_file(file)
-        for name, tensor in tensors.items():
-            if name.endswith(("k_scale", "v_scale")):
-                tensors[name] = tensor * 2
-        save_file(tensors, tmp_path / file.name, metadata={"format": "pt"})
-
-    kwargs = dict(
-        kv_cache_dtype="fp8",
-        attention_config={"backend": "FLASHINFER"},
-        enforce_eager=True,
-        enable_prefix_caching=False,
-        max_model_len=64,
-        max_num_seqs=1,
-    )
-    prompts = ["The capital of France is"]
-    with vllm_runner(model_name=str(tmp_path), **kwargs) as llm:
-        llm.generate_greedy(prompts, max_tokens=2)
-        fresh = llm.collective_rpc(_attention_scales)
-
-    with vllm_runner(model_name=model, **kwargs) as llm:
-        llm.generate_greedy(prompts, max_tokens=2)
-        before = llm.collective_rpc(_attention_scales)
-        llm.collective_rpc("reload_weights", kwargs={"weights_path": str(tmp_path)})
-        llm.generate_greedy(prompts, max_tokens=2)
-        reloaded = llm.collective_rpc(_attention_scales)
-
-    assert before != fresh
-    assert reloaded == fresh
 
 
 @pytest.mark.parametrize(

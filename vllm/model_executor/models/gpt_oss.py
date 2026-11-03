@@ -102,8 +102,7 @@ def _load_presliced_expert(
     only sees writes made through its loader. With ``padded``, ``param`` may be
     padded past the tensor and only its leading region is written; otherwise
     the tensor must broadcast to it."""
-    weight_loader = typing.cast(Callable[..., object], param.weight_loader)
-    weight_loader(
+    _get_weight_loader(param)(
         param,
         loaded_weight,
         weight_name=name,
@@ -336,7 +335,8 @@ class GptOssRoutedExperts(RoutedExperts):
         return_success: bool = False,
     ) -> bool | None:
         if shard_id in ("gpt_oss_presliced", "gpt_oss_presliced_padded"):
-            # see _load_presliced_expert; expert_id indexes the local stack
+            # see _load_presliced_expert; the caller passes expert_id as an
+            # index into this rank's stack, unmapped (no EP remapping here)
             data = param.data if expert_id is None else param.data[expert_id]
             if shard_id == "gpt_oss_presliced_padded":
                 self._copy_to_expert(data, loaded_weight)

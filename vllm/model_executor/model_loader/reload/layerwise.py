@@ -16,6 +16,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     finalize_model_weights,
 )
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .meta import (
     SKIP_LOAD_TENSORS,
@@ -335,8 +336,6 @@ def _reload_attention_scales(
     Assumes dtype/shapes of attention tensors do not change during
     processing, since we use .data.copy_() to preserve kernel tensor
     references."""
-    from vllm.utils.torch_utils import set_default_torch_dtype
-
     quant_method = getattr(layer, "quant_method", None)
     if quant_method is not None:
         # Re-create scale Parameters with sentinel values so unloaded scales

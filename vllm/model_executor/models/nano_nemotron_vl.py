@@ -1701,8 +1701,12 @@ class NemotronH_Nano_VL_V2(
                     assert param_name in vision_norm_params, (
                         f"Unexpected vision LayerNorm weight: {name}"
                     )
+                    param = vision_norm_params[param_name]
                     with torch.no_grad():
-                        default_weight_loader(vision_norm_params[param_name], w)
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, w)
 
         # Fully drain the generator so every mm tensor is buffered, even if
         # the LLM loader stops iterating early.
