@@ -1038,19 +1038,30 @@ def direct_register_custom_op(
         my_lib._register_fake(op_name, fake_impl)
 
 
+def is_tracing() -> bool:
+    """Whether a tracer must see custom ops as graph nodes: Dynamo or
+    torch.export, make_fx (Inductor traces the fusion passes' patterns with
+    it) or a FakeTensorMode."""
+    return (
+        torch.compiler.is_compiling()
+        or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.PROXY) is not None
+        or torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE) is not None
+    )
+
+
 def eager_bypass_custom_op(
     op_name: str,
     op_func: Callable,
     target_lib: Library | None = None,
 ) -> Callable:
-    """Wrap a registered custom op so that only Dynamo tracing goes through
-    the dispatcher, where the op is needed as a graph boundary; eager calls
-    go straight to `op_func`. Use it on host-bound hot paths such as
-    per-linear GEMM calls, where dispatch costs several µs per call."""
+    """Wrap a registered custom op so that only tracing goes through the
+    dispatcher, where the op is needed as a graph boundary; eager calls go
+    straight to `op_func`. Use it on host-bound hot paths such as per-linear
+    GEMM calls, where dispatch costs several µs per call."""
     op = getattr(getattr(torch.ops, (target_lib or vllm_lib).ns), op_name)
 
     def wrapper(*args, **kwargs):
-        if torch.compiler.is_compiling():
+        if is_tracing():
             return op(*args, **kwargs)
         return op_func(*args, **kwargs)
 
