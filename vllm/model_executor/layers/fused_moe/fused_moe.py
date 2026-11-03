@@ -402,13 +402,16 @@ def fused_moe_kernel(
     # `a_ptrs` is a block of [BLOCK_SIZE_M, BLOCK_SIZE_K] pointers
     # `b_ptrs` is a block of [BLOCK_SIZE_K, BLOCK_SIZE_N] pointers
     offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
-    if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
-        return
     if not naive_block_assignment:
+        num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
+        if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
+            return
         offs_token_id = pid_m * BLOCK_SIZE_M + offs
         offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     else:
+        # One program per (token, expert) pair and the grid is exact, so
+        # there is no padding to check and num_tokens_post_padded_ptr is
+        # not read.
         offs_token = tl.where(
             offs == 0,
             pid_m,  # first element = pid_m
@@ -1644,16 +1647,12 @@ def _prepare_expert_assignment(
     )
 
     if naive_block_assignment:
-        return (
-            None,
-            topk_ids.view(-1),
-            torch.full(
-                (1,),
-                topk_ids.numel() * config["BLOCK_SIZE_M"],
-                dtype=torch.int32,
-                device=topk_ids.device,
-            ),
-        )
+        # fused_moe_kernel does not read the token count on this path (its
+        # grid is exact), so hand it a view of the ids instead of filling a
+        # tensor: under CUDA graphs that fill replayed as a kernel on the MoE
+        # stream for every layer of every decode step.
+        flat_ids = topk_ids.view(-1)
+        return None, flat_ids, flat_ids[:1]
 
     return moe_align_block_size(
         topk_ids,
