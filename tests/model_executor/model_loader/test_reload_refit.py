@@ -1,16 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Refit equals fresh: an engine that loaded checkpoint A, with CUDA graphs
-captured, reloads B the way NCCL/IPC weight transfer does (device tensors in
-batches through the model's own `load_weights`, between `start_reload` and
-`finish_reload`). Afterwards every tensor the model holds must equal a fresh
-load of B and none may have moved, appeared or disappeared: captured graphs
-read the old addresses.
+captured, reloads B, A, then B again the way NCCL/IPC weight transfer does
+(device tensors in batches through the model's own `load_weights`, between
+`start_reload` and `finish_reload`), so every reload writes new values.
+Afterwards every tensor the model holds must equal a fresh load of B and none
+may have moved, appeared or disappeared: captured graphs read the old
+addresses. No reload may leave device memory held.
 
 "Every tensor" is the registered parameters and buffers plus the device
 tensors reachable from module attributes (quant methods, kernels, quant
 configs). Checksums, not logits, are compared: logits of separately started
-engines can differ by kernel selection, weights cannot.
+engines can differ by kernel selection, weights cannot. All cases run on one
+GPU (TP=1). The DeepSeek-V3 debug checkpoints (empty/multiply/add) share their
+layer-0 norms, `e_score_correction_bias` and `model.norm.weight`, so a reload
+that skipped those would go unnoticed.
 """
 
 import gc
@@ -22,6 +26,7 @@ from itertools import islice
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.model_loader.mtp_validation import (
     disable_mtp_completeness_check,
@@ -92,9 +97,9 @@ def _ptrs(worker) -> dict[str, int]:
     return {name: t.data_ptr() for name, t in tensors.items() if t.is_cuda}
 
 
-def _stream_reload(worker, model_path: str) -> int:
-    """Reload `model_path` in device-tensor batches; return the bytes of device
-    memory still held afterwards."""
+def _stream_reload(worker, model_path: str) -> tuple[str, int]:
+    """Reload `model_path` in device-tensor batches; return the worker's reload
+    mode and the bytes of device memory still held afterwards."""
     folder = hf_api().snapshot_download(
         model_path, allow_patterns=["*.safetensors", "*.json"]
     )
@@ -115,11 +120,10 @@ def _stream_reload(worker, model_path: str) -> int:
             # one call per transfer chunk, so no call sees the whole checkpoint
             with disable_mtp_completeness_check():
                 model.load_weights(iter(batch))
-            del batch
         finish_reload(model, worker.model_config, device)
     gc.collect()
     torch.accelerator.synchronize()
-    return torch.accelerator.memory_allocated() - base
+    return envs.VLLM_RELOAD_MODE, torch.accelerator.memory_allocated() - base
 
 
 def _diff(before: dict, after: dict) -> dict:
@@ -159,12 +163,25 @@ MODELS = {
     ),
 }
 
+# Layerwise reload runs post-load processing on temporary parameters, and
+# `_Fp8OnlineMoEBase._setup_kernel` rebuilds `moe_quant_config` from them.
+LAYERWISE_KEEPS_TEMPORARIES = pytest.mark.xfail(
+    strict=True,
+    reason="layerwise reload: moe_quant_config keeps temporary scales; see "
+    "https://github.com/vllm-project/vllm/issues/54477#issuecomment-6450991360",
+)
+
 CASES = [
-    pytest.param(mode, *MODELS[case], id=f"{case}-{mode}")
+    pytest.param(
+        mode,
+        *MODELS[case],
+        id=f"{case}-{mode}",
+        marks=[LAYERWISE_KEEPS_TEMPORARIES] if case == "online-fp8-moe" else [],
+    )
     for case in MODELS
     for mode in ("layerwise", "direct")
     # direct reload refuses online quantization at engine construction
-    if not (mode == "direct" and case.startswith("online"))
+    if not (mode == "direct" and case == "online-fp8-moe")
 ]
 
 
@@ -191,20 +208,24 @@ def test_refit_equals_fresh(vllm_runner, monkeypatch, mode, model_a, model_b, kw
 
     with vllm_runner(model_a, **engine_kwargs) as llm:
         ptrs = llm.collective_rpc(_ptrs)
-        for _ in range(2):  # the second reload runs on already-reloaded kernels
-            held = llm.collective_rpc(_stream_reload, args=(model_b,))
+        # B, A, B: the later reloads run on reloaded kernels and still change
+        # every tensor that differs between A and B
+        reloads = [
+            llm.collective_rpc(_stream_reload, args=(path,))
+            for path in (model_b, model_a, model_b)
+        ]
         moved = [_diff(b, a) for b, a in zip(ptrs, llm.collective_rpc(_ptrs))]
         got = llm.collective_rpc(_checksums)
 
-    # one assert, so a failure reports all three
+    # one assert, so a failure reports everything
     result = {
         "differ_from_fresh": [_diff(e, g) for e, g in zip(expected, got)],
         "moved": moved,
-        "held_bytes": held,
+        "mode_and_held_bytes": reloads,
     }
-    ranks = len(got)
+    workers = len(got)
     assert result == {
-        "differ_from_fresh": [{}] * ranks,
-        "moved": [{}] * ranks,
-        "held_bytes": [0] * ranks,
+        "differ_from_fresh": [{}] * workers,
+        "moved": [{}] * workers,
+        "mode_and_held_bytes": [[(mode, 0)] * workers] * len(reloads),
     }

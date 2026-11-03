@@ -84,15 +84,22 @@ steps:
   depends_on:
   - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Weight Reload Refit"
-  device: h200_35gb
+- label: ":nvidia: (B200) Weight Reload Refit"
+  device: b200-k8s
   key: weight-reload-refit
   timeout_in_minutes: 60
   source_file_dependencies:
+  - vllm/config/vllm.py
+  - vllm/envs.py
   - vllm/model_executor/model_loader/
   - vllm/model_executor/layers/
   - vllm/model_executor/utils.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/falcon_h1.py
+  - vllm/model_executor/models/qwen2.py
+  - vllm/model_executor/models/qwen3.py
   - vllm/distributed/weight_transfer/
+  - tests/model_executor/model_loader/test_reload.py
   - tests/model_executor/model_loader/test_reload_refit.py
   commands:
   - pytest -v -s model_executor/model_loader/test_reload_refit.py
