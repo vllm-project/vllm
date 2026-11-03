@@ -180,12 +180,3 @@ def test_device_memory_info_uses_psutil_on_integrated_gpu():
 
         mock_platform.is_integrated_gpu.return_value = False
         assert device_memory_info("cuda:0") == (mock_cuda_free, mock_cuda_total)
-
-        # A CPU device is never an integrated GPU.
-        mock_platform.is_integrated_gpu.return_value = True
-        mock_platform.is_integrated_gpu.reset_mock()
-        assert device_memory_info(torch.device("cpu")) == (
-            mock_cuda_free,
-            mock_cuda_total,
-        )
-        mock_platform.is_integrated_gpu.assert_not_called()

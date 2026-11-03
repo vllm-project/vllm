@@ -114,12 +114,7 @@ def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
     https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
     """
     free_memory, total_memory = torch.accelerator.get_memory_info(device)
-    torch_device = torch.device(device) if device is not None else None
-    if torch_device is not None and torch_device.type == "cpu":
-        return free_memory, total_memory
-    index = torch_device.index if torch_device is not None else None
-    if index is None:
-        index = torch.accelerator.current_device_index()
+    index = torch.device(device).index if device is not None else None
     if current_platform.is_integrated_gpu(index):
         free_memory = psutil.virtual_memory().available
     return free_memory, total_memory

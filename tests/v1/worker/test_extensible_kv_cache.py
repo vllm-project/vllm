@@ -248,7 +248,6 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     monkeypatch.setattr(
         accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
     )
-    monkeypatch.setattr(accelerator, "current_device_index", lambda: 0)
     from vllm.utils import mem_utils
 
     monkeypatch.setattr(
