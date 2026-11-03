@@ -564,8 +564,13 @@ def test_host_resident_weights_take_sorted_path(
     """At small batch the naive path reads an expert once per (token, expert)
     pair. Weights read from host memory in place (UVA offloading) must take
     the sorted path instead, with the same output."""
+    from vllm.platforms import current_platform
     from vllm.utils.platform_utils import is_uva_available
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    monkeypatch.setattr(
+        current_platform, "is_integrated_gpu", lambda device_id=0: False
+    )
 
     if host_resident and not is_uva_available():
         pytest.skip("needs UVA")
