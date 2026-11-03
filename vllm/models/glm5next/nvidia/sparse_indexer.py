@@ -11,6 +11,13 @@ from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    fused_mqa_topk_chunk,
+    fused_mqa_topk_key_scales,
+    fused_mqa_topk_prefill,
+    get_fused_mqa_topk_workspaces,
+    use_fused_mqa_topk,
+)
 from vllm.model_executor.layers.indexer_topk import get_indexer_topk
 from vllm.model_executor.layers.sparse_attn_indexer import (
     PrefillRowShard,
@@ -44,6 +51,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
+    dense_logits_rows,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -144,6 +152,13 @@ def sparse_attn_indexer_kpool(
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
+    fused_mqa_topk = use_fused_mqa_topk(
+        query_shape=q_quant.shape[1:],
+        topk=topk_tokens // max(index_kpool, 1),
+        fp4_cache=use_fp4_cache,
+        full_context=dcp_world_size == 1,
+    )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -155,6 +170,10 @@ def sparse_attn_indexer_kpool(
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
+        # Allocate the largest fused_mqa_topk workspaces so they are accounted
+        # for (freed again, they overlap the dense logits below).
+        if fused_mqa_topk:
+            get_fused_mqa_topk_workspaces(q_quant.device, q_quant.shape[0])
 
         # Reserve profiler-visible memory for the worst-case decode logits,
         # whose shape is [B * next_n, max_pool_len]. This profiling branch
@@ -355,51 +374,75 @@ def sparse_attn_indexer_kpool(
                 ).squeeze(-1)
 
             num_rows = q_slice.shape[0]
-            if chunk.local_total_seq_lens == 0:
-                logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
-            else:
-                q_scale_slice, chunk_weights = mqa_logits_mx_inputs(
-                    q_slice_cast, q_scale_slice, weights[row_start:row_end]
-                )
-                # Compressed: row i starts at K position cu_seqlen_ks[i].
-                row_ends = cu_seqlen_ke - cu_seqlen_ks
-                logits = as_fp32_logits(
-                    fp8_fp4_mqa_logits(
-                        (q_slice_cast, q_scale_slice),
-                        (k_quant_cast, k_scale_cast),
-                        chunk_weights,
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        chunk.max_seqlen_k,
-                    ),
-                    row_ends,
-                )
-
             # kpool: logits are pool-granular (compress_ratio == index_kpool),
             # so topk selects pools. We pick topk_tokens // kpool pools then
             # expand each pool back to its kpool constituent tokens.
             select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
             if index_kpool > 1:
                 pool_topk = torch.empty(
-                    (num_rows, select_k), dtype=torch.int32, device=logits.device
+                    (num_rows, select_k), dtype=torch.int32, device=q_slice.device
                 )
                 topk_dst = pool_topk
             else:
                 topk_dst = topk_indices_buffer[row_start:row_end, :topk_tokens]
 
-            if logits.shape[1] == 0:
+            # Rows per dense logits call under the logits budget.
+            dense_rows = dense_logits_rows(chunk.max_seqlen_k)
+            if chunk.local_total_seq_lens == 0:
+                logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
                 topk_dst.fill_(-1)
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    torch.zeros_like(row_ends),
-                    row_ends,
+            elif fused_mqa_topk and fused_mqa_topk_chunk(
+                chunk.max_seqlen_k, k_quant.shape[0], select_k, num_rows, dense_rows
+            ):
+                fused_mqa_topk_prefill(
+                    q_slice,
+                    k_quant,
+                    fused_mqa_topk_key_scales(k_scale),
+                    weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     topk_dst,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    select_k,
                 )
+                logits = q_slice.new_empty((num_rows, 0), dtype=torch.float32)
+            else:
+                # Chunks planned for fused_mqa_topk are not bounded by the logits
+                # budget: split their rows (budget-planned chunks, the only ones
+                # under DCP, are one window, so the merge below sees all the
+                # rows).
+                # One pass also for 0 rows: the merge is collective.
+                for sub in range(0, max(1, num_rows), dense_rows):
+                    rows = slice(sub, min(sub + dense_rows, num_rows))
+                    q_scale_rows, chunk_weights = mqa_logits_mx_inputs(
+                        q_slice_cast[rows],
+                        q_scale_slice[rows] if q_scale_slice is not None else None,
+                        weights[row_start + rows.start : row_start + rows.stop],
+                    )
+                    # Compressed: row i starts at K position cu_seqlen_ks[i].
+                    row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
+                    logits = as_fp32_logits(
+                        fp8_fp4_mqa_logits(
+                            (q_slice_cast[rows], q_scale_rows),
+                            (k_quant_cast, k_scale_cast),
+                            chunk_weights,
+                            cu_seqlen_ks[rows],
+                            cu_seqlen_ke[rows],
+                            chunk.max_seqlen_k,
+                        ),
+                        row_ends,
+                    )
+                    if logits.shape[1] == 0:
+                        topk_dst[rows].fill_(-1)
+                    else:
+                        torch.ops._C.top_k_per_row_prefill(
+                            logits,
+                            torch.zeros_like(row_ends),
+                            row_ends,
+                            topk_dst[rows],
+                            logits.shape[0],
+                            logits.stride(0),
+                            logits.stride(1),
+                            select_k,
+                        )
             # Local pool ids -> request-relative global pool ids.
             _merge_dcp_topk_global(
                 logits,

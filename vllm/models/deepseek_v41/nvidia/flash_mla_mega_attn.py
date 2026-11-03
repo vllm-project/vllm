@@ -5,7 +5,7 @@
 One kernel does Q RoPE, sparse attention, the inverse RoPE of the output and
 its FP8 cast, and writes straight into the buffer ``wo_a`` consumes. So the
 layer declares ``accepts_unnormed_unroped_query`` -- the kernel RoPEs Q itself,
-leaving the fused KV insert only the zero-pad to the kernel's head count -- and
+leaving Q only the zero-pad to the kernel's head count -- and
 its ``_alloc_attn_out`` / ``_o_proj`` pair speaks QuantizedActivation instead
 of bf16, since the output needs no rotation or quantization here.
 
@@ -282,7 +282,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        # q was zero-padded to the kernel's head count by the fused KV insert.
+        # _fused_qnorm_rope_kv_insert zero-padded q to the kernel's head count.
         assert q.shape[1] == self.padded_heads
         flashmla_metadata = cast(
             DeepseekV4FlashMLAMetadata | None,
@@ -293,14 +293,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        # The kernel takes int32 RoPE positions.
-        positions_int32 = positions.to(torch.int32)
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         if swa_metadata.num_prefills > 0:
             self._forward_prefill_mega(
                 q[num_decode_tokens:],
-                positions_int32[num_decode_tokens:],
+                positions[num_decode_tokens:],
                 flashmla_metadata,
                 swa_metadata,
                 output,
@@ -309,7 +307,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if swa_metadata.num_decodes > 0:
             self._forward_decode_mega(
                 q[:num_decode_tokens],
-                positions_int32[:num_decode_tokens],
+                positions[:num_decode_tokens],
                 flashmla_metadata,
                 swa_metadata,
                 _token_slice(output, 0, num_decode_tokens),
@@ -364,7 +362,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_decode_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
@@ -393,7 +391,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             extra_len,
             False,  # enable_q_norm
             0.0,  # rms_norm_eps
-            positions_int32,
+            positions,
             *_ROPE_ARGS,
             self.rotary_emb.cos_sin_cache,
             self.n_wv_group,
@@ -405,7 +403,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_prefill_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
@@ -506,7 +504,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 combined_lens,
                 False,  # enable_q_norm
                 0.0,  # rms_norm_eps
-                positions_int32[qs:qe],
+                positions[qs:qe],
                 *_ROPE_ARGS,
                 self.rotary_emb.cos_sin_cache,
                 self.n_wv_group,
