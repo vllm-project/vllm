@@ -40,9 +40,8 @@ __all__ = [
     "flydsl_sparse_mla_fp8ds_warmup",
 ]
 
-# Buffer descriptors address the cache with 32-bit byte offsets from its base.
-_MAX_KV_BYTES = 0xFFFFFFFF
-# The index descriptor is sized in bytes (numel * 4) and kept well inside i32.
+# KV rows are addressed in 64 bits, so the cache has no size cap. The index
+# descriptor is sized in bytes (numel * 4) and kept well inside i32.
 _MAX_INDICES = 1 << 29
 
 
@@ -118,7 +117,8 @@ def flydsl_sparse_mla_fp8ds_supported(
     even token/head strides and a 4 B aligned base; kv_buffer has a 16 B
     aligned base and holds 1-byte fp8_ds_mla records at a 656 B pitch
     ([N, 656], [N, 1, 656], [N, 1, 1, 656] or an unpadded [nb, block, 656])
-    with N * 656 < 2^32; kv_indptr / kv_indices are 1-D int32 or int64 on q's
+    of any size (rows are addressed in 64 bits; slot ids are int32);
+    kv_indptr / kv_indices are 1-D int32 or int64 on q's
     device with T + 1 / < 2^29 entries; out, if given, is bf16 [T, H, >= 512]
     with stride(2) == 1, even strides and a 4 B aligned base; and none of
     kv_scale, q_scale, attn_sink, the extra_* segment, the inverse-RoPE / MXFP8
@@ -169,7 +169,7 @@ def flydsl_sparse_mla_fp8ds_supported(
     if not torch.is_tensor(kv_buffer) or kv_buffer.device != q.device:
         return False
     kv = _kv_rows(kv_buffer)
-    if kv is None or kv.shape[0] * RECORD_BYTES > _MAX_KV_BYTES:
+    if kv is None:
         return False
     if kv.data_ptr() % 16:
         return False

@@ -152,6 +152,62 @@ def test_flydsl_matches_triton(
 
 
 @torch.inference_mode()
+def test_flydsl_cache_past_4gib(flydsl_ops) -> None:
+    """The non-DCP K3.1 call hands FlyDSL its whole packed block-row space,
+    which spans more than 4 GiB on a real server: slots past that line must
+    be addressed in 64 bits (DMA, scale and rope reads alike)."""
+    ops, launches = flydsl_ops
+    span = 5 * 2**30
+    num_slots = span // ROW_BYTES
+    free, _ = torch.cuda.mem_get_info()
+    if free < span + 2**30:
+        pytest.skip("needs 6 GiB of free device memory")
+    gen = torch.Generator().manual_seed(3)
+    num_tokens, num_heads = 64, 16
+    small = _fp8_ds_mla_cache(3 * TOPK, gen)
+    n = small.shape[0]
+    # The rows that get read, scattered to either side of the 4 GiB line.
+    line = 2**32 // ROW_BYTES + 1
+    slots = torch.cat(
+        [
+            torch.randperm(line, generator=gen)[: n // 2],
+            line + torch.randperm(num_slots - line, generator=gen)[: n - n // 2],
+        ]
+    ).to("cuda", torch.int64)
+    big = torch.empty(num_slots, ROW_BYTES, dtype=torch.uint8, device="cuda")
+    big[slots] = small
+    indptr, local, has_invalid = _indices("ragged", num_tokens, n, gen)
+    indices = slots[local.long()].to(torch.int32)
+    assert int(indices.max()) * ROW_BYTES > 2**32
+    q = (
+        torch.randn(num_tokens, num_heads, KV_LORA_RANK + ROPE_DIM, generator=gen) * 0.5
+    ).to("cuda", torch.bfloat16)
+    scale = (KV_LORA_RANK + ROPE_DIM) ** -0.5
+
+    out, lse = _run(ops, q, big.unsqueeze(1), indptr, indices, has_invalid, True, scale)
+    assert launches == [(num_heads, has_invalid, True)]
+    # The same kernel over the compact cache with local ids is the same work
+    # in the same order, so it is bit-exact.
+    out_s, lse_s = _run(
+        ops, q, small.unsqueeze(1), indptr, local, has_invalid, True, scale
+    )
+    assert torch.equal(out, out_s) and torch.equal(lse, lse_s)
+    # The Triton kernel gathers with 64-bit offsets, so it is a reference too.
+    ops._FLYDSL_SPARSE_MLA = False
+    ref_out, ref_lse = _run(
+        ops, q, big.unsqueeze(1), indptr, indices, has_invalid, True, scale
+    )
+    assert len(launches) == 2
+    assert not out.isnan().any()
+    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
+    cos = torch.nn.functional.cosine_similarity(
+        out.float().flatten(), ref_out.float().flatten(), dim=0
+    )
+    assert cos > 0.9999
+    torch.testing.assert_close(lse, ref_lse.view_as(lse), atol=1e-3, rtol=1e-4)
+
+
+@torch.inference_mode()
 def test_flydsl_falls_back_to_triton(flydsl_ops, monkeypatch) -> None:
     ops, launches = flydsl_ops
     gen = torch.Generator().manual_seed(0)

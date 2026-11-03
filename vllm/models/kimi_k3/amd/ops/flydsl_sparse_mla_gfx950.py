@@ -35,6 +35,10 @@ causal tail starts first), 128-token tiles over the row's CSR slice
     with has_invalid, entries < 0 are masked; their latent DMA reads row 0.
     Index reads go through a buffer descriptor sized to ``indices``, so a tail
     tile never reads past the end of the index buffer.
+  * KV rows are addressed in 64 bits (global_load ... lds for the latent DMA,
+    plain global loads for the scale and rope words), so the cache may span
+    more than 4 GiB: vLLM hands the non-DCP path its whole packed block-row
+    space, which does. Nothing bounds those reads; see the last precondition.
 
 Preconditions the host cannot check:
   * Every per-128 KV scale is a power of two, as vLLM's fp8_ds_mla writer
@@ -49,7 +53,7 @@ Preconditions the host cannot check:
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from aiter.ops.flydsl.kernels.tensor_shim import GTensor, ptr_buf_tensor
+from aiter.ops.flydsl.kernels.tensor_shim import GTensor, buf_base_i64, ptr_buf_tensor
 from aiter.ops.flydsl.kernels.tensor_shim import _to_raw as _raw
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
@@ -70,7 +74,6 @@ RECORD_BYTES = KV_LORA_RANK + 16 + 2 * QK_ROPE_HEAD_DIM  # 656
 MAX_HEADS = 16
 
 _L = KV_LORA_RANK
-_RECORD_I32 = RECORD_BYTES // 4
 _TILE = 128
 _WAVES = 4
 _BLOCK_THREADS = _WAVES * 64
@@ -113,6 +116,23 @@ def _lds_llvm_ptr(addr):
     return fx.to_llvm_ptr(
         fx.inttoptr(fx.PointerType.get(T.i8, fx.AddressSpace.Shared), fx.Int64(addr))
     )
+
+
+def _global_llvm_ptr(addr):
+    return fx.to_llvm_ptr(
+        fx.inttoptr(fx.PointerType.get(T.i8, fx.AddressSpace.Global), fx.Int64(addr))
+    )
+
+
+def _global_i32(addr, words):
+    """``words`` i32 (1 or 4) at the 64-bit global address ``addr``: a cache
+    past 4 GiB is out of a buffer descriptor's 32-bit offset reach."""
+    ptr = fx.inttoptr(
+        fx.PointerType.get(T.i32, fx.AddressSpace.Global, 4 * words), fx.Int64(addr)
+    )
+    if words == 1:
+        return fx.Int32(fx.generic_load(ptr, dtype=fx.Int32).ir_value())
+    return Vec(fx.generic_load(ptr, dtype=fx.Vector[fx.Int32, words]).ir_value())
 
 
 def _tr8(addr, imm):
@@ -394,7 +414,8 @@ def build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse):
     """JIT launcher for one (heads, has_invalid, return_lse) configuration.
 
     The latent tile lives in LDS as 4 column blocks (bytes 128b..128b + 128 of
-    the record), filled directly by buffer_load ... lds (DMA). Wave w streams
+    the record), filled directly by global_load ... lds (DMA) from 64-bit
+    per-lane row addresses. Wave w streams
     the next tile's column block w right after its own PV tr8 reads; only
     wave w reads block w in PV.
     """
@@ -433,12 +454,11 @@ def build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse):
         qi = fx.Int32(n_q - 1) - fx.Int32(fx.block_idx.x)  # long rows first
 
         q_t = GTensor(Q, dtype=T.i32, shape=(-1,))
-        kv_t = GTensor(KV, dtype=T.i32, shape=(-1,))
+        kv_base = buf_base_i64(KV)  # i64: the cache may span more than 4 GiB
         idx_t = _BoundedI32(IDX, idx_bytes)
         ip_t = GTensor(IPTR, dtype=T.i32, shape=(-1,))
         o_t = GTensor(OUT, dtype=T.i32, shape=(-1,))
         lse_t = GTensor(LSE, dtype=T.i32, shape=(-1,))
-        kv_rsrc = kv_t.rsrc
         lds = fx.SharedAllocator().allocate(Smem).peek()
         base = _readfirstlane(fx.ptrtoint(lds.raw.ptr))
 
@@ -543,36 +563,32 @@ def build_sparse_mla_fp8ds_module(num_heads, has_invalid, return_lse):
             out = []
             for s in range_constexpr(2):
                 ix = fx.Int32(ixs[s])
-                row = (ix >= 0).select(ix, fx.Int32(0)) * _RECORD_I32
-                out.append(Vec.from_elements([fx.Int32(kv_t[row + 128 + g])], fx.Int32))
+                row = (
+                    kv_base + fx.Int64((ix >= 0).select(ix, fx.Int32(0))) * RECORD_BYTES
+                )
+                out.append(
+                    Vec.from_elements(
+                        [_global_i32(row + fx.Int64(_L + g * 4), 1)], fx.Int32
+                    )
+                )
                 for i in range_constexpr(2):
-                    out.append(Vec(kv_t.load(row + 132 + 16 * i + g * 4, vec_size=4)))
+                    out.append(
+                        _global_i32(row + fx.Int64(_L + 16 + 64 * i + g * 16), 4)
+                    )
             return out
 
         def dma(ixd):
-            rows = [
-                (fx.Int32(ix) >= 0).select(fx.Int32(ix), fx.Int32(0)) * RECORD_BYTES
-                for ix in ixd
-            ]
+            ixs = [(fx.Int32(ix) >= 0).select(fx.Int32(ix), fx.Int32(0)) for ix in ixd]
             for j in range_constexpr(16):
-                ro = (
-                    fx.Int32(
-                        rocdl.ds_bpermute(
-                            T.i32, _raw(dma_src[j % 8]), _raw(rows[j // 8])
-                        )
-                    )
-                    + dma_c[j % 4]
+                # The slot id is what gets permuted; its byte offset needs 64 bits.
+                ix = fx.Int32(
+                    rocdl.ds_bpermute(T.i32, _raw(dma_src[j % 8]), _raw(ixs[j // 8]))
+                )
+                src = _global_llvm_ptr(
+                    kv_base + fx.Int64(ix) * RECORD_BYTES + fx.Int64(dma_c[j % 4])
                 )
                 dst = _lds_llvm_ptr(base + w * 16384 + (_V_OFF + j * 1024))
-                rocdl.raw_ptr_buffer_load_lds(
-                    kv_rsrc,
-                    dst,
-                    fx.Int32(16),
-                    ro,
-                    fx.Int32(0),
-                    fx.Int32(0),
-                    fx.Int32(0),
-                )
+                rocdl.global_load_lds(src, dst, 16, 0)
 
         def nxt(tb, k):
             return (tb < (nt - k) * _TILE).select(tb + k * _TILE, tb)
