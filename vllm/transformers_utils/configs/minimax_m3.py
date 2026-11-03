@@ -8,7 +8,7 @@ from transformers import PreTrainedConfig
 class MiniMaxM3TextConfig(PreTrainedConfig):
     """Config for the MiniMax M3 text backbone (MiniMaxM3SparseForCausalLM).
 
-    Defaults mirror the ``text_config`` of the MiniMax-M3-preview checkpoint.
+    Defaults mirror the `text_config` of the MiniMax-M3-preview checkpoint.
     """
 
     model_type = "minimax_m3_text"
@@ -110,7 +110,7 @@ class MiniMaxM3MTPConfig(MiniMaxM3TextConfig):
 
     The MTP transformer layer is structurally a single MiniMax M3 decoder
     layer, so this reuses the text backbone schema. Standalone MTP checkpoints
-    use ``model_type='minimax_m3_mtp'`` and a single hidden layer.
+    use `model_type='minimax_m3_mtp'` and a single hidden layer.
     """
 
     model_type = "minimax_m3_mtp"
@@ -123,10 +123,9 @@ class MiniMaxM3MTPConfig(MiniMaxM3TextConfig):
 class MiniMaxM3Config(PreTrainedConfig):
     """Top-level MiniMax M3 (VL) config.
 
-    Holds the text backbone as ``text_config`` so that
-    ``config.get_text_config()`` extracts the MiniMaxM3SparseForCausalLM
-    backbone. Vision components are kept as a raw dict passthrough and are
-    not modeled here.
+    Holds the text backbone as `text_config` so that `config.get_text_config()` extracts
+    the MiniMaxM3SparseForCausalLM backbone. Vision components are kept as a raw dict
+    passthrough and are not modeled here.
     """
 
     model_type = "minimax_m3_vl"
