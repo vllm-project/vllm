@@ -83,3 +83,16 @@ steps:
   dind: false
   depends_on:
   - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Weight Reload Refit"
+  device: h200_35gb
+  key: weight-reload-refit
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/
+  - vllm/model_executor/utils.py
+  - vllm/distributed/weight_transfer/
+  - tests/model_executor/model_loader/test_reload_refit.py
+  commands:
+  - pytest -v -s model_executor/model_loader/test_reload_refit.py
