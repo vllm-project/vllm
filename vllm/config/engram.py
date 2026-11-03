@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import model_validator
 
@@ -35,7 +35,8 @@ class EngramConfig:
     """Configuration for Engram embedding storage and sharding."""
 
     cpu_offload: bool = True
-    """Store embedding weights in pinned CPU memory for UVA lookup."""
+    """Store embedding weights in pinned CPU memory for UVA lookup. Ignored in
+    ``per_token`` mode, where the table stays on the GPU."""
 
     disk_offload: bool = False
     """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
@@ -55,11 +56,30 @@ class EngramConfig:
     allow it, falling back to per-replica tables when DP replicas are not
     co-located on one node or the host cannot hold them."""
 
+    mode: Literal["ngram", "per_token"] = "ngram"
+    """Engram table lookup mode. ``ngram`` (default) uses the checkpoint's
+    hashed n-gram table. ``per_token`` (DeepSeek V4.1, ROCm only) reads one row
+    per token from the bf16 checkpoint tensor
+    ``layers.<i>.engram.per_token_table.weight``, sliced over hash columns by
+    tensor parallelism; the n-gram table is not needed. Requires
+    embedding_across_dp, dp_shared_memory and use_thp to be off."""
+
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> Self:
+        if self.mode != "ngram" and (
+            self.embedding_across_dp or self.dp_shared_memory or self.use_thp
+        ):
+            raise ValueError(
+                f"engram mode {self.mode!r} keeps its table on each rank's GPU: "
+                "embedding_across_dp, dp_shared_memory and use_thp must be off"
+            )
+        return self
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
@@ -92,12 +112,25 @@ class EngramConfig:
 
             if field != "ple_layer_ids" or not current_platform.is_cuda():
                 raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+        if self.mode == "ngram":
+            return
+        if model_config.architecture != "DeepseekV41ForCausalLM":
+            raise ValueError(
+                f"engram mode {self.mode!r} is only supported for DeepSeek V4.1"
+            )
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_rocm():
+            raise NotImplementedError(
+                f"engram mode {self.mode!r} is only implemented for ROCm"
+            )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
-                self.cpu_offload
+                self.mode == "ngram"
+                and self.cpu_offload
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep

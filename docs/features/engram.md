@@ -14,6 +14,13 @@ vLLM enables Engram automatically whenever the checkpoint declares Engram
 layers, so basic serving needs no extra flags. This page explains what Engram
 does and how to control its memory footprint and multi-GPU topology.
 
+On ROCm, the `per_token` lookup mode replaces the hashed n-gram table (about
+100 GB) with a per-token table of about 1.3 GB. Enable it with
+`--engram-config '{"mode": "per_token"}'` for DeepSeek V4.1, or with
+`ple_embedding_mode` set to `per_token` for Qwen4Exp PLE. The default is
+`ngram`. See [Per-token lookup mode](#per-token-lookup-mode-deepseek-v41-rocm)
+and [PLE embedding mode](#ple-embedding-mode-qwen4exp-rocm).
+
 ## Supported models
 
 Engram layers are declared by the checkpoint, not chosen at serve time:
@@ -151,7 +158,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
 Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
-`disk_offload`.
+`disk_offload` (in `ngram` mode; see
+[PLE embedding mode](#ple-embedding-mode-qwen4exp-rocm)).
 
 ## Sharing host tables across DP replicas
 
@@ -172,9 +180,60 @@ and falls back to per-replica (or DP-sharded) tables with a warning when:
 Requirements: `cpu_offload` enabled, `--data-parallel-size > 1`, and a shared
 IPC namespace across the co-located replicas.
 
+## Per-token lookup mode (DeepSeek V4.1, ROCm)
+
+On ROCm, `DeepseekV41ForCausalLM` accepts `mode` in `--engram-config`. The
+`per_token` mode replaces only the table lookup; the Engram projection, gate and
+residual add run unchanged.
+
+| Mode | Behaviour |
+| --- | --- |
+| `ngram` (default) | Hashed n-gram lookup, as described above. |
+| `per_token` | Reads one row per token from a per-token table, indexed by the compressed id of the current token. |
+
+```bash
+vllm serve <model> --engram-config '{"mode": "per_token"}'
+```
+
+The per-token table of each Engram layer is a regular bf16 checkpoint tensor,
+`layers.<layer>.engram.per_token_table.weight`, of shape
+`[engram_compressed_vocab_size, n_hash_cols, head_dim]` (for example
+`[99092, 24, 256]`). A checkpoint without it fails at load time, as does a
+tensor of another dtype or shape. The n-gram tables of the checkpoint are not
+read: a checkpoint without them can be served, and they are skipped if present.
+
+The table is about 1.3 GB, against about 100 GB for the n-gram table. Each
+tensor-parallel rank keeps only its own hash columns on its GPU, but while
+loading, each rank reads the full tensor into host memory before slicing.
+`cpu_offload` is ignored in this mode,
+`embedding_across_dp`, `dp_shared_memory` and `use_thp` must stay off, and no
+Engram data-parallel group is formed. The mode is experimental, ROCm only.
+
+## PLE embedding mode (Qwen4Exp, ROCm)
+
+On ROCm, `Qwen4ExpForCausalLM` selects the same kind of lookup with a
+`ple_embedding_mode` field in the text config, not with `--engram-config`. It
+can be set through `--hf-overrides`, nested under `text_config` (a top-level
+override is ignored and silently leaves the default `ngram`):
+
+```bash
+vllm serve <model> --hf-overrides '{"text_config": {"ple_embedding_mode": "per_token"}}'
+```
+
+| Mode | Behaviour |
+| --- | --- |
+| `ngram` (default) | Hashed n-gram lookup, as described above. |
+| `per_token` | Reads one row of a `[vocab_size, ple_embed_dim]` table (`per_token_table.weight`) indexed by the current token id. Loading fails if the table is missing from the checkpoint. |
+
+`per_token` supports a single PLE layer. Its table is replicated on every rank's GPU, so
+`cpu_offload` has no effect. Token ids outside the table are clamped to the
+first or last row instead of failing. The selected mode and table size are
+logged once per PLE layer. `per_token` is experimental and not supported on
+other platforms or with sequence parallelism.
+
 ## Limitations
 
-- CUDA-alike platforms only.
+- CUDA-alike platforms only; the `per_token` lookup mode is ROCm only.
 - DeepSeek V4.1 Engram does not support DBO or microbatching; disable
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
