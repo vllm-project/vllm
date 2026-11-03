@@ -12,6 +12,7 @@ from transformers.models.zaya.configuration_zaya import ZayaConfig
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
@@ -31,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadata
@@ -410,6 +411,7 @@ class ZayaSparseMoeBlock(nn.Module):
         super().__init__()
         self.gate = ZayaRouter(config, layer_idx, f"{prefix}.gate")
         parallel_config = get_current_vllm_config().parallel_config
+        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
         self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -419,15 +421,24 @@ class ZayaSparseMoeBlock(nn.Module):
             custom_routing_function=_precomputed_routing,
             router_logits_dtype=torch.float32,
             quant_config=quant_config,
-            is_sequence_parallel=parallel_config.use_sequence_parallel_moe,
+            is_sequence_parallel=self.is_sequence_parallel,
             prefix=f"{prefix}.experts",
         )
 
     def forward(
         self, hidden_states: torch.Tensor, router_states: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.is_sequence_parallel:
+            routing, router_states = self.gate(hidden_states, router_states)
+            return self.experts(hidden_states, routing), router_states
+
+        # Under SP, router_states stays chunked from one MoE block to the next
+        num_tokens = hidden_states.shape[0]
+        hidden_states = sequence_parallel_chunk(hidden_states)
         routing, router_states = self.gate(hidden_states, router_states)
-        return self.experts(hidden_states, routing), router_states
+        hidden_states = self.experts(hidden_states, routing)
+        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+        return hidden_states[:num_tokens], router_states
 
 
 class ZayaResidualScaling(nn.Module):
