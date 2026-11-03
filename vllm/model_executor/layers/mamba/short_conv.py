@@ -18,7 +18,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-    is_conv_state_dim_first,
+    get_conv_state_view,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -88,6 +88,7 @@ class ShortConv(MambaBase, PluggableLayer):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
         self.kv_cache = (torch.tensor([]),)
+        self._conv_state_view_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -134,10 +135,8 @@ class ShortConv(MambaBase, PluggableLayer):
             output[: hidden_states.shape[0]] = output_tensor
             return
 
-        conv_state = (
-            self.kv_cache[0]
-            if is_conv_state_dim_first()
-            else self.kv_cache[0].transpose(-1, -2)
+        self._conv_state_view_cache, conv_state = get_conv_state_view(
+            self._conv_state_view_cache, self.kv_cache[0]
         )  # (num_blocks, dim, state_len)
 
         num_prefills = attn_metadata.num_prefills
@@ -231,10 +230,8 @@ class ShortConv(MambaBase, PluggableLayer):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is not None:
             assert isinstance(attn_metadata, ShortConvAttentionMetadata)
-            conv_state = (
-                self.kv_cache[0]
-                if is_conv_state_dim_first()
-                else self.kv_cache[0].transpose(-1, -2)
+            self._conv_state_view_cache, conv_state = get_conv_state_view(
+                self._conv_state_view_cache, self.kv_cache[0]
             )
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
