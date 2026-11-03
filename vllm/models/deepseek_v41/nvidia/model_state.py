@@ -264,7 +264,7 @@ class DeepseekV41ModelState(DefaultModelState):
             layers is not None
             and compilation_config.cudagraph_decoder_replay
             and compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
-            and is_breakable_cudagraph_enabled()
+            and is_breakable_cudagraph_enabled(compilation_config)
             and get_pp_group().is_first_rank
             # The graphs' fixed inputs hold no LoRA mapping and no None input ids.
             and vllm_config.lora_config is None
