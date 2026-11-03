@@ -977,21 +977,6 @@ class MoRIIOConnectorScheduler:
             )
         )
 
-    @staticmethod
-    def _has_prefill_address(request_id: ReqId, params: dict[str, Any]) -> bool:
-        """Whether add_new_req can resolve the prefill peer of a READ."""
-        if params.get("remote_host") and all(
-            params.get(key) is not None
-            for key in ("remote_handshake_port", "remote_notify_port")
-        ):
-            return True
-        try:
-            return (
-                get_peer_zmq_from_request_id(request_id, is_producer=False) is not None
-            )
-        except ValueError:
-            return False
-
     def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
         transfer_id = params.get("transfer_id")
         if transfer_id is None:
@@ -1629,11 +1614,14 @@ class MoRIIOConnectorScheduler:
             # embedded MoRIIO ZMQ addresses.
             if self.mode == MoRIIOMode.WRITE:
                 self._release_write_prefill_blocks(request.request_id, params)
-            elif not self._has_prefill_address(request.request_id, params):
-                # E.g. the pre-aborted request the serving layer submits after
-                # rejecting one, under its own request_id. Queueing it would
-                # fail in build_connector_meta and kill the engine; prefill
-                # frees the blocks after its deferred-send timeout instead.
+            elif get_peer_zmq_from_request_id(
+                request.request_id, is_producer=False
+            ) is None and not (
+                params.get("remote_host")
+                and params.get("remote_handshake_port") is not None
+                and params.get("remote_notify_port") is not None
+            ):
+                # Prefill frees the blocks after its deferred-send timeout.
                 logger.warning(
                     "Cannot release READ prefill blocks for request %s: "
                     "missing remote notify address",
