@@ -281,9 +281,9 @@ def test_routed_experts_match_flashinfer(experts, rows, graph):
     ours = _fma_finalize(
         out.gemm2_permuted, out.expanded_idx_to_permuted_idx, out.expert_weights
     )
-    assert _bf16_ulps(ours, finalized.cpu()).max() <= 1
     # The finalize kernel computes the same FMA chain.
     assert torch.equal(gemm.finalize(out).cpu(), ours)
+    assert _bf16_ulps(ours, finalized.cpu()).max() <= 1
 
 
 SENTINEL = 128815  # First of five image sentinel token ids.
