@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import torch
 
@@ -83,6 +83,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    CSF_SCALE_ENCODINGS,
+    csf_weights_transform,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
     QuantKey,
@@ -106,6 +110,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -114,6 +119,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    refill_derived,
     replace_parameter,
     retire_parameter,
     set_weight_attrs,
@@ -121,9 +127,6 @@ from vllm.model_executor.utils import (
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
-
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -264,7 +267,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if len(self.exclude_modules) > 0:
             # This is a workaround for the weights remapping issue:
             # https://github.com/vllm-project/vllm/issues/28072
@@ -622,6 +625,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -739,6 +743,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         group_size: int = 16,
         *,
         quantization_args: QuantizationConfigArgs | None = None,
+        weight_scale_encoding: str | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
@@ -749,6 +754,14 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         self.moe_activation_override: QuantKey | None = (
             moe_spec.activation if moe_spec is not None else None
         )
+        if weight_scale_encoding is not None and (
+            weight_scale_encoding not in CSF_SCALE_ENCODINGS
+        ):
+            raise ValueError(
+                f"unsupported weight_scale_encoding: {weight_scale_encoding}"
+            )
+        # CSF weight_scale_encoding of the checkpoint's block scales, if any.
+        self.weight_scale_encoding = weight_scale_encoding
         if is_checkpoint_nvfp4_serialized:
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -765,6 +778,15 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
+
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
+        encoding = self.weight_scale_encoding
+        if encoding is None:
+            return mapper
+        transform = csf_weights_transform((encoding,))
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
@@ -814,6 +836,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         if group_size is None:
             group_size = 16  # Default value
 
+        weight_scale_encoding = original_config.get("weight_scale_encoding")
+        quantization = original_config.get("quantization")
+        if weight_scale_encoding is None and isinstance(quantization, dict):
+            weight_scale_encoding = quantization.get("weight_scale_encoding")
+
         # For FP4, these fields are required
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
             # Check if required fields are present in the quantization config
@@ -835,6 +862,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             exclude_modules,
             group_size,
             quantization_args=original_config.get("_online_quantization_args"),
+            weight_scale_encoding=weight_scale_encoding,
         )
 
 
@@ -1042,10 +1070,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
-            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            if self.nvfp4_backend not in (
+                NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                NvFp4MoeBackend.VLLM_CUTLASS,
+            ):
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
-                    f"moe backend, got {self.nvfp4_backend}"
+                    "pre-processed weights require FLASHINFER_TRTLLM or "
+                    f"VLLM_CUTLASS MoE backend, got {self.nvfp4_backend}"
                 )
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer)
@@ -1123,6 +1154,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
@@ -1547,6 +1579,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
@@ -1667,6 +1700,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 raise ValueError(
                     f"unsupported {codec.upper()} block contract for {prefix}: {recipe}"
                 )
+            encoding = recipe.get("weight_scale_encoding")
+            if encoding is not None and (
+                encoding not in CSF_SCALE_ENCODINGS
+                or codec not in ("nvfp4", "w4a16_nvfp4")
+            ):
+                raise ValueError(
+                    f"unsupported weight_scale_encoding for {prefix}: {recipe}"
+                )
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
@@ -1699,6 +1740,19 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
+
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
+        encodings = {
+            encoding
+            for info in self.quantized_layers.values()
+            if (encoding := info.get("weight_scale_encoding")) is not None
+        }
+        if not encodings:
+            return mapper
+        transform = csf_weights_transform(encodings)
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
@@ -1973,7 +2027,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)
@@ -2732,21 +2786,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 )
             assert self.ctx.group_size is not None
             # Copies: the kernel may write its layout into the params in place.
-            layer.register_buffer(
-                "_nvfp4_weight_for_gather",
-                layer.weight.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach().clone(),
-                persistent=False,
-            )
+            for name, src in (
+                ("_nvfp4_weight_for_gather", layer.weight),
+                ("_nvfp4_weight_scale_for_gather", layer.weight_scale),
+                ("_nvfp4_weight_global_scale_for_gather", layer.weight_global_scale),
+            ):
+                refill_derived(layer, name, src.detach().clone())
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 
