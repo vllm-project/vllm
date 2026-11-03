@@ -84,6 +84,7 @@ when the capture sizes leave no one-request draft graph.
 | `moe/` | The MoE step with a deferred or in-layer finalize, and the low-batch routed-expert GEMMs |
 | `engram/` | The Engram WKV ahead of the decoder layers |
 | `logits/` | The low-batch LM head and the logits gather |
+| `sampling/` | The DSpark Markov chain sharded by vocabulary over the TP ranks |
 
 ## Paths
 
@@ -93,6 +94,8 @@ when the capture sizes leave no one-request draft graph.
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
 | DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
+| DSpark Markov sampling on the fused loop of `ops/fused_markov.py`, as with `dspark_fused_markov` | probabilistic drafting without adaptive verification, watermarking, FP64 Gumbel or batch-sharded sampling |
+| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sampling/sharded_markov.py`) | the same, at up to 8 request rows (4 at 8 ranks) |
 | Aux hidden-state means on the mHC side stream | up to 48 rows |
 | Routed experts on CuTe DSL routing, `tcgen05` GEMM and finalize kernels (`moe/routed_expert_gemm.py`) | 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |

@@ -35,6 +35,11 @@ rounding, temperature division and ``torch.argmax`` tie-breaking) except for
 the bias reduction order before its BF16 rounding, so a bias element can differ
 from cuBLAS's in its last bit.
 
+With ``decode_backend=latency_specialized``, the DSpark draft model's
+``sample_sequential`` (the hook ``DSparkSpeculator._sample_sequential`` asks
+first) is a ``ShardedMarkovSampling``: batches of up to ``max_rows`` request
+rows take this chain, larger ones the fused loop of ``ops/fused_markov.py``.
+
 The exchange is a cross-rank spin wait inside the draft step (and its FULL
 CUDA graph): every rank must launch the kernel the same number of times.
 Installation depends on configuration only and is agreed across the group, and
@@ -42,13 +47,18 @@ the per-call choice depends only on the padded batch shape, which tensor
 parallelism keeps identical across ranks; a rank that diverges hangs.
 """
 
+from collections.abc import Callable
 from functools import cache
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import (
     _DRAFT_NOISE_SALT,
@@ -448,3 +458,60 @@ def make_sharded_sampler(
         sampler.max_rows,
     )
     return sampler
+
+
+class ShardedMarkovSampling:
+    """The DSpark draft model's ``sample_sequential`` hook: the sharded chain
+    for the batches it takes, ``fallback`` (the fused loop) for the others.
+
+    ``local_logits`` (agreed by every rank) has the chain read this rank's
+    vocabulary shard of the draft logits, skipping their all-gather.
+    """
+
+    def __init__(
+        self,
+        sharded: DSparkShardedMarkovSampler,
+        fallback: "Callable[[DSparkSpeculator, int, torch.Tensor], bool]",
+        local_logits: bool,
+    ):
+        self.sharded = sharded
+        self.fallback = fallback
+        self.local_logits = local_logits
+
+    def __call__(
+        self, spec: "DSparkSpeculator", num_reqs: int, head_hidden: torch.Tensor
+    ) -> bool:
+        """Draw the draft tokens of ``num_reqs`` request rows (the padded
+        batch, the same on every rank) into ``spec.draft_tokens`` and cache
+        their logits; returns True, as the fused loop does."""
+        sharded = self.sharded
+        if not sharded.supports_batch(num_reqs):
+            return self.fallback(spec, num_reqs, head_hidden)
+        assert spec.draft_logits is not None
+        assert spec.draft_logits.row_mapping is None
+        model, num_steps = spec.model, spec.num_speculative_steps
+        num_sample = num_reqs * num_steps
+        idx_mapping = spec.sample_idx_mapping[:num_sample]
+        # The noise does not depend on the chain: draw it beside the LM head.
+        sharded.fork_noise(idx_mapping, spec.sample_pos[:num_sample], spec.seeds)
+        sample_hidden = head_hidden[spec.sample_indices[:num_sample]]
+        if self.local_logits:
+            base_logits = model.compute_draft_logits_local(sample_hidden)
+        else:
+            base_logits = model.compute_draft_logits(sample_hidden)
+        base_logits = base_logits.view(num_reqs, num_steps, -1)
+        sharded.join_noise()
+        if not sharded.supports(num_reqs, base_logits):
+            # Logits in a dtype the chain lacks; decided by configuration, so
+            # every rank falls back alike.
+            return self.fallback(spec, num_reqs, head_hidden)
+        sharded.sample(
+            base_logits,
+            spec.input_buffers.input_ids,
+            spec.num_query_per_req,
+            idx_mapping,
+            spec.temperature,
+            spec.draft_logits.values,
+            spec.draft_tokens,
+        )
+        return True

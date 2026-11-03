@@ -16,7 +16,8 @@ requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
 (6 rows each), above 48 rows (inline mHC), padded, row-sharded (12
 requests) and low-batch (one request). The draft samples probabilistically
-(the requests at temperature 0).
+(the requests at temperature 0), so the specialized-decode run samples on the
+vocabulary-sharded Markov chain and, above its batch limit, the fused loop.
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -309,6 +310,7 @@ class StepRecorder:
                 plan.moe.gemm is not None for plan in getattr(draft_decode, "plans", ())
             ],
             "draft_logits": type(draft.logits_processor).__name__,
+            "markov_sampling": type(getattr(draft, "sample_sequential", None)).__name__,
         }
 
     def record_steps(self, prompt_lens: list[int]) -> None:
@@ -506,7 +508,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
 
     # The executors run the target and DSpark draft models over their stock
     # layers, with every MoE layer on the low-batch GEMMs (the target's
-    # deferring).
+    # deferring), and the draft samples on the sharded Markov chain.
     for rank in paths_on:
         assert rank["decode"] == "SpecializedDecode", rank
         assert rank["executor_sublayers"] > 0, "no step ran the executor"
@@ -517,6 +519,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["draft_routed_experts"] == [True] * len(rank["draft_attention"])
         assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
         assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
+        assert rank["markov_sampling"] == "ShardedMarkovSampling", rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
     for rank in paths_off:
@@ -527,6 +530,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["model_state"] == "DeepseekV41ModelState", rank
         assert rank["logits"] == ["LogitsProcessor"], rank
         assert rank["draft_logits"] == "LogitsProcessor", rank
+        assert rank["markov_sampling"] == "NoneType", rank
         assert rank["metadata_graphs"] == 0, rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:
