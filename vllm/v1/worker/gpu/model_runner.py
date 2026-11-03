@@ -860,6 +860,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
         else:
+            self.kv_caches_by_layer = kv_caches_dict
             self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
             # AuxOutput connector requires resolved kv_cache_config.
@@ -2482,6 +2483,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_caches.clear()
         if hasattr(self, "replayssm_block_copy_tensors"):
             self.replayssm_block_copy_tensors.clear()
+        if hasattr(self, "kv_caches_by_layer"):
+            self.kv_caches_by_layer.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
