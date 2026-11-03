@@ -1054,7 +1054,8 @@ impl EngineCoreClient {
 
     /// Release KV cache memory while keeping model weights resident.
     pub async fn release_kv_cache_memory(&self, reset_connector: bool) -> Result<()> {
-        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,)).await?;
+        self.call_utility::<(), _>("release_kv_cache_memory", (reset_connector,))
+            .await?;
         self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
