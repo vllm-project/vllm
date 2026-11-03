@@ -1041,18 +1041,15 @@ def test_lookup_is_released_when_request_finishes():
     assert scheduler.client.discarded == [request.request_id]
 
 
-@pytest.mark.parametrize("preempted", [False, True])
-def test_admission_lookup_is_discarded_on_finish_or_preemption(preempted):
+def test_admission_lookup_is_discarded_on_preemption():
+    """Finished requests are released in request_finished; preempted ones
+    are not finished, so build_connector_meta discards their lookup."""
     scheduler = _make_bare_scheduler()
     scheduler.lookup_async = True
     scheduler.client = _StubLookupClient(hit_tokens=32)
     request = _make_admission_request()
-    output = _make_preemption_scheduler_output()
-    if not preempted:
-        output.preempted_req_ids = set()
-        output.finished_req_ids = {request.request_id}
 
-    scheduler.build_connector_meta(output)
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
     assert scheduler.client.discarded == [request.request_id]
 

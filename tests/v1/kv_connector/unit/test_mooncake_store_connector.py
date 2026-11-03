@@ -947,12 +947,18 @@ def test_prefetch_from_another_thread_is_adopted_by_lookup():
         assert states[0].future.result(timeout=5).hit_length == 32
         assert client.lookup("req", 48, [], non_block=True).hit_length == 32
         assert sock.send_multipart.call_count == 1
-        # A request already looked up keeps its own lookup.
-        dup = client.prefetch(48, [])
-        client.adopt("req", dup)
-        assert client._lookups["req"].future is states[0].future
     finally:
         client.close()
+
+
+def _wait_completed(state: worker.LookupState) -> None:
+    """result() returns before done callbacks run; wait for the TTL stamp."""
+    state.future.result(timeout=5)
+    for _ in range(1000):
+        if state.completed_at is not None:
+            return
+        time.sleep(0.005)
+    raise AssertionError("completion was never stamped")
 
 
 @pytest.mark.parametrize("change", ["tokens", "hash", "expired", "cached_expired"])
@@ -966,7 +972,8 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
         state = client.prefetch(num_tokens, hashes)
         client.adopt("req", state)
         first = state.future
-        assert first.result(timeout=5).hit_length == 32
+        _wait_completed(state)
+        assert first.result().hit_length == 32
         if change == "expired":
             # Prefetched long before the scheduler's first probe.
             clock[0] = 3.0
@@ -989,14 +996,20 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
         client.close()
 
 
-def test_normal_pending_lookup_is_not_restarted_by_result_cache_ttl(monkeypatch):
-    client, sock = _make_lookup_client()
+@pytest.mark.parametrize("prefetched", [False, True])
+def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
+    """A lookup still queued past the TTL is kept, not resubmitted behind
+    the backlog it is waiting on."""
+    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
     gate = threading.Event()
     sock.recv.side_effect = _gated_recv(gate, 32)
     clock = [0.0]
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     try:
-        assert client.lookup("req", 48, [], non_block=True) is None
+        if prefetched:
+            client.adopt("req", client.prefetch(48, []))
+        else:
+            assert client.lookup("req", 48, [], non_block=True) is None
         first = client._lookups["req"].future
         clock[0] = 3.0
         assert client.lookup("req", 48, [], non_block=True) is None

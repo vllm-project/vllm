@@ -343,7 +343,6 @@ class MooncakeStoreScheduler:
         can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:
-            self.client.discard(finished_req_id)
             self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)

@@ -2678,9 +2678,15 @@ class LookupKeyServer:
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]
-    submitted_at: float
-    prefetched: bool
-    cached_at: float | None = None
+    # Freshness runs from when the RPC returned, not when it was queued.
+    completed_at: float | None = None
+    error_logged: bool = False
+
+    def __post_init__(self) -> None:
+        self.future.add_done_callback(self._mark_completed)
+
+    def _mark_completed(self, _: Future) -> None:
+        self.completed_at = time.monotonic()
 
 
 def _lookup_signature(
@@ -2755,10 +2761,9 @@ class LookupKeyClient:
         state = self._lookups.get(req_id)
         if state is not None and (
             state.signature != signature
-            or (state.prefetched and now - state.submitted_at > self._lookup_ttl_s)
             or (
-                state.cached_at is not None
-                and now - state.cached_at > self._lookup_ttl_s
+                state.completed_at is not None
+                and now - state.completed_at > self._lookup_ttl_s
             )
         ):
             self.discard(req_id)
@@ -2769,24 +2774,18 @@ class LookupKeyClient:
                     self._lookup, num_tokens, list(block_hashes)
                 ),
                 signature=signature,
-                submitted_at=now,
-                prefetched=False,
             )
             self._lookups[req_id] = state
-        # Submission-age expiry applies only until the first scheduler probe.
-        state.prefetched = False
         if non_block and not state.future.done():
             return None
         try:
             result = state.future.result()
         except Exception as e:
-            if state.cached_at is None:
+            if not state.error_logged:
+                state.error_logged = True
                 logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
             result = MooncakeLookupResult(0)
-        if non_block:
-            if state.cached_at is None:
-                state.cached_at = time.monotonic()
-        else:
+        if not non_block:
             self.discard(req_id)
         return result
 
@@ -2809,16 +2808,12 @@ class LookupKeyClient:
         return LookupState(
             future=future,
             signature=_lookup_signature(num_tokens, block_hashes),
-            submitted_at=time.monotonic(),
-            prefetched=True,
         )
 
     def adopt(self, req_id: str, state: LookupState) -> None:
         """Register a prefetched lookup; a later lookup(req_id) reuses it."""
-        if req_id in self._lookups:
-            state.future.cancel()
-        else:
-            self._lookups[req_id] = state
+        assert req_id not in self._lookups
+        self._lookups[req_id] = state
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
