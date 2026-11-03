@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -169,35 +170,53 @@ def test_reshape_and_cache(
         torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
-@pytest.mark.parametrize(
-    "num_heads, head_size, kv_cache_dtype",
-    [(32, 192, "auto"), (32, 256, "auto"), (64, 256, "fp8")],
-)
-@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend")
 @torch.inference_mode()
-def test_reshape_and_cache_many_heads(
-    kv_cache_factory,
-    num_heads: int,
-    head_size: int,
-    kv_cache_dtype: str,
-    dtype: torch.dtype,
-) -> None:
+def test_rocm_attn_kv_cache_update_writes_all_heads() -> None:
     """Regression test for https://github.com/vllm-project/vllm/issues/62697.
 
-    These shapes have more 16-byte chunks per token (num_heads * head_size / x,
-    x = 16 // cache element size) than the kernel's 512 threads per token.
+    32 KV heads x 256 in fp16 needs more than the 512 chunks of x elements per
+    token that the native reshape_and_cache kernel writes.
     """
-    test_reshape_and_cache(
-        kv_cache_factory,
-        num_tokens=42,
-        num_heads=num_heads,
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+    from vllm.v1.attention.ops.paged_attn import PagedAttention
+
+    set_random_seed(0)
+    num_tokens, num_kv_heads, head_size, block_size, num_blocks = 42, 32, 256, 16, 8
+    device, dtype = CUDA_DEVICES[0], torch.float16
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.randn_like(key)
+    slot_mapping = torch.randperm(num_blocks * block_size, device=device)[:num_tokens]
+    kv_cache = torch.zeros(
+        2, num_blocks, block_size, num_kv_heads * head_size, dtype=dtype, device=device
+    )
+    scale = torch.tensor(1.0, device=device)
+    impl = RocmAttentionImpl(
+        num_heads=num_kv_heads,
         head_size=head_size,
-        block_size=16,
-        num_blocks=128,
-        dtype=dtype,
-        seed=0,
-        device=CUDA_DEVICES[0],
-        kv_cache_dtype=kv_cache_dtype,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+    )
+    impl.do_kv_cache_update(
+        SimpleNamespace(_k_scale=scale, _v_scale=scale),
+        key,
+        value,
+        kv_cache.transpose(0, 1),
+        slot_mapping,
+    )
+
+    key_cache, value_cache = PagedAttention.split_kv_cache(
+        kv_cache, num_kv_heads, head_size
+    )
+    block_idx, block_offset = slot_mapping // block_size, slot_mapping % block_size
+    torch.testing.assert_close(
+        key_cache[block_idx, :, :, block_offset].flatten(2), key, atol=0, rtol=0
+    )
+    torch.testing.assert_close(
+        value_cache[block_idx, :, :, block_offset], value, atol=0, rtol=0
     )
 
 
