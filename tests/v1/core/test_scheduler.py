@@ -71,6 +71,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
     DraftTokenIds,
     ECConnectorOutput,
     KVConnectorOutput,
@@ -8029,6 +8030,28 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
+    """Admitting an async KV load computes only its own reservation, not that of
+    every load already parked, which made admissions quadratic in a burst."""
+    scheduler = create_scheduler(
+        max_num_seqs=128, use_kv_connector=mock_kv(matched_tokens=64, is_async=True)
+    )
+    for request in create_requests(num_requests=64, num_tokens=80):
+        scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+
+    remaining = Mock(wraps=scheduler._request_remaining_blocks)
+    monkeypatch.setattr(scheduler, "_request_remaining_blocks", remaining)
+    new_ids = [f"new{i}" for i in range(8)]
+    for request in create_requests(num_requests=8, num_tokens=80, req_ids=new_ids):
+        scheduler.add_request(request)
+    scheduler.schedule()
+
+    assert [call.args[0].request_id for call in remaining.call_args_list] == new_ids
+    parked = scheduler._parked_reservations
+    assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
 
 
 def _create_hybrid_mamba_connector_scheduler(
