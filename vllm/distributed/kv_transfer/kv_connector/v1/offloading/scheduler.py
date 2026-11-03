@@ -613,11 +613,11 @@ class OffloadingConnectorScheduler:
 
         full_attention_groups: list[int] = []
         sliding_window_groups: list[int] = []
-        for config_idx, group_config in enumerate(self.config.kv_group_configs):
+        for config_group_idx, group_config in enumerate(self.config.kv_group_configs):
             if group_config.sliding_window_size_in_chunks is None:
-                full_attention_groups.append(config_idx)
+                full_attention_groups.append(config_group_idx)
             else:
-                sliding_window_groups.append(config_idx)
+                sliding_window_groups.append(config_group_idx)
 
         # sort sliding window groups by window size in decreasing order
         def _sliding_window_sort_key(i: int) -> int:
@@ -939,11 +939,13 @@ class OffloadingConnectorScheduler:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
             lookup_groups = ()
-            for group_idx in groups_iter:
+            for config_group_idx in groups_iter:
                 group_config: GroupOffloadConfig = self.config.kv_group_configs[
-                    group_idx
+                    config_group_idx
                 ]
-                group_state: RequestGroupState = req_status.group_states[group_idx]
+                group_state: RequestGroupState = req_status.group_states[
+                    config_group_idx
+                ]
                 tokens_per_chunk = group_config.tokens_per_chunk
                 offload_keys = group_state.offload_keys
 
@@ -952,7 +954,8 @@ class OffloadingConnectorScheduler:
                 )
 
                 is_eagle_unverified = (
-                    group_config.is_eagle_group and group_idx not in eagle_verified
+                    group_config.is_eagle_group
+                    and config_group_idx not in eagle_verified
                 )
 
                 # Constrain to a chunk-aligned boundary for this group.
@@ -1038,7 +1041,7 @@ class OffloadingConnectorScheduler:
                 else:
                     if is_eagle_unverified:
                         num_hit_chunks -= 1
-                        eagle_verified.add(group_idx)
+                        eagle_verified.add(config_group_idx)
 
                     max_hit_size_tokens = min(
                         max_hit_size_tokens,
@@ -1634,8 +1637,8 @@ class OffloadingConnectorScheduler:
             if block_id_groups:
                 if self._sliding_window_groups:
                     new_block_ids_end[req_id] = tuple(
-                        len(req_status.group_states[grp_idx].block_ids)
-                        for grp_idx in self._sliding_window_groups
+                        len(req_status.group_states[config_group_idx].block_ids)
+                        for config_group_idx in self._sliding_window_groups
                     )
                 req_status.update_block_id_groups(block_id_groups)
                 for group_config in self.config.kv_group_configs:
@@ -1657,8 +1660,8 @@ class OffloadingConnectorScheduler:
             blocks_per_chunk = self.config.blocks_per_chunk
             for req_id, req_status in self._req_status.items():
                 ends = new_block_ids_end.get(req_id)
-                for i, grp_idx in enumerate(self._sliding_window_groups):
-                    group_state = req_status.group_states[grp_idx]
+                for i, config_group_idx in enumerate(self._sliding_window_groups):
+                    group_state = req_status.group_states[config_group_idx]
                     start = group_state.next_stored_chunk_idx * blocks_per_chunk
                     end = ends[i] if ends is not None else len(group_state.block_ids)
                     for j in range(start, end):
@@ -1673,9 +1676,9 @@ class OffloadingConnectorScheduler:
     ) -> dict[int, TransferJob]:
         store_jobs: dict[int, TransferJob] = {}
         num_groups = len(self.config.kv_group_configs)
-        config_idx_by_group = {
-            config.group_idx: idx
-            for idx, config in enumerate(self.config.kv_group_configs)
+        config_group_idx_by_group = {
+            config.group_idx: config_group_idx
+            for config_group_idx, config in enumerate(self.config.kv_group_configs)
         }
         for req_id, entries in handoffs.items():
             req_status = self._req_status.get(req_id)
@@ -1684,10 +1687,10 @@ class OffloadingConnectorScheduler:
             req = req_status.req
             max_boundary = self._calc_num_offloadable_tokens(req_status, req.num_tokens)
             for group_idx, block_id, boundary in entries:
-                config_idx = config_idx_by_group.get(group_idx)
-                if config_idx is None:
+                config_group_idx = config_group_idx_by_group.get(group_idx)
+                if config_group_idx is None:
                     continue
-                group_config = self.config.kv_group_configs[config_idx]
+                group_config = self.config.kv_group_configs[config_group_idx]
                 if (
                     block_id == 0
                     or boundary > max_boundary
@@ -1718,9 +1721,9 @@ class OffloadingConnectorScheduler:
                     fenced_block_ids=[block_id],
                 )
                 group_sizes = [0] * num_groups
-                group_sizes[config_idx] = 1
+                group_sizes[config_group_idx] = 1
                 block_indices = [0] * num_groups
-                block_indices[config_idx] = (
+                block_indices[config_group_idx] = (
                     boundary // group_config.tokens_per_block - 1
                 )
                 store_jobs[job_id] = TransferJob(
@@ -1844,14 +1847,18 @@ class OffloadingConnectorScheduler:
                         req, group_config, tokens, key
                     )
 
-            group_by_key = {key: idx for idx, key in enumerate(keys)}
+            group_by_key = {
+                key: config_group_idx for config_group_idx, key in enumerate(keys)
+            }
             accepted_groups = [group_by_key[key] for key in store_output.keys_to_store]
             group_sizes = [0] * len(self.config.kv_group_configs)
             block_indices = [0] * len(self.config.kv_group_configs)
-            for group_idx in accepted_groups:
-                group_sizes[group_idx] = 1
-                block_indices[group_idx] = block_idx
-            source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
+            for config_group_idx in accepted_groups:
+                group_sizes[config_group_idx] = 1
+                block_indices[config_group_idx] = block_idx
+            source_blocks = [
+                block_ids[config_group_idx] for config_group_idx in accepted_groups
+            ]
 
             job_id = self._generate_job_id()
             req_status.transfer_jobs.add(job_id)
