@@ -61,8 +61,11 @@ def test_encoder_graph_configuration(enabled, enforce_eager, supported, expected
     assert state.encoder_runner.has_cudagraph() is expected
 
 
-def test_encoder_graph_unsupported_modality_uses_eager_output():
-    """An image graph must not intercept another modality's encoder output."""
+@pytest.mark.parametrize(
+    "modality,input_key", [("audio", "audio_values"), ("image", "image_embeds")]
+)
+def test_encoder_graph_unsupported_input_uses_eager_output(modality, input_key):
+    """Image graphs must not intercept audio or precomputed image embeddings."""
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
     runner = _make_runner([], [])
@@ -78,7 +81,7 @@ def test_encoder_graph_unsupported_modality_uses_eager_output():
     runner.cudagraph_manager = manager
     with patch(
         "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
-        return_value=[("audio", 1, {"audio_values": torch.zeros(2)})],
+        return_value=[(modality, 1, {input_key: torch.zeros(2)})],
     ):
         result = runner.execute_mm_encoder([("audio", MagicMock())])
     assert len(result) == 1
