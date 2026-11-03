@@ -295,6 +295,11 @@ class EngineCoreOutput(
 
     indexer_topk: np.ndarray | None = None
 
+    # Whether the sampler watermarks this request, after EngineCore enforcement.
+    # Sent once, on the first output, when watermark_config is set. Appended last
+    # for array_like compatibility.
+    watermarking: bool | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

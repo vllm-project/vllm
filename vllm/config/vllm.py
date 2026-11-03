@@ -55,7 +55,7 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
-from .watermarking import WatermarkConfig
+from .watermarking import WatermarkConfig, warn_watermarking_override
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -1453,7 +1453,7 @@ class VllmConfig:
             )
         if config is None:
             return True
-        if config.watermarking is False:
+        if config.watermarking is False and not watermark_config.enforce:
             return False
 
         from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -1484,6 +1484,8 @@ class VllmConfig:
                 scope="global",
             )
             return False
+        if config.watermarking is False:
+            warn_watermarking_override()
         return True
 
     def _resolve_and_verify_engram_config(self) -> None:
@@ -3237,7 +3239,7 @@ class VllmConfig:
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake and MoRIIO connectors require"
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
             )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None
