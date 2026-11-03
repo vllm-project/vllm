@@ -26,6 +26,7 @@ from vllm.model_executor.kernels.linear import (
     ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
     _get_linear_backend,
+    _prefer_humming_on_sm100,
     _resolve_backend_kernels,
     init_fp8_linear_kernel,
     init_int8_linear_kernel,
@@ -441,8 +442,10 @@ def test_humming_priority_only_reorders_humming_and_marlin(possible_kernels):
 def test_humming_priority_sm100_mixed_precision(
     weight_type, group_size, zero_points, expected
 ):
-    """SM100 prefers Humming only for int4 symmetric group-128 weights."""
+    """SM100 moves Humming directly ahead of Marlin only for int4 symmetric
+    group-128 weights; no other kernel moves and other devices are unchanged."""
     kernels = _POSSIBLE_KERNELS[PlatformEnum.CUDA]
+    original = list(kernels)
     config = MPLinearLayerConfig(
         full_weight_shape=(5120, 5120),
         partition_weight_shape=(5120, 5120),
@@ -452,8 +455,16 @@ def test_humming_priority_sm100_mixed_precision(
         zero_points=zero_points,
     )
 
-    assert prioritize_humming(kernels, compute_capability=100) == kernels
-    names = [k.__name__ for k in prioritize_humming(kernels, 100, mp_config=config)]
-    humming = next(i for i, name in enumerate(names) if "Humming" in name)
-    marlin = next(i for i, name in enumerate(names) if "Marlin" in name)
-    assert (humming < marlin) == expected
+    assert _prefer_humming_on_sm100(kernels, config, 103) == original
+    reordered = _prefer_humming_on_sm100(kernels, config, 100)
+    assert kernels == original
+    names = [k.__name__ for k in reordered]
+    humming = names.index("HummingLinearKernel")
+    marlin = names.index("MarlinLinearKernel")
+    assert (humming == marlin - 1) == expected
+    if not expected:
+        assert reordered == original
+    del names[humming]
+    assert names == [
+        k.__name__ for k in original if k.__name__ != "HummingLinearKernel"
+    ]

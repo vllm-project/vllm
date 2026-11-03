@@ -250,6 +250,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.platforms import PlatformEnum, current_platform
+from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
 
@@ -414,7 +415,6 @@ def _resolve_backend_kernels(
     *,
     quantization: str,
     compute_capability: int | None = None,
-    mp_config: MPLinearLayerConfig | None = None,
 ) -> list[type]:
     """Apply device priorities and --linear-backend filtering to a kernel list.
 
@@ -425,7 +425,7 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
-    kernels = prioritize_humming(kernels, compute_capability, mp_config)
+    kernels = prioritize_humming(kernels, compute_capability)
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels
@@ -889,6 +889,29 @@ def init_int8_linear_kernel(
     )
 
 
+def _prefer_humming_on_sm100(
+    kernels: list[type[MPLinearKernel]],
+    config: MPLinearLayerConfig,
+    compute_capability: int | None,
+) -> list[type[MPLinearKernel]]:
+    """Move Humming directly ahead of Marlin on SM100 for int4 symmetric
+    group-128 weights, where Humming prefills ~3x faster at equal decode.
+    With group 32 and zero points Humming decodes 5-6% slower, so those keep
+    Marlin. SM103 is untested and keeps Marlin."""
+    if not (
+        compute_capability == 100
+        and config.weight_type == scalar_types.uint4b8
+        and config.group_size == 128
+        and not config.zero_points
+        and HummingLinearKernel in kernels
+        and MarlinLinearKernel in kernels
+    ):
+        return kernels
+    kernels = [k for k in kernels if k is not HummingLinearKernel]
+    kernels.insert(kernels.index(MarlinLinearKernel), HummingLinearKernel)
+    return kernels
+
+
 def choose_mp_linear_kernel(
     config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
@@ -925,7 +948,9 @@ def choose_mp_linear_kernel(
         "mixed-precision",
         quantization="mixed_precision",
         compute_capability=compute_capability,
-        mp_config=config,
+    )
+    platform_kernels = _prefer_humming_on_sm100(
+        platform_kernels, config, compute_capability
     )
 
     failure_reasons = []
