@@ -39,6 +39,9 @@ class _FlydslMxfp4Gemm(VllmJitKernel["_FlydslMxfp4Gemm.CompileKey"]):
         out_dtype: torch.dtype,
         device_id: int,
         max_m: int,
+        num_processors: int,
+        cache_size_bytes: int,
+        lds_size_bytes: int,
     ) -> list[CompileKey]:
         from flydsl.kernels.gemm.rdna4_mxfp4 import get_warmup_keys
 
@@ -51,6 +54,9 @@ class _FlydslMxfp4Gemm(VllmJitKernel["_FlydslMxfp4Gemm.CompileKey"]):
             dtype=out_dtype,
             device_id=device_id,
             cache_policy="rotating",
+            num_processors=num_processors,
+            cache_size_bytes=cache_size_bytes,
+            lds_size_bytes=lds_size_bytes,
         )
         return self._trace_dispatch(self.dispatch)(signature=WarmupChoices(*signatures))
 
@@ -192,7 +198,10 @@ class FlydslMxfp4LinearKernel(MxFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        from flydsl.kernels.gemm.rdna4_mxfp4 import prepare_weights
+        from flydsl.kernels.gemm.rdna4_mxfp4 import (
+            get_device_capabilities,
+            prepare_weights,
+        )
 
         prepared = prepare_weights(layer.weight, layer.weight_scale)
         replace_parameter(layer, "weight", prepared.packed)
@@ -225,6 +234,7 @@ class FlydslMxfp4LinearKernel(MxFp4LinearKernel):
                     out_dtype=out_dtype,
                     device_id=layer.weight.device.index,
                     max_m=vllm_config.scheduler_config.max_num_batched_tokens,
+                    **get_device_capabilities(layer.weight.device.index),
                 )
 
     def apply_weights(
