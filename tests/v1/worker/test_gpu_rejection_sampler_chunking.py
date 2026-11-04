@@ -329,13 +329,10 @@ def test_chunked_accept_sees_every_plan_field():
     input_batch = _make_input_batch(
         cu_num_logits_np, np.arange(num_reqs, dtype=np.int32), torch.device("cpu")
     )
-    gen = torch.Generator().manual_seed(0)
     input_batch.verify_plan = VerifyPlan(
         parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32),
         count=torch.full((num_reqs,), rows, dtype=torch.int32),
         tokens=torch.randint(0, 100, (num_reqs, rows), dtype=torch.int32),
-        positions=torch.randint(0, 4, (num_reqs, rows), dtype=torch.int32),
-        mask=torch.rand(num_reqs, rows, rows, generator=gen) < 0.5,
     )
     seen: list[VerifyPlan] = []
 
@@ -366,7 +363,7 @@ def test_chunked_accept_sees_every_plan_field():
             max_chunk_logits=max_chunk_logits,
             max_num_logprobs=NO_LOGPROBS,
         )
-        for name in ("parent", "count", "tokens", "positions", "mask"):
+        for name in ("parent", "count", "tokens"):
             assert torch.equal(
                 torch.cat([getattr(plan, name) for plan in seen]),
                 getattr(input_batch.verify_plan, name),

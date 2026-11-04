@@ -160,9 +160,9 @@ def test_reference_plan_kinds():
     registry = KernelRegistry()
     assert registry.plan_kind(_mamba("m", "gdn"))[0] == "tree"
     assert registry.plan_kind(_mamba("m", "mamba2"))[0] == "tree"
-    assert registry.plan_kind(_attn("a"))[0] == "mask"
+    assert registry.plan_kind(_attn("a"))[0] == "tree"
     # A cache not paged by slot keeps its own commit: nothing to need.
-    assert registry.plan_kind(_attn("ring", layout=""))[0] == "mask"
+    assert registry.plan_kind(_attn("ring", layout=""))[0] == "tree"
 
 
 @pytest.mark.parametrize(
@@ -234,8 +234,6 @@ def test_the_registry_sets_the_model_plan_kind():
     lowered = caps(declining)
     assert lowered.plan_kind == "chain"
     assert [limit.reason for limit in lowered.limits] == [
-        "mamba:gdn@slots, 1 layer: ToyKernel verifies tree"
-        " (a recurrent state folds in every ancestor: no masks)",
         "mamba:gdn@slots, 1 layer: ToyKernel declines the layer",
     ]
 

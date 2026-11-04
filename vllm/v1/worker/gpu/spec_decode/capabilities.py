@@ -28,11 +28,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-PlanKind = Literal["none", "chain", "tree", "mask"]
+PlanKind = Literal["none", "chain", "tree"]
 """The plans a model verifies, in increasing order: ``"none"`` (no speculative
 decoding), ``"chain"`` (each row follows the one before it), ``"tree"`` (each
-row names its parent row and sees its ancestors), ``"mask"`` (a tree whose rows
-may also carry their own visibility mask, ``VerifyPlan.mask``)."""
+row names its parent row and sees its ancestors)."""
 
 PLAN_KINDS: tuple[PlanKind, ...] = get_args(PlanKind)
 
@@ -205,11 +204,6 @@ def _mamba_layer_limit(
     plan_kind, why = kernels.plan_kind(
         SpecLayerSpec(name, kind, layer, layout="mamba_state")
     )
-    if plan_kind == "tree":
-        # A row's state folds in every ancestor along parent, so a recurrent
-        # layer cannot hide one: masks lower to trees unless its verify kernel
-        # itself verifies masks.
-        why += " (a recurrent state folds in every ancestor: no masks)"
     return (plan_kind, kind.key(), why)
 
 

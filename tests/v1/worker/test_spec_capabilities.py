@@ -227,19 +227,10 @@ def _import_class(qualname):
 # --- per-model plan kinds ----------------------------------------------------
 
 
-def _chain_limits(caps):
-    """The limits that cap a model at chains (or less): tree-capable layers
-    report a "tree" limit too, as masks lower to trees on them."""
-    return [limit for limit in caps.limits if limit.plan_kind != "tree"]
-
-
 def test_llama_verifies_trees_on_a_tree_builder_and_chains_on_the_stock_one():
     tree = _caps(_llama(_TreeBuilder))
     assert tree.plan_kind == "tree"
-    # A tree is a limit now that plans can carry masks.
-    assert tree.limits == (
-        SpecLimit("tree", "attn:full_attention, 4 layers: _TreeBuilder verifies tree"),
-    )
+    assert tree.limits == ()
     stock = _caps(_llama(_StockBuilder))
     assert stock.plan_kind == "chain"
     assert stock.limits == (
@@ -370,7 +361,7 @@ def test_recurrent_layers_without_tree_kernels_verify_chains(layer, builder):
         builder = _import_class(builder)
     caps = _caps(_hybrid(layer, builder))
     assert caps.plan_kind == "chain"
-    [limit] = _chain_limits(caps)
+    [limit] = caps.limits
     assert limit.reason in (
         f"{layer.__name__}, 3 layers: declares no spec_layer_variant",
         "mamba:short_conv@slots, 3 layers: no mamba:short_conv@slots/verify kernel",
@@ -484,7 +475,7 @@ def test_runner_settings_lower_trees_to_chains(override, reason):
     assert default.plan_kind == "tree"
     caps = _resolve(_runner(**override))
     assert caps.plan_kind == "chain"
-    assert [limit.reason for limit in _chain_limits(caps)] == [
+    assert [limit.reason for limit in caps.limits] == [
         f"{reason}: keeps verify rows in chain order"
     ]
 

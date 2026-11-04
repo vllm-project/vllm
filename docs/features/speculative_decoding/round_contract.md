@@ -16,7 +16,7 @@ only the hooks it needs.
 
 | The speculator owns | vLLM owns |
 | --- | --- |
-| The rows the target verifies each step: chain, tree or mask (`BaseSpeculator.plan`) | The target forward, its CUDA graphs and its parallelism |
+| The rows the target verifies each step: chain or tree (`BaseSpeculator.plan`) | The target forward, its CUDA graphs and its parallelism |
 | Which rows are accepted (`BaseSpeculator.accept`) | KV cache and recurrent-state memory, sized at startup |
 | The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Scheduling, preemption and the order of the waiting queue |
 | Its own drafting (`BaseSpeculator.propose`) | Committing the accepted path to the KV cache and recurrent state |
@@ -35,21 +35,19 @@ holds. vLLM sizes memory and CUDA graphs for it once, at startup.
 | `max_candidates: int` | Rows per request, the root included. Must equal `num_speculative_tokens + 1`; the scheduler reserves this many KV slots per decoding request. |
 | `capture_shapes: tuple[PlanShape, ...]` | The target-forward shapes to capture. `PlanShape(n)` is `n` rows for every request. `PlanShape(None)` is a variable-length decode graph that takes 1 to `max_candidates` rows per request. |
 | `max_branching: int = 1` | 1 for chains. Above 1, plans may branch. |
-| `custom_mask: bool = False` | Plans may carry a visibility mask. Needs `max_branching > 1`. |
 
 The default is a chain of up to K drafts: `max_candidates` is K + 1, with one
 recurrent-state row per draft. `SpecResources.plan_kind` follows from the fields:
-`"mask"` with `custom_mask`, `"tree"` when `max_branching > 1`, else `"chain"`.
+`"tree"` when `max_branching > 1`, else `"chain"`.
 
 ### Plan kinds
 
-Plan kinds are ordered `"none" < "chain" < "tree" < "mask"` (`PlanKind` in
+Plan kinds are ordered `"none" < "chain" < "tree"` (`PlanKind` in
 `capabilities.py`):
 
 - `"none"`: the layer cannot verify drafts at all.
 - `"chain"`: each verify row follows the one before it.
 - `"tree"`: each row has a parent and sees its ancestors.
-- `"mask"`: each row sees the rows its mask names.
 
 ### Per-layer capabilities
 
@@ -67,17 +65,14 @@ Each kind of layer answers in its own way:
   reason the startup log shows. The default is `"chain"`. A builder that returns
   `"tree"` reads `CommonAttentionMetadata.tree_ancestors` and applies every feature
   of the layer by position (`CommonAttentionMetadata.positions`, the plan
-  positions). A builder that returns `"mask"` accepts any mask over earlier rows
-  in `tree_ancestors`.
+  positions).
 - **Recurrent layers** (`MambaBase` subclasses). A layer class verifies more than
   chains only when the class itself sets `spec_layer_variant`, for example `"gdn"`
   or `"mamba2"`. Subclasses do not inherit it, so a subclass with its own forward
   falls back to chains. A class with `spec_chain_supported = False` (Mamba1) reports
   `"none"`. Above chains, a recurrent layer verifies the highest plan kind that its
-  kernels in the registry support (see [Kernel registry](#kernel-registry)). A
-  recurrent state folds in every ancestor, so it cannot hide one. A recurrent layer
-  therefore caps masks at trees, unless its verify kernel itself supports `"mask"`.
-- **Runner settings.** These lower trees and masks to chains: pipeline parallelism,
+  kernels in the registry support (see [Kernel registry](#kernel-registry)).
+- **Runner settings.** These lower trees to chains: pipeline parallelism,
   prefill and decode context parallelism, batch-sharded sampling, micro-batching,
   and a model state without tree support.
 
@@ -87,13 +82,10 @@ The engine core calls `SpeculatorConfig.adapt_resources(declared, caps) ->
 SpecResources` with the reduced capabilities. The result may only take less than
 `declared`, and its plan kind must be one the model verifies
 (`validate_effective_resources` in `capabilities.py`). By default, a speculator
-that branches runs as a chain of the same length, and a mask speculator runs its
-plans as trees on a model that verifies trees: its plans then carry no mask, and
-rows see their ancestors.
+that branches runs as a chain of the same length.
 
 A tree speculator should override `adapt_resources` to pick its own chain, because a
-64-row tree is not a 64-token chain. A mask speculator whose masks only make sense as
-masks should override it to pick its own tree.
+64-row tree is not a 64-token chain.
 
 The engine logs one line per limit that lowers the declared plan kind:
 
@@ -170,8 +162,6 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. |
 | `draft_probs` | `[R, C, vocab]` float32 for probabilistic verification, else `None`. |
 | `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
-| `positions` | `[R, C]` int32 offsets from `num_computed_tokens`, replacing each row's depth. Positions do not enter a recurrence, so any model takes them. |
-| `mask` | `[R, C, C]` bool. `mask[r, i, j]` is whether row `i` sees row `j`. The diagonal is taken as true, entries with `j > i` are ignored, and the committed prefix is always visible. Needs `custom_mask`. `parent` still gives the paths the commit accepts along. Recurrent layers read `parent`, not the mask. |
 
 Row 0 is the root, the request's last committed token. Each row writes its KV at the
 chain slot of its row index. After acceptance, the commit moves the accepted path
@@ -186,15 +176,13 @@ stop short of the bound, and rows past it are never accepted.
 
 A plan that is not a chain needs `max_branching > 1` in the bound resources, and a
 batch that is not `chain_only`. The runner checks each plan against the effective
-resources and rejects a plan with more than `max_candidates` rows, or with a mask
-the resources do not allow.
+resources and rejects a plan with more than `max_candidates` rows.
 
 ### 3. Verify
 
 The runner builds the inputs from the plan and runs the target forward. Each row's
-position is `num_computed_tokens` plus its depth, or plus `positions`. With M-RoPE,
-the shift is the same on every section. Attention sees each row's ancestors, or its
-mask. The forward replays the captured graph for the batch's shape.
+position is `num_computed_tokens` plus its depth. With M-RoPE, the shift is the same
+on every section. Attention sees each row's ancestors. The forward replays the captured graph for the batch's shape.
 
 ### 4. Accept: `BaseSpeculator.accept`
 
@@ -392,13 +380,12 @@ class MyTreeSpeculator(EagleSpeculator):
 
 A model verifies the lowest plan kind of any of its layers. The table shows what each
 family verifies with the in-tree backends and kernels. A plugin attention backend
-whose builder answers `"tree"` or `"mask"`, or a kernel provider, can raise a row.
+whose builder answers `"tree"`, or a kernel provider, can raise a row.
 
 | Family | Layers | Plan kind | What decides it |
 | --- | --- | --- | --- |
 | Dense attention (Llama, Qwen3, Mistral) | FlashAttention, FlashInfer, Triton | chain | The builders keep the default `spec_verify_limit`. |
-| Any attention model on FlexAttention | full and sliding-window attention | mask | `FlexAttentionMetadataBuilder` verifies masks, and so trees. A sliding window measures plan rows by position. |
-| Sinks, soft cap, ALiBi, chunked local attention, R-SWA, KV sharing, quantized KV (for example gpt-oss, Gemma 2, Llama 4) | any in-tree backend | chain | FlexAttention chains with these features and names the feature in the startup log. |
+| Sinks, soft cap, ALiBi, chunked local attention, R-SWA, KV sharing, quantized KV (for example gpt-oss, Gemma 2, Llama 4) | any in-tree backend | chain | The in-tree builders keep the default `spec_verify_limit`. |
 | MLA (DeepSeek V3, Kimi K2) | MLA backends | chain | MLA builders keep the default. |
 | Sparse attention with an indexer (DeepSeek V3.2, GLM-5) | indexer | chain | The indexer builder keeps the default. |
 | GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | tree | `mamba:gdn@slots/verify` and `layout:mamba_state@slots/commit`. The attention layers must also verify trees. |
@@ -412,7 +399,7 @@ whose builder answers `"tree"` or `"mask"`, or a kernel provider, can raise a ro
 
 - A plan has at most 64 rows per request (`MAX_PLAN_ROWS` in `plan_kernels.py`): the
   ancestor set of a row is one int64.
-- With pipeline parallelism, trees and masks run as chains. The tree path is not
+- With pipeline parallelism, trees run as chains. The tree path is not
   broadcast between stages.
 - Prefill and decode context parallelism, batch-sharded sampling and micro-batching
   also run as chains.

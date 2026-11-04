@@ -445,9 +445,8 @@ class CommonAttentionMetadata:
     has positions available so that builders can pre-compute position-dependent
     sparse metadata for DeepSeek V4 C128A layers. On a batch laid out as a plan
     (``tree_parents`` set) a plan row's position is ``num_computed_tokens`` plus
-    its depth, or plus its ``VerifyPlan.positions`` offset, not its KV slot index:
-    a backend that verifies trees measures position terms (a sliding window,
-    ALiBi, a chunk) on these."""
+    its depth, not its KV slot index: a backend that verifies trees measures
+    position terms (a sliding window, ALiBi, a chunk) on these."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -492,11 +491,10 @@ class CommonAttentionMetadata:
     tree_ancestors: torch.Tensor | None = None
     """(num_tokens,) int64 alongside ``tree_parents``: bit ``j`` is set when the
     token sees row ``j`` of its plan, so a plan row attends to the request's
-    context and to the rows whose bits are set. The row's own bit and its
-    ancestors' bits, or the plan's ``VerifyPlan.mask`` when it has one (only on
-    a model whose every layer verifies ``"mask"`` plans). 0 for a token that is
-    not a plan row (a prompt token in front of the plan), which attends
-    causally. Plan rows are the request's last ``count`` query tokens."""
+    context and to the rows whose bits are set: the row's own bit and its
+    ancestors' bits. 0 for a token that is not a plan row (a prompt token in
+    front of the plan), which attends causally. Plan rows are the request's last
+    ``count`` query tokens."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
@@ -708,10 +706,9 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         ``"tree"`` reads ``CommonAttentionMetadata.tree_ancestors`` (attention)
         or ``tree_parents`` (recurrent layers) and applies every feature of the
         layer (window, sinks, soft cap, ALiBi, chunk) by position
-        (``CommonAttentionMetadata.positions``). ``"mask"`` is a tree backend
-        whose ``tree_ancestors`` may be any mask over earlier rows. Features the
-        layer does not have are None or False. Read off the built builder, so
-        an instance may answer per layer group.
+        (``CommonAttentionMetadata.positions``). Features the layer does not
+        have are None or False. Read off the built builder, so an instance may
+        answer per layer group.
         """
         return "chain", f"{type(self).__name__} verifies chain"
 

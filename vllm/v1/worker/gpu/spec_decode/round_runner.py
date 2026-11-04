@@ -243,11 +243,6 @@ class SpecRound:
                 "that can only verify chains (PlanInputs.chain_only)"
             )
         resources = self.resources
-        if plan.mask is not None and not resources.custom_mask:
-            raise ValueError(
-                "the speculator returned a plan with a mask, but runs with plan "
-                f"kind {resources.plan_kind!r} (the model verifies no masks)"
-            )
         if plan.parent.shape[1] > resources.max_candidates:
             raise ValueError(
                 f"a plan has {plan.parent.shape[1]} rows per request; the "
