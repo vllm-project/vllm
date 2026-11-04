@@ -507,14 +507,22 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
 
 class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    """Block-scaled FP8 GEMM using AITER's B-preshuffled weight layout."""
+    """Block-scaled FP8 GEMM through AITER ``gemm_a8w8_blockscale_bpreshuffle``.
+
+    AITER #5141 dispatches ck, cktile, asm, opus, or FlyDSL from the tuned
+    row, including split-K when the kernel name carries it. This class only
+    prepares the shared contract: weights shuffled with ``layout=(16, 16)``
+    and K-major fp32 activation scales. It is selected when any probed M for
+    this ``(N, K)`` has a row, because one shuffled weight serves prefill and
+    decode.
+    """
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
-        # AITER bpreshuffle indexes x_scale as kb * M + row (K-major).
-        # ROCm group_fp8_quant currently ignores this flag, so
-        # apply_block_scaled_mm also converts at runtime.
+        # AITER indexes x_scale as kb * M + row (K-major). ROCm
+        # group_fp8_quant does not read column_major_scales, so
+        # apply_block_scaled_mm converts when the scale is still row-major.
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
@@ -576,14 +584,22 @@ class AiterPreshuffledBlockScaleFp8ScaledMMKernel(Fp8BlockScaledMMLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        params = self._get_layer_params(layer)
+        params = FP8BlockParams.from_layer(layer)
+        if params.weight_scale_inv is not None:
+            ws, attr = params.weight_scale_inv, params.WEIGHT_SCALE_INV
+        else:
+            ws, attr = params.weight_scale, params.WEIGHT_SCALE
+        # gfx942 block-scale rows consume fp32 scales. e8m0 is widened once
+        # here; the GEMM entry point also widens, but the stored scale should
+        # already match the tuned kernels.
+        if ws is not None and ws.dtype == torch.float8_e8m0fnu:
+            replace_parameter(layer, attr, _upcast_e8m0_to_fp32(ws).contiguous())
+
+        w = FP8BlockParams.from_layer(layer).weight
         replace_parameter(
             layer,
-            params.WEIGHT,
-            torch.nn.Parameter(
-                rocm_aiter_ops.shuffle_weight(params.weight.data).data,
-                requires_grad=False,
-            ),
+            FP8BlockParams.WEIGHT,
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
         )
 
     def apply_block_scaled_mm(

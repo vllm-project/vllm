@@ -3566,22 +3566,45 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    @functools.cache
     def is_blockscale_bpreshuffle_tuned(n: int, k: int) -> bool:
-        from aiter.jit.core import AITER_CONFIGS
-        from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
+        # AITER #5141 keys this CSV by (gfx, cu_num, M, N, K). get_CKGEMM_config
+        # fills gfx and cu_num from the current device. One shuffled weight is
+        # used for every M, so any tuned row for this (N, K) selects the path.
+        # Split-K is part of the kernel name inside AITER, not a vLLM argument.
+        try:
+            from aiter.jit.core import AITER_CONFIGS
+            from aiter.ops.gemm_op_a8w8 import get_CKGEMM_config
 
-        config_file = (
-            AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
-        )
-        # Selection is per weight, not per runtime M: a shuffled weight is
-        # used for both prefill and decode. Probe representative M values
-        # rather than M=1 only (FlyDSL/ASM rows are often prefill-sized).
+            config_file = (
+                AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE_FILE
+            )
+        except (AttributeError, ImportError, OSError):
+            return False
         sample_m = (
-            [32768, 8192, 4096, 3307, 2048, 1024, 512, 256, 128, 64, 32, 16, 8, 4, 2, 1]
+            32768,
+            8192,
+            4096,
+            3307,
+            2048,
+            1024,
+            512,
+            256,
+            128,
+            64,
+            32,
+            16,
+            8,
+            4,
+            2,
+            1,
         )
-        return any(
-            get_CKGEMM_config(m, n, k, config_file) is not None for m in sample_m
-        )
+        try:
+            return any(
+                get_CKGEMM_config(m, n, k, config_file) is not None for m in sample_m
+            )
+        except (AttributeError, ImportError, OSError, KeyError, ValueError):
+            return False
 
     @staticmethod
     def fused_moe(
