@@ -53,9 +53,7 @@ def test_grouped_conv_matches_reference(block_size: int):
         (15, 143, 5, 11, 3),
     ],
 )
-@pytest.mark.parametrize(
-    "warps", [None, 4, 8] + ([] if current_platform.is_rocm() else [16])
-)
+@pytest.mark.parametrize("warps", [None, 4, 8, 16])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     """Dtype rounding and request boundaries survive residual/norm fusion."""

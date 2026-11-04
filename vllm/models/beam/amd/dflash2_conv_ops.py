@@ -72,8 +72,13 @@ def conv_residual_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Finish grouped convolution and update the residual before RMSNorm."""
     rows, width = hidden.shape
+    block = triton.next_power_of_2(width)
     if num_warps is None:
         num_warps = 16 if rows <= 256 else (8 if rows < 4096 else 4)
+    # Extra 64-lane wavefronts replicate the block, and a replica can reload
+    # RESIDUAL after another wavefront has updated it in place.
+    # https://github.com/triton-lang/triton/issues/12616
+    num_warps = min(num_warps, max(1, block // 64))
     output = torch.empty_like(hidden)
     if rows:
         _conv_residual_norm_kernel[(rows,)](
@@ -92,7 +97,7 @@ def conv_residual_norm(
             base.shape[0],
             query_len,
             eps,
-            triton.next_power_of_2(width),
+            block,
             num_warps=num_warps,
             enable_fp_fusion=False,
         )

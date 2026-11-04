@@ -12,7 +12,6 @@ if TYPE_CHECKING:
         attention,
         attention_ops,
         dflash2_conv_ops,
-        dflash2_ops,
         layernorm,
         model,
     )
@@ -24,7 +23,6 @@ elif current_platform.is_rocm():
         attention,
         attention_ops,
         dflash2_conv_ops,
-        dflash2_ops,
         layernorm,
         model,
     )
@@ -36,7 +34,6 @@ else:
         attention,
         attention_ops,
         dflash2_conv_ops,
-        dflash2_ops,
         layernorm,
         model,
     )
@@ -49,7 +46,6 @@ beam_norm_residual_norm = layernorm.beam_norm_residual_norm
 beam_rms_norm = layernorm.beam_rms_norm
 beam_silu_mul = activation.beam_silu_mul
 beam_softcap_logits = activation.beam_softcap_logits
-candidate_edges = dflash2_ops.candidate_edges
 conv_residual_norm = dflash2_conv_ops.conv_residual_norm
 
 __all__ = [
@@ -64,10 +60,8 @@ __all__ = [
     "beam_rms_norm",
     "beam_silu_mul",
     "beam_softcap_logits",
-    "candidate_edges",
     "conv_residual_norm",
     "dflash2_conv_ops",
-    "dflash2_ops",
     "layernorm",
     "model",
 ]
