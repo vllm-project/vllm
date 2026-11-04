@@ -189,7 +189,7 @@ def test_fused_shared_experts_are_split_into_slots(
         moe_utils,
         "ExpertMapManager",
         lambda *args, **kwargs: ExpertMapManager(
-            *args, **kwargs, num_fused_shared_experts=n_shared
+            *args, **{**kwargs, "num_fused_shared_experts": n_shared}
         ),
     )
     monkeypatch.setattr(

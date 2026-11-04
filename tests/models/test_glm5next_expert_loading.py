@@ -157,7 +157,7 @@ def test_fused_shared_expert_slot(model_cls, monkeypatch):
         moe_utils,
         "ExpertMapManager",
         lambda *args, **kwargs: ExpertMapManager(
-            *args, **kwargs, num_fused_shared_experts=1
+            *args, **{**kwargs, "num_fused_shared_experts": 1}
         ),
     )
     monkeypatch.setattr(
