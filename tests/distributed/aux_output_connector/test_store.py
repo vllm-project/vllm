@@ -1669,6 +1669,20 @@ def test_store_lru_and_immutable_put():
     store.close()
 
 
+def test_fixed_store_get_optional_reads_unreferenced_and_retained_objects():
+    store = _make_store(max_bytes=8)
+    store.put([BlockObject("key", b"data")])
+
+    assert store.get_optional("key") == b"data"
+
+    store.put([], retain_keys=["key"])
+    assert store.get_optional("key") == b"data"
+
+    store.put([], release_keys=["key"])
+    assert store.get_optional("key") == b"data"
+    store.close()
+
+
 def test_store_replaces_only_unreferenced_aux_outputs():
     store = _make_store(max_bytes=8)
     store.put([BlockObject("block", b"1111")], retain_keys=["block"])

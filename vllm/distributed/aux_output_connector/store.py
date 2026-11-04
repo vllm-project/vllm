@@ -376,7 +376,7 @@ class BlockObjectStore:
         arena_obj = self._arena
         if arena_obj is None:
             raise RuntimeError("auxiliary output store is closed")
-        slot = self._lru.get(key)
+        slot = self._slots.get(key)
         if slot is None:
             return None
         arena = memoryview(arena_obj)
@@ -386,7 +386,8 @@ class BlockObjectStore:
             )
         finally:
             arena.release()
-        self._lru.move_to_end(key)
+        if key in self._lru:
+            self._lru.move_to_end(key)
         return payload
 
     def close(self) -> None:
