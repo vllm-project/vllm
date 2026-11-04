@@ -11,7 +11,6 @@ import torch.distributed as dist
 from torch._ops import OpOverload
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -4033,6 +4032,7 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        k_out_unquantized: torch.Tensor | None = None,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
             fused_qk_norm_rope_cache_pts_quant_shuffle,
@@ -4064,6 +4064,7 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
+            k_out_unquantized=k_out_unquantized,
         )
 
     @staticmethod
@@ -4098,18 +4099,14 @@ class rocm_aiter_ops:
         per-tensor CPU scalars. return_kv says whether the impl consumes
         k_out (FA and ROCM_ATTN prefill do; unified reads K from the cache and
         passes False, so the kernel skips that store). For fp8 caches the
-        kernel emits k_out in the cache dtype, so a returned k_out is
-        converted to the activation dtype.
+        kernel writes the pre-quant K into k_out via k_out_unquantized.
         """
         is_fp8_cache = kv_cache_dtype.startswith("fp8")
-        dequant_k_out = return_kv and is_fp8_cache
-        kernel_k_out = k_out
+        write_unquantized = return_kv and is_fp8_cache
         if is_fp8_cache:
             fp8_dtype = current_platform.fp8_dtype()
             key_cache = key_cache.view(fp8_dtype)
             value_cache = value_cache.view(fp8_dtype)
-        if dequant_k_out:
-            kernel_k_out = torch.empty_like(k_out, dtype=fp8_dtype)
         # Partial-rotary support (e.g. GLM-4.7 applies rotary to only a prefix
         # of each head's channel dim).
         rotary_dim = cos_sin_cache.shape[-1]
@@ -4132,16 +4129,15 @@ class rocm_aiter_ops:
             slot_mapping=slot_mapping,
             k_scale=k_scale,
             v_scale=v_scale,
-            k_out=kernel_k_out,
+            k_out=None if write_unquantized else k_out,
             v_out=None,
             return_kv=return_kv,
             use_shuffle_layout=use_shuffle_layout,
             block_size=key_cache.shape[1],
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
+            k_out_unquantized=k_out if write_unquantized else None,
         )
-        if dequant_k_out:
-            ops.convert_fp8(k_out, kernel_k_out, float(k_scale), kv_cache_dtype)
 
     @staticmethod
     def fused_qk_norm_mrope_and_cache(

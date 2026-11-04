@@ -541,13 +541,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         else:
             cache_atol, cache_rtol = ATOL, RTOL
 
-        # The fused k_out is the dequantized cache write, so it carries the same
-        # rounding; FA and ROCM_ATTN prefill consume it directly. Unified reads K
-        # from the cache and asks the kernel not to write k_out at all.
+        # FA and ROCM_ATTN prefill consume the fused k_out directly; it is the
+        # pre-quant K, like the unfused path. Unified reads K from the cache and
+        # asks the kernel not to write k_out.
         if attn_backend != AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            torch.testing.assert_close(
-                k_unfused, k_fused, atol=cache_atol, rtol=cache_rtol
-            )
+            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
 
         # Should be bit exact since no processing had been done on v for both paths
         torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
