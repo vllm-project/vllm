@@ -38,8 +38,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     calc_diff,
+    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     per_block_cast_to_fp8,
 )
@@ -632,3 +634,26 @@ def test_deepgemm_fp4_vs_triton(
             f"DeepGEMM FP4 path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )
+
+
+@pytest.mark.skipif(
+    not is_deep_gemm_e8m0_used()
+    or not current_platform.is_device_capability_family(90),
+    reason="Requires DeepGEMM E8M0 on Hopper",
+)
+def test_e8m0_small_m_falls_back_to_triton_on_hopper(monkeypatch, workspace_init):
+    """Hopper keeps float32 weight scales that Triton can read, so E8M0 must
+    not force DeepGEMM for small-M shapes where Triton is faster."""
+    deep_gemm_experts = importlib.import_module(
+        "vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe"
+    ).DeepGemmExperts
+    call_counter = {"cnt": 0}
+    orig_fn = deep_gemm_experts.apply
+
+    def _spy_apply(*args, **kwargs):
+        call_counter["cnt"] += 1
+        return orig_fn(*args, **kwargs)
+
+    monkeypatch.setattr(deep_gemm_experts, "apply", _spy_apply)
+    run_single_case(m=8, n=1024, k=1024, topk=2, num_experts=32, block_size=BLOCK_SIZE)
+    assert call_counter["cnt"] == 0

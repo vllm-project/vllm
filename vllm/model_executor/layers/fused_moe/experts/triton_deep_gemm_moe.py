@@ -16,9 +16,13 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 )
 from vllm.model_executor.layers.fused_moe.experts.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_e8m0_used,
-)
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
+
+
+def _triton_cannot_read_weight_scales() -> bool:
+    # Packed UE8M0 weight scales (Blackwell) are DeepGEMM-only; Hopper keeps
+    # float32 scales that the Triton fallback reads directly.
+    return DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0
 
 
 class TritonOrDeepGemmExperts(FallbackExperts):
@@ -51,7 +55,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         # Note: the deep gemm workspaces are strictly larger than the triton
         # workspaces so we can be pessimistic here and allocate for DeepGemm
         # even if we fall back to triton later, e.g. if expert maps are set.
-        if is_deep_gemm_e8m0_used() or _valid_deep_gemm_shape(M, N, K):
+        if _triton_cannot_read_weight_scales() or _valid_deep_gemm_shape(M, N, K):
             return self.experts.workspace_shapes(
                 M,
                 N,
@@ -80,7 +84,9 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         w1: torch.Tensor,
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
-        if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
+        if _triton_cannot_read_weight_scales() or _valid_deep_gemm(
+            hidden_states, w1, w2
+        ):
             return self.experts
         else:
             return self.fallback_experts
