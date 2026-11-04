@@ -185,6 +185,24 @@ def test_multi_node_rows_get_their_own_namespace(
     assert ("slot_layout" in fm.fields) == multi_node
 
 
+@pytest.mark.parametrize("multi_node", [False, True])
+def test_multi_node_rows_keep_their_parallel_layout(multi_node):
+    """A mirrored row concatenates each rank's tensor pages in rank order, so
+    engines of different TP sizes must not share multi-node rows, even for a
+    model whose layout one node treats as parallelism-agnostic."""
+    base_paths = {
+        make_mapper_from_offloading_spec(
+            world_size=tp_size,
+            tp_size=tp_size,
+            local_world_size=tp_size // 2 if multi_node else tp_size,
+            is_parallelism_agnostic=True,
+            parallel_agnostic=True,
+        ).base_path
+        for tp_size in (2, 4)
+    }
+    assert len(base_paths) == (2 if multi_node else 1)
+
+
 def test_parallel_agnostic_collapses_namespace_when_config_allows():
     fm = make_mapper_from_offloading_spec(
         tp_size=4,

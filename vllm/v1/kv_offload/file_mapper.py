@@ -113,8 +113,11 @@ class FileMapper:
             rank=parallel.rank,
             dtype=config.model.dtype,
             kv_cache_groups=kv_cache_groups,
+            # Multi-node rows concatenate each rank's tensor pages in rank
+            # order, so their bytes depend on the parallel layout.
             parallel_agnostic=(
                 parallel_agnostic
+                and not parallel.spans_nodes
                 and (parallel.is_parallelism_agnostic or config.replicated_layout)
             ),
             replicated_layout=(parallel_agnostic and config.replicated_layout),
