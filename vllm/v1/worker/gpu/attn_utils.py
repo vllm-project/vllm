@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
@@ -108,6 +108,8 @@ class FastPrefillHelper:
             not has_prefill
             or batch_desc.cg_mode == CUDAGraphMode.FULL
             or batch_desc.num_ubatches > 1
+            # LoRA metadata describes the full batch, not the logits-only batch.
+            or num_active_loras > 0
         ):
             return None
         buf = self.logits_indices_buf
@@ -404,6 +406,7 @@ def init_kv_cache(
     *,
     block_tables: "BlockTables | None" = None,
     attn_groups: Iterable[AttentionGroup] = (),
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     allocation_context = kv_cache_allocation_context or nullcontext()
     with allocation_context:
@@ -416,6 +419,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                allocate=allocate,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -423,7 +427,21 @@ def init_kv_cache(
                 device,
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
+                allocate=allocate,
             )
+    return bind_kv_caches(
+        kv_caches, forward_context, kv_cache_config, vllm_config, attn_groups
+    )
+
+
+def bind_kv_caches(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    attn_groups: Iterable[AttentionGroup] = (),
+) -> dict[str, Any]:
+    """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
