@@ -111,6 +111,9 @@ SHAPES = [
     (8, 1, 200000, (200000, 262000), 4, 1),
     (4, 2, 0, (0, 0), 1, 1),  # a zero max_seq_len (dummy batch)
     (1, 1, 1, (0, 1), 1, 1),
+    (100, 4, 1 << 20, (1, 1 << 20), 1, 1),  # 100 requests, every window count
+    (16, 1, 1 << 20, (1020 * BLOCK, 1030 * BLOCK), 1, 1),  # waves 0 and 1 meet
+    (16, 1, 1 << 20, (4090 * BLOCK, 4100 * BLOCK), 1, 1),  # second trip of the waves
 ]
 KINDS = [
     "real",
