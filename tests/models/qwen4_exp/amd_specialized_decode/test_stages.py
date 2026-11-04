@@ -1736,18 +1736,20 @@ def test_qsa_select(rows):
     row within the budget lists all of its blocks in order (-1 after) without
     scoring; a longer row picks stock's 512 but for ties at the boundary
     (stock's pick among ties is arbitrary; ours takes the lowest blocks), in
-    ascending order. Rows from no context to past the LDS-staged keys
-    (``select.MAX_KEYS``), and a padded row."""
+    ascending order. Rows from no context to the most keys the select stages
+    in LDS (``select.MAX_KEYS``) and past them, and a padded row."""
     from vllm import _custom_ops as ops
     from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer, select
 
     gen = torch.Generator().manual_seed(rows)
-    page, heads, dim, ratio, top = 64, 4, 128, 4, 512
+    page, heads, dim, ratio, top = 128, 4, 128, 4, 512
     base = [9001, 0, 3, 2048, 2051, 2120, 37, 6000, 33000, 2600]
     contexts = [base[r % len(base)] for r in range(rows)]
-    if rows >= 8:
-        # past the LDS-staged keys: the select re-reads the scores
-        contexts[rows // 2] = (select.MAX_KEYS + 300) * ratio
+    if rows >= 4:
+        # the most LDS-staged keys (page 128: the page table leaves the LDS
+        # room for them), then past them: the select re-reads the scores
+        contexts[rows // 2] = select.MAX_KEYS * ratio
+        contexts[rows // 2 + 1] = (select.MAX_KEYS + 300) * ratio
     width = -(-max(contexts) // page)
     need = [-(-c // page) for c in contexts]
     stride = page * dim + 1024

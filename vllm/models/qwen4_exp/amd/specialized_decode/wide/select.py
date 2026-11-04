@@ -38,7 +38,7 @@ i32 = fx.Int32
 
 THREADS = 256
 WAVES = THREADS // 64
-MAX_KEYS = 32768  # keys a row stages in LDS at most: 128K tokens at ratio 4
+MAX_KEYS = 33792  # keys a row stages in LDS at most: 132K tokens at ratio 4
 BINS = 4096  # a level's histogram (12 key bits)
 PER_THREAD = BINS // THREADS  # bins a thread scans
 # (shift, bits) of each level's digit: key bits 30..19, 18..7, 6..0
@@ -51,14 +51,14 @@ AUX = 2 * WAVES + 4  # the scans' wave totals, then the found (bin, above, count
 def lds_keys(free_bytes: int) -> int:
     """Keys a row stages in LDS when ``free_bytes`` of LDS are left for
     ``select``: whole 1024-key steps up to ``MAX_KEYS``."""
-    keys = (free_bytes // 4 - 2 * BINS - AUX) // 1024 * 1024
+    keys = (free_bytes // 4 - BINS - AUX) // 1024 * 1024
     return max(0, min(MAX_KEYS, keys))
 
 
 def lds_words(keys: int) -> int:
     """i32 words of LDS ``select`` needs with ``keys`` staged keys: the keys,
-    two histograms (the levels alternate), ``AUX``."""
-    return keys + 2 * BINS + AUX
+    the histogram, ``AUX``."""
+    return keys + BINS + AUX
 
 
 @traced
@@ -116,16 +116,24 @@ def _count(hist, load4, lo, hi, prefix, shift: int, bits: int):
 
 
 @traced
-def _find(tid, hist, aux, bins: int, want):
+def _find(tid, hist, aux, bins: int, want, clear: bool):
     """The bin holding the ``want``-th key from the top and the keys in the
     bins above it, (bin, above), from every thread. Thread ``t`` scans bins
-    ``bins - (t + 1) * per .. bins - t * per`` (the top bins first)."""
+    ``bins - (t + 1) * per .. bins - t * per`` (the top bins first);
+    ``clear`` (``bins >= THREADS * STEP``): it zeroes them once read, for the
+    next level."""
     per = max(1, bins // THREADS)
     first = i32(bins) - (tid + i32(1)) * i32(per)
     mine = []
     for b in range_constexpr(per):
         at = first + i32(b)
         mine.append((at >= i32(0)).select(lds_ld(hist + fx.max(at, i32(0))), i32(0)))
+    if const_expr(clear):
+        for b in range_constexpr(0, per, STEP):
+            lds_st(
+                hist + first + i32(b),
+                fx.Vector.from_elements([i32(0)] * STEP, fx.Int32),
+            )
     total = mine[0]
     for b in range_constexpr(1, per):
         total = total + mine[b]
@@ -161,21 +169,19 @@ def _zero(tid, hist, bins: int):
 
 
 @traced
-def _boundary(tid, hists, aux, load4, lo, hi, top: int):
+def _boundary(tid, hist, aux, load4, lo, hi, top: int):
     """(prefix, shift): the ``top``-th largest key's bits above ``shift``; the
     keys whose bits above ``shift`` exceed ``prefix`` and those equal to it
-    taken in block order up to ``top`` are the top ``top``. ``hists``: two
-    zeroed histograms."""
+    taken in block order up to ``top`` are the top ``top``. ``hist``: a
+    zeroed histogram; each level's scan zeroes it for the next (``_find``)."""
     prefix, want, shift_at, done = i32(0), i32(top), i32(31), i32(0)
     for level, (shift, bits) in enumerate(LEVELS):
-        hist = hists[level % 2]
         if done == i32(0):
             _count(hist, load4, lo, hi, prefix, shift, bits)
             fx.barrier()
-            found, below, count = _find(tid, hist, aux, 1 << bits, want)
-            if const_expr(level + 2 < len(LEVELS)):
-                # the level after next counts into this histogram again
-                _zero(tid, hist, 1 << LEVELS[level + 2][1])
+            found, below, count = _find(
+                tid, hist, aux, 1 << bits, want, level + 1 < len(LEVELS)
+            )
             prefix = (prefix << i32(bits)) | found
             want = want - below
             shift_at = i32(shift)
@@ -232,8 +238,8 @@ def select(
     top``), ascending. ``keys``: ``lds_words(staged)`` i32 words of LDS, the
     first ``staged`` for the row's keys. Reads the scores device-coherent
     (``CM_DEV``): other CTAs of the launch wrote them."""
-    hists = (keys + staged, keys + staged + BINS)
-    aux = keys + staged + 2 * BINS
+    hist = keys + staged
+    aux = hist + BINS
     # the thread's run: whole STEP-key reads, every thread's run contiguous
     per = (visible + i32(THREADS * STEP - 1)) // i32(THREADS * STEP) * i32(STEP)
     lo = tid * per
@@ -255,14 +261,13 @@ def select(
         w = lds_ld(keys + j, STEP)
         return [w[e] for e in range(STEP)]
 
-    for h in hists:
-        _zero(tid, h, BINS)
+    _zero(tid, hist, BINS)
     if visible <= i32(staged):
         _stage(keys, from_global, lo, hi)
         fx.barrier()
-        p, sh = _boundary(tid, hists, aux, from_lds, lo, hi, top)
+        p, sh = _boundary(tid, hist, aux, from_lds, lo, hi, top)
         _emit(tid, aux, from_lds, lo, hi, p, sh, sel, row, stride, top)
     else:
         fx.barrier()
-        p, sh = _boundary(tid, hists, aux, from_global, lo, hi, top)
+        p, sh = _boundary(tid, hist, aux, from_global, lo, hi, top)
         _emit(tid, aux, from_global, lo, hi, p, sh, sel, row, stride, top)
