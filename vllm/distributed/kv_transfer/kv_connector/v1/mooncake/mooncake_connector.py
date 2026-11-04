@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections import OrderedDict, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import IntEnum
@@ -112,6 +112,10 @@ TransferId = str  # KV transfer coordination ID (shared by P/D)
 # ids onto that region. Hybrid KV manager assigns distinct ids per group, so
 # flatten does not copy the same block twice.
 _SHARED_REGION_GROUP_ID = -1
+
+# P's read-back buffer for `verify_transfers`. Larger transfers are checked in
+# pieces.
+_VERIFY_BUFFER_BYTES = 64 << 20
 
 
 @dataclass(frozen=True)
@@ -617,6 +621,25 @@ def _pp_mismatch_hides_packed_layers(
     return local_has_opaque_row or _has_opaque_packed_row(
         remote_row_offsets, remote_kv_block_lens, remote_block_lens
     )
+
+
+def _read_back_batches(
+    lengths: list[int], capacity: int
+) -> Iterator[list[tuple[int, int, int]]]:
+    """Split descriptors into (index, start, length) pieces of at most
+    `capacity` bytes, grouped into batches that each fit in `capacity`."""
+    batch: list[tuple[int, int, int]] = []
+    used = 0
+    for i, length in enumerate(lengths):
+        for start in range(0, length, capacity):
+            n = min(capacity, length - start)
+            if used + n > capacity:
+                yield batch
+                batch, used = [], 0
+            batch.append((i, start, n))
+            used += n
+    if batch:
+        yield batch
 
 
 def _get_tensor_dense_flag(tensor: torch.Tensor) -> bool | None:
@@ -1471,6 +1494,12 @@ class MooncakeConnectorWorker:
         # Expired transfers in expiry order, so a late pull fails at once
         # instead of waiting for a prefill that already happened.
         self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
+        # Debug mode: P reads each transfer back from D and compares it.
+        self._verify_transfers = bool(
+            kv_transfer_config.get_from_extra_config("verify_transfers", False)
+        )
+        self._verify_lock = threading.Lock()
+        self._verify_buf: torch.Tensor | None = None
 
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
@@ -1948,8 +1977,19 @@ class MooncakeConnectorWorker:
                     lengths,
                 )
 
+                transfer_err_msg = None
                 if ret_value != 0:
                     transfer_err_msg = f"Mooncake transfer engine returned {ret_value}"
+                elif self._verify_transfers:
+                    transfer_err_msg = await self.sender_loop.run_in_executor(
+                        self._sender_executor,
+                        self._verify_sent_blocks,
+                        remote_session,
+                        src_ptrs,
+                        dst_ptrs,
+                        lengths,
+                    )
+                if transfer_err_msg is not None:
                     err_msg = (
                         transfer_err_msg
                         if err_msg is None
@@ -2272,6 +2312,84 @@ class MooncakeConnectorWorker:
                 sum(lengths),
             )
         return ret_value
+
+    def _verify_sent_blocks(
+        self,
+        remote_session: str,
+        src_ptrs: list[int],
+        dst_ptrs: list[int],
+        lengths: list[int],
+    ) -> str | None:
+        """Read the written ranges back from D and compare them with P's KV.
+        Returns an error message at the first difference, else None."""
+        sources: dict[int, torch.Tensor] = {}
+        for cache in self.device_kv_caches.values():
+            storage = cache.untyped_storage()
+            sources[storage.data_ptr()] = torch.empty(
+                0, dtype=torch.uint8, device=cache.device
+            ).set_(storage)
+
+        def source_bytes(addr: int, length: int) -> torch.Tensor:
+            for base, data in sources.items():
+                if base <= addr and addr + length <= base + data.numel():
+                    return data[addr - base : addr - base + length]
+            raise ValueError(f"{addr:#x} is not in a registered KV cache")
+
+        with self._verify_lock:
+            if self._verify_buf is None:
+                cache = next(iter(self.device_kv_caches.values()))
+                buf = torch.empty(
+                    _VERIFY_BUFFER_BYTES, dtype=torch.uint8, device=cache.device
+                )
+                if self.engine.register_memory(buf.data_ptr(), buf.numel()) != 0:
+                    return "Mooncake read-back buffer registration failed"
+                self._verify_buf = buf
+            buf = self._verify_buf
+            for batch in _read_back_batches(lengths, buf.numel()):
+                sizes = [n for _, _, n in batch]
+                offsets = list(itertools.accumulate(sizes, initial=0))
+                ret_value = self.engine.batch_transfer_sync_read(
+                    remote_session,
+                    [buf.data_ptr() + offset for offset in offsets[:-1]],
+                    [dst_ptrs[i] + start for i, start, _ in batch],
+                    sizes,
+                )
+                if ret_value != 0:
+                    return f"Mooncake read-back returned {ret_value}"
+                for (i, start, n), offset in zip(batch, offsets):
+                    expected = source_bytes(src_ptrs[i] + start, n)
+                    diff = torch.nonzero(buf[offset : offset + n] != expected)
+                    if diff.numel() == 0:
+                        continue
+                    pos = start + int(diff[0])
+                    logger.error(
+                        "Mooncake read-back from %s differs at byte %d of "
+                        "descriptor %d (%d bytes, D address %#x): %s",
+                        remote_session,
+                        pos,
+                        i,
+                        lengths[i],
+                        dst_ptrs[i] + pos,
+                        self._describe_kv_addr(src_ptrs[i] + pos),
+                    )
+                    return "KV read back from the decoder differs from the source"
+        return None
+
+    def _describe_kv_addr(self, addr: int) -> str:
+        """Name the registered region and block that hold a local address."""
+        candidates = [
+            (addr - base, name, block_len)
+            for name, base, block_len in zip(
+                self.registered_layer_names,
+                self.kv_caches_base_addr,
+                self.block_len_per_layer,
+            )
+            if base <= addr
+        ]
+        if not candidates:
+            return f"address {addr:#x}"
+        offset, name, block_len = min(candidates)
+        return f"{name} block {offset // block_len} offset {offset % block_len}"
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
