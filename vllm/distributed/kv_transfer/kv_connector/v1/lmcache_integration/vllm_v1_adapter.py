@@ -202,7 +202,7 @@ class RequestTracker:
         return RequestTracker(
             req_id=new_request.req_id,
             prompt_len=len(new_request.prompt_token_ids),
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute],
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=lmcache_cached_tokens,
             disagg_spec=disagg_spec,
