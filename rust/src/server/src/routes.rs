@@ -89,13 +89,6 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn server_dev_mode_enabled() -> bool {
-    std::env::var("VLLM_SERVER_DEV_MODE")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 fn runtime_lora_updating_enabled() -> bool {
     std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
         .ok()
@@ -126,7 +119,7 @@ struct RouteGates {
 impl RouteGates {
     fn resolve(state: &AppState) -> Self {
         Self {
-            dev_mode: server_dev_mode_enabled(),
+            dev_mode: state.api_server_options.server_dev_mode,
             runtime_lora_updating: runtime_lora_updating_enabled(),
             scale_out: state.api_server_options.enable_scale_out,
             cohere_api: cohere_api_enabled(),
@@ -285,6 +278,7 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
+    let log_error_stack = state.api_server_options.log_error_stack;
     let enable_api_key_auth = state.has_api_keys();
     let enable_access_log = state.access_log.enabled;
     let mut router = router
@@ -301,6 +295,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         .layer(from_fn(middleware::track_http_metrics))
         .layer(middleware::cors_layer(&state.cors))
         .layer(from_fn(middleware::strip_cors_on_no_origin));
+
+    if log_error_stack {
+        router = router.layer(from_fn(middleware::log_error_response));
+    }
 
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(
