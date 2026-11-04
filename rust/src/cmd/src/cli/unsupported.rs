@@ -189,17 +189,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub allowed_media_domains: Option<Unsupported>,
 
-    /// Skip initialization of tokenizer and detokenizer. Expects valid
-    /// `prompt_token_ids` and `None` for prompt from the input. The generated
-    /// output will contain token ids.
-    #[arg(
-        long,
-        visible_alias = "no-skip-tokenizer-init",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub skip_tokenizer_init: Option<Unsupported>,
-
     /// If `True`, enables passing text embeddings as inputs via the
     /// `prompt_embeds` key.
     ///

@@ -758,8 +758,7 @@ class Step5SparseIndexerIndexTPLinear(ColumnParallelLinear):
 def _step5_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
     parallel = vllm_config.parallel_config
     return (
-        parallel.pipeline_parallel_size == 1
-        and parallel.enable_expert_parallel
+        parallel.enable_expert_parallel
         and parallel.tensor_parallel_size > 1
         and vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
     )

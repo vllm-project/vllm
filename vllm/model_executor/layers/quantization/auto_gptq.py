@@ -19,6 +19,9 @@ from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -64,6 +67,7 @@ from vllm.model_executor.parameter import (
     PackedColumnParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import is_weights_pre_processed, retire_parameter
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -330,6 +334,12 @@ class AutoGPTQLinearMethod(LinearMethodBase):
                 group_size=self.quant_config.group_size,
             )
 
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(self.kernel, MarlinLinearKernel) and (
+            self.kernel.config.act_type in (torch.float16, torch.bfloat16)
+        )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -453,6 +463,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Pre-processed AWQ/GPTQ weights require Marlin with "
+                    "FP16 or BF16 activations"
+                )
+            # Symmetric GPTQ retains checkpoint qzeros but reads the empty w_zp.
+            retire_parameter(layer, "qzeros")
+            assert self.kernel is not None
+            self.kernel.w_zp_name = "w_zp"
+            return
+
         if self.use_batch_invariant:
             # No Marlin repacking: apply() unpacks the checkpoint layout.
             for name in ("qweight", "scales", "qzeros"):

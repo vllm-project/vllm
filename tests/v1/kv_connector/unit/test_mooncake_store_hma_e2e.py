@@ -123,6 +123,7 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         sc.local_buffer_size = 1 << 20
         sc.protocol = "tcp"
         sc.device_name = ""
+        sc.device_name_per_gpu = None
         sc.master_server_address = ""
         sc.mode = "embedded"
         sc.enable_offload = False

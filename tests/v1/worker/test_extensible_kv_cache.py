@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
 from types import SimpleNamespace
 
 import pytest
@@ -224,6 +225,69 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     # 6 GiB free, of which extending to 4 blocks takes 3 and IPC keeps 1.
     left_free = 2 * gib - extensible_kv_cache.KV_CACHE_NON_TORCH_RESERVE_BYTES
     assert limits == [2 * gib + left_free]
+
+
+def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
+    """On UMA parts the page cache (e.g. prefetched weights) is reclaimable
+    but cudaMemGetInfo reports it as used; sizing from the raw figure left
+    a 120 GiB DGX Spark with zero KV cache blocks (vllm-project/vllm#65378)."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=7 * gib,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 20 * gib)
+    # cudaMemGetInfo: 10 GiB free of 120; the OS has 100 GiB available.
+    monkeypatch.setattr(
+        accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
+    )
+    from vllm.utils import mem_utils
+
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: True
+    )
+    monkeypatch.setattr(
+        mem_utils.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=100 * gib),
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=None,
+    )
+    measure = functools.partial(
+        extensible_kv_cache.measure_kv_cache_blocks,
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cuda", 0),
+        init_free_memory=110 * gib,
+        requested_memory=96 * gib,
+    )
+
+    num_blocks = measure()
+
+    # headroom 101 GiB, margin 0.75 * 7, non-KV use 110 - 100 - 1 = 9 GiB:
+    # min(96 - 9, 101 - 5.25) - 7 = 80 GiB.
+    assert num_blocks == 80
+
+    # The raw figure would have sized it to nothing.
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: False
+    )
+    assert measure() == 0
 
 
 def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
