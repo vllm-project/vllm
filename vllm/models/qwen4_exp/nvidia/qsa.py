@@ -289,6 +289,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         vllm_config: VllmConfig,
         config: Qwen4ExpTextConfig,
         layer_id: int,
+        topk_indices_buffer: torch.Tensor,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -462,21 +463,9 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
             del self.indexer.index_qk_proj
 
-        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        # PACKED selection buffer: the trailing column holds each row's
-        # valid-entry count (written by the expand kernel) — never a token
-        # index; the sparse attention kernel reads it as its loop bound.
-        # MTP skip_topk steps reuse rows frozen from step 0; the count is
-        # a row column, so compaction/reuse keep it paired with the content.
-        self.register_buffer(
-            "topk_indices_buffer",
-            torch.empty(
-                max_tokens,
-                self.indexer.packed_output_width,
-                dtype=torch.int32,
-            ),
-            persistent=False,
-        )
+        # MTP skip_topk steps reuse rows frozen from step 0; the valid count
+        # is a row column, so compaction/reuse keep it paired with the content.
+        self.topk_indices_buffer = topk_indices_buffer
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:

@@ -60,6 +60,7 @@ from .model import (
     Qwen4ExpDecoderLayer,
     Qwen4ExpMixtureOfExperts,
     Qwen4ExpSparseMoeBlock,
+    get_qsa_topk_buffer_width,
 )
 
 
@@ -195,6 +196,14 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
             vllm_config,
             self.mtp_start_layer_idx,
         )
+        # The proposer replaces this with the target model's buffer.
+        topk_indices_buffer = None
+        if getattr(config, "indexer_n_heads", None) is not None:
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            )
         with set_current_vllm_config(draft_vllm_config, prefix=prefix):
             # residual_linear_shared fusion: fc_embedding projects the token
             # embedding, fc_hidden (shared across HC branches) projects the
@@ -223,6 +232,7 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
                     draft_vllm_config,
                     layer_type="qwen_sparse_attention",
                     prefix=f"{prefix}.layers.{self.mtp_start_layer_idx + idx}",
+                    topk_indices_buffer=topk_indices_buffer,
                 )
                 for idx in range(self.num_mtp_layers)
             )
