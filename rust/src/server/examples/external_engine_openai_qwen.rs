@@ -67,6 +67,7 @@ async fn main() -> Result<()> {
         revision: None,
         tokenizer: None,
         hf_config: None,
+        skip_tokenizer_init: false,
         hf_overrides: Default::default(),
         generation_config: Default::default(),
         served_model_name: vec![],
