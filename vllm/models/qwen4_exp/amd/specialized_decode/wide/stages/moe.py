@@ -771,6 +771,9 @@ def combine(g, xch, route_buf, part, part2, flags, rows: int):
 # path's unsplit units.
 
 SMALL_MAX = 12  # widest step the small-batch path runs (16: mixed, measured)
+# the router barrier runs ``stage_rows`` in its wait (``mlp``), and the layer
+# kernels' ``end_phase`` runs such a hook at the resident widths only
+assert SMALL_MAX <= tiled.RESIDENT_MAX
 PIECES = AGROUPS  # gate/up pieces a unit: 32 intermediate rows (a scale group) each
 UP_STEPS = HIDDEN // 128  # K steps of gate/up
 OWNERS = HIDDEN // TILE  # down owners: 16 output rows each
@@ -904,10 +907,13 @@ def lds_struct(s: Shape):
 
 def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None):
     """The MoE of ``x`` ([rows, HIDDEN] bf16) into exchange ``xch``: every phase
-    of ``phase_names``, ``end_phase(name)`` after each but the last. ``ml``:
-    the ``lds_struct`` view; ``pre``: the router's weights in flight, on the
-    small path ``prefetch``'s (issued here if None), else the CTA's
-    ``tiled.unit_preload`` of ``router_weights`` (or None)."""
+    of ``phase_names``, ``end_phase(name, between=None)`` after each but the
+    last (the phase's grid barrier, ``between()`` run in its wait, as
+    ``grid_sync``'s: on the small path the router's quantizes ``x`` there,
+    ``stage_rows``). ``ml``: the ``lds_struct`` view; ``pre``: the router's
+    weights in flight, on the small path ``prefetch``'s (issued here if
+    None), else the CTA's ``tiled.unit_preload`` of ``router_weights`` (or
+    None)."""
     names = phase_names(s.rows)
     if const_expr(small(s.rows)):
         work = {k: ml.work.ptr + v for k, v in small_work(s).items() if k != "words"}
@@ -923,7 +929,7 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None)
         router_gemv(
             g, lds, prefetch(g, s, w) if pre is None else pre, x, b.part, s.rows
         )
-        end_phase(names[0])
+        end_phase(names[0], lambda: stage_rows(g, s.rows, lds))
         small_up(g, s, lds, x, w, b, sc)
         end_phase(names[1])
         small_down(g, s, lds, w, b, sc, xch)
@@ -1060,7 +1066,6 @@ def router_gemv(g, lds, wl, x, part, rows: int):
                     bf16_round(tot[e]),
                     CM_DEV,
                 )
-    stage_rows(g, rows, lds)
 
 
 # -- phase 2: local routing, the schedule, the gate/up pieces ----------------
@@ -1180,7 +1185,8 @@ def route_rows(g, loaded, ids, wts, rows: int):
 def stage_rows(g, rows: int, lds):
     """``quantize_rows`` from the router's staged bf16 rows (``lds.rx``) into
     LDS: the e2m1 rows ``lds.x`` ([rows][HIDDEN / 8] words), their scale codes
-    ``lds.xs`` ([rows][XGROUPS]), for the gate/up phase."""
+    ``lds.xs`` ([rows][XGROUPS]), for the gate/up phase; run in the router
+    barrier's wait (no global access)."""
     for r in range_constexpr(-(-(rows * XGROUPS) // THREADS)):
         unit = g.tid + i32(r * THREADS)
         u = fx.min(unit, i32(rows * XGROUPS - 1))

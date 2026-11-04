@@ -1161,7 +1161,7 @@ def _moe_kernel(rows, codec="bf16"):
             moe.Weights(w_gate, w13, w13s, w2, w2s),
             moe.Bufs(part, route, x4, x4s, mpart, mpart2, flags),
             ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
-            lambda name: grid_sync(g),
+            lambda name, between=None: grid_sync(g, between),
             pre,
         )
 

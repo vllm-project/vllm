@@ -375,7 +375,8 @@ def build(key: LayerBuild):
 
         def end_phase(name, issue=None):
             """The phase's grid barrier; at resident widths ``issue()`` (the
-            next phase's first weights) runs inside it, its loads returned."""
+            next phase's first weights, or the small MoE path's
+            ``stage_rows``) runs inside it, its result returned."""
             out = grid_sync(g, issue if tiled.resident(S) else None)
             stamp(name)
             return out

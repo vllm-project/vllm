@@ -161,9 +161,11 @@ def grid_sync(g, between=None):
     """Every CTA's stores so far visible to every CTA, then all CTAs past this
     point: drain, CTA barrier, one arrival on the CTA's stripe, wave 0 polls
     all stripes for this barrier's count. ``between()``, when given, runs
-    after the arrival and before the wait (loads of data no CTA writes, such
-    as the next phase's weights); its result is returned. Wave 0's poll waits
-    for its loads (``vmcnt`` counts in issue order)."""
+    after the arrival and before the wait: work that reads no other CTA's
+    stores and stores nothing another CTA reads, such as loads of data no CTA
+    writes (the next phase's weights) or LDS work of the CTA's own; its
+    result is returned. Wave 0's poll waits for its loads (``vmcnt`` counts
+    in issue order)."""
     g.barriers += 1
     _arrive(g)
     out = None if between is None else between()
