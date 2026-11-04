@@ -38,8 +38,9 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
 
 
 @pytest.mark.parametrize("multiple", [False, True])
@@ -805,6 +806,23 @@ async def test_chat_completion_render_with_sampling_params(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
+)
+async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
+    """``max_tokens=16`` (also the completions default) equals the
+    ``SamplingParams`` default; /render must still return it, or generate
+    treats it as unset."""
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello, world.", **max_tokens},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["sampling_params"].get("max_tokens") == 16
+
+
+@pytest.mark.asyncio
 async def test_completion_render_emits_token_offsets(client):
     """With return_token_offsets, /v1/completions/render returns per-token
     (start, end) char offsets aligned with token_ids."""
@@ -1081,3 +1099,88 @@ async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
 
     assert render.status_code == tokenize.status_code == 200
     assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
+@pytest.fixture(scope="module")
+def deepseek_v41_server():
+    args = [
+        "--tokenizer-mode",
+        "deepseek_v41",
+        "--tool-call-parser",
+        "deepseek_v41",
+        "--enable-auto-tool-choice",
+        "--language-model-only",
+    ]
+    with RemoteLaunchRenderServer(DEEPSEEK_V41_MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_messages_render_tool_search_result_for_deepseek_v41(
+    deepseek_v41_server,
+):
+    """A tool search result renders as one result naming the tools it found."""
+    request = {
+        "model": DEEPSEEK_V41_MODEL_NAME,
+        "max_tokens": 16,
+        "tools": [
+            {"name": "tool_search", "input_schema": {"type": "object"}},
+            {"name": "read_file", "input_schema": {"type": "object"}},
+            {
+                "name": "get_weather",
+                "input_schema": {"type": "object"},
+                "defer_loading": True,
+            },
+        ],
+        "messages": [
+            {"role": "user", "content": "Read notes.txt and find a weather tool."},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "tool_search",
+                        "input": {"query": "weather"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_2",
+                        "name": "read_file",
+                        "input": {"path": "notes.txt"},
+                    },
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": [
+                            {"type": "tool_reference", "tool_name": "get_weather"}
+                        ],
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_2",
+                        "content": "notes",
+                    },
+                ],
+            },
+        ],
+    }
+    async with httpx.AsyncClient(
+        base_url=deepseek_v41_server.url_for(""), timeout=30.0
+    ) as client:
+        render = await client.post("/v1/messages/render", json=request)
+        assert render.status_code == 200, render.text
+        detokenize = await client.post(
+            "/detokenize", json={"tokens": render.json()["token_ids"]}
+        )
+
+    assert detokenize.status_code == 200
+    assert (
+        "<｜User｜><tool_result>get_weather</tool_result>\n\n"
+        "<tool_result>notes</tool_result><｜Assistant｜>"
+    ) in detokenize.json()["prompt"]
