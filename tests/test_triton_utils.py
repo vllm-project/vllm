@@ -6,6 +6,8 @@ import sys
 import types
 from unittest import mock
 
+import vllm.triton_utils.platform_config as platform_config_module
+from vllm.platforms import CpuArchEnum, PlatformEnum
 from vllm.triton_utils import importing as triton_importing
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
 
@@ -139,6 +141,37 @@ def test_cpu_build_with_cpu_backend_keeps_triton():
 
 def test_cpu_build_without_cpu_backend_disables_triton():
     assert _has_triton_for_backends(vllm_version="0.0.0+cpu", amd=True) is False
+
+
+def test_platform_config_resolution_order():
+    arm_platform = types.SimpleNamespace(
+        _enum=PlatformEnum.CPU,
+        is_cpu=lambda: True,
+        get_cpu_architecture=lambda: CpuArchEnum.ARM,
+    )
+    platforms = types.SimpleNamespace(current_platform=arm_platform)
+    with mock.patch.object(platform_config_module, "platforms", platforms):
+        assert (
+            platform_config_module.select_platform_config(
+                default=8192,
+                overrides={
+                    (PlatformEnum.CPU, None): 1024,
+                    (PlatformEnum.CPU, CpuArchEnum.ARM): 16,
+                },
+            )
+            == 16
+        )
+        assert (
+            platform_config_module.select_platform_config(
+                default=8192,
+                overrides={(PlatformEnum.CPU, None): 1024},
+            )
+            == 1024
+        )
+        assert (
+            platform_config_module.select_platform_config(default=8192, overrides={})
+            == 8192
+        )
 
 
 def test_no_triton_fallback():

@@ -5,8 +5,10 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.platforms import PlatformEnum
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.platform_config import select_platform_config
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
@@ -19,8 +21,11 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# Overridden on CPU in vllm/v1/worker/cpu/shm.py.
-PENALTIES_BLOCK_SIZE = 8192
+# Smaller Triton-CPU tiles avoid quadratic IR growth when unpacking the mask.
+PENALTIES_BLOCK_SIZE = select_platform_config(
+    default=8192,
+    overrides={(PlatformEnum.CPU, None): 1024},
+)
 
 
 class PenaltiesState(LogitsProcessor):
@@ -197,8 +202,7 @@ def apply_penalties(
     output_bin_counts: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = PENALTIES_BLOCK_SIZE
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    num_blocks = triton.cdiv(vocab_size, PENALTIES_BLOCK_SIZE)
     _penalties_kernel[(num_tokens, num_blocks)](
         logits,
         logits.stride(0),
@@ -213,7 +217,7 @@ def apply_penalties(
         output_bin_counts,
         output_bin_counts.stride(0),
         vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=PENALTIES_BLOCK_SIZE,
     )
 
 

@@ -22,8 +22,9 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     triton_kernel_dispatcher_with_warmup,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import PlatformEnum, current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.platform_config import select_platform_config
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
@@ -930,19 +931,18 @@ def _topk_topp(
     k_ptr = k if k is not None else logits
     p_ptr = p if p is not None else logits
     num_programs = min(num_sm, batch_size)
-    # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
-    # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
-    # approximation; use smaller tiles for accurate top-p results.
-    if logits.device.type == "cpu":
-        block_size, block_size_trunc, num_warps = 256, 128, 4
-    elif logits.device.type == "xpu":
-        block_size, block_size_trunc, num_warps = 4096, 2048, 4
-    else:
-        block_size, block_size_trunc, num_warps = 8192, 4096, 8
-        # Each program serially sweeps the vocab row in BLOCK_SIZE tiles, so
-        # per-tile latency bounds kernel latency, and Triton's default of 4
-        # warps leaves an 8192-wide tile at 16 elements per lane. 8 warps is
-        # faster on every arch measured (SM90, SM100, SM120, gfx950); 16 is not.
+    # Smaller tiles compile and run faster on CPU. On XPU, large BLOCK_SIZE
+    # causes precision loss in the single-pass pivot approximation. Each GPU
+    # program serially sweeps the vocab row in BLOCK_SIZE tiles, so per-tile
+    # latency bounds kernel latency. Eight warps is faster on every measured
+    # GPU architecture.
+    block_size, block_size_trunc, num_warps = select_platform_config(
+        default=(8192, 4096, 8),
+        overrides={
+            (PlatformEnum.CPU, None): (256, 128, 4),
+            (PlatformEnum.XPU, None): (4096, 2048, 4),
+        },
+    )
     split_covers_ponly = (
         current_platform.is_cuda_alike()
         and topp_enabled
