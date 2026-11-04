@@ -210,9 +210,8 @@ SiLU-mul, including the TP2 down partial before the all-reduce.
 `DenseGdnTest` checks K1 against the stock conv update, gated delta rule,
 and RMSNormGated, including pad rows and the TP2 `out_proj` partial.
 `DenseGdnSpecTest` checks K1 on MTP verify steps against the stock
-spec-decode conv and recurrence: res_out, the conv state and the written
-state slots exactly, the recurrence's outputs within fp32 rounding (the
-stock spec kernel reduces in another order).
+spec-decode conv and recurrence, bit-exact (res_out, core, the conv state
+and every state slot).
 `RowCapsTest`, `StockAccumulationTest`, `StockSplitTest`, and
 `StockChainTest` check the row caps and that K2 follows the stock GEMM's
 split-K order. The Buildkite job `qwen38-27b-dense-mono-numerics-amd`

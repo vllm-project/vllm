@@ -57,9 +57,9 @@ With ``K1Build.spec`` (TP1, MTP verify steps) a GDN task is a request's
 ``spec`` tokens: the conv and the recurrence run them in order from the state
 after its last accepted token, as vLLM's spec-decode kernels
 (``causal_conv1d_update`` with ``num_accepted_tokens``,
-``fused_sigmoid_gating_delta_rule_update``). The conv state and the slots
-written match those exactly; the recurrence keeps the decode kernel's
-reductions, so its outputs match the spec kernel's within fp32 rounding.
+``fused_sigmoid_gating_delta_rule_update``), bit-exact: the same conv
+window and state rewrite, the slots written, and the spec kernel's q / k
+l2-norm layout (its 4 warps; the state reductions match the decode kernel's).
 
 Weights: in_proj_qkvz [q | k | v | z] and in_proj_ba [b | a] (the rank's) as
 MXFP4 in the (16, 16)-shuffled order (``dense_ffn.shuffle_w``), e8m0 scales [N, K / 32].
@@ -801,7 +801,8 @@ def gdn_gates(c):
     """Every (task, token) pair's q, k (QK) -> LDS; b, a (BAP, the eighths in
     order) -> beta, decay; then q / k l2-normed (q * HD^-1/2): x / sqrt(sum +
     eps) as the stock decode kernel, x * rsqrt(sum + eps) with ``spec`` as the
-    stock spec-decode kernel."""
+    stock spec-decode kernel (whose sum is over one element a lane of two
+    waves)."""
     s, tid, lane, wave, a, geo, nq = (
         c["S"],
         c["tid"],
@@ -859,7 +860,12 @@ def gdn_gates(c):
             nrm = D.tl_sqrt(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
             y0, y1 = x0 / nrm, x1 / nrm
         else:
-            rn = hw_rsq(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
+            # the spec kernel's layout: an element a lane over two waves, each
+            # wave reduced as here, then the two added
+            ya = fx.ptr_load(base + lane)
+            yb = fx.ptr_load(base + (64 + lane))
+            ss = butterfly(ya * ya, VEC_ORDER) + butterfly(yb * yb, VEC_ORDER)
+            rn = hw_rsq(ss + fx.Float32(1e-6))
             y0, y1 = x0 * rn, x1 * rn
         isq = vi % 2 == 0
         y0 = isq.select(y0 * fx.Float32(HD**-0.5), y0)

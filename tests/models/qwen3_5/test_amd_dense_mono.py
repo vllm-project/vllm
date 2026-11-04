@@ -791,12 +791,10 @@ def _stock_gdn_spec(K, geo, w, h, residual, conv, ssm, idx, n_acc):
 
 @unittest.skipUnless(_gfx950(), "needs FlyDSL and aiter on gfx950")
 class DenseGdnSpecTest(unittest.TestCase):
-    """K1 on MTP verify steps (``K1Build.spec``): 1 + 3 draft tokens a request.
-
-    The stock spec-decode recurrence reduces in another order than the decode
-    kernel K1 reproduces, so the recurrence's outputs are compared within fp32
-    rounding; everything else is exact: res_out, the widened conv state, which
-    slots are written, and a padded request (vLLM's null block) left alone."""
+    """K1 on MTP verify steps (``K1Build.spec``): 1 + 3 draft tokens a request,
+    bit-exact with the stock spec-decode path: res_out, core, the widened conv
+    state, every state slot, and a padded request (vLLM's null block) left
+    alone with zero core rows."""
 
     NQ = 4
 
@@ -871,15 +869,8 @@ class DenseGdnSpecTest(unittest.TestCase):
                 with self.subTest(requests=n, draw=draw):
                     self.assertTrue(torch.equal(res_out, res_ref))
                     self.assertTrue(torch.equal(conv, conv_ref))
-                    # the same slots written, the values within fp32 rounding
-                    self.assertTrue(torch.equal(ssm == 0, ssm_ref == 0))
-                    torch.testing.assert_close(ssm, ssm_ref, rtol=1e-4, atol=1e-5)
-                    torch.testing.assert_close(
-                        core[live].float(),
-                        core_ref[live].float(),
-                        rtol=1.6e-2,
-                        atol=1e-5,
-                    )
+                    self.assertTrue(torch.equal(ssm, ssm_ref))
+                    self.assertTrue(torch.equal(core[live], core_ref[live]))
                     self.assertFalse(core[~live].any())
 
 
