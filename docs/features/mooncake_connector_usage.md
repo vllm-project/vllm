@@ -87,14 +87,6 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Set the same value on prefill and decode instances. A decoder without it does not renew, so its requests that wait longer than the lease lose their prefilled KV; a prefiller without it rejects renewals, and the decoder logs a warning. Prefill instances from releases without this option log an error for each renewal they receive, so upgrade them before enabling it on decode instances.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
-## Early prefill aborts
-
-If a prefill request is aborted before its worker has recorded the transfer,
-abort cleanup treats the missing record as already removed. Repeated cleanup is
-also safe, and missing records do not interrupt cleanup of other requests in the
-same batch. This applies to early, not-yet-ready transfers; it does not cancel
-or drain an active Mooncake transfer.
-
 ## Prometheus metrics
 
 The following Prometheus metrics are exported when MooncakeConnector is active, each with the standard `model_name` and `engine` labels:
