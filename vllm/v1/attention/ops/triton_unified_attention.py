@@ -1146,6 +1146,18 @@ def unified_attention(
         head_size, sliding_window_val, q.element_size(), is_prefill=False
     )
 
+    # An FP8 KV tile is staged in shared memory next to its cast: for head sizes
+    # above 256 a 32-wide tile exceeds the ~99 KiB of shared memory on SM8x.
+    if (
+        k.element_size() == 1
+        and q.element_size() >= 2
+        and head_size > 256
+        and current_platform.is_cuda()
+        and not current_platform.has_device_capability(90)
+    ):
+        TILE_SIZE_PREFILL = min(TILE_SIZE_PREFILL, 16)
+        TILE_SIZE_DECODE = min(TILE_SIZE_DECODE, 16)
+
     # Wider KV tile for the tuned large-head path (see above). Only the 2D
     # path (used when max_seqlen_q > 1) reads TILE_SIZE_PREFILL.
     if tuned_large_head:

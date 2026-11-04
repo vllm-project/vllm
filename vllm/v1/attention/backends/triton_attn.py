@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    kv_cache_fp8_dtype,
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
@@ -514,11 +515,18 @@ class TritonAttentionImpl(AttentionImpl):
             cap = current_platform.get_device_capability()
             cap_str = cap.as_version_str() if cap is not None else "unknown"
             dev = current_platform.get_device_name()
-            if self.kv_cache_dtype.startswith("fp8") and not (
-                current_platform.has_device_capability(89)
+            e5m2_ok = self.kv_cache_dtype == "fp8_e5m2" and (
+                current_platform.has_device_capability(80)
+            )
+            if (
+                self.kv_cache_dtype.startswith("fp8")
+                and not e5m2_ok
+                and not current_platform.has_device_capability(89)
             ):
                 suggested = (
-                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+                    "float16"
+                    if (cap is None or cap.to_int() < 80)
+                    else "fp8_e5m2 (or bfloat16)"
                 )
                 raise ValueError(
                     f"FP8 KV cache is not supported by the Triton attention backend "
@@ -542,7 +550,7 @@ class TritonAttentionImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         self.attn_type = attn_type
-        self.fp8_dtype = current_platform.fp8_dtype()
+        self.fp8_dtype = kv_cache_fp8_dtype(kv_cache_dtype)
 
         self.sinks = sinks
         if sinks is not None:
@@ -553,7 +561,11 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
-        self.supports_quant_query_input = current_platform.is_cuda()
+        # FP8 query quantization targets e4m3, which an e5m2 cache does not match.
+        self.supports_quant_query_input = (
+            current_platform.is_cuda()
+            and self.fp8_dtype == current_platform.fp8_dtype()
+        )
         if current_platform.is_rocm():
             # Enable GPUs with fp8 MMA support
             from vllm.platforms.rocm import on_gfx11, on_gfx90a
