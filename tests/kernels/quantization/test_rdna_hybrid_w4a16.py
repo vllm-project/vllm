@@ -794,6 +794,14 @@ def _hip_skinny_reference(
         (1, 4096, 256, 32),
         (1, 8192, 256, 128),
         (1, 16384, 256, 64),
+        # Wider outputs reach the gfx1150 / gfx1151 per-target tuples; K
+        # values that are not a multiple of their K step hit the ragged tail.
+        (1, 1536, 2560, 32),
+        (1, 896, 1152, 128),
+        (2, 2048, 1024, 32),
+        (2, 1024, 1024, 64),
+        (4, 1024, 2048, 128),
+        (5, 1024, 2048, 32),
         # K * batch beyond what LDS holds (32768 fp16 elements), so gfx115x
         # walks K in chunks; elsewhere the op rejects these, as the layer
         # routes them to Triton. The per-row window shrinks as the batch grows,
