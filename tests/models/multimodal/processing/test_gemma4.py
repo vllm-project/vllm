@@ -416,6 +416,22 @@ def test_limit_mm_per_prompt(
         )
 
 
+@pytest.mark.parametrize("model_id", [GEMMA4_MODEL_ID])
+def test_checkpoint_without_vision_config_has_no_vision_modalities(model_id: str):
+    """Text-only checkpoints (``vision_config: null``) must not advertise or
+    budget image/video inputs."""
+    ctx = build_model_context(model_id)
+    ctx.model_config.hf_config.vision_config = None
+    info = MULTIMODAL_REGISTRY.create_processor(ctx.model_config).info
+
+    assert not {"image", "video"} & set(info.get_supported_mm_limits())
+    tokens = info.get_mm_max_tokens_per_item(
+        seq_len=ctx.model_config.max_model_len, mm_counts={}
+    )
+    assert tokens is not None
+    assert not {"image", "video"} & set(tokens)
+
+
 # Regression guard for PR #43169 follow-up: the batched Gemma4 vision encoder
 # admitted ``chunk ~= 53`` on a 22 GiB L4 with a 26B AWQ model loaded,
 # allocating 2.43 GiB int64 inside
