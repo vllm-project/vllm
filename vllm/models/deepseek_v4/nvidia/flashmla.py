@@ -349,17 +349,19 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 block_table = attn_metadata.block_table[num_decodes:][
                     chunk_start:chunk_end
                 ]
+                chunk_cache = compressed_k_cache
                 if self.hisparse_cache is not None:
-                    compressed_k_cache, block_table = self._stage_hisparse_prefill(
+                    chunk_cache, block_table = self._stage_hisparse_prefill(
                         compressed_k_cache,
                         block_table,
+                        attn_metadata,
                         swa_metadata,
                         chunk_start,
                         chunk_end,
                     )
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
-                    compressed_k_cache,
+                    chunk_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
                     block_table=block_table,
@@ -432,6 +434,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         self,
         host_cache: torch.Tensor,
         block_table: torch.Tensor,
+        attn_metadata: DeepseekV4FlashMLAMetadata,
         swa_metadata: "DeepseekSparseSWAMetadata",
         chunk_start: int,
         chunk_end: int,
@@ -449,17 +452,20 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         if cache.all_context_pages_resident:
             return cache.view.cache, cache.block_table.index_select(0, state_indices)
 
-        seq_lens = swa_metadata.prefill_seq_lens
-        seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
-        assert seq_lens is not None and seq_lens_cpu is not None
         block_rows = host_cache.shape[1]
-        rows = seq_lens_cpu[chunk_start:chunk_end] // self.compress_ratio
-        plan = build_hisparse_prefill_staging_plan(
-            block_table,
-            seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-            block_rows,
-            int(((rows + block_rows - 1) // block_rows).sum()),
-        )
+        plan = attn_metadata.hisparse_prefill_plans.get((chunk_start, chunk_end))
+        if plan is None:
+            seq_lens = swa_metadata.prefill_seq_lens
+            seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
+            assert seq_lens is not None and seq_lens_cpu is not None
+            rows = seq_lens_cpu[chunk_start:chunk_end] // self.compress_ratio
+            plan = build_hisparse_prefill_staging_plan(
+                block_table,
+                seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                block_rows,
+                int(((rows + block_rows - 1) // block_rows).sum()),
+            )
+            attn_metadata.hisparse_prefill_plans[chunk_start, chunk_end] = plan
         plan.ensure_gpu_sources(cache.block_table, state_indices, block_rows)
         staged = cache.runtime.gather_prefill_cache(
             host_cache, plan, resident_cache=cache.view.cache
