@@ -225,6 +225,10 @@ class EngramLayout:
         self.head_dim: int = config.engram_head_dim
         self.compressed_vocab_size: int = config.engram_compressed_vocab_size
         self.pad_token_id: int = config.engram_pad_token_id
+        quantization_config = getattr(config, "quantization_config", None) or {}
+        self.weight_dtype = (
+            torch.float8_e4m3fn if quantization_config else torch.bfloat16
+        )
         assert len(self.layer_ids) == len(self.num_embeddings)
 
         primes = []
@@ -612,6 +616,11 @@ def _engram_head_shard_weight_loader(
     part_rows = param.shape[0]
     if loaded_weight.dtype == torch.float8_e8m0fnu:
         loaded_weight = loaded_weight.view(torch.uint8)
+    if loaded_weight.dtype != param.dtype:
+        raise ValueError(
+            f"Engram checkpoint dtype {loaded_weight.dtype} does not match "
+            f"table dtype {param.dtype}"
+        )
     shard = loaded_weight.narrow(0, param.engram_vocab_start, part_rows)
     assert shard.shape == param.shape, (
         f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
@@ -661,8 +670,9 @@ def _engram_lookup_kernel(
     PACKED: tl.constexpr,
     OUT_STRIDE: tl.constexpr,
     PEER_ROWS: tl.constexpr = 0,
+    QUANTIZED: tl.constexpr = True,
 ):
-    """Gather FP8 rows as packed values/scales or dequantized BF16.
+    """Gather BF16 rows or FP8 rows as packed values/scales or dequantized BF16.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
@@ -701,13 +711,14 @@ def _engram_lookup_kernel(
         else:
             row_weight, row_scales = weight, scales
         row_weight += local * DIM
-        row_scales += local * (DIM // QUANT_BLOCK)
         values = tl.load(
             row_weight[:, None] + cols[None, :], mask=owned[:, None], other=0.0
         )
-        scale = tl.load(
-            row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
-        )
+        if QUANTIZED:
+            row_scales += local * (DIM // QUANT_BLOCK)
+            scale = tl.load(
+                row_scales[:, None] + scale_cols[None, :], mask=owned[:, None], other=0
+            )
         if PACKED:
             width: tl.constexpr = DIM + DIM // QUANT_BLOCK
             dst = dst.to(tl.int64)
@@ -724,10 +735,12 @@ def _engram_lookup_kernel(
             )
         else:
             # ue8m0 is a power of two, so its byte *is* the fp32 exponent field.
-            scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+            if QUANTIZED:
+                scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+                values = (values.to(tl.float32) * scale).to(tl.bfloat16)
             tl.store(
                 out + dst[:, None] * DIM + cols[None, :],
-                (values.to(tl.float32) * scale).to(tl.bfloat16),
+                values,
                 mask=valid[:, None],
             )
 
@@ -841,15 +854,25 @@ class DPSharedEngramStorage:
     cuMem where FABRIC handles work, else a registered /dev/shm mapping."""
 
     def __init__(
-        self, num_rows: int, dim: int, block_size: int, group: GroupCoordinator
+        self,
+        num_rows: int,
+        dim: int,
+        block_size: int,
+        group: GroupCoordinator,
+        dtype: torch.dtype = torch.float8_e4m3fn,
     ) -> None:
         self.group = group
-        weight_bytes = num_rows * dim
-        num_bytes = weight_bytes + weight_bytes // block_size
+        quantized = dtype == torch.float8_e4m3fn
+        weight_bytes = num_rows * dim * dtype.itemsize
+        scale_bytes = num_rows * dim // block_size if quantized else 1
+        num_bytes = weight_bytes + scale_bytes
 
         def split_table(table: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            weight = table[:weight_bytes].view(torch.float8_e4m3fn).view(-1, dim)
-            return weight, table[weight_bytes:].view(-1, dim // block_size)
+            weight = table[:weight_bytes].view(dtype).view(-1, dim)
+            scales = table[weight_bytes:]
+            if quantized:
+                scales = scales.view(-1, dim // block_size)
+            return weight, scales
 
         views = None
         if current_platform.is_cuda():
@@ -965,9 +988,13 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
             "storing the offloaded tables per rank instead of sharing them."
         )
         return False
-    num_bytes = sum(layout.num_embeddings) * (
-        layout.head_dim + layout.head_dim // block_size
+    num_bytes = (
+        sum(layout.num_embeddings) * layout.head_dim * layout.weight_dtype.itemsize
     )
+    if layout.weight_dtype == torch.float8_e4m3fn:
+        num_bytes += sum(layout.num_embeddings) * layout.head_dim // block_size
+    else:
+        num_bytes += len(layout.num_embeddings)
     group = get_engram_dp_group()
     assert group is not None
     # Only the leader allocates, so every replica follows its check. /dev/shm
@@ -1019,7 +1046,7 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
 
 
 class ParallelEngramEmbedding(nn.Module):
-    """Hash heads with FP8 rows and per-block E8M0 scales.
+    """Hash heads with BF16 rows or FP8 rows and per-block E8M0 scales.
 
     Heads are TP-sharded, and additionally DP-sharded across a node-local
     group unless the table lives in (DP-shared) pinned host memory.
@@ -1038,10 +1065,15 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        dtype: torch.dtype = torch.float8_e4m3fn,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
+        if dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+            raise ValueError(f"Unsupported Engram table dtype: {dtype}")
+        self.weight_dtype = dtype
+        self.quantized = dtype == torch.float8_e4m3fn
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
@@ -1062,6 +1094,7 @@ class ParallelEngramEmbedding(nn.Module):
         peer_group = None
         if (
             not cpu_offload
+            and self.quantized
             and self.dp_size > 1
             and get_tensor_model_parallel_world_size() == 1
         ):
@@ -1117,8 +1150,11 @@ class ParallelEngramEmbedding(nn.Module):
         ).multi_processor_count
         weight, scales = self._allocate_weights()
         self.weight = nn.Parameter(weight, requires_grad=False)
-        self.weight_scale_inv = nn.Parameter(scales, requires_grad=False)
-        for param in (self.weight, self.weight_scale_inv):
+        if self.quantized:
+            self.weight_scale_inv = nn.Parameter(scales, requires_grad=False)
+        else:
+            self.register_buffer("weight_scale_inv", scales, persistent=False)
+        for param in self.parameters():
             set_weight_attrs(
                 param,
                 {
@@ -1130,13 +1166,14 @@ class ParallelEngramEmbedding(nn.Module):
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
-            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
+            if self.quantized:
+                set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
             logger.info(
                 "Engram table offloaded to pinned host memory: %d rows x %d, "
                 "%.2f GiB %s",
                 self.part_num_embeddings,
                 dim,
-                self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
+                (weight.nbytes + scales.nbytes) / 1024**3,
                 "per rank"
                 if self._shared_memory is None
                 else "shared across DP replicas via "
@@ -1149,15 +1186,16 @@ class ParallelEngramEmbedding(nn.Module):
         return self.tp_size * self.dp_size, engram_head_shard_rank()
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
-        scale_dim = self.dim // self.block_size
+        scale_dim = self.dim // self.block_size if self.quantized else 0
+        scale_shape = (self.part_num_embeddings, scale_dim) if self.quantized else (1,)
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
             return (
                 torch.empty(
-                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
+                    self.part_num_embeddings, self.dim, dtype=self.weight_dtype
                 ),
-                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+                torch.empty(scale_shape, dtype=torch.uint8),
             )
         if self.peer_rows:
             import torch.distributed._symmetric_memory as symm_mem
@@ -1185,35 +1223,39 @@ class ParallelEngramEmbedding(nn.Module):
             group = get_engram_dp_group()
             assert group is not None
             storage = DPSharedEngramStorage(
-                self.part_num_embeddings, self.dim, self.block_size, group
+                self.part_num_embeddings,
+                self.dim,
+                self.block_size,
+                group,
+                dtype=self.weight_dtype,
             )
             self._shared_memory = storage
             self._weight_loader = storage.load_weight
             return storage.weight, storage.weight_scale_inv
         # pin_memory rounds up to a power of two. ROCm pins huge pages either way.
         if self.use_thp or current_platform.is_rocm():
-            weight_bytes = self.part_num_embeddings * self.dim
-            packed = _allocate_huge_page_storage(
-                weight_bytes + weight_bytes // self.block_size
+            weight_bytes = (
+                self.part_num_embeddings * self.dim * self.weight_dtype.itemsize
             )
+            scale_bytes = self.part_num_embeddings * scale_dim if self.quantized else 1
+            packed = _allocate_huge_page_storage(weight_bytes + scale_bytes)
             if packed is not None:
                 self._packed = packed
                 return (
-                    packed[:weight_bytes].view(torch.float8_e4m3fn).view(-1, self.dim),
-                    packed[weight_bytes:].view(-1, scale_dim),
+                    packed[:weight_bytes].view(self.weight_dtype).view(-1, self.dim),
+                    packed[weight_bytes:].view(scale_shape),
                 )
         # Model initialization may be inside a CUDA device context.
         return (
             torch.empty(
                 self.part_num_embeddings,
                 self.dim,
-                dtype=torch.float8_e4m3fn,
+                dtype=self.weight_dtype,
                 device="cpu",
                 pin_memory=True,
             ),
             torch.empty(
-                self.part_num_embeddings,
-                scale_dim,
+                scale_shape,
                 dtype=torch.uint8,
                 device="cpu",
                 pin_memory=True,
@@ -1262,6 +1304,8 @@ class ParallelEngramEmbedding(nn.Module):
 
         `background` limits the grid to leave SMs for concurrent work.
         """
+        if out.dtype == torch.uint8 and not self.quantized:
+            raise ValueError("Packed Engram lookup requires an FP8 table")
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
             return
@@ -1309,6 +1353,7 @@ class ParallelEngramEmbedding(nn.Module):
             PACKED=out.dtype == torch.uint8,
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
+            QUANTIZED=self.quantized,
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -1595,6 +1640,7 @@ class EngramBatch(nn.Module):
         table = layers[0].embed_tokens
         if (
             table.dp_size == 1
+            or any(not layer.embed_tokens.quantized for layer in layers)
             or table.tp_size > 1
             or table.dim % 128
             or get_current_vllm_config().lora_config is not None
@@ -1737,6 +1783,7 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            dtype=layout.weight_dtype,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

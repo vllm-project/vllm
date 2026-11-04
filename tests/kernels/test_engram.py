@@ -17,6 +17,7 @@ from vllm.models.deepseek_v41.common.engram import (
     ParallelEngramEmbedding,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 
 
 def _reference_engram_post_wkv(
@@ -569,6 +570,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer = ParallelEngramEmbedding.__new__(ParallelEngramEmbedding)
     torch.nn.Module.__init__(layer)
     layer.dim, layer.block_size, layer.tp_size = dim, block, 1
+    layer.quantized = True
     layer.dp_size = 1
     layer.n_hash_cols = layer.part_n_hash_cols = 24
     layer.head_start = 0
@@ -615,6 +617,65 @@ def test_engram_meta_initialization_does_not_allocate_host_tables(
     assert layer.weight_scale_inv.shape == (36, 2)
     assert layer.weight.dtype == torch.float8_e4m3fn
     assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize("quantization_config", [None, {"quant_method": "fp8"}])
+def test_engram_layout_uses_checkpoint_precision(quantization_config):
+    config = DeepseekV41Config(
+        engram_layer_ids=[0],
+        engram_num_embeddings=[36],
+        engram_max_ngram_size=2,
+        engram_n_heads=2,
+        engram_head_dim=32,
+        engram_compressed_vocab_size=32,
+        engram_pad_token_id=0,
+        engram_vocab_size=16,
+        quantization_config=quantization_config,
+    )
+    layout = engram_ops.EngramLayout(config)
+    expected = torch.bfloat16 if quantization_config is None else torch.float8_e4m3fn
+    assert layout.weight_dtype == expected
+
+
+@pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_engram_checkpoint_dtype_is_preserved(dist_init, cpu_offload, use_thp, dtype):
+    """Loaded rows retain checkpoint precision through eager and graph lookups."""
+    rows, dim = 32769, 64
+    with torch.device("cuda"):
+        layer = ParallelEngramEmbedding(
+            rows, dim, (rows,), cpu_offload=cpu_offload, use_thp=use_thp, dtype=dtype
+        )
+    weight = (torch.arange(rows * dim).reshape(rows, dim) % 257 / 13 - 8).to(dtype)
+    layer.weight.weight_loader(layer.weight, weight)
+    assert ("weight_scale_inv" in dict(layer.named_parameters())) == layer.quantized
+    if layer.quantized:
+        scale = torch.full((rows, dim // 32), 128, dtype=torch.uint8)
+        layer.weight_scale_inv.weight_loader(
+            layer.weight_scale_inv, scale.view(torch.float8_e8m0fnu)
+        )
+    with pytest.raises(ValueError, match="checkpoint dtype"):
+        layer.weight.weight_loader(layer.weight, weight.float())
+    ids = torch.tensor(
+        [[0], [rows - 1], [-1], [rows]], device="cuda", dtype=torch.int32
+    )
+    out = torch.empty(4, 1, dim, device="cuda", dtype=torch.bfloat16)
+    layer.lookup(ids, out, background=True)
+    expected = torch.zeros_like(out)
+    expected[:2, 0] = weight[[0, rows - 1]].cuda().float().to(torch.bfloat16)
+    if layer.quantized:
+        expected *= 2
+    assert torch.equal(out, expected)
+    with torch.cuda.graph(graph := torch.cuda.CUDAGraph()):
+        layer.lookup(ids, out, background=True)
+    ids[:2] = torch.tensor([[rows - 1], [0]], device="cuda")
+    graph.replay()
+    assert torch.equal(out, expected[[1, 0, 2, 3]])
+    if not layer.quantized:
+        with pytest.raises(ValueError, match="requires an FP8 table"):
+            layer.lookup(ids, torch.empty(4, 1, dim, device="cuda", dtype=torch.uint8))
 
 
 @pytest.mark.parametrize(
@@ -872,6 +933,7 @@ def test_engram_constructor_honors_offload(monkeypatch, cpu_offload):
         max_ngram_size=2,
         n_heads=24,
         primes=(((3,) * 24,),),
+        weight_dtype=torch.float8_e4m3fn,
     )
     vllm_config = SimpleNamespace(
         engram_config=EngramConfig()
