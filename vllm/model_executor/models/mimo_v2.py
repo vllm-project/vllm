@@ -317,15 +317,24 @@ class MiMoV2Attention(nn.Module):
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
 
-        # Use DiffKV backend when V has a different head dim than K.
-        # Auto-pick FA-DiffKV when FA3/4 is usable on this device, else fall
-        # back to TRITON_ATTN_DIFFKV.  Users can force a choice via
-        # `--attention-backend <FLASH_ATTN_DIFFKV|TRITON_ATTN_DIFFKV>`.
+        # V has a different head dim than K. Honor an explicit backend that
+        # declares it can serve that geometry; anything else keeps the auto-pick
+        # below, with a warning.
         if self.v_head_dim != self.head_dim:
             requested = get_current_vllm_config().attention_config.backend
-            if requested is not None and requested.name.endswith("_DIFFKV"):
+            if requested is not None and requested.get_class().supports_head_size_v(
+                self.head_dim, self.v_head_dim
+            ):
                 backend_enum = requested
             else:
+                if requested is not None:
+                    logger.warning_once(
+                        "%s cannot serve head_size_v=%d != head_size=%d; "
+                        "using the DiffKV auto-pick instead.",
+                        requested.name,
+                        self.v_head_dim,
+                        self.head_dim,
+                    )
                 fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
                 assert hasattr(fa_backend, "is_supported_on_current_device")
                 if fa_backend.is_supported_on_current_device(
@@ -337,8 +346,11 @@ class MiMoV2Attention(nn.Module):
                 else:
                     backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
             attn_backend = backend_enum.get_class()
-            assert hasattr(attn_backend, "set_head_size_v")
-            attn_backend.set_head_size_v(self.v_head_dim)
+            if backend_enum.name.endswith("_DIFFKV"):
+                # DiffKV takes V's head size as a backend class attribute;
+                # unified attention reads it from the layer's KV spec.
+                assert hasattr(attn_backend, "set_head_size_v")
+                attn_backend.set_head_size_v(self.v_head_dim)
             logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
             attn_backend = None
@@ -1020,6 +1032,9 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             return True
 
         prefix, qkv_kind = name.rsplit(".", 1)
+        if f"{prefix}.weight" not in params_dict:
+            # Layer absent from this instance, e.g. truncated num_hidden_layers.
+            return True
         entry = fp8_qkv_proj_dict.setdefault(prefix, {})
         entry[qkv_kind] = tensor
         if "weight" not in entry or "weight_scale_inv" not in entry:

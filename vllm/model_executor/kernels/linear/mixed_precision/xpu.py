@@ -3,10 +3,9 @@
 
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -85,9 +84,7 @@ class XPUwNa16LinearKernel(MPLinearKernel):
             )
         else:
             weight_zero_point = torch.Tensor([8]).to(torch.int8).to("xpu")
-            setattr(
-                layer, self.w_zp_name, Parameter(weight_zero_point, requires_grad=False)
-            )
+            replace_parameter(layer, self.w_zp_name, weight_zero_point)
 
     def apply_weights(
         self,
@@ -170,7 +167,7 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
         device = layer.weight_packed.device
         # TODO: support asymmetric quantization
         weight_zero_point = torch.tensor([8], dtype=torch.int8, device=device)
-        layer.weight_zero_point = Parameter(weight_zero_point, requires_grad=False)
+        replace_parameter(layer, "weight_zero_point", weight_zero_point)
 
         # weight_packed is [out, in] int8, signed int4 values in [-8, 7]
         w = layer.weight_packed.data  # [out, in]
@@ -183,10 +180,6 @@ class XPUW4A8IntLinearKernel(MPLinearKernel):
             self.w_q_name,
             torch.nn.Parameter(packed, requires_grad=False),
         )
-
-        # Free the original unpacked int8 weight (still registered as "weight")
-        # to avoid double-storing both int8 [N, K] and int32 [N, K/8] in memory.
-        delattr(layer, "weight")
 
     def apply_weights(
         self,

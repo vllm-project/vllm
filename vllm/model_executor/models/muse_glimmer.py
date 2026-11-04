@@ -54,6 +54,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -341,41 +342,6 @@ class MuseGlimmerMultiModalProcessor(
                 replacement=video_replacement,
             ),
         ]
-
-
-class MuseGlimmerRMSNorm(nn.Module):
-    """RMSNorm mirroring HF MuseGlimmer exactly (fp32 compute, cast at the end).
-
-    ``normed = _norm(x.float()) * (w.float() + weight_offset)`` cast back to the
-    input dtype. When ``with_scale`` is False the layer is weightless (used for
-    QK-norm and the token-embedding norm).
-    """
-
-    def __init__(
-        self,
-        dim: int | None = None,
-        eps: float = 1e-6,
-        with_scale: bool = True,
-        weight_offset: int = 0,
-    ) -> None:
-        super().__init__()
-        self.eps = eps
-        self.with_scale = with_scale
-        self.weight_offset = weight_offset
-        if with_scale:
-            assert dim is not None
-            self.weight = nn.Parameter(torch.zeros(dim))
-        else:
-            self.register_parameter("weight", None)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        out = self._norm(hidden_states.float())
-        if self.with_scale:
-            out = out * (self.weight.float() + self.weight_offset)
-        return out.type_as(hidden_states)
 
 
 class MuseGlimmerVisionAttention(nn.Module):
@@ -919,7 +885,7 @@ class MuseGlimmerAttention(nn.Module):
         self.use_rope = bool(config.layer_rope_theta[self.layer_idx])
 
         # Weightless, computed in fp32, applied per head over head_dim.
-        self.qk_norm = MuseGlimmerRMSNorm(eps=config.rms_norm_eps, with_scale=False)
+        self.qk_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
         self.scale_query_by = config.qk_scale_factor
 
         self.qkv_proj = QKVParallelLinear(
@@ -1028,17 +994,15 @@ class MuseGlimmerDecoderLayer(nn.Module):
         )
         # Sandwich norms with baked +1 offset. Pre-norms use rms_norm_eps; the
         # post-norms use the (typically smaller) post_norm_eps.
-        self.input_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.post_norm_eps
         )
-        self.post_attention_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
+        self.pre_feedforward_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
         )
-        self.pre_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps, weight_offset=1
-        )
-        self.post_feedforward_layernorm = MuseGlimmerRMSNorm(
-            config.hidden_size, eps=config.post_norm_eps, weight_offset=1
+        self.post_feedforward_layernorm = GemmaRMSNorm(
+            config.hidden_size, eps=config.post_norm_eps
         )
 
     def forward(
@@ -1078,7 +1042,9 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
         )
         # MuseGlimmer normalizes token embeddings with a weightless RMSNorm instead of
         # Gemma's sqrt(hidden_size) multiplier.
-        self.embed_norm = MuseGlimmerRMSNorm(eps=config.rms_norm_eps, with_scale=False)
+        self.embed_norm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps, has_weight=False
+        )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -1088,7 +1054,9 @@ class MuseGlimmerModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
         # Final norm: weight-as-scale, no offset.
-        self.norm = MuseGlimmerRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps, dtype=torch.float32
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -1250,7 +1218,7 @@ class MuseGlimmerForCausalLM(
 
         self.vision_encoder: MuseGlimmerVisionEncoder | None
         self.vision_adapter: MuseGlimmerVisionAdapter | None
-        self.perception_emb_norm: MuseGlimmerRMSNorm | None
+        self.perception_emb_norm: RMSNorm | None
         if self.has_vision:
             with self._mark_tower_model(vllm_config, {"image", "video"}):
                 self.vision_encoder = MuseGlimmerVisionEncoder(
@@ -1263,8 +1231,10 @@ class MuseGlimmerForCausalLM(
                     text_config.hidden_size,
                     bias=False,
                 )
-                self.perception_emb_norm = MuseGlimmerRMSNorm(
-                    eps=text_config.rms_norm_eps, with_scale=False
+                self.perception_emb_norm = RMSNorm(
+                    text_config.hidden_size,
+                    eps=text_config.rms_norm_eps,
+                    has_weight=False,
                 )
         else:
             self.vision_encoder = None

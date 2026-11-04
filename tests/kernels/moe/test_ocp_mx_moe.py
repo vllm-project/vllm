@@ -3,6 +3,7 @@
 
 import types
 from dataclasses import dataclass, replace
+from typing import NotRequired, TypedDict
 
 import pytest
 import torch
@@ -1522,10 +1523,21 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
+class RocmBackendConfig(TypedDict):
+    activation: str
+    rtol: float
+    percent: float
+    requires_aiter: bool
+    requires_gfx950: bool
+    requires_gfx1250: NotRequired[bool]
+    interleaved_layout: NotRequired[bool]
+    act_type: NotRequired[str]
+
+
 # TODO: Further tighten the accuracy threshold.
 # - More accurate ref moe to include activation quantization
 # - Check aiter kernel accuracy. E.g., quant / dequant details.
-ROCM_BACKEND_CONFIGS = {
+ROCM_BACKEND_CONFIGS: dict[str, RocmBackendConfig] = {
     "TRITON": {
         "activation": "SWIGLUOAI",
         "rtol": 0.3,
@@ -1814,6 +1826,7 @@ def test_rocm_mxfp4_moe_oracle(
                 apply_router_weight_on_input=False,
             )
 
+    assert isinstance(out, torch.Tensor)
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
     assert not torch.any(torch.isnan(out)), "Output contains NaN"
@@ -2205,10 +2218,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
-def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+def test_aiter_mxfp4_monolithic_expert_parallel_support(
     monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
 ):
-    """Global routing cannot index local expert weights, even without all-to-all."""
+    """Naive EP (no all-to-all) is supported by W4A16, which takes an expert_map;
+    W4A8's global routing cannot index local expert weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -2253,8 +2267,10 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         FusedMoEActivationFormat.Standard,
     )
 
-    assert supported is not use_ep
-    if use_ep:
+    expect_supported = not use_ep or backend_name == "AITER_TRITON_MXFP4_BF16"
+    assert supported is expect_supported
+    if not expect_supported:
+        assert reason is not None
         assert "parallel config" in reason
 
 

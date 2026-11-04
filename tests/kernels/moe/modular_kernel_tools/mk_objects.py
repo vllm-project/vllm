@@ -44,6 +44,7 @@ from vllm.utils.import_utils import (
     has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
+    mori_epv2_unavailable_reason,
 )
 
 
@@ -80,13 +81,17 @@ class ExpertInfo:
 
 
 PREPARE_FINALIZE_INFO: dict[
-    mk.FusedMoEPrepareAndFinalizeModular, PrepareFinalizeInfo
+    type[mk.FusedMoEPrepareAndFinalizeModular], PrepareFinalizeInfo
 ] = {}
-EXPERT_INFO: dict[mk.FusedMoEExpertsModular, ExpertInfo] = {}
-MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
-MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
+EXPERT_INFO: dict[type[mk.FusedMoEExpertsModular], ExpertInfo] = {}
+MK_ALL_PREPARE_FINALIZE_TYPES: list[type[mk.FusedMoEPrepareAndFinalizeModular]] = []
+MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[
+    type[mk.FusedMoEPrepareAndFinalizeModular]
+] = []
+MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[
+    type[mk.FusedMoEPrepareAndFinalizeModular]
+] = []
+MK_FUSED_EXPERT_TYPES: list[type[mk.FusedMoEExpertsModular]] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
@@ -243,6 +248,7 @@ if has_mori():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
+    from vllm.platforms.rocm import get_cdna_version
 
     register_prepare_and_finalize(
         MoriPrepareAndFinalize,
@@ -252,6 +258,22 @@ if has_mori():
         backend="mori_high_throughput",
         supports_apply_weight_on_input=False,
     )
+
+    # Config.make_env_data pins mori_ep_v2=True, which skips the EPv1 fallback
+    # in RocmPlatform.check_and_update_config, so apply its EPv2 gate here.
+    if get_cdna_version() >= 4 and mori_epv2_unavailable_reason() is None:
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
+            MoriEPv2PrepareAndFinalize,
+        )
+
+        register_prepare_and_finalize(
+            MoriEPv2PrepareAndFinalize,
+            standard_format,
+            [torch.bfloat16],
+            blocked_quantization_support=False,
+            backend="mori",
+            supports_apply_weight_on_input=False,
+        )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
@@ -279,8 +301,9 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         # Note: this is a hack to get it to run for now
     )
 else:
+    # None sentinels stand in for the class names when the backend is unavailable.
     FlashInferCutlassMoEPrepareAndFinalize = None
-    FlashInferExperts = None
+    FlashInferExperts = None  # type: ignore[misc]
 
 if (
     has_flashinfer_nvlink_one_sided()
@@ -352,11 +375,12 @@ if has_aiter():
             needs_aiter=True,
         )
 else:
-    AiterUnquantizedExperts = None
-    AiterFp8BlockExperts = None
-    AiterFp8TensorExperts = None
-    AiterFp8ChannelExperts = None
-    AiterMxfp4Experts = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    AiterUnquantizedExperts = None  # type: ignore[misc]
+    AiterFp8BlockExperts = None  # type: ignore[misc]
+    AiterFp8TensorExperts = None  # type: ignore[misc]
+    AiterFp8ChannelExperts = None  # type: ignore[misc]
+    AiterMxfp4Experts = None  # type: ignore[misc]
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -403,8 +427,9 @@ if cutlass_fp8_supported():
         blocked_quantization_support=False,
     )
 else:
-    CutlassBatchedExpertsFp8 = None
-    CutlassExpertsFp8 = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    CutlassBatchedExpertsFp8 = None  # type: ignore[misc]
+    CutlassExpertsFp8 = None  # type: ignore[misc]
 
 if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
@@ -418,7 +443,8 @@ if cutlass_fp4_supported():
         blocked_quantization_support=True,
     )
 else:
-    CutlassExpertsFp4 = None
+    # None sentinels stand in for the class names when the backend is unavailable.
+    CutlassExpertsFp4 = None  # type: ignore[misc]
 
 MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
@@ -494,7 +520,7 @@ if has_aiter():
 
 
 def make_fused_experts(
-    fused_experts_type: mk.FusedMoEExpertsModular,
+    fused_experts_type: type[mk.FusedMoEExpertsModular],
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,

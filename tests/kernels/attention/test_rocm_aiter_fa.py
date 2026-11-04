@@ -1063,6 +1063,119 @@ def test_aiter_mha_varlen_fp8_kv(dtype):
     torch.testing.assert_close(output, ref, atol=atol, rtol=rtol)
 
 
+@pytest.mark.skipif(not on_mi3xx(), reason="MI300/MI350 ROCm only")
+def test_aiter_paged_decode_over_window_trimmed_block_table_matches_reference():
+    """Sliding-window decode on the paged kernel, fed the trimmed block table.
+
+    The metadata builder keeps only the blocks that overlap the window and
+    rebases the sequence lengths onto the first kept block. That must give the
+    same attention as the full table, for contexts below, at and above the
+    window, including a window start that falls inside a block.
+    """
+    _assert_aiter_supported()
+    from types import SimpleNamespace
+
+    import aiter  # noqa: F401
+
+    from vllm.v1.attention.backends.rocm_aiter_fa import (
+        AiterFlashAttentionMetadataBuilder,
+    )
+
+    set_random_seed(0)
+    device, dtype = "cuda", torch.bfloat16
+    num_q_heads, num_kv_heads, head_size, block_size, window = 16, 2, 64, 16, 256
+    seq_lens_list = [100, 256, 257, 300, 1000, 2011]
+    num_seqs = len(seq_lens_list)
+    max_blocks = (max(seq_lens_list) + block_size - 1) // block_size
+    num_blocks = num_seqs * max_blocks + 4
+    key_cache = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, device=device, dtype=dtype
+    )
+    value_cache = torch.randn_like(key_cache)
+    block_table = (
+        torch.randperm(num_blocks - 4, device=device)[: num_seqs * max_blocks]
+        .reshape(num_seqs, max_blocks)
+        .to(torch.int32)
+    )
+    seq_lens = torch.tensor(seq_lens_list, device=device, dtype=torch.int32)
+    query = torch.randn(num_seqs, num_q_heads, head_size, device=device, dtype=dtype)
+    scale = head_size**-0.5
+
+    num_window_blocks = (window + block_size - 1) // block_size + 1
+    builder = SimpleNamespace(
+        aot_sliding_window=(window - 1, 0),
+        block_size=block_size,
+        _swa_block_table=torch.zeros(
+            (num_seqs, num_window_blocks), dtype=torch.int32, device=device
+        ),
+        _swa_seq_lens=torch.zeros(num_seqs, dtype=torch.int32, device=device),
+        _swa_block_offsets=torch.arange(
+            num_window_blocks, dtype=torch.int64, device=device
+        ),
+    )
+    swa_table, swa_lens, swa_max_len = (
+        AiterFlashAttentionMetadataBuilder._build_swa_decode_tables(
+            builder, block_table, seq_lens, num_seqs, max(seq_lens_list)
+        )
+    )
+    assert swa_table is not None and swa_lens is not None
+    assert swa_table.shape == (num_seqs, num_window_blocks)
+    assert swa_max_len == window + block_size - 1
+    assert int(swa_lens.max()) <= swa_max_len
+    # Below the window nothing is dropped.
+    assert int(swa_lens[0]) == seq_lens_list[0]
+
+    partition = 256
+    num_partitions = (swa_max_len + partition - 1) // partition
+    workspace = torch.empty(
+        num_seqs * num_q_heads * num_partitions * head_size * 2
+        + 2 * num_seqs * num_q_heads * num_partitions * 4,
+        dtype=torch.uint8,
+        device=device,
+    )
+    one = torch.ones(1, device=device, dtype=torch.float32)
+    output = torch.empty_like(query)
+    torch.ops.aiter.paged_attention_v1(
+        output,
+        workspace,
+        query,
+        key_cache,
+        value_cache,
+        scale,
+        swa_table,
+        torch.arange(num_seqs, device=device, dtype=torch.int32),
+        swa_lens,
+        swa_max_len,
+        None,
+        "auto",
+        "NHD",
+        0.0,
+        one,
+        one,
+        None,
+        partition,
+        1,
+        window,
+    )
+
+    ref = torch.empty_like(query)
+    for i, length in enumerate(seq_lens_list):
+        blocks = block_table[i, : (length + block_size - 1) // block_size].long()
+        keys = key_cache[blocks].reshape(-1, num_kv_heads, head_size)[:length]
+        values = value_cache[blocks].reshape(-1, num_kv_heads, head_size)[:length]
+        keys, values = (
+            keys[max(0, length - window) :],
+            values[max(0, length - window) :],
+        )
+        keys = keys.float().repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+        values = values.float().repeat_interleave(num_q_heads // num_kv_heads, dim=1)
+        weights = (torch.einsum("hd,lhd->hl", query[i].float(), keys) * scale).softmax(
+            -1
+        )
+        ref[i] = torch.einsum("hl,lhd->hd", weights, values).to(dtype)
+    torch.testing.assert_close(output, ref, atol=1.5e-2, rtol=1e-2)
+
+
 def test_asm_kv_scale_tables_shared_across_builders():
     """Builders share one AsmKvScaleTables; equal (shape, scale) requests must
     return the same dense table, a different scale a different one."""
