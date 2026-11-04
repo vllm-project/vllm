@@ -35,9 +35,13 @@ fn insert_server_metrics(
 
 /// Build the result JSON object matching the Python output schema exactly.
 ///
-/// Mirrors serve.py:1801-1947 result_json construction.
+/// Mirrors serve.py:1801-1947 result_json construction. `model_id` is the
+/// resolved model (the server's first model when `--model` is not given), and
+/// `current_dt` is local time as `%Y%m%d-%H%M%S`, as in Python.
+#[allow(clippy::too_many_arguments)]
 pub fn build_result_json(
     config: &BenchConfig,
+    model_id: &str,
     metrics: &BenchmarkMetrics,
     actual_output_lens: &[usize],
     outputs: &[RequestFuncOutput],
@@ -58,16 +62,11 @@ pub fn build_result_json(
         "label".into(),
         config.label.as_ref().map(|l| Value::String(l.clone())).unwrap_or(Value::Null),
     );
-    result.insert(
-        "model_id".into(),
-        Value::String(config.model.clone().unwrap_or_default()),
-    );
+    result.insert("model_id".into(), Value::String(model_id.to_string()));
     result.insert(
         "tokenizer_id".into(),
-        config
-            .tokenizer_id
-            .as_ref()
-            .map(|t| Value::String(t.clone()))
+        resolved_tokenizer_id(config, model_id)
+            .map(Value::String)
             .unwrap_or(Value::Null),
     );
     result.insert(
@@ -180,10 +179,17 @@ pub fn build_result_json(
         );
     }
 
-    // Per-request data.
-    // For pooling: Python always includes input_lens and errors (serve.py:1004-1013).
-    // For generation: all per-request arrays are gated by --save-detailed.
-    if is_pooling {
+    // Per-request data. Python always keeps `latencies` and `queue_times`; the
+    // other arrays are dropped unless --save-detailed.
+    result.insert(
+        "latencies".into(),
+        serde_json::json!(outputs.iter().map(|o| o.latency).collect::<Vec<_>>()),
+    );
+    result.insert(
+        "queue_times".into(),
+        serde_json::json!(outputs.iter().map(|o| o.client_queue_time).collect::<Vec<_>>()),
+    );
+    if config.save_detailed {
         result.insert(
             "input_lens".into(),
             serde_json::json!(outputs.iter().map(|o| o.prompt_len).collect::<Vec<_>>()),
@@ -192,13 +198,7 @@ pub fn build_result_json(
             "errors".into(),
             serde_json::json!(outputs.iter().map(|o| &o.error).collect::<Vec<_>>()),
         );
-    }
-    if config.save_detailed {
         if !is_pooling {
-            result.insert(
-                "input_lens".into(),
-                serde_json::json!(outputs.iter().map(|o| o.prompt_len).collect::<Vec<_>>()),
-            );
             result.insert("output_lens".into(), serde_json::json!(actual_output_lens));
             result.insert(
                 "ttfts".into(),
@@ -212,15 +212,7 @@ pub fn build_result_json(
                 "generated_texts".into(),
                 serde_json::json!(outputs.iter().map(|o| &o.generated_text).collect::<Vec<_>>()),
             );
-            result.insert(
-                "errors".into(),
-                serde_json::json!(outputs.iter().map(|o| &o.error).collect::<Vec<_>>()),
-            );
         }
-        result.insert(
-            "latencies".into(),
-            serde_json::json!(outputs.iter().map(|o| o.latency).collect::<Vec<_>>()),
-        );
         result.insert(
             "start_times".into(),
             serde_json::json!(outputs.iter().map(|o| o.start_time).collect::<Vec<_>>()),
@@ -272,6 +264,25 @@ pub fn build_result_json(
         &metrics.percentiles_e2el_ms,
         &config.selected_percentile_metrics,
     );
+    for (name, stats) in [
+        ("client_queue_time", &metrics.client_queue_time),
+        (
+            "e2el_including_client_queue",
+            &metrics.e2el_including_client_queue,
+        ),
+    ] {
+        if let Some(stats) = stats {
+            add_metric_stats(
+                &mut result,
+                name,
+                stats.mean_ms,
+                stats.median_ms,
+                stats.std_ms,
+                &stats.percentiles_ms,
+                &config.selected_percentile_metrics,
+            );
+        }
+    }
 
     // Steady-state metrics (null when not computed or scope gate failed).
     result.insert(
@@ -285,6 +296,7 @@ pub fn build_result_json(
 /// Build multi-turn result JSON.
 pub fn build_multi_turn_result_json(
     config: &BenchConfig,
+    model_id: &str,
     mt_metrics: &MultiTurnMetrics,
     conversation_outputs: &[ConversationOutput],
     benchmark_duration: f64,
@@ -297,10 +309,7 @@ pub fn build_multi_turn_result_json(
     result.insert("date".into(), Value::String(current_dt.to_string()));
     result.insert("mode".into(), Value::String("multi_turn".to_string()));
     result.insert("backend".into(), Value::String(config.backend.to_string()));
-    result.insert(
-        "model_id".into(),
-        Value::String(config.model.clone().unwrap_or_default()),
-    );
+    result.insert("model_id".into(), Value::String(model_id.to_string()));
     result.insert(
         "num_conversations".into(),
         Value::Number(config.num_prompts.into()),
@@ -581,6 +590,15 @@ fn collect_failed_turns(conversation_outputs: &[ConversationOutput]) -> Vec<Valu
     failed
 }
 
+/// `--tokenizer`, else the resolved model, as in Python; none when the
+/// tokenizer is skipped.
+fn resolved_tokenizer_id(config: &BenchConfig, model_id: &str) -> Option<String> {
+    if config.skip_tokenizer_init {
+        return None;
+    }
+    Some(config.tokenizer_id.clone().unwrap_or_else(|| model_id.to_string()))
+}
+
 fn insert_spec_decode_stats(result: &mut serde_json::Map<String, Value>, stats: &SpecDecodeStats) {
     result.insert(
         "spec_decode_acceptance_rate".into(),
@@ -656,6 +674,56 @@ pub fn append_result(json: &Value, file_path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Save one point of a sweep or multi-run.
+///
+/// With `--append-result` every point is appended to the file its config names.
+/// With `--save-result`, `point` is inserted before the extension when given, so
+/// points that would otherwise share a name (an explicit `--result-filename`,
+/// or repeated runs) each keep their own file.
+pub fn save_point_result(
+    config: &BenchConfig,
+    result: &Value,
+    current_dt: &str,
+    point: Option<&str>,
+) -> Result<()> {
+    if !(config.save_result || config.append_result) {
+        return Ok(());
+    }
+    let model_id = result
+        .get("model_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or(config.model.as_deref())
+        .unwrap_or("unknown");
+    let file_name = compute_result_filename(config, model_id, current_dt);
+    if let Some(ref dir) = config.result_dir {
+        std::fs::create_dir_all(dir)?;
+    }
+    if config.append_result {
+        return append_result(result, &file_name);
+    }
+    match point {
+        Some(point) => save_result(result, &with_point_suffix(&file_name, point)),
+        None => save_result(result, &file_name),
+    }
+}
+
+/// `dir/name.json` -> `dir/name-<point>.json`.
+fn with_point_suffix(file_name: &str, point: &str) -> String {
+    let path = std::path::Path::new(file_name);
+    match (path.file_stem(), path.extension()) {
+        (Some(stem), Some(ext)) => path
+            .with_file_name(format!(
+                "{}-{point}.{}",
+                stem.to_string_lossy(),
+                ext.to_string_lossy()
+            ))
+            .to_string_lossy()
+            .into_owned(),
+        _ => format!("{file_name}-{point}"),
+    }
+}
+
 /// Compute the result filename matching Python's logic.
 pub fn compute_result_filename(config: &BenchConfig, model_id: &str, current_dt: &str) -> String {
     let base_model = model_id.split('/').next_back().unwrap_or(model_id);
@@ -666,8 +734,9 @@ pub fn compute_result_filename(config: &BenchConfig, model_id: &str, current_dt:
     let file_name = if config.request_rate.is_infinite() {
         format!("{label}-infqps{max_conc_str}-{base_model}-{current_dt}.json")
     } else {
+        // Debug keeps the trailing `.0` that Python's `str(float)` writes (`10.0qps`).
         format!(
-            "{label}-{}qps{max_conc_str}-{base_model}-{current_dt}.json",
+            "{label}-{:?}qps{max_conc_str}-{base_model}-{current_dt}.json",
             config.request_rate
         )
     };
@@ -688,7 +757,251 @@ pub fn compute_result_filename(config: &BenchConfig, model_id: &str, current_dt:
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::*;
+    use crate::cli::BenchServeArgs;
+    use crate::config::GoodputConfig;
+    use crate::metrics::calculator::{
+        attach_client_queue_metrics, calculate_embedding_metrics, calculate_metrics,
+    };
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchServeArgs,
+    }
+
+    fn config_without_model(extra: &[&str]) -> BenchConfig {
+        let mut argv = vec!["vllm-bench"];
+        argv.extend_from_slice(extra);
+        BenchConfig::from_args(&TestCli::parse_from(argv).args).unwrap()
+    }
+
+    fn config(extra: &[&str]) -> BenchConfig {
+        config_without_model(&[&["--model", "org/model"], extra].concat())
+    }
+
+    fn outputs() -> Vec<RequestFuncOutput> {
+        [(0.0, 1.0), (0.5, 2.0)]
+            .into_iter()
+            .map(|(queue, latency)| RequestFuncOutput {
+                success: true,
+                latency,
+                ttft: 0.1,
+                itl: vec![0.2, 0.3],
+                output_tokens: 3,
+                prompt_len: 8,
+                client_queue_time: queue,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    fn keys(json: &Value) -> Vec<&str> {
+        json.as_object().unwrap().keys().map(String::as_str).collect()
+    }
+
+    /// Without --save-detailed, Python keeps `latencies` and `queue_times` and
+    /// drops the other per-request arrays (serve.py `if not args.save_detailed`).
+    #[test]
+    fn test_result_json_has_python_keys() {
+        let config = config(&[
+            "--request-rate",
+            "10",
+            "--max-concurrency",
+            "4",
+            "--percentile-metrics",
+            "ttft,tpot,itl,e2el,client_queue_time,e2el_including_client_queue",
+        ]);
+        let outputs = outputs();
+        let (mut metrics, lens) = calculate_metrics(
+            &outputs,
+            2.0,
+            &config.selected_percentiles,
+            true,
+            &GoodputConfig::default(),
+        );
+        attach_client_queue_metrics(
+            &mut metrics,
+            &outputs,
+            Some(4),
+            10.0,
+            &config.selected_percentiles,
+        );
+        let json = build_result_json(
+            &config,
+            "org/model",
+            &metrics,
+            &lens,
+            &outputs,
+            2.0,
+            "20261104-120000",
+            None,
+        );
+
+        let mut python_keys = vec![
+            "date",
+            "endpoint_type",
+            "backend",
+            "label",
+            "model_id",
+            "tokenizer_id",
+            "num_prompts",
+            "request_rate",
+            "burstiness",
+            "max_concurrency",
+            "duration",
+            "completed",
+            "failed",
+            "total_input_tokens",
+            "total_output_tokens",
+            "request_throughput",
+            "request_goodput",
+            "output_throughput",
+            "total_token_throughput",
+            "latencies",
+            "queue_times",
+            "max_output_tokens_per_s",
+            "max_concurrent_requests",
+            "rtfx",
+        ];
+        let metric_keys: Vec<String> = [
+            "ttft",
+            "tpot",
+            "itl",
+            "e2el",
+            "client_queue_time",
+            "e2el_including_client_queue",
+        ]
+        .iter()
+        .flat_map(|m| ["mean", "median", "std", "p99"].map(|s| format!("{s}_{m}_ms")))
+        .collect();
+        python_keys.extend(metric_keys.iter().map(String::as_str));
+        let rust_keys = keys(&json);
+        for key in &python_keys {
+            assert!(rust_keys.contains(key), "missing {key}");
+        }
+        for key in [
+            "input_lens",
+            "output_lens",
+            "ttfts",
+            "itls",
+            "start_times",
+            "generated_texts",
+            "errors",
+        ] {
+            assert!(!rust_keys.contains(&key), "{key} needs --save-detailed");
+        }
+        assert_eq!(json["queue_times"], serde_json::json!([0.0, 0.5]));
+        assert_eq!(json["mean_client_queue_time_ms"], 250.0);
+        assert_eq!(json["mean_e2el_including_client_queue_ms"], 1750.0);
+        assert_eq!(json["date"], "20261104-120000");
+    }
+
+    #[test]
+    fn test_pooling_result_json_has_python_keys() {
+        let config = config(&["--backend", "openai-embeddings"]);
+        let outputs = outputs();
+        let metrics = calculate_embedding_metrics(&outputs, 2.0, &config.selected_percentiles);
+        let json = build_result_json(
+            &config,
+            "org/model",
+            &metrics,
+            &[],
+            &outputs,
+            2.0,
+            "20261104-120000",
+            None,
+        );
+
+        let rust_keys = keys(&json);
+        for key in [
+            "duration",
+            "completed",
+            "total_input_tokens",
+            "total_input_sequences",
+            "request_throughput",
+            "input_sequence_throughput",
+            "total_token_throughput",
+            "latencies",
+            "queue_times",
+            "mean_e2el_ms",
+            "median_e2el_ms",
+            "std_e2el_ms",
+            "p99_e2el_ms",
+        ] {
+            assert!(rust_keys.contains(&key), "missing {key}");
+        }
+        for key in ["input_lens", "errors"] {
+            assert!(!rust_keys.contains(&key), "{key} needs --save-detailed");
+        }
+    }
+
+    /// Without --model the server's model goes into `model_id`, and the
+    /// tokenizer defaults to it, as in Python.
+    #[test]
+    fn test_result_json_records_resolved_model() {
+        let config = config_without_model(&[]);
+        let (metrics, lens) = calculate_metrics(&[], 1.0, &[], true, &GoodputConfig::default());
+        let json = build_result_json(&config, "org/served", &metrics, &lens, &[], 1.0, "dt", None);
+        assert_eq!(json["model_id"], "org/served");
+        assert_eq!(json["tokenizer_id"], "org/served");
+
+        let config = config_without_model(&["--tokenizer", "org/tok"]);
+        let json = build_result_json(&config, "org/served", &metrics, &lens, &[], 1.0, "dt", None);
+        assert_eq!(json["tokenizer_id"], "org/tok");
+    }
+
+    /// Python formats the rate with `str(float)`.
+    #[test]
+    fn test_result_filename_rate_matches_python() {
+        for (rate, expected) in [("10", "10.0qps"), ("2.5", "2.5qps")] {
+            let config = config(&["--request-rate", rate]);
+            assert_eq!(
+                compute_result_filename(&config, "org/model", "dt"),
+                format!("openai-{expected}-model-dt.json")
+            );
+        }
+    }
+
+    /// Sweep points and repeated runs must not overwrite each other, and
+    /// --append-result collects them in one file.
+    #[test]
+    fn test_save_point_result() {
+        let dir =
+            std::env::temp_dir().join(format!("vllm-bench-save-point-{}", std::process::id()));
+        let dir_str = dir.to_str().unwrap();
+        let result = serde_json::json!({"model_id": "org/model"});
+
+        let saved = config(&[
+            "--save-result",
+            "--result-dir",
+            dir_str,
+            "--result-filename",
+            "out.json",
+        ]);
+        for point in ["run1", "run2"] {
+            save_point_result(&saved, &result, "dt", Some(point)).unwrap();
+        }
+        assert!(dir.join("out-run1.json").exists());
+        assert!(dir.join("out-run2.json").exists());
+
+        let appended = config(&[
+            "--append-result",
+            "--result-dir",
+            dir_str,
+            "--result-filename",
+            "all.json",
+        ]);
+        for point in ["run1", "run2"] {
+            save_point_result(&appended, &result, "dt", Some(point)).unwrap();
+        }
+        let content = std::fs::read_to_string(dir.join("all.json")).unwrap();
+        assert_eq!(content.lines().count(), 2);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn test_insert_spec_decode_stats() {
