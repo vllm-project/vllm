@@ -859,6 +859,7 @@ def current_stream() -> torch.cuda.Stream:
 #
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
+#   - DeepSeek-V4.1 mHC gate projection overlap on ROCm
 _aux_stream: torch.cuda.Stream | None = None
 
 
@@ -1052,6 +1053,25 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def eager_bypass_custom_op(
+    op_name: str,
+    op_func: Callable,
+    target_lib: Library | None = None,
+) -> Callable:
+    """Wrap a registered custom op so that only Dynamo tracing goes through
+    the dispatcher, where the op is needed as a graph boundary; eager calls
+    go straight to `op_func`. Use it on host-bound hot paths such as
+    per-linear GEMM calls, where dispatch costs several µs per call."""
+    op = getattr(getattr(torch.ops, (target_lib or vllm_lib).ns), op_name)
+
+    def wrapper(*args, **kwargs):
+        if torch.compiler.is_compiling():
+            return op(*args, **kwargs)
+        return op_func(*args, **kwargs)
+
+    return wrapper
 
 
 # Keep this at the end of the module: it resolves current_platform, which can

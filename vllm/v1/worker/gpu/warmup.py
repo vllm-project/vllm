@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm import PoolingParams, SamplingParams
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.utils.math_utils import cdiv
@@ -39,6 +40,7 @@ def _reserved_block_count(
     num_tokens: int,
     kvcache_spec: KVCacheSpec,
     *,
+    vllm_config: VllmConfig,
     num_lookahead_tokens: int,
     max_model_len: int,
     max_encoder_len: int,
@@ -70,7 +72,13 @@ def _reserved_block_count(
     if kvcache_spec.dcp_sharded:
         block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, block_size) + num_speculative_blocks
+    num_blocks = cdiv(num_tokens, block_size) + num_speculative_blocks
+    if isinstance(kvcache_spec, MambaSpec):
+        # MambaManager may hold more blocks than its block-table row length.
+        return num_blocks
+    return min(
+        num_blocks, kvcache_spec.max_num_blocks_per_req(vllm_config, max_model_len)
+    )
 
 
 def _warmup_token_ids(model_runner: GPUModelRunner, num_tokens: int) -> list[int]:
@@ -94,6 +102,7 @@ def _warmup_block_counter(
         return _reserved_block_count(
             num_tokens,
             kvcache_spec,
+            vllm_config=vllm_config,
             num_lookahead_tokens=num_lookahead_tokens,
             max_model_len=max_model_len,
             max_encoder_len=max_encoder_len,
@@ -622,6 +631,9 @@ def _warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+    if model_runner.speculator is not None:
+        # Reset state for drafters that learn across requests.
+        model_runner.speculator.reset_state()
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.zero_block_ids([0])

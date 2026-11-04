@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -168,8 +169,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Deferred frees may contain blocks from multiple pools.
-    pool: "BlockPool | None" = field(
+    # Deferred frees may contain blocks from multiple pools. Weak to avoid ref cycles.
+    pool: "weakref.ref[BlockPool] | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
     # The hash key (block hash + group id) of the block, only available
@@ -1128,8 +1129,8 @@ def generate_scheduler_kv_cache_config(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
     )
-    # All workers have the same kv_cache_config except layer names, so use
-    # an arbitrary one to initialize the scheduler.
+    # Worker configs share scheduler geometry and the resolved zeroing
+    # decision, so use an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):

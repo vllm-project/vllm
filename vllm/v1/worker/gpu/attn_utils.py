@@ -108,6 +108,8 @@ class FastPrefillHelper:
             not has_prefill
             or batch_desc.cg_mode == CUDAGraphMode.FULL
             or batch_desc.num_ubatches > 1
+            # LoRA metadata describes the full batch, not the logits-only batch.
+            or num_active_loras > 0
         ):
             return None
         buf = self.logits_indices_buf
@@ -417,6 +419,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                allocate=allocate,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -497,6 +500,12 @@ def build_attn_metadata(
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
+    if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
+        # FULL graphs include inactive padded requests. Their prompt lengths
+        # must be zero, just like the padded sequence lengths and slot mapping.
+        rswa_prefix_lens = torch.nn.functional.pad(
+            rswa_prefix_lens, (0, num_reqs - rswa_prefix_lens.shape[0])
+        )
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
     if dcp_local_seq_lens_cpu_upper_bound is not None:

@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -31,6 +32,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.utils import sched_yield
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -56,7 +58,6 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
-    align_extensible_kv_cache_capacity,
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
@@ -379,14 +380,6 @@ class EngineCore:
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
         extensible = vllm_config.cache_config.enable_extensible_kv_cache
-        # A KV connector may register each committed segment for RDMA, which
-        # cannot span physical chunks: keep segment bounds granule-aligned.
-        commit_granule: int | None = None
-        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
-            commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
-            align_extensible_kv_cache_capacity(
-                vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule
-            )
         if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -418,7 +411,6 @@ class EngineCore:
                 kv_cache_configs,
                 scheduler_kv_cache_config,
                 compilation_times,
-                commit_granule,
             )
             self.model_executor.extend_kv_cache(num_blocks)
         # Under the extensible KV cache, workers create the connector in
@@ -732,7 +724,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -746,6 +738,10 @@ class EngineCore:
         self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Block until a step's model output is ready."""
+        return future.result()
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -831,7 +827,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -1178,6 +1174,14 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def is_inference_ready(self) -> bool:
+        """Whether the engine can accept and process new requests: it is not
+        paused (including for a checkpoint) or asleep, and no weight update has
+        left the weights incomplete."""
+        return not self.is_sleeping() and not any(
+            self.collective_rpc("has_incomplete_weight_update")
+        )
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
@@ -1236,6 +1240,21 @@ class EngineCore:
                 request.mm_features
             )
 
+        watermark_config = self.vllm_config.watermark_config
+        params = request.sampling_params
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
+                warn_watermarking_override()
+            params.watermarking = True
+
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
@@ -1264,6 +1283,19 @@ class EngineShutdownState(IntEnum):
     SHUTTING_DOWN = 2
 
 
+# Input types that EngineCoreProc handles while waiting for a step's output.
+# Others are deferred until the step completes.
+_INPUTS_HANDLED_DURING_STEP = (
+    EngineCoreRequestType.ADD,
+    EngineCoreRequestType.ABORT,
+    EngineCoreRequestType.EXECUTOR_FAILED,
+    EngineCoreRequestType.WAKEUP,
+)
+# While waiting for a step's output, how long to busy-poll for new inputs
+# before falling back to a blocking wait for the output.
+_INPUT_SPIN_DURATION_S = 1.0
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -1285,6 +1317,9 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        # Inputs taken from input_queue while waiting for a step's output that
+        # must not be handled until the step completes (see _wait_for_output).
+        self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
 
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
@@ -1755,6 +1790,10 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+        # Inputs deferred during the last step precede anything still queued.
+        while self._deferred_inputs:
+            self._handle_client_request(*self._deferred_inputs.popleft())
+
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1856,6 +1895,30 @@ class EngineCoreProc(EngineCore):
             return False
 
         return True
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Wait for a step's model output, meanwhile handling new requests and
+        aborts as they arrive."""
+        poll: Callable[[], bool] | None = getattr(future, "poll", None)
+        if poll is not None:
+            pending_inputs = self.input_queue.queue
+            spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+            while not self._deferred_inputs and not poll():
+                if pending_inputs:
+                    req = self.input_queue.get_nowait()
+                    # Some kinds of request must wait until the step completes.
+                    if req[0] in _INPUTS_HANDLED_DURING_STEP:
+                        self._handle_client_request(*req)
+                    else:
+                        self._deferred_inputs.append(req)
+                elif time.monotonic() < spin_deadline:
+                    sched_yield()
+                else:
+                    # Long-running step: stop busy-looping and block until the
+                    # output arrives. Later inputs are handled after the step.
+                    break
+
+        return future.result()
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any

@@ -482,11 +482,17 @@ impl ChatLlm {
             prompt_text,
         } = self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
-        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
+        let prepared = self.text.request_processor().prepare(text_request)?;
+        let sampling = prepared.effective_sampling();
+        let decoded_stream =
+            self.text.generate_prepared(prepared).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
+        Ok(
+            ChatEventStream::new(request_id, sampling, structured_stream)
+                .with_prompt_text(prompt_text),
+        )
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
