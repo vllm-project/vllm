@@ -46,8 +46,8 @@ use crate::routes::openai::completions::types::{
 use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
@@ -84,6 +84,10 @@ pub async fn completions(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,

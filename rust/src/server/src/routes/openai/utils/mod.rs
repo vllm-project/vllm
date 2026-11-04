@@ -36,14 +36,6 @@ pub(crate) fn validate_generation_prompt_truncation(
     Ok(())
 }
 
-/// Upper bound on `n`, configurable like Python's `VLLM_MAX_N_SEQUENCES`.
-fn max_n_sequences() -> u32 {
-    std::env::var("VLLM_MAX_N_SEQUENCES")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(16384)
-}
-
 /// Resolve the number of choices to generate, checked like Python's
 /// `SamplingParams` checks `n`.
 pub(crate) fn resolve_n(n: Option<u32>) -> Result<NonZeroU32, ApiError> {
@@ -51,15 +43,20 @@ pub(crate) fn resolve_n(n: Option<u32>) -> Result<NonZeroU32, ApiError> {
     let Some(resolved) = NonZeroU32::new(n) else {
         bail_invalid_request!(param = "n", "n must be at least 1, got {n}.");
     };
-    let max_n = max_n_sequences();
-    if n > max_n {
+    Ok(resolved)
+}
+
+/// Reject more choices than the server's `VLLM_MAX_N_SEQUENCES` allows, like
+/// Python's `SamplingParams` checks `n`.
+pub(crate) fn validate_n_limit(n: u32, max_n_sequences: i64) -> Result<(), ApiError> {
+    if i64::from(n) > max_n_sequences {
         bail_invalid_request!(
             param = "n",
-            "n must be at most {max_n}, got {n}. To increase this limit, set the \
+            "n must be at most {max_n_sequences}, got {n}. To increase this limit, set the \
              VLLM_MAX_N_SEQUENCES environment variable."
         );
     }
-    Ok(resolved)
+    Ok(())
 }
 
 /// Reject an output budget larger than the whole context window, like

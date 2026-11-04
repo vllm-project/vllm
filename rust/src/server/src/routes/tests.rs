@@ -809,6 +809,7 @@ fn test_render_app_with(
         model: "backend-model".to_string(),
         served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
         max_model_len,
+        max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
         text: TextRequestProcessor::new(backend.clone(), max_model_len.unwrap_or(u32::MAX)),
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
@@ -1927,6 +1928,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
             model: "glm-test".into(),
             served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
+            max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
             chat: ChatRequestProcessor::render_only(backend.clone())
                 .with_exclude_tools_when_tool_choice_none(exclude),
@@ -11349,6 +11351,64 @@ async fn n_is_checked_like_python_sampling_params() {
         let mut body = body;
         body["model"] = json!("Qwen/Qwen1.5-0.5B-Chat");
         let (status, json) = post_json(&mut app, uri, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
+        assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn n_limit_follows_max_n_sequences_option() {
+    let expected_message = "n must be at most 2, got 3. To increase this limit, set the \
+                            VLLM_MAX_N_SEQUENCES environment variable.";
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-max-n-sequences",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                max_n_sequences: 2,
+                ..Default::default()
+            },
+        ),
+    ));
+    for (uri, body) in [
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hello"}], "n": 3}),
+        ),
+        ("/v1/completions", json!({"prompt": "hello", "n": 3})),
+    ] {
+        let mut body = body;
+        body["model"] = json!("Qwen/Qwen1.5-0.5B-Chat");
+        let (status, json) = post_json(&mut app, uri, body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
+        assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
+        assert_eq!(json["error"]["param"], "n", "{uri} {body}");
+    }
+
+    let backend = Arc::new(FakeChatBackend::new());
+    let mut render_app = build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: ServedModelNames::new(vec!["render-model".to_string()]),
+        max_model_len: Some(128),
+        max_n_sequences: 2,
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::render_only(backend),
+    }));
+    for (uri, body) in [
+        (
+            "/v1/chat/completions/render",
+            json!({"messages": [{"role": "user", "content": "hello"}], "n": 3}),
+        ),
+        ("/v1/completions/render", json!({"prompt": "hello", "n": 3})),
+    ] {
+        let mut body = body;
+        body["model"] = json!("render-model");
+        let (status, json) = post_json(&mut render_app, uri, body.clone()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} {body}");
         assert_eq!(json["error"]["message"], expected_message, "{uri} {body}");
     }

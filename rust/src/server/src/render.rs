@@ -37,6 +37,8 @@ pub struct RenderConfig {
     pub served_model_name: Vec<String>,
     /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
     pub tool_call_parser: ParserSelection,
@@ -75,6 +77,8 @@ pub(crate) struct RenderState {
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
 }
@@ -126,6 +130,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
+        max_n_sequences: config.max_n_sequences,
         text,
         chat,
     }))
@@ -193,6 +198,7 @@ mod tests {
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
                 skip_model_name_validation: false,
+                max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 tool_call_parser: ParserSelection::Auto,
