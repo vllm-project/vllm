@@ -275,6 +275,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     per_act_token_quant=False,
                     block_shape=quant_config.block_shape,
                     is_scale_swizzled=quant_config.is_scale_swizzled,
+                    use_ue8m0=quant_config.act_scale_ue8m0,
                 )
 
         return (
@@ -319,6 +320,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
+                use_ue8m0=quant_config.act_scale_ue8m0,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
