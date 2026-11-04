@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain, islice
 from typing import TYPE_CHECKING
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import LogprobsLists
     from vllm.v1.request import Request
 
 
@@ -43,6 +44,12 @@ class AuxOutputConnectorMetadata:
     finished_requests: tuple[str, ...]
     retained_block_hashes: PackedBlockHashes | None = None
     released_block_hashes: PackedBlockHashes | None = None
+    logprobs: dict[str, str] = field(default_factory=dict)
+    prompt_lens: dict[str, int] = field(default_factory=dict)
+    logprob_block_hashes: dict[str, PackedBlockHashes] = field(default_factory=dict)
+    logprob_boundary_token_ids: dict[str, tuple[int | None, ...]] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -65,6 +72,8 @@ class AuxRequestOutput:
         assert len(row_counts) == 1, "auxiliary output artifact row counts differ"
         return row_counts.pop()
 
+    logprobs: LogprobsLists | None = None
+
 
 class AuxOutputSchedulerConnector:
     """Build worker metadata without owning auxiliary output payloads or stores."""
@@ -76,6 +85,8 @@ class AuxOutputSchedulerConnector:
         *,
         enable_routed_experts: bool = True,
         enable_indexer: bool = False,
+        enable_logprobs: bool = False,
+        logprobs_mode: str = "raw_logprobs",
     ) -> None:
         self._output_fields = tuple(
             (rows, prompt_start)
@@ -89,7 +100,14 @@ class AuxOutputSchedulerConnector:
         self._sent_hash_counts: dict[str, int] = {}
         # Terminal events are delivered with the next connector metadata.
         self._finished_requests: dict[str, PackedBlockHashes | None] = {}
+        self._sent_logprob_hash_counts: dict[str, int] = {}
+        self._finished_logprob_blocks: dict[
+            str, tuple[PackedBlockHashes, tuple[int | None, ...]] | None
+        ] = {}
+        self._logprob_fingerprints: dict[str, str] = {}
         self._generation = 0
+        self._enable_logprobs = enable_logprobs
+        self._logprobs_mode = logprobs_mode
         coordinator = kv_cache_manager.coordinator
         self._group_id = getattr(coordinator, "full_attention_group_id", None) or 0
         self._block_pool = kv_cache_manager.block_pool
@@ -114,9 +132,13 @@ class AuxOutputSchedulerConnector:
         """Build one step's incremental worker metadata."""
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
+        logprob_block_hashes: dict[str, PackedBlockHashes] = {}
+        logprob_boundary_token_ids: dict[str, tuple[int | None, ...]] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
             self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            if self._enable_logprobs and self._request_needs_aux_logprobs(request):
+                self._logprob_fingerprints[request_id] = self._fingerprint(request)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
@@ -124,6 +146,13 @@ class AuxOutputSchedulerConnector:
                 block_hashes_by_request[request_id] = packed
             self._loading.pop(request_id, None)
             scheduled_requests[request_id] = self._get_request_start(request)
+            if request_id in self._logprob_fingerprints:
+                self._add_logprob_hashes(
+                    request,
+                    request.num_computed_tokens + num_tokens,
+                    logprob_block_hashes,
+                    logprob_boundary_token_ids,
+                )
         # A settled token can complete a hash block after the next async schedule
         # was built. Send a hash-only update if the request was not rescheduled.
         if len(self._sent_hash_counts) != len(scheduled_requests):
@@ -134,6 +163,13 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
+            if request_id in self._logprob_fingerprints:
+                self._add_logprob_hashes(
+                    request,
+                    request.num_computed_tokens,
+                    logprob_block_hashes,
+                    logprob_boundary_token_ids,
+                )
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
@@ -142,6 +178,12 @@ class AuxOutputSchedulerConnector:
             if block_hashes is not None
         )
         self._finished_requests = {}
+        for request_id, update in self._finished_logprob_blocks.items():
+            if update is None:
+                continue
+            hashes, boundary_token_ids = update
+            logprob_block_hashes[request_id] = hashes
+            logprob_boundary_token_ids[request_id] = boundary_token_ids
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
@@ -149,8 +191,25 @@ class AuxOutputSchedulerConnector:
             finished_requests,
             self._pack_hashes(self._retained_hashes),
             self._pack_hashes(self._released_hashes),
+            {
+                request_id: self._logprob_fingerprints[request_id]
+                for request_id in logprob_block_hashes
+                if request_id in self._logprob_fingerprints
+            }
+            | {
+                request_id: self._logprob_fingerprints[request_id]
+                for request_id in scheduled_requests
+                if request_id in self._logprob_fingerprints
+            },
+            {
+                request_id: requests[request_id].num_prompt_tokens
+                for request_id in scheduled_requests
+            },
+            logprob_block_hashes,
+            logprob_boundary_token_ids,
         )
         self._retained_hashes, self._released_hashes = [], []
+        self._finished_logprob_blocks = {}
         return metadata
 
     def max_cache_hit(self, request: Request) -> int:
@@ -203,6 +262,11 @@ class AuxOutputSchedulerConnector:
 
     def _get_request_start(self, request: Request) -> int:
         assert request.sampling_params is not None
+        if not self._output_fields:
+            return max(
+                request.num_prompt_tokens,
+                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
+            )
         prompt_start: int = min(
             getattr(request.sampling_params, field) for _, field in self._output_fields
         )
@@ -273,6 +337,86 @@ class AuxOutputSchedulerConnector:
             request, request.num_computed_tokens
         )
         del self._sent_hash_counts[request_id]
+        logprob_sent = self._sent_logprob_hash_counts.pop(request_id, None)
+        if logprob_sent is not None:
+            self._finished_logprob_blocks[request_id] = self._logprob_hash_update(
+                request, logprob_sent, request.num_computed_tokens
+            )
+
+    @staticmethod
+    def _request_needs_aux_logprobs(request: Request) -> bool:
+        params = request.sampling_params
+        extra_args = None if params is None else getattr(params, "extra_args", None)
+        return bool(
+            params is not None
+            and extra_args
+            and extra_args.get("aux_output_enabled", False)
+            and params.num_logprobs is not None
+        )
+
+    def _fingerprint(self, request: Request) -> str:
+        params = request.sampling_params
+        assert params is not None
+        token_ids = params.logprob_token_ids
+        return repr(
+            (
+                self._logprobs_mode,
+                params.num_logprobs,
+                None if token_ids is None else list(token_ids),
+            )
+        )
+
+    def _add_logprob_hashes(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        hashes_by_request: dict[str, PackedBlockHashes],
+        boundaries_by_request: dict[str, tuple[int | None, ...]],
+    ) -> None:
+        request_id = request.request_id
+        num_sent = self._sent_logprob_hash_counts.setdefault(request_id, 0)
+        update = self._logprob_hash_update(request, num_sent, num_computed_tokens)
+        if update is None:
+            return
+        hashes, boundary_token_ids = update
+        hashes_by_request[request_id] = hashes
+        boundaries_by_request[request_id] = boundary_token_ids
+        self._sent_logprob_hash_counts[request_id] = num_sent + len(boundary_token_ids)
+
+    def _logprob_hash_update(
+        self, request: Request, num_sent: int, num_computed_tokens: int
+    ) -> tuple[PackedBlockHashes, tuple[int | None, ...]] | None:
+        num_keyed = min(
+            len(request.block_hashes), num_computed_tokens // self._hash_block_size
+        )
+        if num_keyed <= num_sent:
+            return None
+        new_hashes = request.block_hashes[num_sent:num_keyed]
+        packed = self._pack_hashes(new_hashes)
+        assert packed is not None
+        boundaries = tuple(
+            request.all_token_ids[(index + 1) * self._hash_block_size]
+            if (index + 1) * self._hash_block_size < request.num_tokens
+            else None
+            for index in range(num_sent, num_keyed)
+        )
+        return packed, boundaries
+
+    def take_logprobs(
+        self, request: Request, output: dict[str, AuxRequestOutput] | None
+    ) -> LogprobsLists | None:
+        if not self._request_needs_aux_logprobs(request):
+            return None
+        if output is None or request.request_id not in output:
+            raise RuntimeError(
+                f"auxiliary logprobs output is missing {request.request_id}"
+            )
+        value = output[request.request_id].logprobs
+        if value is None:
+            raise RuntimeError(
+                f"auxiliary logprobs artifact is missing {request.request_id}"
+            )
+        return value
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
@@ -296,7 +440,10 @@ class AuxOutputSchedulerConnector:
         """Start a new auxiliary output namespace after a prefix-cache reset."""
         # The worker drops temporary state on generation changes; resend hashes.
         self._sent_hash_counts.clear()
+        self._sent_logprob_hash_counts.clear()
         self._finished_requests.clear()
+        self._finished_logprob_blocks.clear()
+        self._logprob_fingerprints.clear()
         self._generation += 1
         self._released_hashes.extend(chain.from_iterable(self._kv_cached.values()))
         self._kv_cached.clear()

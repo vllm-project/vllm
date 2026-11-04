@@ -66,6 +66,7 @@ def test_aux_output_config_defaults():
 
     assert not config.enabled
     assert not config.enable_return_routed_experts
+    assert not config.enable_return_logprobs
     assert config.max_bytes is None
 
 

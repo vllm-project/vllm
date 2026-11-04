@@ -23,9 +23,19 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
 )
+from vllm.distributed.aux_output_connector.logprobs import (
+    LogprobRows,
+    concat_rows,
+    decode_rows,
+    encode_rows,
+    rows_from_lists,
+    rows_to_lists,
+)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
+    BlockObject,
     BlockObjectStore,
+    VariableBlockObjectStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
@@ -38,6 +48,7 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import LogprobsTensors
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -54,6 +65,15 @@ class _WorkerRequestState:
     pending_outputs: int = 0
     # Terminal event received; teardown waits for in-flight step outputs.
     finished: bool = False
+    logprob_keys: list[str] = field(default_factory=list)
+    pending_logprob_blocks: list[tuple[bytes, str]] = field(default_factory=list)
+    logprob_rows: dict[int, LogprobRows] = field(default_factory=dict)
+    logprob_cursor: int | None = None
+    pending_publish_logprobs: set[int] = field(default_factory=set)
+    published_artifact_positions: dict[str, frozenset[int]] = field(
+        default_factory=dict
+    )
+    prompt_len: int = 0
 
 
 @dataclass
@@ -62,6 +82,7 @@ class PendingAuxOutput:
 
     connector: AuxOutputWorkerConnector
     request_ids: list[str]
+    batch_indices: np.ndarray
     token_starts: np.ndarray
     query_start_loc: np.ndarray
     # GPU snapshots taken on the main stream.
@@ -72,9 +93,15 @@ class PendingAuxOutput:
     num_rejected: np.ndarray | None = None
     indexer_snapshot: torch.Tensor | None = None
     indexer: np.ndarray | None = None
+    logprobs_tensors: LogprobsTensors | None = None
+    logprobs: dict[str, Any] = field(default_factory=dict)
+    aux_logprobs: frozenset[str] = frozenset()
 
     def enqueue_cpu_copy(
-        self, num_sampled: np.ndarray, num_rejected: np.ndarray
+        self,
+        num_sampled: np.ndarray,
+        num_rejected: np.ndarray,
+        logprobs: LogprobsTensors | None = None,
     ) -> None:
         """Enqueue asynchronous D2H copies; call on the output copy stream."""
         self.num_sampled = num_sampled
@@ -89,6 +116,7 @@ class PendingAuxOutput:
             self.routed_experts = copy_rows(self.routed_experts_snapshot)
         if self.indexer_snapshot is not None:
             self.indexer = copy_rows(self.indexer_snapshot)
+        self.logprobs_tensors = logprobs if self.aux_logprobs else None
 
     def process_output(self) -> dict[str, AuxRequestOutput]:
         return self.connector.process_output(self)
@@ -124,6 +152,7 @@ class AuxOutputWorkerConnector:
         self._r3_dtype: np.dtype[Any] = np.dtype("uint8")
         self._r3_nbytes = 0
         self._store: BackgroundBlockObjectStore | None = None
+        self._logprob_store: BackgroundBlockObjectStore | None = None
         self._buffer: AuxOutputBuffer | None = None
         self._requests: dict[str, _WorkerRequestState] = {}
         self._generation = 0
@@ -134,6 +163,8 @@ class AuxOutputWorkerConnector:
         self._pending_outputs: list[PendingAuxOutput] = []
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
+        self._logprob_block_size = 1
+        self._enable_logprobs = vllm_config.aux_output_config.enable_return_logprobs
 
     def _close_capture(self) -> None:
         """Release both capturers; safe to call on a partially built connector."""
@@ -166,23 +197,24 @@ class AuxOutputWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        shape_per_token, dtype = self._get_storage_layout(max_num_batched_tokens)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-        bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
-        block_nbytes = hash_block_size * bytes_per_token
-        max_bytes = vllm_config.aux_output_config.max_bytes
-        if max_bytes is None:
-            max_bytes = (
-                kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
+        self._logprob_block_size = hash_block_size
+        if self._routed_experts_capturer is not None or self._indexer is not None:
+            shape_per_token, dtype = self._get_storage_layout(max_num_batched_tokens)
+            bytes_per_token = int(np.prod(shape_per_token)) * dtype.itemsize
+            block_nbytes = hash_block_size * bytes_per_token
+            max_bytes = vllm_config.aux_output_config.max_bytes
+            if max_bytes is None:
+                max_bytes = (
+                    kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
+                )
+            self._store = BackgroundBlockObjectStore(
+                BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
+                max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
             )
-        store = BackgroundBlockObjectStore(
-            BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
-            max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
-        )
-        try:
-            buffer = AuxOutputBuffer(
+            self._buffer = AuxOutputBuffer(
                 dtype,
                 shape_per_token,
                 hash_block_size,
@@ -190,18 +222,20 @@ class AuxOutputWorkerConnector:
                 max_num_batched_tokens,
                 vllm_config.max_concurrent_batches,
             )
-        except BaseException:
-            try:
-                store.close()
-            except Exception:
-                logger.warning(
-                    "Failed to close the auxiliary-output store after "
-                    "initialization failed",
-                    exc_info=True,
+        if self._enable_logprobs:
+            logprob_max_bytes = vllm_config.aux_output_config.max_bytes
+            if logprob_max_bytes is None:
+                max_logprobs = max(vllm_config.model_config.max_logprobs, 0)
+                bytes_per_row = max(16, (max_logprobs + 1) * 8 + 4)
+                logprob_max_bytes = (
+                    kv_cache_config.num_blocks
+                    * scheduler_block_size
+                    * (self._logprob_block_size * bytes_per_row + 4096)
                 )
-            raise
-        self._store = store
-        self._buffer = buffer
+            self._logprob_store = BackgroundBlockObjectStore(
+                VariableBlockObjectStore(max_bytes=logprob_max_bytes),
+                max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
+            )
 
     def _get_storage_layout(
         self, max_num_batched_tokens: int
@@ -223,17 +257,41 @@ class AuxOutputWorkerConnector:
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
-        if self._buffer is None or self._step_metadata is None:
+        if (
+            self._buffer is None and getattr(self, "_logprob_store", None) is None
+        ) or self._step_metadata is None:
             return None
-
-        request_ids = list(input_batch.req_ids)
-        query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
+        if self._buffer is None and not self._step_metadata.logprobs:
+            return None
+        if self._buffer is None:
+            request_ids = [
+                req_id
+                for req_id in input_batch.req_ids
+                if req_id in self._step_metadata.logprobs
+            ]
+            if not request_ids:
+                return None
+            indices = np.asarray(
+                [input_batch.req_ids.index(req_id) for req_id in request_ids],
+                dtype=np.int32,
+            )
+            query_start_loc = np.zeros(len(request_ids) + 1, dtype=np.int32)
+            np.cumsum(
+                input_batch.num_scheduled_tokens[indices], out=query_start_loc[1:]
+            )
+            token_starts = input_batch.num_computed_tokens_np[indices]
+        else:
+            request_ids = list(input_batch.req_ids)
+            indices = np.arange(len(request_ids), dtype=np.int32)
+            query_start_loc = input_batch.query_start_loc_np[: len(request_ids) + 1]
+            token_starts = input_batch.num_computed_tokens_np[: len(request_ids)]
         num_rows = int(query_start_loc[-1])
         snapshot = self._indexer.snapshot(num_rows) if self._indexer else None
         pending_output = PendingAuxOutput(
             connector=self,
             request_ids=request_ids,
-            token_starts=input_batch.num_computed_tokens_np[: len(request_ids)],
+            batch_indices=indices,
+            token_starts=token_starts,
             query_start_loc=query_start_loc,
             routed_experts_snapshot=(
                 self._routed_experts_capturer.snapshot_routing_data(num_rows)
@@ -241,6 +299,7 @@ class AuxOutputWorkerConnector:
                 else None
             ),
             indexer_snapshot=snapshot,
+            aux_logprobs=frozenset(self._step_metadata.logprobs),
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -260,6 +319,7 @@ class AuxOutputWorkerConnector:
         with self._lock:
             teardown = []
             release_keys: list[str] = []
+            release_logprob_keys: list[str] = []
             try:
                 outputs = self._commit_output(pending)
             finally:
@@ -270,16 +330,23 @@ class AuxOutputWorkerConnector:
                     if state.pending_outputs == 0 and state.finished:
                         teardown.append(request_id)
                         release_keys.extend(reversed(state.aux_output_keys))
+                        release_logprob_keys.extend(reversed(state.logprob_keys))
             if teardown:
-                self._publish_blocks([], release_keys=release_keys)
+                if self._buffer is not None:
+                    self._publish_blocks([], release_keys=release_keys)
+                logprob_store = getattr(self, "_logprob_store", None)
+                if logprob_store is not None:
+                    logprob_store.put([], release_keys=release_logprob_keys)
                 self._teardown(teardown)
             return outputs
 
     def _commit_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
         buffer = self._buffer
         store = self._store
-        assert buffer is not None and store is not None
-        block_size = buffer.block_size
+        assert store is not None or getattr(self, "_logprob_store", None) is not None
+        block_size = (
+            buffer.block_size if buffer is not None else self._logprob_block_size
+        )
 
         packed_rows = pending.routed_experts
         if self._indexer is not None:
@@ -303,11 +370,29 @@ class AuxOutputWorkerConnector:
                 )
         num_sampled = pending.num_sampled
         num_rejected = pending.num_rejected
-        assert (
-            packed_rows is not None
-            and num_sampled is not None
-            and num_rejected is not None
-        ), "auxiliary output CPU copy was not enqueued"
+        assert num_sampled is not None and num_rejected is not None, (
+            "auxiliary output CPU copy was not enqueued"
+        )
+        num_sampled = num_sampled[pending.batch_indices]
+        num_rejected = num_rejected[pending.batch_indices]
+
+        if pending.logprobs_tensors is not None:
+            values = pending.logprobs_tensors.tolists()
+            for index, request_id in enumerate(pending.request_ids):
+                count = int(num_sampled[index])
+                if not count or request_id not in pending.aux_logprobs:
+                    continue
+                offset = (
+                    values.cu_num_generated_tokens[index]
+                    if values.cu_num_generated_tokens is not None
+                    else index
+                )
+                pending.logprobs[request_id] = type(values)(
+                    values.logprob_token_ids[offset : offset + count],
+                    values.logprobs[offset : offset + count],
+                    values.sampled_token_ranks[offset : offset + count],
+                    None,
+                )
 
         # Publish the whole batch before materializing any consumer output.
         materialize_outputs: list[tuple[str, int, int]] = []
@@ -336,7 +421,36 @@ class AuxOutputWorkerConnector:
             assert 0 <= rejected <= request_num_tokens, (
                 "auxiliary output rejected-token count is invalid"
             )
-            rows = packed_rows[start : end - rejected]
+            rows = (
+                packed_rows[start : end - rejected] if packed_rows is not None else None
+            )
+
+            if request_id in pending.logprobs:
+                proposed_start = max(state.prompt_len, int(token_start) + 1)
+                sample_start = state.logprob_cursor
+                if sample_start is None:
+                    sample_start = proposed_start
+                rows_logprobs = rows_from_lists(
+                    pending.logprobs[request_id], sample_start
+                )
+                self._bind_pending_logprob_blocks(state, rows_logprobs)
+                state.logprob_rows[sample_start] = rows_logprobs
+                state.logprob_cursor = sample_start + len(rows_logprobs.positions)
+                state.pending_publish_logprobs.update(
+                    self._block_starts(
+                        rows_logprobs.positions, self._logprob_block_size
+                    )
+                )
+
+            if buffer is None:
+                state.scheduled_cursor = int(token_start) + request_num_tokens
+                if request_id in pending.logprobs:
+                    outputs[request_id] = AuxRequestOutput(
+                        token_start=int(token_start) + 1,
+                        logprobs=pending.logprobs[request_id],
+                    )
+                continue
+            assert rows is not None
 
             capture_start = token_start
             capture_cursor = state.capture_cursor
@@ -378,6 +492,7 @@ class AuxOutputWorkerConnector:
                             if pending.indexer is not None
                             else None
                         ),
+                        logprobs=pending.logprobs.get(request_id),
                     )
                     state.emit_cursor = token_end
                 else:
@@ -388,6 +503,7 @@ class AuxOutputWorkerConnector:
 
         for request_id, emit_start, token_end in materialize_outputs:
             state = self._requests[request_id]
+            assert buffer is not None and store is not None
             stored_end = (
                 min(token_end // block_size, len(state.aux_output_keys)) * block_size
             )
@@ -408,8 +524,56 @@ class AuxOutputWorkerConnector:
             else:
                 rows = buffer.read(request_id, emit_start, token_end)
             outputs[request_id] = self._make_output(emit_start, rows)
+            if request_id in pending.logprobs:
+                outputs[request_id].logprobs = pending.logprobs[request_id]
             state.emit_cursor = token_end
+        self._publish_logprob_blocks(pending.request_ids)
+        for index, request_id in enumerate(pending.request_ids):
+            state = self._requests[request_id]
+            if request_id not in outputs and request_id in pending.aux_logprobs:
+                outputs[request_id] = AuxRequestOutput(0)
+            output = outputs.get(request_id)
+            if output is None or request_id not in pending.aux_logprobs:
+                continue
+            if request_id in pending.logprobs:
+                output.logprobs = pending.logprobs[request_id]
+            elif state.logprob_keys and int(num_sampled[index]):
+                position = max(
+                    state.prompt_len,
+                    int(pending.token_starts[index]) + 1,
+                )
+                block_index = max((position - 1) // self._logprob_block_size, 0)
+                if block_index >= len(state.logprob_keys):
+                    raise RuntimeError(
+                        "auxiliary logprobs artifact has no key for sampled "
+                        f"position {position}: request={request_id}"
+                    )
+                rows = self._read_logprob_rows([state.logprob_keys[block_index]])
+                mask = rows.positions == position
+                if int(mask.sum()) != 1:
+                    raise RuntimeError(
+                        "auxiliary logprobs artifact is missing sampled position "
+                        f"{position}: request={request_id}"
+                    )
+                output.logprobs = rows_to_lists(
+                    LogprobRows(
+                        rows.positions[mask],
+                        rows.token_ids[mask],
+                        rows.values[mask],
+                        rows.ranks[mask],
+                    )
+                )
         return outputs
+
+    def _read_logprob_rows(self, keys: Sequence[str]) -> LogprobRows:
+        store = getattr(self, "_logprob_store", None)
+        if store is None:
+            raise RuntimeError("logprob replay store is disabled")
+        chunks = [decode_rows(store.get_concatenated([key])) for key in keys]
+        rows = concat_rows(chunks)
+        if rows is None:
+            raise RuntimeError("auxiliary logprobs artifact contains no rows")
+        return rows
 
     def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
         if self._indexer is None:
@@ -449,6 +613,110 @@ class AuxOutputWorkerConnector:
             rows = rows.copy()
         return rows.view(dtype).reshape(len(rows), *shape_per_token)
 
+    @staticmethod
+    def _block_starts(positions: np.ndarray, block_size: int) -> set[int]:
+        return {
+            (int(position) - 1) // block_size * block_size for position in positions
+        }
+
+    def _publish_logprob_blocks(
+        self, request_ids: Iterable[str], *, discard_rows: bool = True
+    ) -> dict[str, list[tuple[int, int]]]:
+        store = getattr(self, "_logprob_store", None)
+        if store is None:
+            return {}
+        discard_spans: dict[str, list[tuple[int, int]]] = {}
+        block_size = self._logprob_block_size
+        for request_id in request_ids:
+            state = self._requests[request_id]
+            for start in list(state.pending_publish_logprobs):
+                block_index = start // block_size
+                if block_index >= len(state.logprob_keys):
+                    continue
+                end = start + block_size
+                rows = concat_rows(
+                    [
+                        value
+                        for value in state.logprob_rows.values()
+                        if np.any((value.positions > start) & (value.positions <= end))
+                    ]
+                )
+                if rows is None:
+                    continue
+                mask = (rows.positions > start) & (rows.positions <= end)
+                artifact = LogprobRows(
+                    rows.positions[mask],
+                    rows.token_ids[mask],
+                    rows.values[mask],
+                    rows.ranks[mask],
+                )
+                key = state.logprob_keys[block_index]
+                existing = store.get_optional(key)
+                if existing is not None:
+                    merged = concat_rows([decode_rows(existing), artifact])
+                    assert merged is not None
+                    artifact = merged
+                store.put([BlockObject(key, encode_rows(artifact))])
+                state.published_artifact_positions[key] = frozenset(
+                    int(position) for position in artifact.positions
+                )
+                state.pending_publish_logprobs.discard(start)
+                if max(artifact.positions) >= end:
+                    discard_spans.setdefault(request_id, []).append((start, end))
+            if discard_rows:
+                for start, end in discard_spans.get(request_id, ()):
+                    self._discard_logprob_rows(state.logprob_rows, start, end)
+        return discard_spans
+
+    @staticmethod
+    def _discard_logprob_rows(
+        rows_by_start: dict[int, LogprobRows], start: int, end: int
+    ) -> None:
+        remaining = []
+        for rows in rows_by_start.values():
+            keep = (rows.positions <= start) | (rows.positions > end)
+            if np.any(keep):
+                remaining.append(
+                    LogprobRows(
+                        rows.positions[keep],
+                        rows.token_ids[keep],
+                        rows.values[keep],
+                        rows.ranks[keep],
+                    )
+                )
+        rows_by_start.clear()
+        merged = concat_rows(remaining)
+        if merged is not None:
+            rows_by_start[int(merged.positions[0])] = merged
+
+    def _bind_pending_logprob_blocks(
+        self, state: _WorkerRequestState, rows: LogprobRows
+    ) -> None:
+        store = getattr(self, "_logprob_store", None)
+        if store is None or not state.pending_logprob_blocks:
+            return
+        retained = []
+        for position, token_ids in zip(rows.positions, rows.token_ids, strict=True):
+            if (
+                int(position) % self._logprob_block_size
+                or not state.pending_logprob_blocks
+            ):
+                continue
+            block_hash, fingerprint = state.pending_logprob_blocks.pop(0)
+            key = self._logprob_key(block_hash, int(token_ids[0]), fingerprint)
+            state.logprob_keys.append(key)
+            retained.append(key)
+        if retained:
+            store.put([], retain_keys=retained)
+
+    def _logprob_key(
+        self, block_hash: bytes, boundary_token_id: int, fingerprint: str
+    ) -> str:
+        return (
+            f"vllm-logprobs/v1/{self._generation}/{fingerprint}/"
+            f"{block_hash.hex()}/{boundary_token_id}"
+        )
+
     def _publish_blocks(
         self,
         batches: list[tuple[_WorkerRequestState, list[tuple[int, np.ndarray]]]],
@@ -485,12 +753,12 @@ class AuxOutputWorkerConnector:
     def _teardown(self, request_ids: Iterable[str]) -> None:
         """Drop finished requests' temporary state after publishing key releases."""
         buffer = self._buffer
-        assert buffer is not None
         for request_id in request_ids:
             state = self._requests.pop(request_id)
-            for _, rows in state.pending_blocks:
-                buffer.release_block(rows)
-            buffer.discard(request_id)
+            if buffer is not None:
+                for _, rows in state.pending_blocks:
+                    buffer.release_block(rows)
+                buffer.discard(request_id)
 
     def _get_namespace(self, generation: int) -> str:
         namespace = str(generation)
@@ -507,7 +775,9 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
-        if self._buffer is None or metadata is None:
+        if (
+            self._buffer is None and getattr(self, "_logprob_store", None) is None
+        ) or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
@@ -532,13 +802,23 @@ class AuxOutputWorkerConnector:
                     for state in self._requests.values()
                     for key in reversed(state.aux_output_keys)
                 )
-                self._buffer.reset()
+                release_logprob_keys = [
+                    key
+                    for state in self._requests.values()
+                    for key in reversed(state.logprob_keys)
+                ]
+                if self._buffer is not None:
+                    self._buffer.reset()
+                logprob_store = getattr(self, "_logprob_store", None)
+                if logprob_store is not None and release_logprob_keys:
+                    logprob_store.put([], release_keys=release_logprob_keys)
                 self._requests.clear()
                 self._generation = metadata.generation
             for request_id, emit_start in metadata.requests.items():
                 state = self._requests.setdefault(
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
+                state.prompt_len = metadata.prompt_lens.get(request_id, 0)
                 if state.pending_outputs == 0:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
@@ -555,6 +835,25 @@ class AuxOutputWorkerConnector:
                 state.aux_output_keys.extend(keys)
                 retained_keys.extend(keys)
                 block_batches.append((state, []))
+            retained_logprob_keys: list[str] = []
+            for request_id, fingerprint in metadata.logprobs.items():
+                state = self._requests[request_id]
+                logprob_hashes: list[bytes] = list(
+                    metadata.logprob_block_hashes.get(request_id, ())
+                )
+                boundaries = metadata.logprob_boundary_token_ids.get(request_id, ())
+                if len(logprob_hashes) != len(boundaries):
+                    raise ValueError("auxiliary logprobs block metadata is misaligned")
+                for block_hash, boundary in zip(
+                    logprob_hashes, boundaries, strict=True
+                ):
+                    if boundary is None:
+                        state.pending_logprob_blocks.append((block_hash, fingerprint))
+                    else:
+                        key = self._logprob_key(block_hash, boundary, fingerprint)
+                        state.logprob_keys.append(key)
+                        retained_logprob_keys.append(key)
+            self._publish_logprob_blocks(metadata.logprob_block_hashes)
             finished_now: list[str] = []
             for request_id in metadata.finished_requests:
                 state = self._requests[request_id]
@@ -563,7 +862,16 @@ class AuxOutputWorkerConnector:
                     continue
                 finished_now.append(request_id)
                 release_keys.extend(reversed(state.aux_output_keys))
-            self._publish_blocks(block_batches, retained_keys, release_keys)
+                logprob_store = getattr(self, "_logprob_store", None)
+                if logprob_store is not None:
+                    logprob_store.put(
+                        [], release_keys=list(reversed(state.logprob_keys))
+                    )
+            if self._buffer is not None:
+                self._publish_blocks(block_batches, retained_keys, release_keys)
+            logprob_store = getattr(self, "_logprob_store", None)
+            if logprob_store is not None:
+                logprob_store.put([], retain_keys=retained_logprob_keys)
             self._teardown(finished_now)
 
     def close(self) -> None:
@@ -575,6 +883,12 @@ class AuxOutputWorkerConnector:
                     store.close()
             finally:
                 self._buffer = None
+                logprob_store, self._logprob_store = (
+                    getattr(self, "_logprob_store", None),
+                    None,
+                )
+                if logprob_store is not None:
+                    logprob_store.close()
                 self._requests.clear()
                 self._step_metadata = None
                 self._close_capture()

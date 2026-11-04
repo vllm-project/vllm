@@ -105,6 +105,18 @@ steps:
       source_file_dependencies:
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (H200 MIG 18GB) Auxiliary Output Logprobs E2E"
+  key: auxiliary-output-logprobs-e2e
+  automatic_shard: true
+  timeout_in_minutes: 45
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/distributed/aux_output_connector/
+    - vllm/v1/
+    - tests/v1/e2e/test_aux_output_logprobs.py
+  commands:
+    - pytest -v -s v1/e2e/test_aux_output_logprobs.py
+
 - label: ":nvidia: (H200 MIG 18GB) E2E Scheduling Accuracy"
   key: e2e-scheduling-accuracy-1-gpu
   automatic_shard: true

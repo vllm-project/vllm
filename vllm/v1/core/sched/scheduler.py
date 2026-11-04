@@ -484,6 +484,8 @@ class Scheduler(SchedulerInterface):
                 self.connector,
                 enable_routed_experts=vllm_config.aux_output_config.enable_return_routed_experts,
                 enable_indexer=vllm_config.aux_output_config.enable_return_indexer_topk,
+                enable_logprobs=vllm_config.aux_output_config.enable_return_logprobs,
+                logprobs_mode=vllm_config.model_config.logprobs_mode,
             )
             if vllm_config.aux_output_config.enabled
             else None
@@ -2446,7 +2448,14 @@ class Scheduler(SchedulerInterface):
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
             )
-            if self.aux_output_connector is not None and should_emit_output:
+            if (
+                self.aux_output_connector is not None
+                and (
+                    self.vllm_config.aux_output_config.enable_return_routed_experts
+                    or self.vllm_config.aux_output_config.enable_return_indexer_topk
+                )
+                and should_emit_output
+            ):
                 routed_experts, indexer_topk = self.aux_output_connector.take_output(
                     request, model_runner_output.aux_output_connector_output
                 )
@@ -2474,7 +2483,12 @@ class Scheduler(SchedulerInterface):
                 and logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
-
+            if self.aux_output_connector is not None and new_token_ids:
+                logplist = self.aux_output_connector.take_logprobs(
+                    request, model_runner_output.aux_output_connector_output
+                )
+                if logplist is not None:
+                    new_logprobs = logplist.slice_request(0, len(new_token_ids))
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may

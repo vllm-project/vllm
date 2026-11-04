@@ -17,6 +17,9 @@ class AuxOutputConfig:
     enable_return_indexer_topk: bool = False
     """Capture and return sparse-attention index selections."""
 
+    enable_return_logprobs: bool = False
+    """Enable generated-token logprobs replay for opted-in requests."""
+
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or ``None`` to derive it from the KV cache capacity.
     Grows when every object is referenced."""
@@ -24,7 +27,11 @@ class AuxOutputConfig:
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts or self.enable_return_indexer_topk
+        return (
+            self.enable_return_routed_experts
+            or self.enable_return_indexer_topk
+            or self.enable_return_logprobs
+        )
 
     def compute_hash(self) -> str:
         """Hash AuxOutput settings that alter the model forward graph."""
@@ -33,5 +40,6 @@ class AuxOutputConfig:
         factors: dict[str, object] = {
             "enable_return_routed_experts": self.enable_return_routed_experts,
             "enable_return_indexer_topk": self.enable_return_indexer_topk,
+            "enable_return_logprobs": self.enable_return_logprobs,
         }
         return hash_factors(factors)

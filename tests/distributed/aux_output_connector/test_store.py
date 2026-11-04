@@ -25,11 +25,17 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
     PackedBlockHashes,
 )
+from vllm.distributed.aux_output_connector.logprobs import (
+    LogprobRows,
+    decode_rows,
+    encode_rows,
+)
 from vllm.distributed.aux_output_connector.store import (
     BackgroundBlockObjectStore,
     BlockObject,
     BlockObjectStore,
     BlockObjectStoreError,
+    VariableBlockObjectStore,
 )
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
@@ -66,6 +72,26 @@ def test_background_store_publishes_without_blocking_caller():
     store.close()
 
     underlying.close.assert_called_once_with()
+
+
+def test_variable_store_round_trips_logprob_rows():
+    rows = LogprobRows(
+        positions=np.array([4, 5], dtype=np.int64),
+        token_ids=np.array([[10, 11], [12, 13]], dtype=np.int32),
+        values=np.array([[-0.1, -0.2], [-0.3, -0.4]], dtype=np.float32),
+        ranks=np.array([0, 1], dtype=np.int32),
+    )
+    payload = encode_rows(rows)
+    store = VariableBlockObjectStore(max_bytes=len(payload))
+    store.put([BlockObject("logprobs", payload)])
+
+    decoded = decode_rows(store.get_concatenated(["logprobs"]))
+
+    np.testing.assert_array_equal(decoded.positions, rows.positions)
+    np.testing.assert_array_equal(decoded.token_ids, rows.token_ids)
+    np.testing.assert_array_equal(decoded.values, rows.values)
+    np.testing.assert_array_equal(decoded.ranks, rows.ranks)
+    store.close()
 
 
 def _kv_cache_manager(
