@@ -145,12 +145,6 @@ Whisper is supported natively. Other encoder-decoder models are supported via th
 For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
 following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).
 
-The encoder of an encoder-decoder model runs on what its multimodal processor
-packs into multimodal items. If the encoder also reads the prompt tokens, as in
-T5-style models, set `process_text_only_encoder_prompt = True` on the model's
-`EncDecMultiModalProcessor`, so that encoder prompts without multimodal data are
-processed too.
-
 ### Features
 
 | Feature                                     | Status                                                                            |
