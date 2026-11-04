@@ -220,8 +220,7 @@ def test_public_binding_supports_direct_capture_source():
     assert calls == [(3, topk_ids)]
 
 
-@pytest.mark.parametrize("custom", [False, True])
-def test_capture_uses_one_model_wide_restorer(custom, tmp_path, monkeypatch):
+def _cpu_capturer(tmp_path, monkeypatch):
     from transformers import MixtralConfig
 
     from vllm.platforms.cpu import CpuPlatform
@@ -243,33 +242,59 @@ def test_capture_uses_one_model_wide_restorer(custom, tmp_path, monkeypatch):
         device_config=DeviceConfig(device="cpu"),
     )
     monkeypatch.setattr(f"{_REC_MODULE}.current_platform", CpuPlatform())
-    capturer = RoutedExpertsCapturer(8, config)
-    provider = _CaptureRestorer if custom else _CaptureSource
-    model = torch.nn.ModuleList([_CaptureSource(0), provider(2), provider(2)])
-    bind_routed_experts_capturer(model, capturer)
+    return RoutedExpertsCapturer(8, config)
 
-    for start, rows in ((1, 2), (2, 1), (0, 0)):
+
+def test_custom_restorer_writes_returned_rows(tmp_path, monkeypatch):
+    """Capture writes the rows returned by the backend's single restorer."""
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    capturer.device_buffer.fill_(-1)
+    source = _CaptureRestorer(0)
+    bind_routed_experts_capturer(source, capturer)
+
+    ids = torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32)
+    original = ids.clone()
+    ctx = _forward_context(
+        batch_descriptor=BatchDescriptor(num_tokens=2),
+        additional_kwargs={"start": 1},
+    )
+    with override_forward_context(ctx):
+        source(ids)
+
+    expected = torch.full_like(capturer.device_buffer, -1)
+    expected[:2, 0] = original[1:3]
+    torch.testing.assert_close(capturer.device_buffer, expected)
+    torch.testing.assert_close(ids, original)
+    assert source.restore_calls == 1
+
+
+def test_shared_restorer_uses_current_context_for_each_layer(tmp_path, monkeypatch):
+    """The same callback handles distinct layers and reads each forward's context."""
+    capturer = _cpu_capturer(tmp_path, monkeypatch)
+    model = torch.nn.ModuleList([_CaptureRestorer(0), _CaptureRestorer(1)])
+    bind_routed_experts_capturer(model, capturer)
+    ids_by_layer = (
+        torch.tensor([[1, 2], [3, 4], [5, 6]], dtype=torch.int32),
+        torch.tensor([[7, 8], [9, 10], [11, 12]], dtype=torch.int32),
+    )
+
+    for start, rows in ((0, 2), (2, 1)):
         capturer.device_buffer.fill_(-1)
-        expected = torch.full_like(capturer.device_buffer, -1)
         ctx = _forward_context(
             batch_descriptor=BatchDescriptor(num_tokens=rows),
             additional_kwargs={"start": start},
         )
         with override_forward_context(ctx):
-            for i, source in enumerate(model):
-                ids = torch.arange(12, dtype=torch.int32).reshape(6, 2) + i
-                if not custom:
-                    ids = ids[:rows]
-                original = ids.clone()
+            for source, ids in zip(model, ids_by_layer, strict=True):
                 source(ids)
-                expected[:rows, source.layer_id] = (
-                    original[start : start + rows] if custom else original
-                )
-                torch.testing.assert_close(ids, original)
-                torch.testing.assert_close(capturer.device_buffer, expected)
-    if custom:
-        assert model[1].restore_calls == 9
-        assert model[2].restore_calls == 0
+
+        expected = torch.full_like(capturer.device_buffer, -1)
+        for layer_id, ids in enumerate(ids_by_layer):
+            expected[:rows, layer_id] = ids[start : start + rows]
+        torch.testing.assert_close(capturer.device_buffer, expected)
+
+    assert model[0].restore_calls == 4
+    assert model[1].restore_calls == 0
 
 
 _SINK_CONFIG = SimpleNamespace(
