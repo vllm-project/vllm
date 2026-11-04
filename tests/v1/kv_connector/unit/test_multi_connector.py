@@ -805,6 +805,23 @@ class TestMultiConnectorStats:
 
         child_metrics.observe.assert_called_once_with({"transfer_duration": [1.5]}, 2)
 
+    @pytest.mark.parametrize("with_exporter", [False, True])
+    def test_prom_metrics_skips_stats_only_connectors(self, with_exporter):
+        """Stats-only children must not prevent supported metrics from exporting."""
+        child_metrics = MagicMock()
+        metrics = object.__new__(MultiKVConnectorPromMetrics)
+        metrics._prom_metrics = (
+            {"MooncakeStoreConnector": child_metrics} if with_exporter else {}
+        )
+        payload = {"MooncakeConnector": {"bytes_transferred": [1024]}}
+        if with_exporter:
+            payload["MooncakeStoreConnector"] = {"load_get_bytes": [2048]}
+
+        metrics.observe(payload, engine_idx=2)
+
+        if with_exporter:
+            child_metrics.observe.assert_called_once_with({"load_get_bytes": [2048]}, 2)
+
     def test_aggregate_same_connector(self):
         """Test aggregating stats from the same connector type."""
         stats1 = MultiKVConnectorStats(
@@ -1213,6 +1230,37 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 
     mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
     assert mixed.supports_divergent_local_hybrid_hits is False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("top_role", "child_roles", "consumer", "producer"),
+    [
+        ("kv_producer", ["kv_producer", "kv_both"], True, True),
+        ("kv_producer", ["kv_producer", "kv_producer"], False, True),
+        ("kv_consumer", ["kv_consumer", "kv_both"], True, True),
+        ("kv_both", ["kv_producer"], False, True),
+    ],
+    ids=["loading-child", "pure-producers", "saving-child", "no-loading-child"],
+)
+def test_multi_connector_role_follows_children(
+    top_role, child_roles, consumer, producer
+):
+    """MultiConnector does not pass its own kv_role to its connectors, so their
+    roles decide whether it loads KV (e.g. whether the scheduler defers freeing
+    blocks) and whether it saves KV."""
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role=top_role,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "ExampleConnector", "kv_role": role}
+                for role in child_roles
+            ]
+        },
+    )
+    assert config.is_kv_consumer is consumer
+    assert config.is_kv_producer is producer
 
 
 @pytest.mark.skipif(

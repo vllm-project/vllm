@@ -93,6 +93,8 @@ def test_registry_imports(model_arch):
     [
         ("LlamaForCausalLM", False, "bi-encoder"),
         ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("Step5ForCausalLM", False, "bi-encoder"),
+        ("Step5ForConditionalGeneration", True, "bi-encoder"),
         ("DeepseekV41ForCausalLM", True, "bi-encoder"),
         ("BertForSequenceClassification", False, "cross-encoder"),
         ("RobertaForSequenceClassification", False, "cross-encoder"),
@@ -168,7 +170,10 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
     [
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
-        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        (
+            "KimiLinearForCausalLM",
+            not (current_platform.is_rocm() or current_platform.is_xpu()),
+        ),
         ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),

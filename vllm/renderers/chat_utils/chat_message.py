@@ -27,6 +27,7 @@ from .content_parser import (
     MODALITY_PLACEHOLDERS_MAP,
     PROMPT_EMBEDS_PLACEHOLDER_TOKEN,
     BaseMultiModalContentParser,
+    make_prompt_embeds_placeholder,
 )
 from .item_tracker import (
     AsyncMultiModalItemTracker,
@@ -274,7 +275,7 @@ def parse_chat_message_content_mm_part(
             )
             image_embeds = image_params.get("image_embeds", None)
             return "image_embeds", image_embeds
-        if "audio_embeds" in part:
+        if "audio_embeds" in part and part_type != "video_embeds":
             # "audio_embeds" could be None if UUID is provided.
             audio_params = cast(  # type: ignore[assignment]
                 ChatCompletionContentPartAudioEmbedsParam, part
@@ -348,7 +349,7 @@ _MEDIA_CONTENT_PART_KEYS = frozenset(MM_PARSER_MAP) - _TEXT_CONTENT_PART_TYPES
 
 
 def has_non_text_content(messages: Any) -> bool:
-    """Whether any message in ``messages`` has a non-text content part.
+    """Whether any message has non-text content or reasoning.
 
     Only list content is inspected, so validated chat content that is a
     one-shot iterator is never consumed.
@@ -356,6 +357,14 @@ def has_non_text_content(messages: Any) -> bool:
     if not isinstance(messages, list):
         return False
     for msg in messages:
+        if isinstance(msg, dict):
+            for field in ("reasoning", "reasoning_content"):
+                reasoning = msg.get(field)
+                if (
+                    isinstance(reasoning, dict)
+                    and reasoning.get("type") == "prompt_embeds"
+                ):
+                    return True
         content = msg.get("content") if isinstance(msg, dict) else None
         if not isinstance(content, list):
             continue
@@ -387,6 +396,7 @@ def parse_chat_message_content_parts(
         parse_res = parse_chat_message_content_part(
             part,
             mm_parser,
+            mm_tracker=mm_tracker,
             wrap_dicts=wrap_dicts,
             interleave_strings=interleave_strings,
         )
@@ -434,6 +444,7 @@ def parse_chat_message_content_part(
     part: ChatCompletionContentPartParam,
     mm_parser: BaseMultiModalContentParser,
     *,
+    mm_tracker: BaseMultiModalItemTracker,
     wrap_dicts: bool,
     interleave_strings: bool,
 ) -> ContentPart | None:
@@ -479,6 +490,7 @@ def parse_chat_message_content_part(
         uuid = str(uuid)
 
     modality = None
+    prompt_embeds_placeholder = None
     if part_type == "image_pil":
         image_content = cast(Image.Image, content) if content is not None else None
         mm_parser.parse_image_pil(image_content, uuid)
@@ -503,14 +515,17 @@ def parse_chat_message_content_part(
         content = (
             cast(MultiModalEmbedsPayload, content) if content is not None else None
         )
-        mm_parser.parse_video_embeds(content, uuid)
+        audio_embeds = cast(MultiModalEmbedsPayload | None, part.get("audio_embeds"))
+        mm_parser.parse_video_embeds(content, uuid, audio_embeds)
         modality = "video"
     elif part_type == "prompt_embeds":
         if not content:
             raise VLLMValidationError(
                 _PROMPT_EMBEDS_MISSING_DATA_ERROR, parameter="prompt_embeds"
             )
+        prompt_embeds_index = mm_tracker.get_num_items("prompt_embeds")
         mm_parser.parse_prompt_embeds(cast(str, content))
+        prompt_embeds_placeholder = make_prompt_embeds_placeholder(prompt_embeds_index)
         modality = "prompt_embeds"
     elif part_type == "audio_url":
         str_content = cast(str, content)
@@ -542,18 +557,18 @@ def parse_chat_message_content_part(
     if wrap_dicts:
         if modality == "prompt_embeds":
             # Chat templates don't know about the "prompt_embeds" modality,
-            # emit the single sentinel token as text so the template renders
-            # it inline. The renderer later expands it to N tokens post-tokenize.
-            return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
+            # emit a unique sentinel as text so the template renders it inline.
+            assert prompt_embeds_placeholder is not None
+            return {"type": "text", "text": prompt_embeds_placeholder}
         result = {"type": modality}
         result.update(_collect_extra_fields(cast(dict[str, Any], part)))
         return result
     if modality == "prompt_embeds":
-        # Emit the renderer token inline regardless of `interleave_strings`,
-        # prompt_embeds are spliced at the token offset so position matters.
+        # Emit the renderer token inline regardless of `interleave_strings`.
         # Falling back to front-padding via `missing_placeholders` would
         # reorder them relative to surrounding text.
-        return PROMPT_EMBEDS_PLACEHOLDER_TOKEN
+        assert prompt_embeds_placeholder is not None
+        return prompt_embeds_placeholder
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
 
@@ -602,6 +617,16 @@ def parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning")
+
+    if isinstance(reasoning, dict) and reasoning.get("type") == "prompt_embeds":
+        reasoning = parse_chat_message_content_parts(
+            role,
+            [cast(ChatCompletionContentPartParam, reasoning)],
+            mm_tracker,
+            wrap_dicts=False,
+            interleave_strings=interleave_strings,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )[0]["content"]
 
     if content is None:
         content = []
