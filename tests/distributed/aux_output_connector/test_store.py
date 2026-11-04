@@ -2306,6 +2306,50 @@ def test_scheduler_connector_sends_unscheduled_hash_update():
     assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
+def test_scheduler_connector_sends_logprob_hash_updates_for_all_idle_requests():
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}), enable_routed_experts=False, enable_logprobs=True
+    )
+
+    def make_request(request_id, token_offset):
+        block_hasher = lambda req: [
+            bytes([token_offset + index]) * 32
+            for index in range(len(req.block_hashes), req.num_tokens // _BLOCK_SIZE)
+        ]
+        return Request(
+            request_id=request_id,
+            prompt_token_ids=list(range(token_offset, token_offset + _BLOCK_SIZE)),
+            sampling_params=SamplingParams(
+                max_tokens=8,
+                logprobs=1,
+                extra_args={"aux_output_enabled": True},
+            ),
+            pooling_params=None,
+            block_hasher=block_hasher,
+        )
+
+    requests = [make_request("first", 0), make_request("second", 10)]
+    connector.build_connector_meta(
+        _step_output([request.request_id for request in requests], [0, 0], [1, 1]),
+        {request.request_id: request for request in requests},
+    )
+
+    for request in requests:
+        request.append_output_token_ids(list(range(100, 105)))
+        request.num_computed_tokens = 8
+
+    metadata = connector.build_connector_meta(
+        _step_output([], [], []), {request.request_id: request for request in requests}
+    )
+
+    assert not metadata.requests
+    assert set(metadata.logprob_block_hashes) == {"first", "second"}
+    assert metadata.logprob_boundary_token_ids == {
+        "first": (100, 104),
+        "second": (100, 104),
+    }
+
+
 def test_scheduler_connector_releases_finished_logprob_fingerprint():
     connector = AuxOutputSchedulerConnector(
         _kv_cache_manager({}), enable_routed_experts=False, enable_logprobs=True

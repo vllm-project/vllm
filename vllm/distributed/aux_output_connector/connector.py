@@ -164,13 +164,13 @@ class AuxOutputSchedulerConnector:
                 packed = self._take_new_hashes(request, request.num_computed_tokens)
                 if packed is not None:
                     block_hashes_by_request[request_id] = packed
-            if request_id in self._logprob_fingerprints:
-                self._add_logprob_hashes(
-                    request,
-                    request.num_computed_tokens,
-                    logprob_block_hashes,
-                    logprob_boundary_token_ids,
-                )
+                if request_id in self._logprob_fingerprints:
+                    self._add_logprob_hashes(
+                        request,
+                        request.num_computed_tokens,
+                        logprob_block_hashes,
+                        logprob_boundary_token_ids,
+                    )
         # Sending transfers ownership of these one-shot events.
         finished_requests = tuple(self._finished_requests)
         block_hashes_by_request.update(
