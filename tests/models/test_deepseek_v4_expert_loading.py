@@ -23,9 +23,13 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.amd import dspark as v4_amd_dspark
 from vllm.models.deepseek_v4.amd import model as v4_amd_model
 from vllm.models.deepseek_v4.amd import mtp as v4_amd_mtp
+from vllm.models.deepseek_v4.cpu import model as v4_cpu_model
 from vllm.models.deepseek_v4.nvidia import dspark as v4_dspark
 from vllm.models.deepseek_v4.nvidia import model as v4_model
 from vllm.models.deepseek_v4.nvidia import mtp as v4_mtp
+from vllm.models.deepseek_v4.xpu import dspark as v4_xpu_dspark
+from vllm.models.deepseek_v4.xpu import model as v4_xpu_model
+from vllm.models.deepseek_v4.xpu import mtp as v4_xpu_mtp
 from vllm.models.deepseek_v41.amd import dspark as v41_amd_dspark
 from vllm.models.deepseek_v41.amd import model as v41_amd_model
 from vllm.models.deepseek_v41.nvidia import dspark as v41_dspark
@@ -41,7 +45,9 @@ def _vllm_config():
         yield
 
 
-def _ffn_layer(tp, ep, num_redundant_experts=0, num_shared=0) -> nn.Module:
+def _ffn_layer(
+    tp, ep, num_redundant_experts=0, num_shared=0, ffn_cls=nn.Module
+) -> nn.Module:
     """A decoder layer stand-in: `ffn.experts` is a `MoERunner` around a CPU
     `RoutedExperts` with DSv4's `w1/w2/w3` checkpoint names, params at -7;
     `num_shared` fused shared experts follow the routed ones."""
@@ -64,13 +70,15 @@ def _ffn_layer(tp, ep, num_redundant_experts=0, num_shared=0) -> nn.Module:
     runner = object.__new__(MoERunner)
     nn.Module.__init__(runner)
     runner.routed_experts = experts
-    ffn = nn.Module()
+    ffn = object.__new__(ffn_cls)
+    nn.Module.__init__(ffn)
     ffn.experts = runner
     ffn.gate = nn.Module()
     ffn.gate.weight = nn.Parameter(torch.zeros(E, H), requires_grad=False)
     ffn.use_native_mega_moe = False
     ffn.use_mega_moe = False
     ffn.n_redundant_experts = num_redundant_experts
+    ffn.is_fused_shared_expert_enabled = num_shared > 0
     layer = nn.Module()
     layer.ffn = ffn
     return layer
@@ -91,8 +99,9 @@ def _main_model(model_cls):
             self.quant_config = None
             self.use_sequence_parallel = False
             self.use_mega_moe = False
-            # AMD: layers whose shared expert is fused into the routed experts
+            # AMD / CPU: whether the shared expert is fused into the routed ones
             self.fused_shared_expert_layers: frozenset[int] = frozenset()
+            self.is_fused_shared_expert_enabled = False
 
     return Model
 
@@ -154,6 +163,10 @@ MODELS = {
     "v4_amd_dspark": _dspark_model(v4_amd_dspark.DSparkDeepseekV4ForCausalLM),
     "v41_amd": _main_model(v41_amd_model.DeepseekV4Model),
     "v41_amd_dspark": _dspark_model(v41_amd_dspark.DSparkDeepseekV4ForCausalLM),
+    "v4_xpu": _main_model(v4_xpu_model.DeepseekV4Model),
+    "v4_xpu_mtp": _mtp_model(v4_xpu_mtp.DeepSeekV4MTP),
+    "v4_xpu_dspark": _dspark_model(v4_xpu_dspark.DSparkDeepseekV4ForCausalLM),
+    "v4_cpu": _main_model(v4_cpu_model.DeepseekV4Model),
 }
 # The NVIDIA MoE layers take EPLB redundant experts.
 EPLB_MODELS = {"v4", "v4_mtp", "v4_dspark", "v41", "v41_dspark"}
@@ -235,7 +248,9 @@ def test_routed_experts_load_through_the_moe_layer(
     }
 
 
-@pytest.mark.parametrize("model_key", ["v4", "v41", "v4_amd", "v41_amd"])
+@pytest.mark.parametrize(
+    "model_key", ["v4", "v41", "v4_amd", "v41_amd", "v4_xpu", "v4_cpu"]
+)
 def test_unmatched_expert_names_raise(model_key):
     model = MODELS[model_key](_ffn_layer((1, 0), (1, 0)))
     with pytest.raises(KeyError):
@@ -248,12 +263,17 @@ SHARED = [  # the one shared expert, as `shared_experts.w{1,2,3}.weight`
 ]
 
 
-@pytest.mark.parametrize("model_key", ["v4_amd"])
+@pytest.mark.parametrize("model_key", ["v4_amd", "v4_cpu"])
 @pytest.mark.parametrize("tp", [(1, 0), (2, 1)])
 def test_fused_shared_expert_loads_into_the_appended_slot(model_key, tp):
-    model = MODELS[model_key](_ffn_layer(tp, (1, 0), num_shared=1))
+    # The CPU loader finds fused layers by their DeepseekV4MoE type.
+    ffn_cls = v4_cpu_model.DeepseekV4MoE if model_key == "v4_cpu" else nn.Module
+    model, direct = (
+        MODELS[model_key](_ffn_layer(tp, (1, 0), num_shared=1, ffn_cls=ffn_cls))
+        for _ in range(2)
+    )
     model.fused_shared_expert_layers = frozenset({0})
-    direct = MODELS[model_key](_ffn_layer(tp, (1, 0), num_shared=1))
+    model.is_fused_shared_expert_enabled = True
     shared = [(f"layers.0.ffn.shared_experts.{n}", t) for n, t in SHARED]
     loaded = model.load_weights(_checkpoint(model, fused=False) + shared)
     list(
