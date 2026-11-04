@@ -5,8 +5,13 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_fp8_ds_mla import (
+    _dequantize_e4m3,
+    decode_attention_fwd_fp8_ds_mla,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -395,3 +400,186 @@ def test_decode_attention_int64_logits_offset(B, H_Q, H_KV, D_QK, D_V, is_mla):
     # Same compute order; the last request only differs in its logits offset.
     assert torch.equal(o[-1:], o_last)
     assert torch.equal(lse[-1:], lse_last)
+
+
+@triton.jit
+def _convert_packed_mla_e4m3(Bytes, Scales, Output):
+    d = tl.arange(0, 256)
+    tl.store(Output + d, _dequantize_e4m3(tl.load(Bytes + d), tl.load(Scales + d)))
+
+
+@pytest.mark.parametrize("scale", [0.0, 0.003, 1.0, 2.0**-126])
+def test_packed_fp8_software_e4m3_conversion(scale):
+    raw = torch.arange(256, dtype=torch.uint8, device="cuda")
+    scales = torch.full((256,), scale, dtype=torch.float32, device="cuda")
+    actual = torch.empty((256,), dtype=torch.bfloat16, device="cuda")
+    _convert_packed_mla_e4m3[(1,)](raw, scales, actual)
+    expected = (raw.view(torch.float8_e4m3fn).float() * scales).bfloat16()
+    finite = torch.isfinite(expected)
+    torch.testing.assert_close(torch.isnan(actual), torch.isnan(expected))
+    torch.testing.assert_close(
+        actual.view(torch.int16)[finite],
+        expected.view(torch.int16)[finite],
+        atol=0,
+        rtol=0,
+    )
+
+
+@pytest.mark.parametrize(
+    "token_stride,block_padding,storage_offset,workspace_width,workspace_padding,error",
+    [
+        (657, 0, 0, 513, 0, "cache strides and storage offset"),
+        (656, 1, 0, 513, 0, "cache strides and storage offset"),
+        (656, 0, 1, 513, 0, "cache strides and storage offset"),
+        (656, 0, 0, 512, 0, "workspace"),
+        (656, 0, 0, 513, 1, "workspace"),
+    ],
+)
+def test_packed_fp8_decode_rejects_invalid_layout(
+    token_stride,
+    block_padding,
+    storage_offset,
+    workspace_width,
+    workspace_padding,
+    error,
+):
+    """Reject unsafe typed cache views and incompatible split-KV workspace layouts."""
+    storage = torch.empty(
+        2 * 16 * token_stride + block_padding + storage_offset, dtype=torch.uint8
+    )
+    cache = storage.as_strided(
+        (2, 16, 656),
+        (16 * token_stride + block_padding, token_stride, 1),
+        storage_offset,
+    )
+    q = torch.empty(2, 2, 576, dtype=torch.bfloat16)
+    output = torch.empty(2, 2, 512, dtype=q.dtype)
+    lse = torch.empty(2, 2, dtype=torch.float32)
+    table = torch.zeros(2, 1, dtype=torch.int32)
+    lengths = torch.ones(2, dtype=torch.int32)
+    mid = torch.empty(2, 2, 2, workspace_width + workspace_padding)[
+        ..., :workspace_width
+    ]
+    with pytest.raises(AssertionError, match=error):
+        decode_attention_fwd_fp8_ds_mla(
+            q, cache, output, lse, table, lengths, mid, 2, 576**-0.5
+        )
+
+
+def _make_packed_fp8_mla_case(batch, length, heads, page_size, padded):
+    torch.manual_seed(42)
+    pages_per_request = triton.cdiv(length, page_size)
+    pages = batch * pages_per_request
+    table = torch.randperm(pages, device="cuda").reshape(batch, -1).int()
+    lengths = torch.tensor(
+        [max(1, length - 17 * i) for i in range(batch)],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    latent = torch.randn(pages, page_size, 512, device="cuda", dtype=torch.bfloat16)
+    rope = torch.randn(pages, page_size, 64, device="cuda", dtype=torch.bfloat16)
+    grouped = latent.float().reshape(pages, page_size, 4, 128)
+    scales = (grouped.abs().amax(-1) / 448).clamp_min(torch.finfo(torch.float32).tiny)
+    fp8 = (grouped / scales[..., None]).to(torch.float8_e4m3fn)
+    storage = torch.empty(
+        pages, page_size, 672 if padded else 656, device="cuda", dtype=torch.uint8
+    )
+    cache = storage[..., :656]
+    cache[..., :512] = fp8.reshape(pages, page_size, 512).view(torch.uint8)
+    cache[..., 512:528] = scales.contiguous().view(torch.uint8)
+    cache[..., 528:] = rope.view(torch.uint8)
+    restored = (
+        (fp8.float() * scales[..., None]).reshape(pages, page_size, 512).bfloat16()
+    )
+    unpacked = torch.cat((restored, rope), dim=-1)
+    q = torch.randn(batch, heads, 576, device="cuda", dtype=torch.bfloat16)
+    return q, cache, unpacked, table, lengths
+
+
+def _assert_packed_mla_reference(q, unpacked, table, lengths, output, lse):
+    for b, length in enumerate(lengths.cpu().tolist()):
+        kv = unpacked[table[b].long()].reshape(-1, 576)[:length].float()
+        logits = (q[b].float() @ kv.T) * 576**-0.5
+        expected = logits.softmax(-1) @ kv[:, :512]
+        torch.testing.assert_close(output[b].float(), expected, atol=0.005, rtol=0.03)
+        torch.testing.assert_close(
+            lse[b].float(), logits.logsumexp(-1), atol=0.01, rtol=0.001
+        )
+
+
+@pytest.mark.parametrize(
+    "batch,length,heads,page_size,splits",
+    [
+        (1, 1, 1, 16, 4),
+        (3, 31, 17, 16, 4),
+        (3, 1027, 32, 16, 16),
+        (5, 1025, 16, 32, 8),
+        (2, 4097, 16, 16, 1),
+        (2, 8193, 128, 16, 16),
+    ],
+)
+@pytest.mark.parametrize("padded", [False, True])
+def test_packed_fp8_decode(batch, length, heads, page_size, splits, padded):
+    q, cache, unpacked, table, lengths = _make_packed_fp8_mla_case(
+        batch, length, heads, page_size, padded
+    )
+    output = torch.empty(batch, heads, 512, device="cuda", dtype=q.dtype)
+    lse = torch.empty(batch, heads, device="cuda", dtype=torch.float32)
+    mid = torch.full(
+        (batch, heads, splits, 513), float("nan"), device="cuda", dtype=torch.float32
+    )
+    decode_attention_fwd_fp8_ds_mla(
+        q, cache, output, lse, table, lengths, mid, splits, 576**-0.5
+    )
+    _assert_packed_mla_reference(q, unpacked, table, lengths, output, lse)
+
+
+def test_packed_fp8_cuda_graph_replay():
+    q, cache, unpacked, table, lengths = _make_packed_fp8_mla_case(
+        3, 1027, 17, 16, False
+    )
+    output = torch.empty(3, 17, 512, device="cuda", dtype=q.dtype)
+    lse = torch.empty(3, 17, device="cuda", dtype=torch.float32)
+    mid = torch.empty(3, 17, 16, 513, device="cuda", dtype=torch.float32)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            decode_attention_fwd_fp8_ds_mla(
+                q, cache, output, lse, table, lengths, mid, 16, 576**-0.5
+            )
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        decode_attention_fwd_fp8_ds_mla(
+            q, cache, output, lse, table, lengths, mid, 16, 576**-0.5
+        )
+    lengths.copy_(torch.tensor([1, 31, 1025], device="cuda", dtype=torch.int32))
+    q.mul_(0.5)
+    graph.replay()
+    _assert_packed_mla_reference(q, unpacked, table, lengths, output, lse)
+
+
+def test_packed_fp8_batch_invariance():
+    q, cache, _, table, lengths = _make_packed_fp8_mla_case(3, 1027, 17, 16, False)
+    output = torch.empty(3, 17, 512, device="cuda", dtype=q.dtype)
+    lse = torch.empty(3, 17, device="cuda", dtype=torch.float32)
+    mid = torch.empty(3, 17, 1, 513, device="cuda", dtype=torch.float32)
+    decode_attention_fwd_fp8_ds_mla(
+        q, cache, output, lse, table, lengths, mid, 1, 576**-0.5
+    )
+    single_output = torch.empty_like(output[:1])
+    single_lse = torch.empty_like(lse[:1])
+    decode_attention_fwd_fp8_ds_mla(
+        q[:1],
+        cache,
+        single_output,
+        single_lse,
+        table[:1],
+        lengths[:1],
+        mid[:1],
+        1,
+        576**-0.5,
+    )
+    torch.testing.assert_close(single_output, output[:1], atol=0, rtol=0)
+    torch.testing.assert_close(single_lse, lse[:1], atol=0, rtol=0)
