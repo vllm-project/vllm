@@ -24,14 +24,14 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
+from vllm.v1.worker.gpu.spec_decode.autoregressive import (
     cudagraph_utils as spec_cudagraph_utils,
+)
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
 )
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar import (
     speculator as spec_module,
-)
-from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
-    SpeculatorCudaGraphManager,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -438,8 +438,8 @@ def test_mixed_batch_never_selects_a_uniform_decode_graph(monkeypatch):
 
 def test_varlen_decode_graph_takes_bounded_decode_batches_only(monkeypatch):
     """A varlen decode graph replays any decode batch within its query-length
-    bound. The runner passes no bound for a batch with a prefill, which must not
-    replay one however short the prefill is."""
+    bound. The runner passes no bound for a batch that is not decode-eligible,
+    which must not replay one however short the prefill is."""
     manager = _make_spec_decode_manager(monkeypatch, varlen_decode=True)
 
     def dispatch(max_query_len):
@@ -517,15 +517,22 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         max_query_len if decode_eligible else None,
         dp_size=dp_size,
         dp_rank=0,
-        max_query_len=None if has_prefill else max_query_len,
+        max_query_len=max_query_len if decode_eligible else None,
     )
     hidden_states = torch.zeros(target_desc.num_tokens, 1)
-    speculator = SimpleNamespace(
+
+    class _Speculator(spec_module.TargetDependentARSpeculator):
+        max_model_len = 4096
+
+        def load_draft_model(self, target_model, target_attn_layer_names):
+            raise NotImplementedError
+
+    speculator = object.__new__(_Speculator)
+    speculator.__dict__.update(
         vllm_config=target.vllm_config,
         device=torch.device("cpu"),
         num_speculative_steps=3,
         enable_adaptive_verification=adaptive,
-        max_model_len=4096,
         max_num_reqs=8,
         dp_size=dp_size,
         dp_rank=0,
@@ -536,9 +543,8 @@ def test_draft_prefill_matches_shared_target_metadata_shape(
         input_buffers=None,
         _copy_request_inputs=lambda *a, **kw: None,
     )
-    spec_module.TargetDependentARSpeculator.init_cudagraph_manager(
-        speculator, CUDAGraphMode.FULL_AND_PIECEWISE
-    )
+    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_AND_PIECEWISE)
+    assert speculator.prefill_cudagraph_manager is not None
     speculator.prefill_cudagraph_manager._graphs_captured = True
     batch = SimpleNamespace(
         num_reqs=4,
