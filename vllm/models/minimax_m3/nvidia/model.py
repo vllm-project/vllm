@@ -1395,8 +1395,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             )
         else:
             # MXFP8 output when qkv_proj consumes it (checked per call: LoRA
-            # wrappers installed after construction change the key).
-            mxfp8 = _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
+            # wrappers installed after construction change the key), but not
+            # under sequence parallelism, which all-gathers the norm output.
+            mxfp8 = not self.use_sequence_parallel and _consumes_mxfp8_128x4(
+                self.self_attn.qkv_proj
+            )
             if residual is None:
                 residual = hidden_states
                 hidden_states = self.input_layernorm(hidden_states, mxfp8=mxfp8)
