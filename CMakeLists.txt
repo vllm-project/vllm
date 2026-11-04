@@ -1657,7 +1657,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_wvsplitkq.cu")
 
   # The int4 skinny GEMM is instantiated one unit per N_in (a template over
-  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
+  # N_in, see skinny_gemms_int4.h), with the dense and MoE kernels in separate
+  # units so they compile in parallel: with the whole op in one unit the 9-arch
   # build spends its entire length compiling that single file.
   # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
   # with extern template keeping the device code in the per-N_in units.
@@ -1670,7 +1671,12 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms_int4_n5.cu"
     "csrc/rocm/skinny_gemms_int4_n6.cu"
     "csrc/rocm/skinny_gemms_int4_n7.cu"
-    "csrc/rocm/skinny_gemms_int4_n8.cu")
+    "csrc/rocm/skinny_gemms_int4_n8.cu"
+    "csrc/rocm/skinny_gemms_int4_moe_n1.cu"
+    "csrc/rocm/skinny_gemms_int4_moe_n2.cu"
+    "csrc/rocm/skinny_gemms_int4_moe_n3.cu"
+    "csrc/rocm/skinny_gemms_int4_moe_n4.cu"
+    "csrc/rocm/skinny_gemms_int4_moe_n5.cu")
   # Both families are built into _rocm_C_skinny below.
   list(APPEND VLLM_SKINNY_SRC ${VLLM_SKINNY_INT4_SRC})
 
