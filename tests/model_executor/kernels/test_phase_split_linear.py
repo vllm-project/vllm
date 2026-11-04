@@ -262,8 +262,8 @@ def test_phase_split_rejects_kernel_without_both_modes(vllm_config) -> None:
     message = str(error.value)
     assert "weight=nvfp4" in message
     assert "decode=unquantized, prefill=nvfp4, max_decode_tokens=8" in message
-    assert "_A16OnlyKernel cannot serve both phases" in message
-    with pytest.raises(NotImplementedError, match=r"backend\): _DualKernel\."):
+    assert "_A16OnlyKernel cannot serve it" in message
+    with pytest.raises(NotImplementedError, match=r"b12x\): _DualKernel\."):
         maybe_phase_split(object(), _phase(), weight="nvfp4", candidates=[_DualKernel])
 
 

@@ -202,7 +202,10 @@ def test_phase_resolves_activation_modes(decode, prefill, modes, scale):
 
 def test_phase_defaults_and_optional_cutoff():
     phase = quant_spec(phase={**_PHASE, "scale": "dynamic_tensor"}).phase
-    assert phase == quant_spec(phase={"max_decode_tokens": 1024}).phase
+    assert (
+        phase
+        == quant_spec(phase={"prefill": "nvfp4", "max_decode_tokens": 1024}).phase
+    )
     # One format for both phases needs no cutoff.
     for fmt in ("nvfp4", "mxfp8", "unquantized"):
         phase = quant_spec(phase={"decode": fmt, "prefill": fmt}).phase
@@ -279,6 +282,27 @@ def test_online_mxfp8_accepts_phase():
     assert resolved is not None
     assert resolved[-1] is Mxfp8OnlineLinearMethod
     assert resolved[-2].phase == quant_spec(phase=phase).phase
+
+
+@pytest.mark.parametrize(
+    "shorthand,linear",
+    [
+        ("mxfp4", {"activation": None, "weight": None}),
+        ("fp8_per_tensor", {}),
+        ("fp8_per_tensor", {"weight": None}),
+    ],
+)
+def test_shorthand_respects_explicitly_unquantized_linear(shorthand, linear):
+    """An explicit linear spec without a phase keeps linears unquantized, as in
+    the MoE-only recipes; only a phase-only spec inherits the weight."""
+    args = resolve_quantization_config(shorthand, {"linear": linear})
+    assert args is not None and args.linear is not None
+    assert args.linear.weight is None
+
+
+def test_phase_requires_prefill():
+    with pytest.raises(ValueError, match="prefill"):
+        quant_spec(phase={"decode": "mxfp8", "max_decode_tokens": 8})
 
 
 def test_mxfp8_shorthand_keeps_weight_with_phase():

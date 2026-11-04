@@ -432,8 +432,9 @@ class KernelConfig:
     CUDA graph capture size; not supported with data parallelism or encoder CUDA
     graphs. None (default) keeps BF16 activations for every input. Alias for
     quantization_config.linear.phase with decode "unquantized", prefill "nvfp4",
-    max_decode_tokens set to this value and scale "dynamic_tensor". The lm_head
-    copies of draft_lm_head_quantization keep BF16 activations."""
+    max_decode_tokens set to this value and scale "dynamic_tensor", so it is
+    also rejected with VLLM_BATCH_INVARIANT. The lm_head copies of
+    draft_lm_head_quantization keep BF16 activations."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod

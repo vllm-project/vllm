@@ -64,6 +64,7 @@ quantization_config:
   linear:
     weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
     activation: <name>
+    phase: {decode: <format>, prefill: <format>, max_decode_tokens: <rows>}
   moe:
     weight: <name>
     activation: <name>
@@ -121,8 +122,10 @@ quantized format of the weights:
 | NVFP4 W4A16 | b12x | `unquantized` or `nvfp4` | `unquantized` or `nvfp4` | `dynamic_tensor` (default) with `nvfp4`, else unset |
 | MXFP8, checkpoint or online | b12x | `unquantized` or `mxfp8` | `unquantized` or `mxfp8` | unset |
 
-`max_decode_tokens` is required when `decode` and `prefill` differ. A phase
-applies to NVFP4 linears when it uses `nvfp4` or only `unquantized`, and to
+`prefill` is required and `decode` defaults to `unquantized`. Both rows need
+BF16 activations (`--dtype bfloat16`).
+`max_decode_tokens` is required when `decode` and `prefill` differ, and unused
+when they match. A phase applies to NVFP4 linears when it uses `nvfp4` or only `unquantized`, and to
 MXFP8 linears when it uses `mxfp8` or only `unquantized`; mixing `nvfp4` and
 `mxfp8` is rejected, since it needs two weight copies. For example, to keep
 BF16 activations for decode and quantize prefills to NVFP4:
@@ -142,7 +145,10 @@ copies use the model dtype. `phase` cannot be combined with `activation`,
 `moe.phase` is not supported, and online-quantized linears reject it unless
 their weights are MXFP8 (`--quantization mxfp8`). For an MXFP8 checkpoint, pass
 the phase with `--quantization-config` alone: adding `--quantization mxfp8`
-also quantizes the linears the checkpoint keeps in the model dtype.
+applies online MXFP8 to every linear, re-quantizing the checkpoint's MXFP8
+linears and quantizing the rest. The phase applies to every eligible
+checkpoint linear; `ignore` only affects online quantization. Batched (BMM)
+MXFP8 layers keep their own activations.
 
 `dynamic_tensor` shares one NVFP4 scale, computed from the absolute maximum,
 across every request in a call, so outputs depend on batch composition. NVFP4

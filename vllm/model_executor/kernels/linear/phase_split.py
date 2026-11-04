@@ -229,8 +229,8 @@ def maybe_phase_split(
     raise NotImplementedError(
         f"quantization_config.linear.phase ({phase}) with weight={weight} on "
         f"{current_platform.device_name}: {type(kernel).__name__} cannot serve "
-        "both phases from one weight copy. Kernels that can, where supported "
-        f"(see --linear-backend): {', '.join(capable) or 'none'}."
+        "it from one weight copy. Kernels that can, where supported "
+        f"(--linear-backend b12x): {', '.join(capable) or 'none'}."
     )
 
 

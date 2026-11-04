@@ -90,11 +90,12 @@ class PhaseSpec:
     "unquantized".
     """
 
-    decode: Literal["unquantized", "nvfp4", "mxfp8"] = "unquantized"
-    """Activations of small calls: "unquantized" keeps the model dtype."""
+    prefill: Literal["unquantized", "nvfp4", "mxfp8"]
+    """Activations of large calls (required)."""
 
-    prefill: Literal["unquantized", "nvfp4", "mxfp8"] = "nvfp4"
-    """Activations of large calls."""
+    decode: Literal["unquantized", "nvfp4", "mxfp8"] = "unquantized"
+    """Activations of small calls: "unquantized" (default) keeps the model
+    dtype."""
 
     max_decode_tokens: int | None = Field(default=None, ge=1)
     """Largest call, in rows, that uses `decode`. Required when `decode` and
@@ -370,6 +371,7 @@ def resolve_quantization_config(
         and base.linear is not None
         and linear.weight is None
         and linear.activation is None
+        and linear.phase is not None
     ):
         # A spec that only sets the phase keeps the shorthand's weight format.
         linear = QuantSpec(weight=base.linear.weight, phase=linear.phase)

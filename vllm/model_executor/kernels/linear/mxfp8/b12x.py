@@ -217,6 +217,12 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
             return _apply_b12x_mxfp8_packed_linear(layer, x, bias)
         if mode is not None and mode != kMxfp8Dynamic:
             raise ValueError(f"b12x MXFP8 does not support activations {mode}")
+        if x.dtype != torch.bfloat16:
+            # b12x picks the activation mode per call for BF16 sources only.
+            raise ValueError(
+                "quantization_config.linear.phase on b12x MXFP8 requires BF16 "
+                f"activations (--dtype bfloat16), got {x.dtype}"
+            )
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         # Rows beyond the planned capacity (e.g. an encoder batch) run in
         # capacity-sized chunks; an unplanned call would prepare on first use.

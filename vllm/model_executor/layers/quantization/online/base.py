@@ -278,7 +278,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
         if spec.phase is not None and cls is not Mxfp8OnlineLinearMethod:
             raise ValueError(
                 f"quantization_config.linear.phase ({spec.phase}) is not "
-                f"supported for online {cls.__name__}"
+                f"supported for online {cls.__name__}; of the online methods, "
+                "only MXFP8 (--quantization mxfp8) supports it"
             )
         return cls
 

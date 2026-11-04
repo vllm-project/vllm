@@ -811,6 +811,7 @@ def test_b12x_backend_selects_w4a16(monkeypatch) -> None:
 
 
 def _b12x_phase(max_decode_tokens: int | None, **formats: str) -> PhaseSpec:
+    formats.setdefault("prefill", "nvfp4")
     return PhaseSpec(max_decode_tokens=max_decode_tokens, **formats)
 
 
@@ -970,8 +971,8 @@ def test_mxfp8_phase_rejects_other_kernels_and_formats(monkeypatch, _select_b12x
         init_mxfp8_linear_kernel(weight_shape=(2048, 2048))
     message = str(error.value)
     assert "weight=mxfp8" in message
-    assert "EmulationMxfp8LinearKernel cannot serve both phases" in message
-    assert "B12xMxfp8LinearKernel" in message.rsplit("backend):", 1)[1]
+    assert "EmulationMxfp8LinearKernel cannot serve it" in message
+    assert "B12xMxfp8LinearKernel" in message.rsplit("b12x):", 1)[1]
     # Batched (BMM) layers keep their own activations.
     kernel = init_mxfp8_linear_kernel(weight_shape=(2048, 2048), bmm_batch_size=4)
     assert type(kernel) is EmulationMxfp8LinearKernel
@@ -1482,6 +1483,9 @@ def test_b12x_mxfp8_plans_and_dispatches_every_cell(
     assert all(scale is None for *_, scale in calls)
     with pytest.raises(ValueError, match="does not support activations"):
         kernel.kernel.apply_weights(layer, x, mode=kNvfp4DynamicTensor)
+    # b12x picks the activation mode per call for BF16 sources only.
+    with pytest.raises(ValueError, match="requires BF16 activations"):
+        kernel.apply_weights(layer, x.half())
 
     calls.clear()
     layer.b12x_warmup_provider.get_b12x_warmup_unit(
