@@ -516,7 +516,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
 | `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `speed-bench`, `hf`) |
-| `--dataset-path` | — | Path to dataset file (`sharegpt` auto-downloads when omitted) |
+| `--dataset-path` | — | Path to dataset file, or HF dataset ID for `hf` (`sharegpt` auto-downloads when omitted; rejected with synthetic datasets such as `random`) |
 | `--num-prompts` | `1000` | Number of prompts to generate (conversations in multi-turn mode) |
 | `--max-model-len` | — | Filter out requests where `prompt_len + output_len` exceeds this context length |
 | `--input-len` | — | Override input length (general) |
@@ -830,7 +830,7 @@ src/
 - **Enum dispatch** — backend variants instead of trait objects (avoids async trait-object limitations)
 - **Typed SSE deserialization** — `CompletionChunk`/`ChatChunk` structs skip unused JSON fields (cheaper than `serde_json::Value`)
 - **Speculative JSON parse** — SSE handler uses `serde_json::value::RawValue` to detect complete JSON before `\n\n` arrives, improving TTFT/ITL accuracy when TCP segments split
-- **Connection error retry** — automatic retry with backoff on connection reset/timeout/refused (up to 3 attempts)
+- **Measured request semantics** — each workload request is attempted once, matching Python; connection failures are reported rather than retried
 - **Tokenizer verification cache** — server-side token-length verification is cached per model+server pair
 
 ### Behavioral parity with Python
