@@ -363,6 +363,117 @@ fn serve_args_auto_forward_enable_lora_to_python() {
 }
 
 #[test]
+fn serve_args_accept_python_underscore_flag_names() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--served_model_name",
+        "qwen",
+        "--max_model_len=1024",
+        "--enforce_eager",
+        "--kv_transfer_config.kv_role",
+        "kv_both",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("1024"));
+    expect![[r#"
+        [
+            "--enforce-eager",
+            "--kv-transfer-config.kv_role",
+            "kv_both",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_merge_dotted_forms_of_frontend_flags() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.rope_scaling.rope_type",
+        "yarn",
+        "--compilation-config.mode",
+        "3",
+        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.max_position_embeddings",
+        "32k",
+        "--hf-overrides.sliding_window=4K",
+        "--hf-overrides.note",
+        "1.5K",
+        "--structured-outputs-config.backend",
+        "guidance",
+        "--default-chat-template-kwargs.enable_thinking",
+        "false",
+        "--default-chat-template-kwargs.tags+",
+        "a,b",
+        "--default-chat-template-kwargs.tags+=c",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let hf_overrides = serde_json::json!({
+        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "max_position_embeddings": 32000,
+        "sliding_window": 4096,
+        "note": "1.5K",
+    });
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        hf_overrides
+    );
+    assert_eq!(
+        serde_json::to_value(&args.runtime.default_chat_template_kwargs).unwrap(),
+        serde_json::json!({"enable_thinking": false, "tags": ["a", "b", "c"]})
+    );
+    // Shared flags still reach the engine; dotted forms of engine-only flags
+    // are left for Python to expand.
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = |flag: &str| {
+        let index = engine.python_args.iter().position(|arg| arg == flag).unwrap();
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap()
+    };
+    assert_eq!(forwarded("--hf-overrides"), hf_overrides);
+    assert_eq!(
+        forwarded("--structured-outputs-config"),
+        serde_json::json!({"backend": "guidance"})
+    );
+    expect![[r#"
+        [
+            "--compilation-config.mode",
+            "3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_reject_dotted_frontend_flag_without_value() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.max_position_embeddings",
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a value is required for '--hf-overrides.max_position_embeddings'"),
+        "{error}"
+    );
+}
+
+#[test]
 fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
