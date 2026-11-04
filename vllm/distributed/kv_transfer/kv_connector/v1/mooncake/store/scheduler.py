@@ -295,6 +295,9 @@ class MooncakeStoreScheduler:
         num_external_tokens: int,
     ):
         """Update state after block allocation."""
+        # The lookup is consumed; a reschedule (e.g. after a failed load) must
+        # not reuse its hit.
+        self.client.discard(request.request_id)
         local_block_ids: tuple[list[int], ...] = ()
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids(

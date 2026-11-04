@@ -2797,7 +2797,11 @@ class LookupKeyClient:
         slots = self._prefetch_slots
         if slots is None or not slots.acquire(blocking=False):
             return False
-        future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+        try:
+            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+        except RuntimeError:  # executor shut down
+            slots.release()
+            return False
         future.add_done_callback(lambda _: slots.release())
         self._lookups[req_id] = LookupState(
             future=future,

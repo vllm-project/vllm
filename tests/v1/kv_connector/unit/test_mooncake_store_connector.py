@@ -844,6 +844,9 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         assert mock_make_socket.return_value.send_multipart.call_count == 1
         assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
         assert mock_make_socket.return_value.send_multipart.call_count == 1
+        # Once allocated, a reschedule (e.g. after a failed load) looks up anew.
+        connector.update_state_after_alloc(request, MagicMock(), 16)
+        assert request.request_id not in sched.client._lookups
     finally:
         connector.shutdown()
 
@@ -1004,6 +1007,14 @@ def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
     finally:
         gate.set()
         client.close()
+
+
+def test_prefetch_after_close_starts_nothing():
+    client, _ = _make_lookup_client({"lookup_prefetch_limit": 1})
+    client.close()
+    assert client.prefetch("req", 48, []) is False
+    assert client._lookups == {}
+    assert client._prefetch_slots.acquire(blocking=False)
 
 
 def test_reset_clears_cached_async_results():
