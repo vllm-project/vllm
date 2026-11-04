@@ -17,7 +17,6 @@ import torch
 
 from tests.utils_tree import depths_and_ancestors, path_to, random_parents
 from vllm.config import CacheConfig
-from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu import model_runner as model_runner_module
 from vllm.v1.worker.gpu.input_batch import prepare_pos_seq_lens
@@ -27,7 +26,6 @@ from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.commit import (
-    ConvWindowAligner,
     KvCompactor,
     accept_result_of,
     accepted_rows,
@@ -591,14 +589,13 @@ def test_tree_commit_compacts_and_resumes_from_the_path(monkeypatch):
     )
     model_state = SimpleNamespace(postprocess_state=Mock())
     runner, batch = _commit_runner(plan, model_state)
-    # The reference commit kernels as bound for a model without conv states.
+    # The reference commit kernel as bound for a tree plan.
     registry = KernelRegistry()
     kv_commit = registry.get(("layout:paged_token", "commit"))
-    state_commit = registry.get(("layout:mamba_state@slots", "commit"))
-    assert isinstance(kv_commit, KvCompactor) and state_commit is not None
+    assert isinstance(kv_commit, KvCompactor)
     compact = Mock()
     monkeypatch.setattr(kv_commit, "commit", compact)
-    registry._commits = [kv_commit, state_commit]
+    registry._commits = [kv_commit]
     runner.spec_round.kernels = registry
     runner.spec_round.kernel_context = object()
     result = AcceptResult(
@@ -815,70 +812,6 @@ def _layer(name, module, block_table, block_size=0, num_blocks=0):
         block_size=block_size,
         num_blocks=num_blocks,
     )
-
-
-def _chain_order_window_commit(window, slot, path, length, width):
-    """A commit that moves the path to chain order: path row ``j`` moves from
-    column ``(k-2) + path[j]`` to ``(k-2) + j``; the next step then reads the
-    ``k - 1`` columns ending at ``(k-2) + length - 1``."""
-    window = window.clone()
-    for j in range(1, length):
-        window[slot, :, width - 2 + j] = window[slot, :, width - 2 + path[j]]
-    end = width - 2 + length - 1
-    return window[slot, :, end - (width - 2) : end + 1]
-
-
-@requires_kernels
-@pytest.mark.parametrize("width", [2, 4])
-@pytest.mark.parametrize("seed", range(3))
-def test_conv_window_alignment_reads_what_a_chain_order_commit_reads(width, seed):
-    """The engine keeps the state where the last accepted row wrote it and lines
-    the conv window up to end at that row; the next step reads the same k - 1
-    conv inputs as after moving the path to chain order."""
-    gen = np.random.default_rng(900 + seed)
-    num_reqs, num_rows, dim, num_slots = 5, 6, 40, 9
-    window = torch.randn(num_slots, dim, width - 2 + num_rows + 1).to(DEVICE)
-    # Column 0 of each request's table row is its state slot; request 4 is idle.
-    slots = [3, 1, 7, 5, 0]
-    table = torch.zeros(num_reqs + 2, 4, dtype=torch.int32)
-    table[:num_reqs, 0] = torch.tensor(slots)
-    paths, lengths = [], []
-    for _ in range(num_reqs):
-        length = int(gen.integers(1, num_rows + 1))
-        rows = sorted(gen.choice(np.arange(1, num_rows), length - 1, replace=False))
-        paths.append([0, *map(int, rows)] + [0] * (num_rows - length))
-        lengths.append(length)
-    result = AcceptResult(
-        torch.tensor(paths, dtype=torch.int32, device=DEVICE),
-        torch.tensor(lengths, dtype=torch.int32, device=DEVICE),
-        torch.zeros(num_reqs, num_rows, dtype=torch.int64, device=DEVICE),
-    )
-    expected = [
-        _chain_order_window_commit(window, slots[b], paths[b], lengths[b], width)
-        for b in range(num_reqs - 1)
-    ]
-    before = window.clone()
-
-    layer = SimpleNamespace(
-        kv_cache=[window if is_conv_state_dim_first() else window.mT],
-        conv1d=SimpleNamespace(weight=torch.empty(dim, 1, width)),
-    )
-    aligner = ConvWindowAligner()
-    aligner.bind(
-        _kernel_context(window.device),
-        [_layer("conv", layer, table.to(DEVICE))],
-    )
-    aligner.commit(CommitStep(result, num_reqs, count=None, seq_lens=None))
-
-    for b in range(num_reqs - 1):
-        last = paths[b][lengths[b] - 1]
-        end = width - 2 + last
-        assert torch.equal(
-            window[slots[b], :, end - (width - 2) : end + 1], expected[b]
-        )
-    # The null slot (an idle request) and other slots are untouched.
-    untouched = [s for s in range(num_slots) if s not in slots[:-1]]
-    assert torch.equal(window[untouched], before[untouched])
 
 
 # --- SpecResources and the candidate budget on the speculator config --------

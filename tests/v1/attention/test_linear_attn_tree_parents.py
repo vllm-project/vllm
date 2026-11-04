@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""``CommonAttentionMetadata.tree_parents`` reaches the GDN spec kernels and
-sends the batch past the chain-only fused MTP kernel. CPU only, kernels faked."""
+"""``CommonAttentionMetadata.tree_parents`` reaches the GDN spec rows, which the
+layer's own kernels verify only as chains. CPU only, kernels faked."""
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_layer_module
@@ -138,47 +139,15 @@ def test_builder_hands_the_spec_rows_their_parents():
     assert torch.equal(metadata.spec_tree_parents.cpu(), PARENTS)
 
 
-def test_layer_passes_the_parents_to_both_spec_kernels(monkeypatch):
-    seen = {}
-    parents = torch.tensor([-1, 0, 0, 2], dtype=torch.int32)
+def test_own_kernels_refuse_a_tree(monkeypatch):
+    """Without a bound verify kernel the layer runs chains only."""
     calls = _Calls()
+    parents = torch.tensor([-1, 0, 0, 2], dtype=torch.int32)
     layer = _layer(monkeypatch, calls, _spec_metadata(parents))
-    conv, recurrent = (
-        gdn_layer_module.causal_conv1d_update,
-        gdn_layer_module.fused_sigmoid_gating_delta_rule_update,
-    )
-
-    def record_conv(*args, **kwargs):
-        seen["conv"] = kwargs.get("parents")
-        return conv(*args, **kwargs)
-
-    def record_recurrent(**kwargs):
-        seen["recurrent"] = kwargs.get("parents")
-        return recurrent(**kwargs)
-
-    monkeypatch.setattr(gdn_layer_module, "causal_conv1d_update", record_conv)
-    monkeypatch.setattr(
-        gdn_layer_module, "fused_sigmoid_gating_delta_rule_update", record_recurrent
-    )
     n = NUM_TOKENS
     b, a = torch.zeros(n, 4).chunk(2, dim=-1)
-    layer._forward_core(
-        mixed_qkv=torch.zeros(n, 5), b=b, a=a, core_attn_out=torch.zeros(n, 2, 3)
-    )
-    assert (calls.conv, calls.recurrent) == (1, 1)
-    assert seen["conv"] is parents and seen["recurrent"] is parents
-
-
-def test_fused_mtp_decode_is_skipped_for_a_tree(monkeypatch):
-    layer = QwenGatedDeltaNetAttention.__new__(QwenGatedDeltaNetAttention)
-    torch.nn.Module.__init__(layer)
-    state_dtype = next(iter(gdn_layer_module.FUSED_GDN_STATE_DTYPES))
-    layer.kv_cache = (torch.zeros(1), torch.zeros(1, dtype=state_dtype))
-    layer.gdn_decode_kernel = "cuda"
-    layer.num_v_heads = layer.num_k_heads = 2
-    monkeypatch.setattr(
-        torch.ops._C, "fused_gdn_decode_post_conv_mtp", object(), raising=False
-    )
-    assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is True
-    tree = _spec_metadata(torch.tensor([-1, 0, 0, 1], dtype=torch.int32))
-    assert layer._can_use_fused_gdn_mtp_decode(tree) is False
+    with pytest.raises(AssertionError):
+        layer._forward_core(
+            mixed_qkv=torch.zeros(n, 5), b=b, a=a, core_attn_out=torch.zeros(n, 2, 3)
+        )
+    assert (calls.conv, calls.recurrent) == (0, 0)

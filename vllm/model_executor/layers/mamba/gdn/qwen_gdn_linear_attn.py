@@ -560,7 +560,7 @@ class ChunkGatedDeltaRule(CustomOp):
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
-    # The spec kernels follow CommonAttentionMetadata.tree_parents.
+    # A tree verifies only through a registry verify kernel bound to the layer.
     spec_layer_variant = "gdn"
 
     def get_state_shape(
@@ -1820,6 +1820,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
                 mixed_qkv_spec = None
             else:
+                # The layer's own kernels verify chains only.
+                assert attn_metadata.spec_tree_parents is None
                 mixed_qkv_spec = causal_conv1d_update(
                     mixed_qkv_spec,
                     conv_state,
@@ -1833,7 +1835,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     query_start_loc=spec_query_start_loc,
                     max_query_len=spec_state_indices_tensor.size(-1),
                     validate_data=False,
-                    parents=attn_metadata.spec_tree_parents,
                 )
 
         # 1.2: Process the remaining part
@@ -1955,7 +1956,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
-                    parents=attn_metadata.spec_tree_parents,
                 )
             )
         else:
@@ -2394,8 +2394,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         state_indices = attn_metadata.spec_state_indices_tensor
         return (
             self.spec_verify_kernel is None
-            # The fused CUDA kernel runs chains; the Triton path follows parents.
-            and attn_metadata.spec_tree_parents is None
             and attn_metadata.spec_sequence_masks is not None
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes > 0

@@ -236,16 +236,16 @@ written as `"<layer kind>/<op>"` in logs:
 
 | Op | Keys | What it does |
 | --- | --- | --- |
-| `verify` | `mamba:gdn@slots`, `mamba:mamba2@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. The reference entry is the layer's own kernels. A bound provider kernel replaces them. |
-| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: attention KV, or the recurrent state and conv window. |
+| `verify` | `mamba:gdn@slots`, `mamba:mamba2@slots` | Runs the convolution and recurrence of a recurrent layer's verify rows, inside the captured graphs. There is no reference entry: without a bound provider kernel, the layer runs its own chain kernels. |
+| `commit` | `layout:paged_token`, `layout:mamba_state@slots` | Moves what the accepted path wrote to where the next step reads it: attention KV (the reference entry), or the recurrent state and conv window (a provider's). |
 
 `@slots` is the recurrent-state mode.
 
-`ReferenceKernels` holds the in-tree kernels. A speculator names provider factories
-in `SpeculatorConfig.spec_kernel_providers`, a tuple of qualified names. Providers
-overlay the reference kernels in order: a later provider wins a key, and each
-override is logged once. A provider is constructed with `vllm_config`, has a `name`,
-and returns `{key: SpecKernel}` from `kernels()`.
+`ReferenceKernels` holds the in-tree kernels: the attention KV commit. A speculator
+names provider factories in `SpeculatorConfig.spec_kernel_providers`, a tuple of
+qualified names. Providers overlay the reference kernels in order: a later provider
+wins a key, and each override is logged once. A provider is constructed with
+`vllm_config`, has a `name`, and returns `{key: SpecKernel}` from `kernels()`.
 
 A provider may supply any subset of keys. A layer verifies the highest plan kind
 that every kernel it needs supports for it. `KernelRegistry.required_keys(layer)`
@@ -290,7 +290,10 @@ class MyProvider:
     def __init__(self, vllm_config): ...
 
     def kernels(self):
-        return {("mamba:gdn@slots", "verify"): MyGDNVerify()}
+        return {
+            ("mamba:gdn@slots", "verify"): MyGDNVerify(),
+            ("layout:mamba_state@slots", "commit"): MyConvWindowCommit(),
+        }
 
 
 class MySpeculatorConfig(SpeculatorConfig):
@@ -387,8 +390,8 @@ whose builder answers `"tree"`, or a kernel provider, can raise a row.
 | Sinks, soft cap, ALiBi, chunked local attention, R-SWA, KV sharing, quantized KV (for example gpt-oss, Gemma 2, Llama 4) | any in-tree backend | chain | The in-tree builders keep the default `spec_verify_limit`. |
 | MLA (DeepSeek V3, Kimi K2) | MLA backends | chain | MLA builders keep the default. |
 | Sparse attention with an indexer (DeepSeek V3.2, GLM-5) | indexer | chain | The indexer builder keeps the default. |
-| GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | tree | `mamba:gdn@slots/verify` and `layout:mamba_state@slots/commit`. The attention layers must also verify trees. |
-| Mamba2 hybrids (Nemotron-H, Zamba2, Falcon-H1, Granite hybrids) | Mamba2 | tree | `mamba:mamba2@slots/verify`. The attention layers must also verify trees. |
+| GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | chain | No `mamba:gdn@slots/verify` or `layout:mamba_state@slots/commit` kernel in tree. A provider of both raises it to tree, if the attention layers verify trees. |
+| Mamba2 hybrids (Nemotron-H, Zamba2, Falcon-H1, Granite hybrids) | Mamba2 | chain | No `mamba:mamba2@slots/verify` or `layout:mamba_state@slots/commit` kernel in tree. A provider of both raises it to tree, if the attention layers verify trees. |
 | KDA and other GDN subclasses (Kimi Linear, OLMo hybrid) | own layer classes | chain | No `spec_layer_variant` on the subclass. |
 | Linear attention (MiniMax-Text-01, Bailing) | `LinearAttention` | chain | No `spec_layer_variant`. |
 | Short conv (LFM2) | short conv | chain | No `verify` kernel for `mamba:short_conv@slots`. |

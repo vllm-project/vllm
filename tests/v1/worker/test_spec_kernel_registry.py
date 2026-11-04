@@ -17,10 +17,9 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     SpecLayerKind,
     layer_spec_limits,
 )
-from vllm.v1.worker.gpu.spec_decode.commit import ConvWindowAligner, KvCompactor
+from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,
-    InTreeVerify,
     KernelContext,
     KernelRegistry,
     SpecKernel,
@@ -99,13 +98,11 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
 
 
 def test_reference_keys():
-    """GDN and Mamba2 verify trees in tree; short conv has no tree kernel."""
+    """The reference is the KV commit; recurrent layers take providers'."""
     registry = KernelRegistry()
-    assert isinstance(registry.get(GDN_VERIFY), InTreeVerify)
-    assert isinstance(registry.get(MAMBA2_VERIFY), InTreeVerify)
-    assert registry.get(SHORT_CONV_VERIFY) is None
+    for key in (GDN_VERIFY, MAMBA2_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT):
+        assert registry.get(key) is None
     assert isinstance(registry.get(KV_COMMIT), KvCompactor)
-    assert isinstance(registry.get(STATE_COMMIT), ConvWindowAligner)
 
 
 def test_required_keys():
@@ -129,9 +126,8 @@ def test_a_partial_provider_overrides_one_key():
     toy = ToyKernel()
     registry = KernelRegistry([Provider({GDN_VERIFY: toy})])
     assert registry.get(GDN_VERIFY) is toy
-    assert isinstance(registry.get(MAMBA2_VERIFY), InTreeVerify)
+    assert registry.get(MAMBA2_VERIFY) is None
     assert isinstance(registry.get(KV_COMMIT), KvCompactor)
-    assert isinstance(registry.get(STATE_COMMIT), ConvWindowAligner)
 
 
 def test_a_later_provider_wins_a_key():
@@ -157,9 +153,13 @@ def test_each_override_is_logged_once(caplog):
 
 
 def test_reference_plan_kinds():
+    """Without a provider, recurrent layers chain and attention layers tree."""
     registry = KernelRegistry()
-    assert registry.plan_kind(_mamba("m", "gdn"))[0] == "tree"
-    assert registry.plan_kind(_mamba("m", "mamba2"))[0] == "tree"
+    for variant in ("gdn", "mamba2"):
+        assert registry.plan_kind(_mamba("m", variant)) == (
+            "chain",
+            f"no mamba:{variant}@slots/verify kernel",
+        )
     assert registry.plan_kind(_attn("a"))[0] == "tree"
     # A cache not paged by slot keeps its own commit: nothing to need.
     assert registry.plan_kind(_attn("ring", layout=""))[0] == "tree"
@@ -182,13 +182,14 @@ def test_a_missing_key_lowers_the_layer_to_chain(layer, why):
 
 
 def test_a_provider_for_the_missing_key_raises_the_layer():
-    registry = KernelRegistry([Provider({SHORT_CONV_VERIFY: ToyKernel()})])
+    provider = Provider({SHORT_CONV_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel()})
+    registry = KernelRegistry([provider])
     assert registry.plan_kind(_mamba("m", "short_conv"))[0] == "tree"
 
 
 def test_a_kernel_declining_a_layer_lowers_it_to_chain():
     toy = ToyKernel(declines={"m.1"})
-    registry = KernelRegistry([Provider({GDN_VERIFY: toy})])
+    registry = KernelRegistry([Provider({GDN_VERIFY: toy, STATE_COMMIT: ToyKernel()})])
     assert registry.plan_kind(_mamba("m.0"))[0] == "tree"
     assert registry.plan_kind(_mamba("m.1")) == (
         "chain",
@@ -198,7 +199,10 @@ def test_a_kernel_declining_a_layer_lowers_it_to_chain():
 
 def test_the_layer_takes_the_lowest_kind_of_its_kernels():
     """Verify takes trees, the state commit chains only: the layer chains."""
-    registry = KernelRegistry([Provider({STATE_COMMIT: ToyKernel(kinds={"chain"})})])
+    state = ToyKernel(kinds={"chain"})
+    registry = KernelRegistry(
+        [Provider({GDN_VERIFY: ToyKernel(), STATE_COMMIT: state})]
+    )
     assert registry.plan_kind(_mamba("m")) == ("chain", "ToyKernel verifies chain")
 
 
@@ -227,9 +231,16 @@ def test_the_registry_sets_the_model_plan_kind():
             layer_spec_limits([[group]], layers, "slots", kernels=registry)
         )
 
-    assert caps(KernelRegistry()).plan_kind == "tree"
+    reference = caps(KernelRegistry())
+    assert reference.plan_kind == "chain"
+    assert [limit.reason for limit in reference.limits] == [
+        "mamba:gdn@slots, 2 layers: no mamba:gdn@slots/verify kernel",
+    ]
+    state = ToyKernel()
+    tree = KernelRegistry([Provider({GDN_VERIFY: ToyKernel(), STATE_COMMIT: state})])
+    assert caps(tree).plan_kind == "tree"
     declining = KernelRegistry(
-        [Provider({GDN_VERIFY: ToyKernel(declines={"linear.1"})})]
+        [Provider({GDN_VERIFY: ToyKernel(declines={"linear.1"}), STATE_COMMIT: state})]
     )
     lowered = caps(declining)
     assert lowered.plan_kind == "chain"
@@ -275,7 +286,7 @@ def test_no_spec_decode_unbinds_the_verify_kernel():
     assert layers[0].module.spec_verify_kernel is None
 
 
-def test_the_reference_verify_leaves_the_layer_on_its_own_kernels():
+def test_no_verify_kernel_leaves_the_layer_on_its_own_kernels():
     layer = _mamba("m.0")
     layer.module.spec_verify_kernel = "stale"
     registry = KernelRegistry([Provider({STATE_COMMIT: ToyKernel()})])

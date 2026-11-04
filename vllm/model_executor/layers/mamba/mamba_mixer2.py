@@ -275,7 +275,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
     # --8<-- [end:mamba_mixer2]
 
-    # The spec kernels follow CommonAttentionMetadata.tree_parents.
+    # A tree verifies only through a registry verify kernel bound to the layer.
     spec_layer_variant = "mamba2"
 
     def __init__(
@@ -952,6 +952,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
         elif has_decode:
             assert state_indices_tensor_d is not None
+            # The layer's own kernels verify chains only.
+            assert attn_metadata.tree_parents_d is None
             if (
                 self.use_replayssm
                 and self.mamba_config.backend == MambaBackendEnum.FLASHINFER
@@ -990,7 +992,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 conv_state_indices=state_indices_tensor_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
-                parents=attn_metadata.tree_parents_d,
                 # ReplaySSM keeps one physical state block while a speculative
                 # decode call still processes the full target + draft window.
                 max_query_len=(
@@ -1139,7 +1140,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     num_accepted_tokens=num_accepted_tokens,
                     cu_seqlens=query_start_loc_d,
                     is_blackwell=self.is_blackwell,
-                    parents=attn_metadata.tree_parents_d,
                 )
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:

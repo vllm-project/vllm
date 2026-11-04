@@ -60,7 +60,11 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     resolve_spec_resources,
 )
 from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
-from vllm.v1.worker.gpu.spec_decode.kernels import KernelContext, KernelRegistry
+from vllm.v1.worker.gpu.spec_decode.kernels import (
+    KernelContext,
+    KernelRegistry,
+    SpecKernel,
+)
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
@@ -160,11 +164,36 @@ def _model(*groups):
     return attn_groups, layers
 
 
-def _caps(model, state_mode="slots") -> SpecCapabilities:
+def _caps(model, state_mode="slots", kernels=None) -> SpecCapabilities:
     attn_groups, layers = model
     return SpecCapabilities.from_limits(
-        layer_spec_limits(attn_groups, layers, state_mode)
+        layer_spec_limits(attn_groups, layers, state_mode, kernels)
     )
+
+
+class _TreeKernel(SpecKernel):
+    def supports(self, layer):
+        return frozenset({"chain", "tree"})
+
+    def verify(self, rows):
+        raise AssertionError("not called on CPU")
+
+
+class _RecurrentTreeProvider:
+    """A plugin's recurrent tree verify: verify and state commit kernels."""
+
+    name = "recurrent-trees"
+
+    def kernels(self):
+        return {
+            ("mamba:gdn@slots", "verify"): _TreeKernel(),
+            ("mamba:mamba2@slots", "verify"): _TreeKernel(),
+            ("layout:mamba_state@slots", "commit"): _TreeKernel(),
+        }
+
+
+def _provided() -> KernelRegistry:
+    return KernelRegistry([_RecurrentTreeProvider()])
 
 
 def _layers(prefix, n, make):
@@ -309,16 +338,29 @@ def test_dsv3_mla_verifies_chains():
     assert resolve_spec_resources(_TreeConfig(), declared, [caps]) == declared
 
 
-def test_nemotron_h_verifies_trees():
-    caps = _caps(_hybrid(MambaMixer2, Mamba2AttentionMetadataBuilder))
-    assert caps.plan_kind == "tree", caps.limits
+@pytest.mark.parametrize(
+    "layer, builder, variant",
+    [
+        (MambaMixer2, Mamba2AttentionMetadataBuilder, "mamba2"),  # Nemotron-H
+        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder, "gdn"),
+    ],
+    ids=["nemotron-h", "qwen-gdn"],
+)
+def test_hybrids_verify_trees_only_with_a_provider(layer, builder, variant):
+    model = _hybrid(layer, builder)
+    caps = _caps(model)
+    assert caps.plan_kind == "chain"
+    assert [limit.reason for limit in caps.limits] == [
+        f"mamba:{variant}@slots, 3 layers: no mamba:{variant}@slots/verify kernel"
+    ]
+    assert _caps(model, kernels=_provided()).plan_kind == "tree"
 
 
 def test_qwen_gdn_verifies_trees_with_state_slots_and_chains_by_replay():
     model = _hybrid(QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder)
-    assert _caps(model).plan_kind == "tree"
+    assert _caps(model, kernels=_provided()).plan_kind == "tree"
     for mode in ("replay", "recover"):
-        caps = _caps(model, state_mode=mode)
+        caps = _caps(model, state_mode=mode, kernels=_provided())
         assert caps.plan_kind == "chain"
         assert caps.limits[0].reason.startswith(f"mamba:gdn@{mode}, 3 layers")
 
@@ -453,9 +495,9 @@ def _runner(**overrides):
     return runner
 
 
-def _resolve(runner) -> SpecCapabilities:
+def _resolve(runner, kernels=None) -> SpecCapabilities:
     spec_round = object.__new__(SpecRound)
-    spec_round.kernels = KernelRegistry()
+    spec_round.kernels = kernels or KernelRegistry()
     return spec_round.resolve_capabilities(runner)
 
 
@@ -489,9 +531,32 @@ def test_runner_reads_the_mamba_state_mode():
         compilation_config=SimpleNamespace(static_forward_context=layers),
         cache_config=CacheConfig(use_replayssm=True),
     )
-    caps = _resolve(runner)
+    caps = _resolve(runner, _provided())
     assert caps.plan_kind == "chain"
     assert caps.limits[0].reason.startswith("mamba:gdn@replay")
+
+
+@pytest.mark.parametrize(
+    "layer, builder",
+    [
+        (MambaMixer2, Mamba2AttentionMetadataBuilder),
+        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder),
+    ],
+    ids=["nemotron-h", "qwen-gdn"],
+)
+def test_tree_speculator_on_a_hybrid_without_a_provider_runs_as_a_chain(layer, builder):
+    """At startup the runner lowers the tree to a chain; nothing raises."""
+    attn_groups, layers = _hybrid(layer, builder)
+    runner = _runner(
+        attn_groups=attn_groups,
+        compilation_config=SimpleNamespace(static_forward_context=layers),
+    )
+    caps = _resolve(runner)
+    assert caps.plan_kind == "chain"
+    config = _TreeConfig()
+    effective = resolve_spec_resources(config, config.resources(8), [caps])
+    assert effective.plan_kind == "chain"
+    assert _resolve(runner, _provided()).plan_kind == "tree"
 
 
 # --- engine core: reduce, adapt, validate ------------------------------------

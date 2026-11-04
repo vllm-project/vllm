@@ -22,7 +22,8 @@ missing. So a provider may supply any subset of keys; a key it leaves out keeps
 the reference kernel, or lowers the plan kind when there is none, and a missing
 kernel is never called.
 
-A provider, for example of a faster GDN tree kernel::
+A provider, for example of GDN tree verify (a recurrent layer needs a verify and
+a state commit kernel to verify trees)::
 
     class MyGDNVerify(SpecKernel):
         def supports(self, layer):
@@ -37,7 +38,10 @@ A provider, for example of a faster GDN tree kernel::
         def __init__(self, vllm_config): ...
 
         def kernels(self):
-            return {("mamba:gdn@slots", "verify"): MyGDNVerify()}
+            return {
+                ("mamba:gdn@slots", "verify"): MyGDNVerify(),
+                ("layout:mamba_state@slots", "commit"): MyConvWindowCommit(),
+            }
 
 
     class MySpeculatorConfig(SpeculatorConfig):
@@ -272,44 +276,22 @@ ABOVE_NONE: frozenset[PlanKind] = frozenset(PLAN_KINDS[1:])
 """Every plan kind with verify rows: a commit reads only the accepted path."""
 
 
-class InTreeVerify(SpecKernel):
-    """The layer's own spec-row kernels (the convolution and recurrence of
-    ``variant`` with tree parents, a state slot per draft row). The layer runs
-    them when no other verify kernel is bound to it, so ``verify`` is never
-    called."""
-
-    def __init__(self, variant: str):
-        self.variant = variant
-
-    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
-        return frozenset({"chain", "tree"})
-
-    def verify(self, rows: Any) -> None:
-        raise AssertionError(f"the {self.variant} layer runs its own kernels")
-
-
 class ReferenceKernels:
-    """The in-tree kernels, which run every key no provider overrides.
+    """The in-tree kernels, which run every key no provider overrides: the KV
+    commit of attention layers.
 
-    There is no ``mamba:short_conv@slots/verify``: the short-conv layer's
-    convolution takes no tree parents, so it verifies chains. Nor is there a
+    There is no ``mamba:*/verify`` or ``layout:mamba_state@*/commit``: a
+    recurrent layer runs its own chain kernels, and verifies trees only with a
+    provider's verify and state commit kernels. Nor is there a
     ``layout:paged_split_scale/commit`` yet.
     """
 
     name = "reference"
 
     def kernels(self) -> dict[KernelKey, SpecKernel]:
-        from vllm.v1.worker.gpu.spec_decode.commit import (
-            ConvWindowAligner,
-            KvCompactor,
-        )
+        from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
 
-        return {
-            ("mamba:gdn@slots", "verify"): InTreeVerify("gdn"),
-            ("mamba:mamba2@slots", "verify"): InTreeVerify("mamba2"),
-            ("layout:paged_token", "commit"): KvCompactor(),
-            ("layout:mamba_state@slots", "commit"): ConvWindowAligner(),
-        }
+        return {("layout:paged_token", "commit"): KvCompactor()}
 
 
 # --- the registry ------------------------------------------------------------
@@ -414,7 +396,7 @@ class KernelRegistry:
                 if kernel is None:
                     continue
                 served.setdefault(id(kernel), (key, kernel, []))[2].append(layer)
-                if key[1] == "verify" and not isinstance(kernel, InTreeVerify):
+                if key[1] == "verify":
                     layer.module.spec_verify_kernel = kernel
         self._commits = []
         for key, kernel, served_layers in served.values():

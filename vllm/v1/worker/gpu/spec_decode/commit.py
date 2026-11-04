@@ -10,9 +10,9 @@ sees the cache a chain round would have left. A chain plan's path is ``arange``:
 commit moves nothing and launches nothing.
 
 The recurrent state of hybrid models commits by row index instead: the model state
-resumes from the state the last accepted row wrote (``accepted_row``), and
-:class:`ConvWindowAligner` gathers the path's conv inputs into the window the next
-step reads.
+resumes from the state the last accepted row wrote (``accepted_row``). Lining the
+conv window up with the path is the ``layout:mamba_state@<state mode>/commit``
+kernel a provider brings with its recurrent tree verify.
 """
 
 from collections.abc import Sequence
@@ -278,143 +278,10 @@ _BITS = {1: "int8", 2: "int16", 4: "int32"}
 
 
 def copies_dtype(dtype: torch.dtype) -> bool:
-    """Whether the compactor and the aligner copy caches of ``dtype``."""
+    """Whether the compactor copies caches of ``dtype``."""
     return dtype.itemsize in _BITS
 
 
 def _check_dtype(dtype: torch.dtype) -> None:
     if not copies_dtype(dtype):
         raise NotImplementedError(f"KV compaction does not copy {dtype} caches")
-
-
-@triton.jit
-def _align_conv_window_kernel(
-    window_ptrs,  # [L] uint64: base of each layer's conv state, viewed [slot, dim, tok]
-    table_ptrs,  # [L] uint64: the layer group's block table, batch rows
-    table_strides,  # [L] int64
-    path_ptr,  # [R, C] int32
-    stride_path,
-    path_len_ptr,  # [R] int32
-    stride_slot,
-    stride_dim,
-    stride_tok,
-    dim,
-    WIDTH: tl.constexpr,  # conv kernel width k
-    DTYPE: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    b = tl.program_id(0)
-    layer = tl.program_id(1)
-    length = tl.load(path_len_ptr + b)
-    if length <= 0:
-        return
-    last = tl.load(path_ptr + b * stride_path + length - 1)
-    table = tl.load(table_ptrs + layer).to(tl.pointer_type(tl.int32))
-    slot = tl.load(table + b * tl.load(table_strides + layer)).to(tl.int64)
-    if slot <= 0:  # the null block: a request without state in this group
-        return
-    feats = tl.program_id(2) * BLOCK + tl.arange(0, BLOCK)
-    mask = feats < dim
-    base = (
-        tl.load(window_ptrs + layer).to(tl.pointer_type(DTYPE))
-        + slot * stride_slot
-        + feats * stride_dim
-    )
-    # Column (k-2)+j holds the conv input of row j (j < 0: the history). The next
-    # step reads the k-1 columns ending at (k-2)+last, which must hold the path's
-    # inputs: path[length-1-i], or the history once the path is exhausted. The path
-    # is increasing, so a source never lies above its destination nor at a column
-    # already written; descending destinations make the copy safe in place.
-    for i in tl.static_range(WIDTH - 1):
-        j = length - 1 - i
-        row = tl.where(
-            j >= 0, tl.load(path_ptr + b * stride_path + tl.maximum(j, 0)), j
-        )
-        value = tl.load(base + (WIDTH - 2 + row) * stride_tok, mask=mask)
-        tl.store(base + (WIDTH - 2 + last - i) * stride_tok, value, mask=mask)
-
-
-class ConvWindowAligner(SpecKernel):
-    """The ``layout:mamba_state@slots`` commit: lines up the conv windows of
-    recurrent layers with the accepted path.
-
-    After a verify step the conv state of a request holds the conv inputs of its
-    rows in row order, and the next step reads the ``k - 1`` columns that end at
-    the last accepted row (``num_accepted_tokens - 1``). For a chain those are
-    the accepted rows; for a tree they must be gathered from the path. The SSM
-    state needs no move: it resumes from the state row the last accepted row
-    wrote. Column 0 of a layer's block table is the request's state slot.
-    """
-
-    def __init__(self) -> None:
-        self.window_ptrs: torch.Tensor | None = None
-
-    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
-        return ABOVE_NONE
-
-    def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
-        from vllm.model_executor.layers.mamba.mamba_utils import (
-            is_conv_state_dim_first,
-        )
-
-        windows: list[torch.Tensor] = []
-        tables: list[torch.Tensor] = []
-        widths: set[int] = set()
-        for layer in layers:
-            if not hasattr(layer.module, "conv1d"):
-                continue
-            assert layer.block_table is not None
-            conv = layer.module.kv_cache[0]
-            # Viewed [slot, dim, tok].
-            windows.append(conv if is_conv_state_dim_first() else conv.mT)
-            tables.append(layer.block_table)
-            widths.add(layer.module.conv1d.weight.shape[-1])
-        if not windows:
-            return
-        if len(widths) != 1:
-            raise NotImplementedError(
-                "verify plans that are not chains need one conv width per model"
-            )
-        width = widths.pop()
-        first = windows[0]
-        for window in windows:
-            if window.stride() != first.stride() or window.dtype != first.dtype:
-                raise ValueError("every conv state must share one layout and dtype")
-        if any(t.dtype != torch.int32 for t in tables):
-            raise ValueError("block tables must be int32")
-        if first.shape[2] < width - 1:
-            raise ValueError("the conv state is narrower than its kernel")
-        self.width = width
-        self.dim = first.shape[1]
-        self.strides = first.stride()
-        self.dtype = getattr(tl, _BITS[first.dtype.itemsize])
-        self.window_ptrs = torch.tensor(
-            [w.data_ptr() for w in windows], dtype=torch.uint64, device=ctx.device
-        )
-        self.table_ptrs = torch.tensor(
-            [t.data_ptr() for t in tables], dtype=torch.uint64, device=ctx.device
-        )
-        self.table_strides = torch.tensor(
-            [t.stride(0) for t in tables], dtype=torch.int64, device=ctx.device
-        )
-
-    def commit(self, step: CommitStep) -> None:
-        if self.window_ptrs is None or step.num_reqs == 0:
-            return
-        result = step.result
-        block = 256
-        grid = (step.num_reqs, self.window_ptrs.shape[0], triton.cdiv(self.dim, block))
-        _align_conv_window_kernel[grid](
-            self.window_ptrs,
-            self.table_ptrs,
-            self.table_strides,
-            result.path,
-            result.path.stride(0),
-            result.path_len,
-            *self.strides,
-            self.dim,
-            WIDTH=self.width,
-            DTYPE=self.dtype,
-            BLOCK=block,
-            num_warps=2,
-        )
