@@ -173,14 +173,12 @@ def _vram_used_file(index: int) -> str | None:
     return _vram_used_files[index]
 
 
-def _read(index: int, path: str) -> DeviceMemoryReading | None:
+def _read_used(path: str) -> int | None:
     try:
         with open(path) as f:
-            used = int(f.read())
+            return int(f.read())
     except (OSError, ValueError):
         return None
-    free, total = torch.cuda.mem_get_info(index)
-    return DeviceMemoryReading(used, free, total, torch.cuda.memory_reserved(index))
 
 
 def _settled_reading(index: int) -> DeviceMemoryReading | None:
@@ -193,12 +191,19 @@ def _settled_reading(index: int) -> DeviceMemoryReading | None:
     start = last_drop = time.monotonic()
     lowest = None
     while True:
-        reading = _read(index, path)
-        if reading is None:
+        used = _read_used(path)
+        free, total = torch.cuda.mem_get_info(index)
+        used_after = _read_used(path)
+        if used is None or used_after is None:
             return None
         now = time.monotonic()
-        if lowest is None or reading.gap < lowest.gap:
-            lowest, last_drop = reading, now
+        # Skip a sample when another process allocated between the two
+        # counts: free memory would already show it and the gap be too low.
+        if used_after <= used:
+            reserved = torch.cuda.memory_reserved(index)
+            reading = DeviceMemoryReading(used, free, total, reserved)
+            if lowest is None or reading.gap < lowest.gap:
+                lowest, last_drop = reading, now
         if now - last_drop >= SETTLE_SECONDS or now - start >= MAX_SAMPLING_SECONDS:
             return lowest
         time.sleep(SAMPLE_INTERVAL_SECONDS)
