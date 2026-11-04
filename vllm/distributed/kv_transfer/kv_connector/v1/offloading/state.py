@@ -11,7 +11,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import is_mamba_prefix_caching_group
+from vllm.v1.core.kv_cache_utils import (
+    is_mamba_prefix_caching_group,
+    partial_hash_hits_enabled,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     SingleTypeKVCacheManager,
     SlidingWindowManager,
@@ -111,6 +115,9 @@ class SchedulerOffloadConfig(NamedTuple):
     # Lookahead block hashes already cover positions past the computed tokens.
     num_hash_lookahead_tokens: int = 0
     cache_hit_alignment_tokens: int | None = None
+    # A prefix-cache hit can end inside a KV cache block, so core copies the
+    # shared block with CoW before the request writes to it.
+    partial_hash_hits_enabled: bool = False
 
     @property
     def supports_handoff(self) -> bool:
@@ -225,6 +232,12 @@ class SchedulerOffloadConfig(NamedTuple):
                         f"tokens_per_chunk ({config.tokens_per_chunk})."
                     )
 
+        hash_block_size = kv_cache_config.hash_block_size
+        if hash_block_size is None:
+            _, hash_block_size = resolve_kv_cache_block_sizes(
+                kv_cache_config, vllm_config
+            )
+
         return cls(
             num_workers=vllm_config.parallel_config.world_size,
             kv_group_configs=kv_group_configs,
@@ -246,6 +259,12 @@ class SchedulerOffloadConfig(NamedTuple):
             ),
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             cache_hit_alignment_tokens=cache_hit_alignment,
+            partial_hash_hits_enabled=partial_hash_hits_enabled(
+                kv_cache_config.kv_cache_groups,
+                hash_block_size,
+                vllm_config.parallel_config.decode_context_parallel_size,
+                [config.manager_cls for config in kv_group_configs],
+            ),
         )
 
 
