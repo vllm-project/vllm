@@ -2217,6 +2217,7 @@ def initialize_model_parallel(
         engram_config is not None
         and config.model_config is not None
         and config.model_config.architecture == "DeepseekV41ForCausalLM"
+        and not engram_config.mooncake_config_path
         and not enable_elastic_ep
     ):
         if (

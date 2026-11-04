@@ -150,8 +150,65 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
-`disk_offload`.
+Qwen4Exp PLE tables are ETP-sharded instead. The Mooncake placement below
+changes their physical storage ownership but preserves ETP computation.
+
+## Node-sharded Mooncake storage
+
+Mooncake can hold one logical Engram table across multiple storage nodes while
+each vLLM worker keeps only its small lookup buffers. This placement supports
+both DeepSeek V4.1 Engram and Qwen4-Exp PLE, including the Qwen3.8-Flash-Next
+checkpoint family. Storage-node ownership is independent of TP and DP: each
+node publishes a contiguous range of complete hash heads. Mooncake resolves
+local and remote rows while vLLM preserves each model's existing TP/ETP
+computation ownership, collectives, quantization, and prefetch behavior.
+
+Set `mooncake_config_path` to a JSON file shared by the workers on one node:
+
+```bash
+vllm serve <engram-checkpoint> \
+  --engram-config '{"mooncake_config_path":"/mnt/config/engram-node.json"}'
+```
+
+```json
+{
+  "local_dir": "/mnt/nvme/mooncake-engram",
+  "shard_id": 0,
+  "num_shards": 2,
+  "master_addr": "http://10.0.0.10:5000",
+  "session_id": "deployment-2026-11-04",
+  "max_lookup_rows": 65536,
+  "rdma_device": "mlx5_{local_rank}",
+  "num_callers": 4
+}
+```
+
+Use a different `shard_id` on each storage node and a new `session_id` for
+each deployment. `local_dir` must be a writable node-local directory; the
+published table itself lives in Mooncake's shared host allocation rather than
+as a file in that directory. The optional `{local_rank}` placeholder selects
+one RDMA device per local GPU caller. Mooncake Engram requires
+`NCCL_CUMEM_ENABLE=1`; vLLM sets it before distributed initialization and
+rejects an explicit `0`.
+
+`max_lookup_rows` is the maximum number of token/head IDs in one lookup, not
+just the token count. `num_callers` is the number of local GPU workers that
+participate in each layer's deployment. `caller_id` defaults to vLLM's local
+worker rank, which remains dense when each worker sees a different CUDA device;
+set it explicitly only for a nonstandard worker-to-caller mapping.
+
+This path requires the node-sharded EngramStore API from
+[Mooncake #5129](https://github.com/kvcache-ai/Mooncake/pull/5129) after the
+[large-local-table offset fix](https://github.com/magicYang1573/Mooncake/pull/1)
+has landed. The fix is required when one local table exceeds 2 GiB, as Qwen PLE
+tables commonly do. If the Mooncake master requires authentication, provide
+its bearer token through `MC_METADATA_HTTP_TOKEN` on every worker. vLLM
+explicitly coordinates store shutdown after model CUDA graphs have been
+released.
+
+Mooncake storage is an alternative to `disk_offload`, `dp_shared_memory`,
+`use_thp`, and `embedding_across_dp`. Pipeline parallelism, elastic EP, and
+Qwen NVFP4 PLE rows are not supported yet.
 
 ## Sharing host tables across DP replicas
 
@@ -179,3 +236,5 @@ IPC namespace across the co-located replicas.
   `--enable-dbo` and set `--ubatch-size 0`.
 - `dp_shared_memory` requires `cpu_offload`, `data_parallel_size > 1`, and is
   unsupported with elastic expert parallelism.
+- Mooncake Engram currently supports DeepSeek V4.1 FP8/ue8m0 rows and Qwen
+  BF16 or FP8 PLE rows, but not Qwen NVFP4 rows.
