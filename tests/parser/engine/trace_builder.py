@@ -48,6 +48,7 @@ from vllm.parser.engine.registered_adapters import (
     Qwen3Parser,
     SeedOssParser,
     Step3p5Parser,
+    ZayaParser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -462,6 +463,20 @@ def _build_step3p5(scenario: Scenario, validate: bool = True) -> Sample:
         strip_trailing_ws=True,
         validate=validate,
     )
+
+
+def _build_zaya(scenario: Scenario, validate: bool = True) -> Sample:
+    """ZAYA1: the Qwen3 grammar with ``<zyphra_tool_call>`` tags."""
+    sample = _build_qwen3(scenario, name="zaya", validate=False)
+    rename = {"<tool_call>": ZayaParser.TOOL_START, "</tool_call>": ZayaParser.TOOL_END}
+    sample = replace(
+        sample,
+        vocab={rename.get(text, text): tid for text, tid in sample.vocab.items()},
+        tokens=[(tid, rename.get(text, text)) for tid, text in sample.tokens],
+    )
+    if validate:
+        _validate_sample(sample, ZayaParser)
+    return sample
 
 
 # ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
@@ -1347,6 +1362,7 @@ _BUILDERS: dict[str, Any] = {
     "step3p5": _build_step3p5,
     "inkling": _build_inkling,
     "plamo3": _build_plamo3,
+    "zaya": _build_zaya,
 }
 
 
