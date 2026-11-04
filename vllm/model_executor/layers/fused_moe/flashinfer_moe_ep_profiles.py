@@ -181,10 +181,6 @@ def flashinfer_moe_ep_profile_context(runner: Any) -> Iterator[None]:
         yield
 
 
-def _profile_capacities(decode_tokens: int, prefill_tokens: int) -> tuple[int, ...]:
-    return tuple(sorted({max(1, decode_tokens), max(1, prefill_tokens)}))
-
-
 class FlashInferMoeEpProfiles:
     """Tune once per geometry and retain fixed workspaces for serving."""
 
@@ -344,7 +340,7 @@ class FlashInferMoeEpProfiles:
             raise RuntimeError("MegaMoE startup tuning requires EP to span WORLD")
         decode = max(1, cdiv(context.decode_tokens, self.sp_size))
         prefill = max(1, cdiv(context.prefill_tokens, self.sp_size))
-        self.capacities = _profile_capacities(decode, prefill)
+        self.capacities = tuple(sorted({decode, prefill}))
         self._agree(self.capacities)
         for capacity in self.capacities:
             buckets = {capacity}
@@ -359,14 +355,12 @@ class FlashInferMoeEpProfiles:
                 knobs = self._broadcast(
                     context.records.get(key) if self.bootstrap.rank == 0 else None
                 )
-                source = "cache hit"
                 if not isinstance(knobs, dict) or not knobs:
                     knobs = self._broadcast(self._tune(inputs, capacity, live_tokens))
                     if not isinstance(knobs, dict) or not knobs:
                         raise RuntimeError(
                             "MegaMoE autotune returned no selected knobs"
                         )
-                    source = "tuned"
                     context.records[key] = knobs
                     context.dirty = True
                 # FlashInfer tactics contain tuple-valued tile/cluster shapes.
@@ -379,20 +373,7 @@ class FlashInferMoeEpProfiles:
                 )
                 self.layer.warmup(inputs, workspace=workspace)
                 handles.append((live_tokens, workspace))
-                if self.bootstrap.rank == 0:
-                    logger.info(
-                        "MegaMoE %s: capacity=%d live_tokens=%d knobs=%s",
-                        source,
-                        capacity,
-                        live_tokens,
-                        knobs,
-                    )
             self.workspaces[capacity] = handles
-            logger.info(
-                "Prepared FlashInfer MegaMoE capacity=%d live_tokens=%s",
-                capacity,
-                live_buckets,
-            )
 
     def _token_count(self, local_rows: int) -> int:
         if self.bootstrap.world_size == 1:

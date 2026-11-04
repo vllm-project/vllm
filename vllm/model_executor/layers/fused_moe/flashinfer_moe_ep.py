@@ -466,9 +466,7 @@ class FlashInferMoeEp:
 
     @torch.inference_mode()
     def warmup(self) -> None:
-        if self._mega_layer is None:
-            return
-        if self._profiles is not None:
+        if self._mega_layer is None or self._profiles is not None:
             return
         hidden_states = torch.zeros(
             1,

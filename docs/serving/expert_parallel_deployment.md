@@ -31,26 +31,6 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
-### FlashInfer MegaMoE live-token profiles
-
-When FlashInfer autotuning is enabled, vLLM tunes CuTeDSL MegaMoE at
-powers-of-two decode token counts, the exact decode ceiling, and one prefill
-ceiling. Layers with the same geometry share the tuning results. Each EP rank
-selects the same fixed workspace using the largest rank-local token count.
-All tuning and workspace warmup finish before CUDA graph capture and before
-the serving-memory measurement used to size the KV cache.
-
-This requires `MoEEpMegaLayer.get_tuned_knobs()` and
-`create_workspace(..., live_tokens=..., knobs=...)`, available in FlashInfer
-0.7.3rc1. Older versions use the default workspace. Results are cached in
-`megamoe_knobs_v1.json` under the vLLM FlashInfer autotune cache directory;
-`VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` overrides that directory. Delete this file
-to retune. Missing, incompatible, or unreadable caches trigger startup tuning.
-
-Use `--disable-flashinfer-autotune` to disable these profiles. Startup tuning
-requires EP to span the WORLD process group and is disabled with prefill
-context parallelism, elastic EP, and sleep mode.
-
 ## Single Node Deployment
 
 ### Configuration
