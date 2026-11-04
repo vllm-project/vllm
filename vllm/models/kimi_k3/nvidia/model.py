@@ -21,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
-    fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
@@ -556,6 +556,7 @@ class KimiMoE(nn.Module):
                 activation_situ_linear_beta=activation_situ_linear_beta,
                 renormalize=moe_renormalize,
                 quant_config=quant_config,
+                ckpt_names=("w1", "w2", "w3"),
                 use_grouped_topk=config.use_grouped_topk,
                 num_expert_group=config.num_expert_group,
                 topk_group=config.topk_group,
@@ -1291,19 +1292,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             for module in self.modules()
             if isinstance(module, KimiMoE)
         )
+        # MegaMoE experts are not under a MoERunner; they keep their mapping.
         if self.config.is_moe and use_mega_moe:
             expert_params_mapping = make_kimi_k3_mega_moe_expert_params_mapping(
                 self.config.num_experts
-            )
-        elif self.config.is_moe:
-            # Params for weights, fp8 weight scales, fp8 activation scales
-            # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
             )
         else:
             expert_params_mapping = []
@@ -1358,6 +1350,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
+                    continue
                 for (
                     expert_param_name,
                     expert_weight_name,

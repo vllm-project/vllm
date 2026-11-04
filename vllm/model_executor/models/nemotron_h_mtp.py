@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NemotronH-MTP model with attention layers."""
 
-import typing
 from collections.abc import Callable, Iterable
 
 import torch
@@ -12,9 +11,7 @@ from transformers import NemotronHConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -355,13 +352,6 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
         # Needed for load_weights mapping
         self.mtp_start_layer_idx = config.num_hidden_layers
 
-        # EPLB config for experts
-        self.num_redundant_experts = 0
-        if vllm_config.parallel_config and vllm_config.parallel_config.eplb_config:
-            self.num_redundant_experts = (
-                vllm_config.parallel_config.eplb_config.num_redundant_experts
-            )
-
         # MTP predictor
         self.model = NemotronHMultiTokenPredictor(
             vllm_config=vllm_config,
@@ -432,20 +422,6 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             ("qkv_proj", "v_proj", "v"),
         ]
 
-        expert_params_mapping = []
-        num_experts = getattr(self.config, "n_routed_experts", None)
-        if getattr(self.config, "model_type", None) == "nemotron_h_puzzle":
-            num_experts = self.config.mtp_n_routed_experts
-        if num_experts is not None:
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="up_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name=None,  # non-gated MoE
-                num_experts=num_experts,
-                num_redundant_experts=self.num_redundant_experts,
-            )
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -496,37 +472,9 @@ class NemotronHMTP(nn.Module, SupportsPP, SupportsQuant):
             if is_stacked:
                 continue
 
-            is_expert_weight = False
-            for mapping in expert_params_mapping:
-                param_name, weight_name, expert_id, shard_id = mapping
-                # weight_name is like "experts.0.up_proj."
-                if weight_name not in name:
-                    continue
-
-                is_expert_weight = True
-
-                # Replace the expert-specific weight name with fused parameter name
-                # e.g., "experts.0.up_proj." -> "experts.w13_"
-                name_mapped = name.replace(weight_name, param_name)
-
-                if name_mapped not in params_dict:
-                    continue
-
-                param = params_dict[name_mapped]
-                weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-                success = weight_loader(
-                    param,
-                    loaded_weight,
-                    name_mapped,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
-                    return_success=True,
-                )
-                if success:
-                    loaded_params.add(name_mapped)
-                break
-
-            if is_expert_weight:
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
                 continue
 
             if name.endswith(".bias") and name not in params_dict:

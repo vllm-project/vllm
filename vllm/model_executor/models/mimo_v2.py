@@ -26,6 +26,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -890,7 +891,6 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
-        expert_params_mapping = self.get_expert_mapping()
         # Pro-format fused qkv_proj arrives as two tensors (weight and
         # weight_scale_inv). Store them per-layer so that they can be
         # sharded together. The state must outlive this call: AutoWeightsLoader
@@ -907,39 +907,9 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
             if "mtp" in name:
                 continue
 
-            expert_matched = False
-            for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
-                if weight_name not in name:
-                    continue
-
-                name_rewritten = name.replace(weight_name, param_name)
-
-                if is_pp_missing_parameter(name_rewritten, self):
-                    continue
-
-                if (
-                    name_rewritten.endswith(".bias") or name_rewritten.endswith("_bias")
-                ) and name_rewritten not in params_dict:
-                    continue
-
-                if name_rewritten not in params_dict:
-                    continue
-
-                param = params_dict[name_rewritten]
-                weight_loader = param.weight_loader
-
-                weight_loader(
-                    param,
-                    loaded_weight,
-                    name_rewritten,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
-                )
-                loaded_params.add(name_rewritten)
-                expert_matched = True
-                break
-
-            if expert_matched:
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
                 continue
             # Support fused qkv_proj checkpoint (Pro format)
             if self._try_load_fp8_qkv_proj(
@@ -971,7 +941,7 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
                     continue
 
                 param = params_dict[name_rewritten]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, stacked_shard_id)
                 loaded_params.add(name_rewritten)
 

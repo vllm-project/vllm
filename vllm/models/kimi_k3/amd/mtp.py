@@ -10,9 +10,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -245,18 +243,6 @@ class KimiK3MTP(nn.Module):
             if self.config.mla_use_output_gate:
                 stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
 
-        expert_params_mapping = (
-            fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
-            )
-            if self.config.is_moe
-            else []
-        )
-
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
@@ -302,56 +288,35 @@ class KimiK3MTP(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for (
-                    expert_param_name,
-                    expert_weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if expert_weight_name not in name:
-                        continue
-                    name_mapped = name.replace(expert_weight_name, expert_param_name)
-                    if name_mapped in pp_missing_layer_names:
-                        continue
-                    param = params_dict[name_mapped]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    name = name_mapped
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
+                    continue
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
+                    continue
+                name = remapped_name
 
-                    # The embedding is shared across MTP layers; only the first
-                    # spec layer carries the hoisted (non-".layers") copy.
-                    if spec_layer != self.model.mtp_start_layer_idx and (
-                        ".layers" not in name
-                    ):
-                        continue
-                    if name in pp_missing_layer_names:
-                        continue
-                    # The base model uses an attn-residual scheme whose per-layer
-                    # weights (self_attention_res_*, mlp_res_*) are not used by
-                    # the draft block; such names have no matching parameter and
-                    # are safely skipped.
-                    if name not in params_dict:
-                        continue
+                # The embedding is shared across MTP layers; only the first
+                # spec layer carries the hoisted (non-".layers") copy.
+                if spec_layer != self.model.mtp_start_layer_idx and (
+                    ".layers" not in name
+                ):
+                    continue
+                if name in pp_missing_layer_names:
+                    continue
+                # The base model uses an attn-residual scheme whose per-layer
+                # weights (self_attention_res_*, mlp_res_*) are not used by
+                # the draft block; such names have no matching parameter and
+                # are safely skipped.
+                if name not in params_dict:
+                    continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         # Validate that weights were loaded for each expected MTP layer.

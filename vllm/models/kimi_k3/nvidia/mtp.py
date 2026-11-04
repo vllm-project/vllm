@@ -13,7 +13,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -292,17 +292,10 @@ class KimiK3MTP(nn.Module):
             for module in self.modules()
             if isinstance(module, KimiMoE)
         )
+        # MegaMoE experts are not under a MoERunner; they keep their mapping.
         if self.config.is_moe and use_mega_moe:
             expert_params_mapping = make_kimi_k3_mega_moe_expert_params_mapping(
                 self.config.num_experts
-            )
-        elif self.config.is_moe:
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
             )
         else:
             expert_params_mapping = []
@@ -354,6 +347,10 @@ class KimiK3MTP(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
+                    continue
                 for (
                     expert_param_name,
                     expert_weight_name,

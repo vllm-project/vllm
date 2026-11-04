@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
-    fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -335,6 +335,7 @@ class KimiMoE(nn.Module):
             activation_situ_linear_beta=activation_situ_linear_beta,
             renormalize=moe_renormalize,
             quant_config=quant_config,
+            ckpt_names=("w1", "w2", "w3"),
             use_grouped_topk=config.use_grouped_topk,
             num_expert_group=config.num_expert_group,
             topk_group=config.topk_group,
@@ -968,18 +969,6 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             ]
             if self.config.mla_use_output_gate:
                 stacked_params_mapping.append((".fused_qkv_a_proj", ".g_proj", 2))
-        if self.config.is_moe:
-            # Params for weights, fp8 weight scales, fp8 activation scales
-            # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.num_experts,
-            )
-        else:
-            expert_params_mapping = []
         params_dict = dict(self.named_parameters())
         # Under the MXFP4 quant interface the routed experts register unpacked
         # params (``w13_weight``), while the compressed-tensors checkpoint names
@@ -1028,48 +1017,28 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for (
-                    expert_param_name,
-                    expert_weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if expert_weight_name not in name:
-                        continue
-                    name = name.replace(expert_weight_name, expert_param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        expert_id=expert_id,
-                        shard_id=expert_shard_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias")
-                        and name not in params_dict
-                        and not self.config.is_linear_attn
-                    ):  # noqa: E501
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name.endswith(".bias")
+                    and name not in params_dict
+                    and not self.config.is_linear_attn
+                ):  # noqa: E501
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
+                    continue
+                name = remapped_name
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, **kwargs)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
         return loaded_params
 
