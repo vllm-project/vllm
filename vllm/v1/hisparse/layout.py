@@ -261,15 +261,13 @@ def create_hisparse_layout(
         source_group.kv_cache_spec.page_size_bytes,
         use_shared_host_pool=shared_host_pool,
     )
-    total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
-    logical_block_bytes = (
-        sum(
+    logical_block_bytes = host_block_stride
+    if sparse_full_specs:
+        total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
+        logical_block_bytes = sum(
             spec.num_states * total_num_kv_heads * spec.state_content_size_bytes
             for spec in sparse_full_specs
         )
-        if sparse_full_specs
-        else host_block_stride
-    )
     host_num_blocks = host_budget // logical_block_bytes
     if host_num_blocks <= 0:
         raise ValueError("HiSparse has no allocatable host blocks.")
