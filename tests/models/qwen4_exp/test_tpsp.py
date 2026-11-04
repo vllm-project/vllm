@@ -313,3 +313,94 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
     """Padding in compiled SP collectives must not specialize on the traced size."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
+
+
+def _run_qsa_tp_prefill(rank: int, port: int) -> None:
+    """Check real collectives, ragged rows, offset views and exact score ties."""
+    from vllm.distributed import get_tp_group
+    from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as ops
+
+    torch.accelerator.set_device_index(rank)
+    torch.set_num_threads(1)
+    init_distributed_environment(
+        world_size=4,
+        rank=rank,
+        local_rank=rank,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+    )
+    try:
+        config = VllmConfig(parallel_config=ParallelConfig(tensor_parallel_size=4))
+        with set_current_vllm_config(config):
+            initialize_model_parallel(tensor_model_parallel_size=4)
+            device = torch.device(f"cuda:{rank}")
+            gen = torch.Generator().manual_seed(37)
+            cache = torch.randn(32, 208, 1, 128, generator=gen).bfloat16().to(device)
+            table = torch.randperm(32, generator=gen).int().reshape(2, 16).to(device)
+            q = torch.randn(44, 4, 128, generator=gen).bfloat16().to(device)[7:]
+            starts = torch.tensor([7, 10, 44], dtype=torch.int32, device=device)
+            visible = torch.cat((torch.arange(254, 257), torch.arange(2015, 2049)))
+            visible = visible.int().to(device)
+            for tied in (False, True):
+                if tied:
+                    q.zero_()
+                for force_chunk in (False, True):
+                    with pytest.MonkeyPatch.context() as m:
+                        m.setenv(
+                            "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB",
+                            "0" if force_chunk else "4",
+                        )
+                        expected = torch.empty(
+                            (37, 512), dtype=torch.int32, device=device
+                        )
+                        backing = torch.full(
+                            (44, 512), -99, dtype=torch.int32, device=device
+                        )
+                        actual = backing[7:]
+                        args = (q, cache, table, starts, visible, 2048, 4, 34)
+                        ops.qsa_select_paged_prefill(*args, expected, 8192)
+                        ops.qsa_select_paged_prefill(
+                            *args, actual, 8192, tp_group=get_tp_group()
+                        )
+                        assert (backing[:7] == -99).all()
+                        workspace = torch.empty(
+                            37 * 2048, dtype=torch.float32, device=device
+                        )
+                        logits = ops._prefill_logits(
+                            q, cache, table, starts, visible, workspace, 34, 2048, 0, 37
+                        )
+                        columns = torch.arange(2048, device=device)[None, :]
+                        assert torch.isfinite(
+                            logits[columns.expand_as(logits) < visible[:, None]]
+                        ).all()
+                        logits.masked_fill_(columns >= visible[:, None], -torch.inf)
+                        scores = []
+                        for indices in (expected, actual):
+                            assert (
+                                (indices >= -1) & (indices < visible[:, None])
+                            ).all()
+                            ordered = indices.sort().values
+                            assert not (
+                                (ordered[:, 1:] == ordered[:, :-1])
+                                & (ordered[:, 1:] >= 0)
+                            ).any()
+                            values = logits.gather(1, indices.clamp_min(0).long())
+                            scores.append(
+                                values.masked_fill(indices < 0, -torch.inf)
+                                .sort()
+                                .values
+                            )
+                        torch.testing.assert_close(scores[1], scores[0], atol=0, rtol=0)
+                        torch.testing.assert_close(
+                            scores[1],
+                            logits.topk(512).values.sort().values,
+                            atol=0,
+                            rtol=0,
+                        )
+    finally:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVIDIA QSA indexer")
+@multi_gpu_test(num_gpus=4)
+def test_qsa_tp_prefill_preserves_selection() -> None:
+    mp.spawn(_run_qsa_tp_prefill, args=(get_open_port(),), nprocs=4)

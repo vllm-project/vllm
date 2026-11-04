@@ -1410,3 +1410,87 @@ def test_qsa_streaming_compression_and_compressor_state_store_match_reference() 
                 rope_cache[block, position % 4, 0],
                 position_row(request, position).to("cuda"),
             )
+
+
+@pytest.mark.parametrize(
+    "rows,seq_len,dtype,heads,topk,ratio,enabled,expected",
+    [
+        (4096, 65536, torch.bfloat16, 4, 2048, 4, True, True),
+        (8192, 131072, torch.bfloat16, 4, 2048, 4, True, True),
+        (799, 131072, torch.bfloat16, 4, 2048, 4, True, False),
+        (4095, 65536, torch.bfloat16, 4, 2048, 4, True, False),
+        (4096, 65535, torch.bfloat16, 4, 2048, 4, True, False),
+        (8192, 131072, torch.float8_e4m3fn, 4, 2048, 4, True, False),
+        (8192, 131072, torch.bfloat16, 8, 2048, 4, True, False),
+        (8192, 131072, torch.bfloat16, 4, 1024, 4, True, False),
+        (8192, 131072, torch.bfloat16, 4, 2048, 2, True, False),
+        (8192, 131072, torch.bfloat16, 4, 2048, 4, False, False),
+    ],
+)
+def test_qsa_tp_prefill_keeps_unmeasured_workloads_replicated(
+    rows, seq_len, dtype, heads, topk, ratio, enabled, expected
+) -> None:
+    q = torch.empty((rows, heads, 128), dtype=dtype, device="meta")
+    assert (
+        qsa_indexer._use_tp_prefill_sharding(enabled, q, seq_len, topk, ratio)
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    "tp,dcp,pcp,graph,disabled_env",
+    [
+        (4, 1, 1, "PIECEWISE", None),
+        (1, 1, 1, "PIECEWISE", None),
+        (2, 1, 1, "PIECEWISE", None),
+        (8, 1, 1, "PIECEWISE", None),
+        (4, 2, 1, "PIECEWISE", None),
+        (4, 1, 2, "PIECEWISE", None),
+        (4, 1, 1, "FULL", None),
+        (4, 1, 1, "PIECEWISE", "VLLM_DISABLE_PYNCCL"),
+        (4, 1, 1, "PIECEWISE", "VLLM_USE_NCCL_SYMM_MEM"),
+        (4, 1, 1, "PIECEWISE", "VLLM_BATCH_INVARIANT"),
+    ],
+)
+def test_qsa_tp_prefill_configuration_fallbacks(
+    monkeypatch, tp, dcp, pcp, graph, disabled_env
+) -> None:
+    from vllm.config import CompilationConfig, ParallelConfig, VllmConfig
+    from vllm.config.compilation import CUDAGraphMode
+
+    for name in (
+        "VLLM_DISABLE_PYNCCL",
+        "VLLM_USE_NCCL_SYMM_MEM",
+        "VLLM_BATCH_INVARIANT",
+    ):
+        monkeypatch.setenv(name, "1" if name == disabled_env else "0")
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tp,
+            decode_context_parallel_size=dcp,
+            prefill_context_parallel_size=pcp,
+            distributed_executor_backend="mp",
+        ),
+        compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode[graph]),
+    )
+    expected = (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and (tp, dcp, pcp, graph, disabled_env) == (4, 1, 1, "PIECEWISE", None)
+    )
+    assert qsa_indexer._tp_prefill_sharding_supported(config) is expected
+
+
+@pytest.mark.parametrize("nodes,backend", [(2, "mp"), (1, "external_launcher")])
+def test_qsa_tp_prefill_retains_unmeasured_topologies(monkeypatch, nodes, backend):
+    from vllm.config import ParallelConfig, VllmConfig
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=4,
+            nnodes=nodes,
+            distributed_executor_backend=backend,
+        ),
+    )
+    assert not qsa_indexer._tp_prefill_sharding_supported(config)

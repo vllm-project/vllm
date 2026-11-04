@@ -395,6 +395,20 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
+- label: ":nvidia: (H100) [Nightly] Qwen4 Exp QSA TP4"
+  key: qwen4-exp-qsa-tp4
+  device: h100
+  num_devices: 4
+  optional: true
+  timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/qwen4_exp/
+  - vllm/distributed/
+  - tests/models/qwen4_exp/test_tpsp.py
+  commands:
+  - pytest -v -s models/qwen4_exp/test_tpsp.py -k qsa_tp_prefill
+
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
   automatic_shard: true

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton kernels for Qwen4Exp QSA index selection."""
 
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -11,6 +13,10 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from vllm.distributed.parallel_state import GroupCoordinator
+
 
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
 _DECODE_BLOCK_N = 64
@@ -587,6 +593,8 @@ def qsa_select_paged_prefill(
     max_query_len: int,
     block_indices: torch.Tensor,
     max_seq_len: int,
+    *,
+    tp_group: "GroupCoordinator | None" = None,
 ) -> None:
     """Score and select compressed prefill blocks in bounded chunks.
 
@@ -603,6 +611,7 @@ def qsa_select_paged_prefill(
         max_query_len: Maximum number of query tokens in one request.
         block_indices: Compressed-index output buffer.
         max_seq_len: Longest context length in the batch this step.
+        tp_group: Optional group owning disjoint query rows with replicated K.
 
     """
     assert token_topk % compress_ratio == 0
@@ -627,8 +636,16 @@ def qsa_select_paged_prefill(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
 
-    for query_start in range(0, rows, rows_per_chunk):
-        query_end = min(query_start + rows_per_chunk, rows)
+    first, last = 0, rows
+    local_indices = block_indices
+    if tp_group is not None:
+        local_rows = triton.cdiv(rows, tp_group.world_size)
+        first = tp_group.rank_in_group * local_rows
+        last = min(first + local_rows, rows)
+        local_indices = block_indices.new_empty((local_rows, block_indices.shape[1]))
+
+    for query_start in range(first, last, rows_per_chunk):
+        query_end = min(query_start + rows_per_chunk, last)
         query_slice = slice(query_start, query_end)
         logits = _prefill_logits(
             q,
@@ -647,9 +664,12 @@ def qsa_select_paged_prefill(
             visible_blocks[query_slice],
             token_topk,
             compress_ratio,
-            block_indices[query_slice],
+            local_indices[query_start - first : query_end - first],
             topk_workspace,
         )
+
+    if tp_group is not None:
+        block_indices.copy_(tp_group.all_gather(local_indices, dim=0)[:rows])
 
 
 __all__ = [

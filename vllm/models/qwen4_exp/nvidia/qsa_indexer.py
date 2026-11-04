@@ -8,12 +8,16 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
+from vllm.platforms import current_platform
 
 from ..common.qsa_indexer import (
     QSACompressedKeyCache,
@@ -87,6 +91,43 @@ def _supports_fused_pre_indexer(
     )
 
 
+def _tp_prefill_sharding_supported(vllm_config: VllmConfig) -> bool:
+    parallel = vllm_config.parallel_config
+    graph = vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and parallel.tensor_parallel_size == 4
+        and parallel.nnodes == 1
+        and parallel.distributed_executor_backend == "mp"
+        and parallel.decode_context_parallel_size == 1
+        and parallel.prefill_context_parallel_size == 1
+        and not envs.VLLM_DISABLE_PYNCCL
+        and not envs.VLLM_USE_NCCL_SYMM_MEM
+        and not envs.VLLM_BATCH_INVARIANT
+        and graph.mixed_mode() != CUDAGraphMode.FULL
+    )
+
+
+def _use_tp_prefill_sharding(
+    enabled: bool,
+    q: torch.Tensor,
+    max_seq_len: int,
+    token_topk: int,
+    compress_ratio: int,
+) -> bool:
+    # Only the measured BF16 H20/TP4 large-prefill regime amortizes exchange.
+    return (
+        enabled
+        and q.dtype == torch.bfloat16
+        and q.shape[1:] == (4, 128)
+        and token_topk == 2048
+        and compress_ratio == 4
+        and q.shape[0] >= 4096
+        and max_seq_len >= 65536
+    )
+
+
 class QSAIndexer(nn.Module):
     """QSA projection weights, indexer caches, and paged, weight-free selection.
 
@@ -111,6 +152,7 @@ class QSAIndexer(nn.Module):
         if vllm_config.model_config.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
 
+        self.tp_prefill_sharding = _tp_prefill_sharding_supported(vllm_config)
         self.layer_id = int(layer_id)
         self.index_n_heads = int(config.indexer_n_heads)
         self.index_kv_heads = int(config.indexer_kv_heads)
@@ -430,6 +472,15 @@ class QSAIndexer(nn.Module):
         if num_decode_tokens < num_tokens:
             num_decodes = compressed_metadata.num_decodes
             prefill_slice = slice(num_decode_tokens, num_tokens)
+            tp_group = None
+            if _use_tp_prefill_sharding(
+                self.tp_prefill_sharding,
+                q[prefill_slice],
+                compressed_metadata.max_seq_len,
+                self.token_topk,
+                self.compress_ratio,
+            ):
+                tp_group = get_tp_group()
             qsa_select_paged_prefill(
                 q[prefill_slice],
                 compressed_key_cache,
@@ -441,6 +492,7 @@ class QSAIndexer(nn.Module):
                 compressed_metadata.max_query_len,
                 block_indices[prefill_slice],
                 compressed_metadata.max_seq_len,
+                tp_group=tp_group,
             )
         expand_qsa_block_indices(
             block_indices,
