@@ -94,6 +94,15 @@ def _maybe_set_cuda_compatibility_path():
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
 
 
+def _rocm_promote_torch_symbols_enabled():
+    """VLLM_ROCM_PROMOTE_TORCH_SYMBOLS if set; otherwise whether the torch
+    profiler is on (VLLM_TORCH_PROFILER_DIR), the one consumer of the symbol."""
+    value = os.environ.get("VLLM_ROCM_PROMOTE_TORCH_SYMBOLS")
+    if value is None:
+        return bool(os.environ.get("VLLM_TORCH_PROFILER_DIR", "").strip())
+    return value.strip().lower() in ("1", "true")
+
+
 def _maybe_promote_torch_symbols_for_rocm():
     """Put libtorch_cpu.so in the global symbol scope on ROCm, for GPU profiling.
 
@@ -110,7 +119,16 @@ def _maybe_promote_torch_symbols_for_rocm():
 
     Best effort. If the library cannot be loaded early we leave the process
     exactly as it would have been, losing only GPU tracing.
+
+    Off unless profiling is requested. The early load interposes a second
+    LLVM on stacks whose torch preloads its own ROCm runtime during 'import
+    torch' (TheRock ROCm 10 with torch 2.13: "Option 'spirv-expand-step'
+    registered more than once", and the process aborts). Since only the
+    profiler needs the symbol, VLLM_ROCM_PROMOTE_TORCH_SYMBOLS decides, and
+    when it is unset the load happens only with VLLM_TORCH_PROFILER_DIR set.
     """
+    if not _rocm_promote_torch_symbols_enabled():
+        return
     if _get_torch_version_attr("hip") is None:
         return
     try:

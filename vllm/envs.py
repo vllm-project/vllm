@@ -331,6 +331,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
+    VLLM_ROCM_PROMOTE_TORCH_SYMBOLS: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
     VLLM_SKIP_MODEL_NAME_VALIDATION: bool = False
     """If set, vLLM will skip model name validation in API requests.
@@ -1278,6 +1279,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Load libtorch_cpu.so into the global symbol scope before `import torch`
+    # so rocprofiler-sdk finds libkineto and torch.profiler gets GPU records.
+    # Read by vllm/env_override.py ahead of this module. Unset, it follows
+    # VLLM_TORCH_PROFILER_DIR; "0" keeps the load off on stacks whose torch
+    # preloads its own ROCm runtime, where the early load aborts the process.
+    "VLLM_ROCM_PROMOTE_TORCH_SYMBOLS": lambda: (
+        os.environ.get(
+            "VLLM_ROCM_PROMOTE_TORCH_SYMBOLS",
+            "1" if os.environ.get("VLLM_TORCH_PROFILER_DIR", "").strip() else "0",
+        )
+        .strip()
+        .lower()
+        in ("1", "true")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
@@ -2540,6 +2555,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_TEST_FORCE_LOAD_FORMAT",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
+        "VLLM_ROCM_PROMOTE_TORCH_SYMBOLS",
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
