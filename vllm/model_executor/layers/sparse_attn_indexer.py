@@ -45,7 +45,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
-    get_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
@@ -675,7 +674,6 @@ def sparse_attn_indexer(
             if candidate_blocks is not None
             else PrefillRowShard.from_metadata(prefill_metadata, num_decode_tokens)
         )
-        # Once per layer rather than per chunk: bf16 weights / unit Q scales.
         mx_q_scale, mx_weights = mqa_logits_mx_inputs(q_quant, q_scale, weights)
         for chunk in prefill_metadata.chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
@@ -758,19 +756,9 @@ def sparse_attn_indexer(
                     row_starts = cu_seqlen_ks
                     row_ends = cu_seqlen_ke
                 else:
-                    # Layers scoring the same chunk share DeepGEMM's per-SM
-                    # schedule; a row-sharded (narrowed) chunk builds its own.
-                    schedules = (
-                        chunk.logits_schedules
-                        if cu_seqlen_ks is chunk.cu_seqlen_ks
-                        else {}
+                    schedule = chunk.logits_schedule(
+                        row_start, row_end, k_quant_cast.shape[0], q_slice_cast.shape[1]
                     )
-                    num_kv, num_heads = k_quant_cast.shape[0], q_slice_cast.shape[1]
-                    key = (torch.cuda.is_current_stream_capturing(), num_kv, num_heads)
-                    if key not in schedules:
-                        schedules[key] = get_mqa_logits_metadata(
-                            cu_seqlen_ks, cu_seqlen_ke, num_kv, num_heads
-                        )
                     row_ends = cu_seqlen_ke - cu_seqlen_ks
                     logits = fp8_fp4_mqa_logits(
                         (q_slice_cast, q_scale_slice),
@@ -779,7 +767,7 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         chunk.max_seqlen_k,
-                        schedules[key],
+                        schedule,
                     )
                     # DeepSelect ranks the bf16 logits in place of their exact fp32
                     # copy; fp32 logits keep the per-row top-k.

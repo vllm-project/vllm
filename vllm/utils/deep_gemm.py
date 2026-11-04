@@ -709,7 +709,7 @@ def fp8_fp4_mqa_logits(
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
-    # Only DeepGEMM builds with get_mqa_logits_metadata take a schedule.
+    # Builds without get_mqa_logits_metadata reject a schedule argument.
     schedule = () if schedule_meta is None else (schedule_meta,)
     return _fp8_fp4_mqa_logits_impl(
         q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, max_seqlen_k, *schedule
@@ -722,13 +722,10 @@ def get_mqa_logits_metadata(
     num_kv_tokens: int,
     num_heads: int,
 ) -> torch.Tensor | None:
-    """SM100 per-SM schedule for ``fp8_fp4_mqa_logits``, or None where this
-    DeepGEMM has none. It balances the rows' KV ranges across SMs, so layers
-    sharing the row bounds and KV length can share it."""
+    """SM100 per-SM schedule balancing ``fp8_fp4_mqa_logits`` rows' KV ranges,
+    or None where this DeepGEMM has none."""
     _lazy_init()
-    if _get_mqa_logits_metadata_impl is None or not (
-        current_platform.is_device_capability_family(100)
-    ):
+    if _get_mqa_logits_metadata_impl is None or not mqa_logits_use_mx_scales():
         return None
     return _get_mqa_logits_metadata_impl(
         cu_seqlen_ks, cu_seqlen_ke, num_kv_tokens, num_heads
@@ -1139,7 +1136,6 @@ def should_use_deepgemm_for_fp8_linear(
 
 __all__ = [
     "calc_diff",
-    "get_mqa_logits_metadata",
     "bf16_mega_gate",
     "DeepGemmQuantScaleFMT",
     "fp8_gemm_nt",
@@ -1149,6 +1145,7 @@ __all__ = [
     "fp8_m_grouped_gemm_nt_masked",
     "fp8_fp4_mqa_logits",
     "fp8_fp4_paged_mqa_logits",
+    "get_mqa_logits_metadata",
     "get_paged_mqa_logits_metadata",
     "mqa_logits_mx_inputs",
     "mqa_logits_use_mx_scales",

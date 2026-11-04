@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
+    get_mqa_logits_metadata,
     get_paged_mqa_logits_metadata,
     get_paged_mqa_page_sizes,
     has_deep_gemm,
@@ -474,9 +475,26 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
     pcp_deinterleave_idx: torch.Tensor | None = None
-    # DeepGEMM logits schedules built by the first indexer layer scoring this
-    # chunk, keyed by (capturing, KV length, heads), reused by the next ones.
-    logits_schedules: dict[tuple, torch.Tensor | None] = field(default_factory=dict)
+    _logits_schedules: dict[tuple[bool, int, int], torch.Tensor | None] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    def logits_schedule(
+        self, row_start: int, row_end: int, num_kv_tokens: int, num_heads: int
+    ) -> torch.Tensor | None:
+        """DeepGEMM's per-SM logits schedule for rows ``[row_start, row_end)``,
+        built by the first indexer layer scoring them and shared by the rest.
+        A graph being captured never reads a schedule built eagerly."""
+        key = (torch.cuda.is_current_stream_capturing(), row_start, row_end)
+        if key not in self._logits_schedules:
+            lo, hi = row_start - self.token_start, row_end - self.token_start
+            self._logits_schedules[key] = get_mqa_logits_metadata(
+                self.cu_seqlen_ks[lo:hi],
+                self.cu_seqlen_ke[lo:hi],
+                num_kv_tokens,
+                num_heads,
+            )
+        return self._logits_schedules[key]
 
 
 class BuildPrefillChunkMetadataKernel(
