@@ -9,8 +9,9 @@ flag in the output rank's flag array, then a release fence, then any further dat
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+
+from vllm import envs
 
 MONO_ABI_VERSION = 1
 ERROR_WORD_BYTES = 4
@@ -30,18 +31,23 @@ class FaultSpec:
 
 def fault_spec() -> FaultSpec | None:
     """The build-time fault hook, from ``VLLM_MONO_FAULT_INJECT="rank=R,step=N,us=D"``.
-    Unset: kernels generate no fault code."""
-    raw = os.environ.get(FAULT_INJECT_ENV)
+    Unset: kernels generate no fault code. The values are closure constants of the
+    kernel, which FlyDSL folds into its disk-cache key; ``D > 0`` keeps that key
+    apart from the unset (0, 0, 0), so a later run never loads a fault build."""
+    raw = envs.VLLM_MONO_FAULT_INJECT
     if not raw:
         return None
     fields = dict(kv.split("=", 1) for kv in raw.split(","))
     try:
-        return FaultSpec(int(fields["rank"]), int(fields["step"]), int(fields["us"]))
+        spec = FaultSpec(int(fields["rank"]), int(fields["step"]), int(fields["us"]))
     except (KeyError, ValueError) as error:
         raise ValueError(
             f'{FAULT_INJECT_ENV} must look like "rank=R,step=N,us=D", got {raw!r}'
         ) from error
+    if spec.us <= 0:
+        raise ValueError(f"{FAULT_INJECT_ENV} needs us > 0, got {raw!r}")
+    return spec
 
 
 def unsafe_warn() -> bool:
-    return os.environ.get(UNSAFE_WARN_ENV) == "1"
+    return envs.VLLM_MONO_UNSAFE_WARN

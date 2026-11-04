@@ -78,8 +78,10 @@ def _mxfp4_rows(name: str, linear: nn.Module, rows: int, k: int):
         got = None if sc is None else tuple(sc.shape)
         raise ValueError(
             f"needs shared_experts.{name} as row-major MXFP4 {(rows, k // 2)} with a "
-            f"{(k // 32, rows)} scale (VLLM_ROCM_USE_AITER_FP4_ASM_GEMM off), got "
-            f"{w.dtype} {tuple(w.shape)} and scale {got}"
+            f"{(k // 32, rows)} scale, got {w.dtype} {tuple(w.shape)} and scale "
+            f"{got} (AITER's preshuffled ASM GEMM layout, picked for shapes AITER "
+            "has tuned, is not read; VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 "
+            "fuses the shared expert into the routed experts instead)"
         )
     return w.view(torch.uint8), sc.view(torch.uint8).T.contiguous()
 

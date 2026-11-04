@@ -158,6 +158,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_MONO_UNSAFE_WARN: bool = False
+    VLLM_MONO_FAULT_INJECT: str | None = None
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1429,6 +1431,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
         in ("true", "1")
     ),
+    # GLM-5.3-Flash MonoKernel (ROCm), debugging only: after an expired kernel
+    # wait, log and clear the error words and keep serving instead of stopping.
+    "VLLM_MONO_UNSAFE_WARN": lambda: os.getenv("VLLM_MONO_UNSAFE_WARN", "0") == "1",
+    # GLM-5.3-Flash MonoKernel (ROCm) fault test: "rank=R,step=N,us=D" builds
+    # kernels that stall rank R for D microseconds at kernel step N.
+    "VLLM_MONO_FAULT_INJECT": lambda: os.getenv("VLLM_MONO_FAULT_INJECT"),
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
@@ -2554,6 +2562,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_VERSION_SUFFIX",
         "FORCE_COLOR",
         "VLLM_REQUEST_BODY_LOG_LEVEL",
+        # MonoKernel fail-stop and fault test; FlyDSL keys its own kernel cache
+        "VLLM_MONO_UNSAFE_WARN",
+        "VLLM_MONO_FAULT_INJECT",
     }
 
     from vllm.config.utils import normalize_value
