@@ -15,9 +15,55 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _block_table_for(worker: "Worker", prefix: str) -> torch.Tensor:
+    runner = worker.model_runner
+    group_id = next(
+        i
+        for i, group in enumerate(runner.kv_cache_config.kv_cache_groups)
+        if prefix in group.layer_names
+    )
+    return runner.block_tables.input_block_tables[group_id]
+
+
+def _amd_qsa_triton_warmup(worker: "Worker") -> None:
+    """Compile the MFMA scorer the AMD indexer uses for prefill chunks; its
+    first launch would otherwise come after warmup, in a served step."""
+    qsa_module = sys.modules.get("vllm.models.qwen4_exp.amd.qsa_indexer")
+    if qsa_module is None:
+        return
+    indexer = next(
+        (
+            layer
+            for layer in worker.get_model().modules()
+            if isinstance(layer, qsa_module.QSAIndexer)
+        ),
+        None,
+    )
+    if indexer is None:
+        return
+
+    from vllm.models.qwen4_exp.amd.ops.qsa_mfma_scorer import (
+        warmup_qsa_mqa_paged_mfma,
+    )
+
+    k_cache = indexer.compressed_key_cache.kv_cache
+    assert k_cache.numel()
+    widths = warmup_qsa_mqa_paged_mfma(
+        k_cache,
+        _block_table_for(worker, indexer.compressed_key_cache.prefix),
+        num_heads=indexer.index_n_heads,
+        head_dim=indexer.index_head_dim,
+        compress_ratio=indexer.compress_ratio,
+        max_num_batched_tokens=worker.model_runner.max_num_tokens,
+    )
+    logger.info("Warmed up Qwen4Exp QSA MFMA scorer at score widths %s.", widths)
+
+
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
-    profiles plus the sparse attention split-K/merge configs."""
+    profiles plus the sparse attention split-K/merge configs (NVIDIA), the
+    prefill MFMA scorer (AMD)."""
+    _amd_qsa_triton_warmup(worker)
     qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa_indexer")
     attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
     if qsa_module is None or attn_module is None:
@@ -34,14 +80,6 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
 
     runner = worker.model_runner
 
-    def block_table_for(prefix: str) -> torch.Tensor:
-        group_id = next(
-            i
-            for i, group in enumerate(runner.kv_cache_config.kv_cache_groups)
-            if prefix in group.layer_names
-        )
-        return runner.block_tables.input_block_tables[group_id]
-
     from vllm.models.qwen4_exp.nvidia.ops.qsa_indexer import (
         warmup_qsa_mqa_paged_decode,
     )
@@ -50,7 +88,7 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     assert k_cache.numel()
     profiles = warmup_qsa_mqa_paged_decode(
         k_cache,
-        block_table_for(indexer.compressed_key_cache.prefix),
+        _block_table_for(worker, indexer.compressed_key_cache.prefix),
         num_heads=indexer.index_n_heads,
         head_dim=indexer.index_head_dim,
         max_decode_query_len=runner.decode_query_len,
@@ -67,7 +105,7 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     assert kv_cache.numel()
     attention_profiles = warmup_qsa_sparse_paged_attention(
         kv_cache,
-        block_table_for(owner.layer_name),
+        _block_table_for(worker, owner.layer_name),
         num_query_heads=owner.num_heads,
         selection_width=indexer.output_width,
     )
