@@ -17,10 +17,6 @@ meta:
   # NVIDIA hardware with a published end-to-end run on that branch: TP4 + EP
   # on one NVL4 tray, FP8 KV cache, block size 256, DSpark k=3, full
   # 1000-sample OCRBench at 83.5% with zero request errors.
-  # Atlas A5 8-card mixed serving of the native FP4+FP8 Vision-Exp checkpoint
-  # (DP4+EP, TP=1, no speculative decoding). 950PR verified 2026-09-10 on
-  # vLLM Ascend; 950DT uses the same command (4 of 8 NPUs). See the hardware
-  # note for the required hash-router bias fix.
   # AMD MI350X (gfx950): ROCm vision merged in vllm-project/vllm#55107 (2026-09-11)
   # on the #54566 base. Verified text+vision on stock ROCm nightly at single-node
   # TP2 and TP4, with DSpark k=3 (needs VLLM_USE_V2_MODEL_RUNNER=1). See
@@ -29,8 +25,6 @@ meta:
   hardware:
     gb200: verified
     mi350x: verified
-    ascend_950dt_8x: verified
-    ascend_950pr_8x: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4-Flash-Vision-Exp"
@@ -74,13 +68,6 @@ features:
       - "deepseek_v4"
       - "--reasoning-config"
       - '{"reasoning_parser":"deepseek_v4","reasoning_start_str":"","reasoning_end_str":""}'
-    # Empty start/end strings make the Ascend chat path emit content=null
-    # for a full completion. Keep the parser, drop the override.
-    hardware_overrides:
-      npu:
-        args:
-          - "--reasoning-parser"
-          - "deepseek_v4"
   # Single method, so the boolean form (not `modes`): the checkpoint's fused
   # DSpark module is the only drafter with a published run on this branch. Left
   # OUT of opt_in_features on purpose — the verified GB200 configuration had
@@ -92,9 +79,6 @@ features:
     args:
       - "--speculative-config"
       - '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":true}'
-    # 950 has no working MTP or DSpark path yet. Empty args so a toggle-on
-    # still emits no --speculative-config. Default-off via
-    # hardware_opt_in_features below — GB200 keeps DSpark on.
     hardware_overrides:
       # ROCm: the DeepseekV4 indexer backend rejects adaptive verification, so it
       # is forced false (DSpark still drafts k=3). VLLM_USE_V2_MODEL_RUNNER=1
@@ -103,15 +87,6 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dspark","model":"deepseek-ai/DeepSeek-V4-Flash-Vision-Exp","num_speculative_tokens":3,"draft_sample_method":"probabilistic","enable_adaptive_verification":false}'
-      npu:
-        args: []
-
-# Spec decoding stays default-on everywhere except the A5 8-card pills.
-hardware_opt_in_features:
-  ascend_950pr_8x:
-    - spec_decoding
-  ascend_950dt_8x:
-    - spec_decoding
 
 variants:
   default:
@@ -120,18 +95,6 @@ variants:
     # underestimates: sized from the real checkpoint (167.8 GB x 1.2).
     vram_minimum_gb: 202
     description: "Native FP4+FP8 mixed checkpoint (MoE experts FP4, attention/norm/router FP8) with a BF16 vision tower, aligner, and the fused DSpark draft module."
-    hardware_overrides:
-      # Exact-GPU pin: computeDockerMeta has no Huawei brand, so the model-level
-      # docker_image string only affects NVIDIA. Hide pip — official wheels
-      # have no NPU kernels.
-      ascend_950pr_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
-      ascend_950dt_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
 
 compatible_strategies:
   - single_node_tp
@@ -143,23 +106,6 @@ compatible_strategies:
 # TP + EP is the verified layout (TP4 + EP on one GB200 NVL4 tray).
 default_strategy: single_node_tep
 
-# Atlas A5 mixed serving is DP+EP only. The native checkpoint has 64
-# attention heads; 950's FP8 DSA operator accepts local num_heads_q of
-# 64 or 128, so TP must stay 1. TEP/TP and intra-node PD are not offered.
-strategy_hardware:
-  single_node_tp:
-    npu: unsupported
-  single_node_tep:
-    npu: unsupported
-  multi_node_tep:
-    npu: unsupported
-  multi_node_dep:
-    npu: unsupported
-
-# Shared by 950DT 8x (8×96 GB) and 950PR 8x (8×128 GB). Mixed serving uses
-# 4 of the 8 NPUs (DP4+EP, TP=1). HCCL_BUFFSIZE=1024 is required for MC2
-# dispatch. last-wins shadows the DEP builder's --data-parallel-size 8
-# and the recipe-level --block-size 256 / --kv-cache-dtype fp8.
 hardware_overrides:
   amd:
     extra_args:
@@ -173,49 +119,6 @@ hardware_overrides:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
       VLLM_USE_V2_MODEL_RUNNER: "1"
-  npu:
-    extra_args:
-      - "--data-parallel-size"
-      - "4"
-      - "--block-size"
-      - "128"
-      - "--kv-cache-dtype"
-      - "auto"
-      - "--tokenizer-mode"
-      - "deepseek_v4"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--async-scheduling"
-      - "--max-model-len"
-      - "8192"
-      - "--max-num-seqs"
-      - "16"
-      - "--max-num-batched-tokens"
-      - "2048"
-      - "--gpu-memory-utilization"
-      - "0.9"
-      - "--api-server-count"
-      - "1"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--additional-config"
-      - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "10"
-      HCCL_BUFFSIZE: "1024"
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      TASK_QUEUE_ENABLE: "1"
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
-
-hardware_notes:
-  ascend_950dt_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Mixed serving on one 8-card 950DT node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950PR. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias."
-  ascend_950pr_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Mixed serving on one 8-card 950PR node uses 4 of 8 NPUs (DP4+EP, TP=1). Same command as 950DT. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and set HCCL_BUFFSIZE=1024 before launch. Native Flash-Vision checkpoints need the hash-router bias skip in vllm-project/vllm-ascend#16259 — without it load_weights aborts on model.layers.0.mlp.gate.e_score_correction_bias."
 
 guide: |
   ## Overview
@@ -271,7 +174,7 @@ guide: |
   - `VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS` excludes the FP4 block-scale MoE op from
     FlashInfer's startup autotuning. Export it if autotuning that op fails or costs more
     startup time than it earns back on your FlashInfer build; it is a tuning knob, not a
-    requirement. The Advanced row's `--no-enable-flashinfer-autotune` turns autotuning
+    requirement. The Advanced row's `--disable-flashinfer-autotune` turns autotuning
     off wholesale instead.
   - `--max-model-len 32768` bounds KV cache for the benchmark. The checkpoint advertises
     1M tokens; that is **not** what was measured, and 1M-token KV needs far more memory

@@ -13,9 +13,10 @@ import torch
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -315,10 +316,15 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                 )
             elif self.load_config.load_format == "instanttensor":
+                vllm_config = get_current_vllm_config_or_none()
+                engram_config = vllm_config.engram_config if vllm_config else None
                 weights_iterator = instanttensor_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                     local_expert_ids=self.local_expert_ids,
+                    load_engram_on_cpu=bool(
+                        engram_config and engram_config.cpu_offload
+                    ),
                 )
             else:
                 if extra_config.get("enable_multithread_load"):
@@ -525,8 +531,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
-            # ignore online quantization scales
             for name, module in model.named_modules():
+                if isinstance(module, StackedColumnParallelLinear):
+                    weights_to_load.update(
+                        f"{name}.{shard_id}" for shard_id in module.pop_missing_shards()
+                    )
+                # ignore online quantization scales
                 quant_method = getattr(module, "quant_method", None)
                 has_online_quant = getattr(quant_method, "uses_meta_device", False)
                 has_postprocess_quant = getattr(

@@ -14,10 +14,8 @@ import torch
 
 from tests.kernels.mamba.test_mamba_ssm_ssd import generate_random_inputs
 from vllm.model_executor.layers.mamba.checkpoint import (
+    MambaPrefillCheckpointExporter,
     MambaPrefillCheckpointMetadata,
-)
-from vllm.model_executor.layers.mamba.ops.ssd_checkpoint import (
-    store_prefill_checkpoint,
 )
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
@@ -148,15 +146,14 @@ def test_store_selects_the_checkpoint_from_all_chunk_states(dim_first, spec_slot
         offsets=[32, 0],
     )
 
-    store_prefill_checkpoint(
+    MambaPrefillCheckpointExporter(state_len=state_len).export(
         checkpoint,
-        torch.tensor([3, 0], device=DEVICE),
-        conv_input.T,
-        conv_state,
-        varlen_states,
-        ssm_state,
-        torch.tensor([0, 40, 64], dtype=torch.int32, device=DEVICE),
-        state_len=state_len,
+        raw_qkv=conv_input,
+        conv_state=conv_state,
+        recurrent_checkpoint=varlen_states,
+        recurrent_state=ssm_state,
+        cu_seqlens=torch.tensor([0, 40, 64], dtype=torch.int32, device=DEVICE),
+        recurrent_rows=torch.tensor([3, 0], device=DEVICE),
     )
 
     exact = dict(rtol=0, atol=0)

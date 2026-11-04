@@ -7,7 +7,7 @@ from typing import Literal
 from weakref import WeakKeyDictionary
 
 import torch
-from torch.nn import Module, Parameter
+from torch.nn import Module
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
@@ -69,8 +69,8 @@ class _LMHeadNvfp4Method(OnlineLinearBase):
     def process_weights_after_loading(self, layer: Module) -> None:
         packed, scales, global_scale = _quantize_nvfp4(layer.weight)
         replace_parameter(layer, "weight", packed)
-        layer.weight_scale = Parameter(scales, requires_grad=False)
-        layer.weight_global_scale = Parameter(global_scale, requires_grad=False)
+        replace_parameter(layer, "weight_scale", scales)
+        replace_parameter(layer, "weight_global_scale", global_scale)
         self.kernel = init_nvfp4_linear_kernel(use_a16=True)
         self.kernel.process_weights_after_loading(layer)
 
@@ -112,7 +112,8 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             disable_tp=lm_head.disable_tp,
             quant_method=_LM_HEAD_METHODS[quantization](),
         )
-    replace_parameter(head, "weight", lm_head.weight.data)
+    # Never loaded: a new param sharing the source storage, never a copy of it.
+    head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
     head.quant_method.process_weights_after_loading(head)
     # The copy is never loaded. The online loader wrapper captures the layer,
     # so keeping it would leave each copy to the cycle collector.

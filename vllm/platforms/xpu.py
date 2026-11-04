@@ -213,8 +213,8 @@ class XPUPlatform(Platform):
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Attention request (for text-only workloads); otherwise use the
+            # Triton/FlashAttention composite, falling back to Triton Attention.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
                 logger.warning_once(
                     "Using Flash Attention on XPU for a multimodal prefix-LM "
@@ -224,6 +224,29 @@ class XPUPlatform(Platform):
                     "text-only workloads."
                 )
                 return AttentionBackendEnum.FLASH_ATTN.get_path()
+            if (
+                selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
+                and dtype != torch.float32
+            ):
+                from vllm.v1.attention.backends.triton_flash_attn import (
+                    TritonFlashAttentionBackend,
+                )
+
+                if TritonFlashAttentionBackend.supports_head_size(
+                    attn_selector_config.head_size
+                ):
+                    logger.info_once(
+                        "Using the Triton/FlashAttention composite backend on "
+                        "XPU: batches with multimodal prefix masks run Triton "
+                        "Attention, causal batches run Flash Attention."
+                    )
+                    return AttentionBackendEnum.TRITON_FLASH_ATTN.get_path()
+                if selected_backend == AttentionBackendEnum.TRITON_FLASH_ATTN:
+                    raise ValueError(
+                        "TRITON_FLASH_ATTN on XPU supports head sizes "
+                        f"{TritonFlashAttentionBackend.get_supported_head_sizes()}"
+                        f", got {attn_selector_config.head_size}."
+                    )
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."

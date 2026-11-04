@@ -6,8 +6,11 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use super::streaming::{StreamedResponseHandler, trim_bytes};
-use super::{CompletionChunk, RequestFuncInput, RequestFuncOutput, build_headers};
+use super::streaming::StreamedResponseHandler;
+use super::{
+    CompletionChunk, NO_VALID_CHUNK_ERROR, RequestFuncInput, RequestFuncOutput, build_headers,
+    update_server_metrics,
+};
 use crate::error::Result;
 
 /// Backend for OpenAI-compatible Completions API (/v1/completions).
@@ -95,30 +98,16 @@ impl OpenAICompletionsBackend {
                             }
                         };
 
-                        let trimmed_bytes = trim_bytes(&chunk_bytes);
-                        if trimmed_bytes.is_empty() {
-                            continue;
-                        }
-
-                        let messages = handler.add_chunk(trimmed_bytes);
+                        let messages = handler.add_chunk(&chunk_bytes);
                         for message in messages {
-                            // Skip SSE comments
-                            if message.starts_with(':') {
+                            // Take the data: line of each event, which may carry other
+                            // fields (Dynamo sends "event: message\ndata: {...}").
+                            // Comments and other events without data are skipped.
+                            let Some(chunk) =
+                                message.lines().find_map(|l| l.strip_prefix("data: "))
+                            else {
                                 continue;
-                            }
-
-                            // Handle multi-field SSE events (e.g., Dynamo sends
-                            // "event: message\ndata: {...}"). Extract the data: line.
-                            let raw = if message.contains('\n') {
-                                match message.lines().find(|l| l.starts_with("data: ")) {
-                                    Some(l) => l,
-                                    None => continue,
-                                }
-                            } else {
-                                message.as_str()
                             };
-
-                            let chunk = raw.strip_prefix("data: ").unwrap_or(raw);
 
                             if chunk == "[DONE]" {
                                 continue;
@@ -130,6 +119,8 @@ impl OpenAICompletionsBackend {
                                 Ok(d) => d,
                                 Err(_) => continue,
                             };
+
+                            update_server_metrics(&mut output, data.metrics.as_ref());
 
                             if !data.choices.is_empty() {
                                 let text = data.choices[0].text.as_deref().unwrap_or("");
@@ -152,10 +143,8 @@ impl OpenAICompletionsBackend {
                             }
                             // Separate `if` (not `else if`) — Dynamo may send
                             // both choices and usage in the same chunk.
-                            if let Some(ref usage) = data.usage
-                                && let Some(ct) = usage.completion_tokens
-                            {
-                                output.output_tokens = ct as usize;
+                            if let Some(usage) = &data.usage {
+                                usage.apply(&mut output);
                             }
                         }
                     }
@@ -164,9 +153,7 @@ impl OpenAICompletionsBackend {
                         output.success = true;
                     } else {
                         output.success = false;
-                        output.error = "Never received a valid chunk to calculate TTFT. \
-                                        This response will be marked as failed!"
-                            .to_string();
+                        output.error = NO_VALID_CHUNK_ERROR.to_string();
                     }
                     output.generated_text = generated_text;
                     output.latency = most_recent_timestamp.duration_since(st).as_secs_f64();
@@ -195,5 +182,71 @@ impl OpenAICompletionsBackend {
         }
 
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve `body` as one streaming completions response over a raw socket.
+    /// Returns the endpoint URL.
+    fn spawn_sse_server(body: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            reader.read_exact(&mut vec![0; content_length]).unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         connection: close\r\n\r\n{body}"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        format!("http://{addr}/v1/completions")
+    }
+
+    /// The server's `usage.prompt_tokens` replaces the client-side estimate,
+    /// as in the chat backend.
+    #[tokio::test]
+    async fn test_usage_prompt_tokens_override_prompt_len() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(concat!(
+                "data: {\"choices\":[{\"text\":\"a\"}]}\n\n",
+                "data: {\"choices\":[{\"text\":\"b\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"completion_tokens\":2,\"prompt_tokens\":128}}\n\n",
+                "data: [DONE]\n\n",
+            )),
+            model: "test-model".to_string(),
+            prompt_len: 100,
+            output_len: 2,
+            ..Default::default()
+        };
+
+        let output = OpenAICompletionsBackend
+            .send_request(&input, &reqwest::Client::new())
+            .await
+            .unwrap();
+
+        assert!(output.success, "{}", output.error);
+        assert_eq!((output.prompt_len, output.output_tokens), (128, 2));
     }
 }
