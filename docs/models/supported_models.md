@@ -199,7 +199,9 @@ Some model architectures are supported via vLLM plugins. These plugins extend vL
 | ------------ | ------ | ----------------- |
 | `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
 | `Florence2ForConditionalGeneration` | Florence-2 | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+| `Nemotron3DiarizationForAudioFrameClassification` | NVIDIA Nemotron-3-Diarization | [vllm-nemotron-diarization-plugin](https://github.com/Alex-Wengg/vllm-nemotron-diarization-plugin) |
 | `Nemotron3_5AsrForRNNT` | NVIDIA Nemotron 3.5 ASR | [vllm-nemotron-asr-plugin](https://github.com/Sohaib-Ahmed21/vllm-nemotron-asr-plugin) |
+| `ParakeetForTDT` | NVIDIA Parakeet TDT | [vllm-parakeet-plugin](https://github.com/Alex-Wengg/vllm-parakeet-plugin) |
 
 For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
 
@@ -423,7 +425,7 @@ th {
 | `GraniteSWAForCausalLM` | Granite SWA | `ibm-granite/granite-swash-2b` | ✅︎ | ✅︎ |
 | `HrmTextForCausalLM` | HRM-Text | `sapientinc/HRM-Text-1B`, etc. | | |
 | `HYV3ForCausalLM` | HY3 | `tencent/Hy3-preview-Base`, `tencent/Hy3-preview`, `tencent/Hy3`, `tencent/Hy3-FP8` | ✅︎ | ✅︎ |
-| `HYV4ForCausalLM` | HY4 | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
+| `HYV4ForCausalLM` | [HY4](hy4.md) | `tencent/Hy4-preview`, `tencent/Hy4-preview-FP8` | ✅︎ | ✅︎ |
 | `HyperCLOVAXForCausalLM` | HyperCLOVAX-SEED-Think-14B | `naver-hyperclovax/HyperCLOVAX-SEED-Think-14B` | ✅︎ | ✅︎ |
 | `InternLM2ForCausalLM` | InternLM2 | `internlm/internlm2-7b`, `internlm/internlm2-chat-7b`, etc. | ✅︎ | ✅︎ |
 | `InternLM3ForCausalLM` | InternLM3 | `internlm/internlm3-8b-instruct`, etc. | ✅︎ | ✅︎ |
@@ -732,7 +734,8 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     on `transformers>=5.18.0`; older versions still require the flag.
 
 !!! note
-    On ROCm, `Step5ForConditionalGeneration` runs its MoE layers on Triton. With
+    On ROCm, `Step5ForConditionalGeneration` requires CDNA3 or newer (MI300 series
+    or later) and runs its MoE layers on Triton. With
     `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
     apply Step-5's SwiGLU clamp. An FP8 KV cache (`--kv-cache-dtype fp8`) needs
     `--block-size 32`. The checkpoint ships three MTP layers, enabled with
