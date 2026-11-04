@@ -100,6 +100,7 @@ steps:
   - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
   - tests/v1/e2e/general/test_sharded_sampling.py
   - tests/v1/e2e/spec_decode/test_sharded_sampling.py
+  - tests/v1/e2e/spec_decode/test_round_contract.py
   - tests/v1/e2e/spec_decode/utils.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
@@ -111,6 +112,8 @@ steps:
   # Batch-sharded sampling requires TP=2
   - pytest -v -s v1/e2e/general/test_sharded_sampling.py
   - pytest -v -s v1/e2e/spec_decode/test_sharded_sampling.py
+  # The round contract on 1 GPU, TP=2 and DP=2
+  - pytest -v -s v1/e2e/spec_decode/test_round_contract.py
   mirror:
     amd:
       label: ":amd: (MI355) Distributed DP Basic"

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 import random
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -15,6 +17,14 @@ from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.outputs import RequestOutput
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.metrics.reader import Counter, Gauge, Metric
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.ngram.config import NgramGPUSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
+from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+    SpeculatorConfig,
+    register_speculative_method,
+)
 
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
@@ -229,3 +239,164 @@ def compute_acceptance_len(
         if n_drafts <= 0:
             return 1
     return 1 + (n_accepted_toks / n_drafts)
+
+
+# --- Test-only speculators ---------------------------------------------------
+#
+# Registered with `register_speculative_method` as `test_*` methods. A custom
+# method must be registered in every process: the tests fork their engine and
+# worker processes (VLLM_WORKER_MULTIPROC_METHOD=fork) after registering.
+
+
+class _BudgetOne(SpeculatorConfig):
+    """Every step's drafts may take 1 row: no drafts, plain decode."""
+
+    def candidate_budget(self, view: BudgetView) -> int:
+        return 1
+
+
+class _AlternatingBudget(SpeculatorConfig):
+    """Alternates 1 and K + 1 rows: the step after a budget-1 step drafts again."""
+
+    def candidate_budget(self, view: BudgetView) -> int:
+        self._steps = getattr(self, "_steps", 0) + 1
+        return 1 if self._steps % 2 else self.num_speculative_tokens + 1
+
+
+class _BudgetOneOnRankZero(SpeculatorConfig):
+    """Data parallel rank 0 never drafts while the other ranks do."""
+
+    def candidate_budget(self, view: BudgetView) -> int:
+        if self.spec_config.target_parallel_config.data_parallel_index == 0:
+            return 1
+        return self.num_speculative_tokens + 1
+
+
+class NgramBudgetOneConfig(_BudgetOne, NgramGPUSpeculatorConfig):
+    pass
+
+
+class Eagle3BudgetOneConfig(_BudgetOne, Eagle3SpeculatorConfig):
+    pass
+
+
+class MTPAlternatingBudgetConfig(_AlternatingBudget, MTPSpeculatorConfig):
+    pass
+
+
+class NgramBudgetOneOnRankZeroConfig(_BudgetOneOnRankZero, NgramGPUSpeculatorConfig):
+    pass
+
+
+@functools.cache
+def _tree_speculator_class() -> type:
+    # The speculator imports the model runner, so it is built lazily: configs
+    # are imported in every process, including the scheduler's.
+    import numpy as np
+    import torch
+
+    from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+    from vllm.v1.worker.gpu.spec_decode.round import (
+        PlanBound,
+        PlanInputs,
+        VerifyPlan,
+    )
+
+    class NgramTreeSpeculator(NgramGPUSpeculator):
+        """Verifies the n-gram drafts as a tree: with ``branch`` the first draft
+        gets a sibling holding another token, and the chain continues from the
+        first draft. Without it the plan is the chain itself, laid out and
+        committed as a tree (``is_chain=False``)."""
+
+        branch = True
+
+        def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None:
+            if inputs.chain_only:
+                return None
+            assert self.resources is not None
+            num_reqs = len(inputs.req_ids)
+            num_cols = self.resources.max_candidates
+            if not hasattr(self, "_parent"):
+                shape = (self.req_states.max_num_reqs, num_cols)
+                self._parent = torch.empty(shape, dtype=torch.int32, device=self.device)
+                self._tokens = torch.empty(shape, dtype=torch.int32, device=self.device)
+                self._count = torch.empty(
+                    shape[0], dtype=torch.int32, device=self.device
+                )
+            rows = inputs.scheduled_rows.astype(np.int32)
+            parent = np.tile(np.arange(-1, num_cols - 1, dtype=np.int32), (num_reqs, 1))
+            # Row i holds draft i - 1 (row 0, the root, is ignored).
+            src = np.tile(np.arange(-1, num_cols - 1), (num_reqs, 1)).clip(min=0)
+            alt = np.zeros((num_reqs, num_cols), dtype=np.int64)
+            if self.branch:
+                tree = rows >= 4
+                # Rows: root, d1, sibling of d1, d2 (child of d1), d3, ...
+                parent[tree, 2] = 0
+                parent[tree, 3] = 1
+                src[tree, 2] = 0
+                src[tree, 3:] -= 1
+                alt[tree, 2] = 1
+            drafts = self.req_states.draft_tokens[inputs.idx_mapping]
+            src_gpu = torch.from_numpy(src).to(self.device, non_blocking=True)
+            src_gpu = src_gpu.clamp(max=drafts.shape[1] - 1)
+            tokens = drafts.gather(1, src_gpu)
+            tokens = tokens + torch.from_numpy(alt).to(self.device, non_blocking=True)
+            # Unproposed drafts are -1: any real token verifies the same.
+            tokens = (
+                tokens.clamp(min=0) % self.vllm_config.model_config.get_vocab_size()
+            )
+            self._parent[:num_reqs].copy_(torch.from_numpy(parent), non_blocking=True)
+            self._tokens[:num_reqs].copy_(tokens.to(torch.int32))
+            self._count[:num_reqs].copy_(torch.from_numpy(rows), non_blocking=True)
+            plan = VerifyPlan(
+                parent=self._parent[:num_reqs],
+                count=self._count[:num_reqs],
+                tokens=self._tokens[:num_reqs],
+            )
+            return plan, PlanBound()
+
+    return NgramTreeSpeculator
+
+
+@functools.cache
+def _chain_as_tree_speculator_class() -> type:
+    return type(
+        "NgramChainAsTreeSpeculator", (_tree_speculator_class(),), {"branch": False}
+    )
+
+
+def __getattr__(name: str) -> Any:
+    # Resolved by qualname in the worker (`speculator_class`).
+    if name == "NgramTreeSpeculator":
+        return _tree_speculator_class()
+    if name == "NgramChainAsTreeSpeculator":
+        return _chain_as_tree_speculator_class()
+    raise AttributeError(name)
+
+
+class NgramTreeConfig(NgramGPUSpeculatorConfig):
+    """A 2-way branching speculator built on the n-gram drafts."""
+
+    speculator_class = f"{__name__}.NgramTreeSpeculator"
+
+    def resources(self, max_num_seqs: int) -> SpecResources:
+        return replace(super().resources(max_num_seqs), max_branching=2)
+
+
+class NgramChainAsTreeConfig(NgramTreeConfig):
+    speculator_class = f"{__name__}.NgramChainAsTreeSpeculator"
+
+
+TEST_SPECULATORS = {
+    "test_ngram_budget_one": NgramBudgetOneConfig,
+    "test_eagle3_budget_one": Eagle3BudgetOneConfig,
+    "test_mtp_alternating_budget": MTPAlternatingBudgetConfig,
+    "test_ngram_budget_one_on_rank_zero": NgramBudgetOneOnRankZeroConfig,
+    "test_ngram_tree": NgramTreeConfig,
+    "test_ngram_chain_as_tree": NgramChainAsTreeConfig,
+}
+
+
+def register_test_speculators() -> None:
+    for name, config_cls in TEST_SPECULATORS.items():
+        register_speculative_method(name, config_cls)
