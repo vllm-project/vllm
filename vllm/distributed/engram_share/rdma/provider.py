@@ -213,9 +213,12 @@ class VllmRemoteReader:
             raise RuntimeError("vLLM prototype requires packed row264 tables")
         self.consumed = torch.cuda.Event()
         self.inflight = False
+        self.last_stream = None
+        self.captured_stream = None
 
     def lookup(self, table, indices, out, background=False):
-        if torch.cuda.is_current_stream_capturing():
+        capturing = torch.cuda.is_current_stream_capturing()
+        if capturing and not getattr(table, "rdma_full_decode_graph", False):
             raise RuntimeError("remote lookup must run at a vLLM eager boundary")
         if table.dim != 256 or table.block_size != 32:
             raise ValueError("unsupported remote Engram row format")
@@ -235,8 +238,18 @@ class VllmRemoteReader:
         # placeholder and retain the original IDs for the final ownership mask.
         read_ids = torch.where((ids >= 0) & (ids < table.num_embeddings), ids, 0)
         stream = torch.cuda.current_stream()
+        if (
+            self.captured_stream is not None
+            and self.captured_stream != stream.cuda_stream
+        ):
+            raise RuntimeError("captured remote reader must stay on its prefetch stream")
         if self.inflight:
-            stream.wait_event(self.consumed)
+            if capturing and self.last_stream != stream.cuda_stream:
+                raise RuntimeError("warm remote reader on capture stream")
+            # An event recorded during capture cannot be waited on by unrelated
+            # eager work. The same stream already orders reuse of the arena.
+            if not capturing and self.last_stream != stream.cuda_stream:
+                stream.wait_event(self.consumed)
         _, weight, scale = self.runtime.fetch(
             read_ids, table.rdma_layer_id, table.vocab_start_idx, table.vocab_end_idx
         )
@@ -258,6 +271,9 @@ class VllmRemoteReader:
         self.runtime.record_consumed(table.rdma_layer_id)
         self.consumed.record(stream)
         self.inflight = True
+        self.last_stream = stream.cuda_stream
+        if capturing:
+            self.captured_stream = stream.cuda_stream
 
 
 _reader = None

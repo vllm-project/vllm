@@ -244,6 +244,36 @@ def test_remote_graph_requires_breakable_piecewise(eager, mode, breakable, allow
 
 
 @pytest.mark.parametrize(
+    "mode,breakable,allowed",
+    [
+        (CUDAGraphMode.FULL_DECODE_ONLY, False, True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, True, True),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, False, False),
+        (CUDAGraphMode.FULL, True, False),
+    ],
+)
+def test_remote_full_decode_graph_is_opt_in(mode, breakable, allowed):
+    if allowed:
+        _validate_remote_graph_mode(False, mode, breakable, full_decode=True)
+    else:
+        with pytest.raises(ValueError):
+            _validate_remote_graph_mode(False, mode, breakable, full_decode=True)
+
+
+@pytest.mark.parametrize(
+    "provider,prefetch",
+    [(None, True), ("test_provider", False)],
+)
+def test_remote_full_decode_graph_requires_prefetch_provider(provider, prefetch):
+    with pytest.raises(ValueError, match="requires a prefetching rdma_provider"):
+        EngramConfig(
+            rdma_provider=provider,
+            rdma_prefetch=prefetch,
+            rdma_full_decode_graph=True,
+        )
+
+
+@pytest.mark.parametrize(
     "remote,role,keep_option,keep_all",
     [
         (False, "kv_producer", False, False),

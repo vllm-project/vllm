@@ -147,7 +147,12 @@ The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
 size 1.
 It requires `--load-format safetensors --safetensors-load-strategy lazy` and
 single-threaded loading. The research provider accepts `--enforce-eager` or
-breakable `PIECEWISE` CUDA graphs; `FULL` capture is not supported. Remote
+breakable `PIECEWISE` CUDA graphs. Experimental full decode capture can be
+enabled with `rdma_full_decode_graph: true` and `rdma_prefetch: true`, using
+`FULL_DECODE_ONLY` or breakable `FULL_AND_PIECEWISE`; full prefill capture is
+not supported. The reader shares a scratch buffer across layers and requires
+lookups to remain on the same prefetch stream after capture; independently
+concurrent graph executions sharing one reader are not supported. Remote
 KV-producer processes use the same bounded decoder replay as local tables by
 default. Set `rdma_keep_prefill_rows` to `true` to retain all producer rows as
 a conservative comparison mode. Prefill batches whose

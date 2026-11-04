@@ -88,11 +88,21 @@ logger = init_logger(__name__)
 
 
 def _validate_remote_graph_mode(
-    enforce_eager: bool, mode: CUDAGraphMode, breakable: bool
+    enforce_eager: bool,
+    mode: CUDAGraphMode,
+    breakable: bool,
+    full_decode: bool = False,
 ) -> None:
-    if not enforce_eager and (mode != CUDAGraphMode.PIECEWISE or not breakable):
+    allowed_full = full_decode and (
+        mode == CUDAGraphMode.FULL_DECODE_ONLY
+        or (mode == CUDAGraphMode.FULL_AND_PIECEWISE and breakable)
+    )
+    if not enforce_eager and not allowed_full and (
+        mode != CUDAGraphMode.PIECEWISE or not breakable
+    ):
         raise ValueError(
-            "rdma_provider requires enforce_eager or breakable PIECEWISE CUDA graphs"
+            "rdma_provider requires enforce_eager, breakable PIECEWISE, or "
+            "explicitly enabled FULL decode CUDA graphs"
         )
 
 
@@ -1054,6 +1064,7 @@ class ParallelEngramEmbedding(nn.Module):
         use_thp: bool = False,
         rdma_provider: str | None = None,
         rdma_layer_id: int | None = None,
+        rdma_full_decode_graph: bool = False,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
@@ -1062,6 +1073,7 @@ class ParallelEngramEmbedding(nn.Module):
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
         self.rdma_provider = rdma_provider
+        self.rdma_full_decode_graph = rdma_full_decode_graph
         self.rdma_layer_id = rdma_layer_id
         self._rdma_reader = None
         self.dp_size = get_engram_dp_size()
@@ -1784,6 +1796,7 @@ class Engram(nn.Module):
                 vllm_config.model_config.enforce_eager,
                 vllm_config.compilation_config.cudagraph_mode,
                 is_breakable_cudagraph_enabled(),
+                engram_config.rdma_full_decode_graph,
             )
             if (
                 load_config.safetensors_load_strategy != "lazy"
@@ -1801,6 +1814,7 @@ class Engram(nn.Module):
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
             rdma_provider=engram_config.rdma_provider,
+            rdma_full_decode_graph=engram_config.rdma_full_decode_graph,
             rdma_layer_id=(
                 layout.layer_ids[layer_hash_index]
                 if engram_config.rdma_provider

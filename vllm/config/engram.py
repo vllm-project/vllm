@@ -67,11 +67,18 @@ class EngramConfig:
     rdma_prefetch: bool = True
     """Allow remote Engram lookups to overlap decoder computation."""
 
+    rdma_full_decode_graph: bool = False
+    """Capture remote lookups in a full decode CUDA graph (experimental)."""
+
     rdma_keep_prefill_rows: bool = False
     """Retain all producer prefill rows instead of bounded decoder replay."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.rdma_full_decode_graph and (
+            not self.rdma_provider or not self.rdma_prefetch
+        ):
+            raise ValueError("rdma_full_decode_graph requires a prefetching rdma_provider")
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
