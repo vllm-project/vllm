@@ -218,13 +218,27 @@ def is_b200_supported() -> bool:
     ],
 )
 def test_mxfp4_input_quantization_dispatch_boundaries(m: int, expected_fanout: bool):
-    """Unmeasured shapes retain the legacy M-based dispatch boundaries."""
+    """Top-k 8 switches to fanout at its measured threshold."""
     assert _select_mxfp4_input_quantization(m, 8) == expected_fanout
 
 
-@pytest.mark.parametrize(("topk", "min_tokens"), [(2, 80), (4, 96)])
-def test_mxfp4_measured_selector_thresholds(topk: int, min_tokens: int):
-    """Shared conservative M thresholds cover the measured K range."""
+@pytest.mark.parametrize(
+    ("topk", "min_tokens"),
+    [
+        (2, 80),
+        (3, 80),
+        (4, 96),
+        (5, 96),
+        (6, 96),
+        (7, 96),
+        (8, 58),
+        (15, 58),
+        (16, 58),
+        (32, 58),
+    ],
+)
+def test_mxfp4_selector_threshold_ranges(topk: int, min_tokens: int):
+    """Top-k ranges reuse thresholds from their lower measured anchor."""
     assert not _select_mxfp4_input_quantization(min_tokens - 1, topk)
     assert _select_mxfp4_input_quantization(min_tokens, topk)
 
@@ -233,15 +247,6 @@ def test_mxfp4_topk1_stays_on_gather():
     """Top-k 1 keeps gather because fanout cannot avoid repeated quantization."""
     for m in (1, 57, 58, 128, 512):
         assert not _select_mxfp4_input_quantization(m, 1)
-
-
-def test_mxfp4_selector_uses_only_m_and_topk():
-    """The host selector chooses fanout without exposing launch geometry."""
-    assert not _select_mxfp4_input_quantization(24, 1)
-    assert not _select_mxfp4_input_quantization(24, 2)
-    assert not _select_mxfp4_input_quantization(24, 4)
-    assert not _select_mxfp4_input_quantization(24, 8)
-    assert _select_mxfp4_input_quantization(58, 3)
 
 
 def compute_ref_output(

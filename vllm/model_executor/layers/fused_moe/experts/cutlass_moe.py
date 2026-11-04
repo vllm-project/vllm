@@ -837,21 +837,23 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         )
 
 
-# Fallback for shapes outside the measured selector ranges below.
+# B200 BF16 threshold anchors; ranges reuse the nearest measured lower top-k.
 MXFP4_QUANTIZE_ONCE_MIN_TOKENS = 58
 MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS = 80
 MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS = 96
 
 
 def _select_mxfp4_input_quantization(m: int, topk: int) -> bool:
-    """Select MXFP4 input quantization from M and top-k."""
+    """Select input quantization using measured power-of-two top-k anchors."""
     if topk == 1:
         return False
-    if topk == 2:
+    if 2 <= topk < 4:
         return m >= MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS
-    if topk == 4:
+    if 4 <= topk < 8:
         return m >= MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS
-    return m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
+    if topk >= 8:
+        return m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
+    return False
 
 
 def run_cutlass_moe_mxfp4(

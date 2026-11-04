@@ -223,7 +223,10 @@ struct Fp4QuantizedVec {
 };
 
 // Quantizes the provided PackedVec and returns both the packed values and SF.
-template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
+// USE_ACTIVE_MASK lets MXFP4 use active lanes for pairwise scale reduction
+// while preserving the existing full-warp mask by default for NVFP4 callers.
+template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false,
+          bool USE_ACTIVE_MASK = false>
 __device__ __forceinline__ Fp4QuantizedVec<Type> cvt_warp_fp16_to_fp4_with_sf(
     PackedVec<Type, CVT_FP4_PACK16>& vec, float SFScaleVal) {
   // Get absolute maximum values among the local 8 values.
@@ -238,7 +241,9 @@ __device__ __forceinline__ Fp4QuantizedVec<Type> cvt_warp_fp16_to_fp4_with_sf(
   // Get the absolute maximum among all 16 values (two threads).
 
   if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
-    localMax = __hmax2(__shfl_xor_sync(0xffffffffu, localMax, 1), localMax);
+    // Keep the legacy full-warp mask unless an MXFP4 caller opts in.
+    uint32_t const mask = USE_ACTIVE_MASK ? __activemask() : 0xffffffffu;
+    localMax = __hmax2(__shfl_xor_sync(mask, localMax, 1), localMax);
   }
   // Get the final absolute maximum values.
   float vecMax = float(__hmax(localMax.x, localMax.y));
@@ -305,12 +310,13 @@ __device__ __forceinline__ Fp4QuantizedVec<Type> cvt_warp_fp16_to_fp4_with_sf(
 }
 
 // Quantizes the provided PackedVec into the uint32_t output and writes its SF.
-template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false>
+template <class Type, int CVT_FP4_NUM_THREADS_PER_SF, bool UE8M0_SF = false,
+          bool USE_ACTIVE_MASK = false>
 __device__ __forceinline__ fp4_packed_t cvt_warp_fp16_to_fp4(
     PackedVec<Type, CVT_FP4_PACK16>& vec, float SFScaleVal, uint8_t* SFout) {
   auto result =
-      cvt_warp_fp16_to_fp4_with_sf<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-          vec, SFScaleVal);
+      cvt_warp_fp16_to_fp4_with_sf<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF,
+                                   USE_ACTIVE_MASK>(vec, SFScaleVal);
   if (SFout) *SFout = result.scale;
   return result.packed;
 }

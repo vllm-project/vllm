@@ -167,9 +167,10 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     // Block E8M0 scales only; no extra tensor-level scale in this path
     constexpr float SFScaleVal = 1.0f;
     // UE8M0_SF=true for MXFP4 E8M0 scale factors
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, MXFP4_NUM_THREADS_PER_SF, /*UE8M0_SF=*/true>(
-            quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, MXFP4_NUM_THREADS_PER_SF,
+                                   /*UE8M0_SF=*/true,
+                                   /*USE_ACTIVE_MASK=*/true>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 
@@ -273,9 +274,10 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
         cvt_quant_to_fp4_get_sf_out_offset<uint32_t, MXFP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, MXFP4_NUM_THREADS_PER_SF, /*UE8M0_SF=*/true>(
-            quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, MXFP4_NUM_THREADS_PER_SF,
+                                   /*UE8M0_SF=*/true,
+                                   /*USE_ACTIVE_MASK=*/true>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 
@@ -357,7 +359,8 @@ __global__ void __launch_bounds__(
       in)[static_cast<int64_t>(inputToken) * colsPerRow + inputColIdx];
   auto quantized =
       cvt_warp_fp16_to_fp4_with_sf<Type, MXFP4_NUM_THREADS_PER_SF,
-                                   /*UE8M0_SF=*/true>(in_vec, 1.0f);
+                                   /*UE8M0_SF=*/true,
+                                   /*USE_ACTIVE_MASK=*/true>(in_vec, 1.0f);
 
   if (token >= numTokens) {
     return;
