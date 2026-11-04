@@ -42,6 +42,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    cudagraph_mode: CUDAGraphMode = CUDAGraphMode.NONE
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
@@ -61,7 +62,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             ),
         ):
             return {}
-        return {
+        kwargs: dict[str, Any] = {
             "num_accepted_tokens": None
             if self.num_accepted_tokens is None
             else self.num_accepted_tokens[:num_reqs],
@@ -69,6 +70,9 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
         }
+        if isinstance(attn_metadata_builder, Mamba2AttentionMetadataBuilder):
+            kwargs["cudagraph_mode"] = self.cudagraph_mode
+        return kwargs
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -321,6 +325,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            cudagraph_mode=cudagraph_mode,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

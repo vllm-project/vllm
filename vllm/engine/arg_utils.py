@@ -828,6 +828,7 @@ class EngineArgs:
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
+    mamba_prefill_backend: MambaBackendEnum = MambaConfig.prefill_backend
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1129,6 +1130,9 @@ class EngineArgs:
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
             "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
+            "--mamba-prefill-backend", **mamba_kwargs["prefill_backend"]
         )
         mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
@@ -2792,6 +2796,12 @@ class EngineArgs:
             mamba_config.backend = self.mamba_backend
         if self.mamba_ssu_algorithm is not None:
             mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
+        if isinstance(self.mamba_prefill_backend, str):
+            mamba_config.prefill_backend = MambaBackendEnum[
+                self.mamba_prefill_backend.upper()
+            ]
+        else:
+            mamba_config.prefill_backend = self.mamba_prefill_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2801,6 +2811,7 @@ class EngineArgs:
                 self.mamba_cache_philox_rounds
             )
         mamba_config.validate_ssu_algorithm()
+        mamba_config.validate_prefill_backend()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
