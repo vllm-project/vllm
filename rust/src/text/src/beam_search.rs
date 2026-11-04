@@ -77,28 +77,15 @@ struct BeamCandidate {
 
 /// Calculate the beam search score with length penalty.
 ///
-/// Adapted from HuggingFace transformers.
-///
-/// When `eos_token_id` is `None` the EOS length adjustment is skipped,
-/// matching Python's graceful handling of `tokenizer.eos_token_id == None`.
+/// Like Transformers, the length counts the generated tokens, including a
+/// terminating EOS token.
 fn get_beam_search_score(
-    tokens: &[u32],
+    num_generated_tokens: usize,
     cumulative_logprob: f32,
-    eos_token_id: Option<u32>,
     length_penalty: f32,
 ) -> f32 {
-    let mut seq_len = tokens.len();
-    if let Some(eos) = eos_token_id
-        && tokens.last() == Some(&eos)
-    {
-        seq_len -= 1;
-    }
-    let denom = (seq_len as f32).powf(length_penalty);
-    if denom == 0.0 {
-        cumulative_logprob
-    } else {
-        cumulative_logprob / denom
-    }
+    // An aborted beam may not have generated any tokens.
+    cumulative_logprob / (num_generated_tokens.max(1) as f32).powf(length_penalty)
 }
 
 /// Given a scored token produced by the engine, determine whether it should
@@ -321,12 +308,11 @@ pub(crate) async fn run_beam_search(
         completed.push(seq);
     }
 
-    let eos = eos_token_id;
+    // `logprobs` has one entry per generated token, including a terminating
+    // EOS token, so its length is the generated length used for scoring.
     completed.sort_by(|a, b| {
-        let score_a =
-            get_beam_search_score(&a.tokens, a.cum_logprob, eos, length_penalty);
-        let score_b =
-            get_beam_search_score(&b.tokens, b.cum_logprob, eos, length_penalty);
+        let score_a = get_beam_search_score(a.logprobs.len(), a.cum_logprob, length_penalty);
+        let score_b = get_beam_search_score(b.logprobs.len(), b.cum_logprob, length_penalty);
         score_b.total_cmp(&score_a)
     });
 
@@ -380,64 +366,57 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn beam_score_identity_length_penalty() {
-        let tokens = vec![1, 2, 3, 4, 5];
-        let score = get_beam_search_score(&tokens, -10.0, Some(99), 1.0);
+    fn beam_score_ignores_prompt_length() {
+        // The score only sees the generated length, never the prompt length.
+        let score = get_beam_search_score(5, -10.0, 1.0);
         assert!((score - (-10.0 / 5.0)).abs() < 1e-6);
     }
 
     #[test]
     fn beam_score_longer_higher_with_same_cum_logprob_and_lp_gt_1() {
-        let short = get_beam_search_score(&[1, 2], -3.0, Some(99), 2.0);
-        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -3.0, Some(99), 2.0);
+        let short = get_beam_search_score(2, -3.0, 2.0);
+        let long = get_beam_search_score(5, -3.0, 2.0);
         assert!(long > short);
     }
 
     #[test]
     fn beam_score_longer_favored_with_lp_gt_1() {
-        let short = get_beam_search_score(&[1, 2], -5.0, Some(99), 2.0);
-        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -5.0, Some(99), 2.0);
+        let short = get_beam_search_score(2, -5.0, 2.0);
+        let long = get_beam_search_score(5, -5.0, 2.0);
         assert!(long > short);
     }
 
     #[test]
     fn beam_score_longer_still_favored_with_lp_lt_1() {
-        let short = get_beam_search_score(&[1, 2], -5.0, Some(99), 0.5);
-        let long = get_beam_search_score(&[1, 2, 3, 4, 5], -5.0, Some(99), 0.5);
+        let short = get_beam_search_score(2, -5.0, 0.5);
+        let long = get_beam_search_score(5, -5.0, 0.5);
         assert!(long > short);
     }
 
     #[test]
     fn beam_score_lp_affects_relative_ordering() {
-        let short_strong = get_beam_search_score(&[1, 2], -5.0, Some(99), 1.0);
-        let long_weak = get_beam_search_score(&[1, 2, 3, 4, 5], -5.5, Some(99), 1.0);
+        let short_strong = get_beam_search_score(2, -5.0, 1.0);
+        let long_weak = get_beam_search_score(5, -5.5, 1.0);
         assert!(long_weak > short_strong);
     }
 
     #[test]
-    fn beam_score_eos_subtracts_from_length() {
-        let with_eos = get_beam_search_score(&[1, 2, 99], -6.0, Some(99), 0.0);
-        let no_eos = get_beam_search_score(&[1, 2], -6.0, Some(99), 0.0);
-        assert!((with_eos - no_eos).abs() < 1e-6);
+    fn beam_score_counts_terminating_eos_in_generated_length() {
+        // Two visible tokens plus EOS: the length is 3, not 2.
+        let score = get_beam_search_score(3, -3.0, 2.0);
+        assert!((score - (-3.0 / 9.0)).abs() < 1e-6);
     }
 
     #[test]
-    fn beam_score_eos_none_skips_length_adjustment() {
-        let with_eos_none = get_beam_search_score(&[1, 2, 99], -6.0, None, 0.0);
-        let with_eos_some = get_beam_search_score(&[1, 2, 99], -6.0, Some(99), 0.0);
-        assert!((with_eos_none - with_eos_some).abs() < 1e-6);
-    }
-
-    #[test]
-    fn beam_score_zero_denom_returns_cum_logprob() {
-        let score = get_beam_search_score(&[], -7.0, Some(99), 1.0);
+    fn beam_score_no_generated_tokens_uses_unit_length() {
+        // An aborted beam may not have generated any tokens.
+        let score = get_beam_search_score(0, -7.0, 1.0);
         assert!((score - (-7.0)).abs() < 1e-6);
     }
 
     #[test]
     fn beam_score_lp_zero_no_penalty() {
-        let tokens = vec![1, 2, 3, 4, 5];
-        let score = get_beam_search_score(&tokens, -10.0, Some(99), 0.0);
+        let score = get_beam_search_score(5, -10.0, 0.0);
         assert!((score - (-10.0)).abs() < 1e-6);
     }
 
@@ -579,26 +558,33 @@ mod tests {
 
     #[test]
     fn beams_scored_by_length_penalty() {
-        let eos = Some(99);
-        let short_seq = make_sequence(vec![1, 2, 3], -5.0, vec![vec![make_token_logprob(3, -5.0)]]);
+        // Prompt [1]; generated lengths are the logprobs entry counts: 2 and 4.
+        let short_seq = make_sequence(
+            vec![1, 2, 3],
+            -5.0,
+            vec![
+                vec![make_token_logprob(2, -2.0)],
+                vec![make_token_logprob(3, -3.0)],
+            ],
+        );
         let long_seq = make_sequence(
             vec![1, 2, 3, 4, 5],
             -5.5,
-            vec![vec![make_token_logprob(5, -5.5)]],
+            (0..4).map(|i| vec![make_token_logprob(2 + i, -5.5 / 4.0)]).collect(),
         );
 
         let score_short =
-            get_beam_search_score(&short_seq.tokens, short_seq.cum_logprob, eos, 1.0);
-        let score_long = get_beam_search_score(&long_seq.tokens, long_seq.cum_logprob, eos, 1.0);
+            get_beam_search_score(short_seq.logprobs.len(), short_seq.cum_logprob, 1.0);
+        let score_long = get_beam_search_score(long_seq.logprobs.len(), long_seq.cum_logprob, 1.0);
 
-        // lp=1.0: short=-5/3=-1.667, long=-5.5/5=-1.1 → long wins (length reward)
+        // lp=1.0: short=-5/2=-2.5, long=-5.5/4=-1.375 → long wins (length reward)
         assert!(score_long > score_short);
 
         let score_short_lp3 =
-            get_beam_search_score(&short_seq.tokens, short_seq.cum_logprob, eos, 3.0);
+            get_beam_search_score(short_seq.logprobs.len(), short_seq.cum_logprob, 3.0);
         let score_long_lp3 =
-            get_beam_search_score(&long_seq.tokens, long_seq.cum_logprob, eos, 3.0);
-        // lp=3.0: short=-5/27=-0.185, long=-5.5/125=-0.044 → long still wins
+            get_beam_search_score(long_seq.logprobs.len(), long_seq.cum_logprob, 3.0);
+        // lp=3.0: short=-5/8=-0.625, long=-5.5/64=-0.086 → long still wins
         assert!(score_long_lp3 > score_short_lp3);
     }
 
@@ -696,23 +682,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // include_stop_str_in_output — EOS token affects length-penalty scoring
+    // include_stop_str_in_output — EOS token kept or dropped from `tokens`
+    // does not change the score: scoring uses the logprobs entry count,
+    // which includes the EOS either way.
     // -----------------------------------------------------------------------
 
     #[test]
-    fn include_stop_str_in_output_affects_score_via_length_penalty() {
+    fn include_stop_str_in_output_does_not_change_score() {
         let eos = 99u32;
-        // Sequence without EOS appended: length 3, score = -3.0 / 3^2 = -0.333
-        let tokens_without_eos = vec![1, 2, 3];
-        // Sequence with EOS appended: length 4, but EOS subtracts 1 → 3
-        // score = -3.0 / 3^2 = -0.333
-        let tokens_with_eos = vec![1, 2, 3, eos];
+        // 3 generated tokens (2 visible + EOS) whether or not `tokens` keeps it.
+        let logprobs: Vec<Vec<TokenLogprob>> =
+            (0..3).map(|i| vec![make_token_logprob(2 + i, -1.0)]).collect();
+        let seq_without = make_sequence(vec![1, 2, 3], -3.0, logprobs.clone());
+        let seq_with = make_sequence(vec![1, 2, 3, eos], -3.0, logprobs);
 
-        let score_without = get_beam_search_score(&tokens_without_eos, -3.0, Some(eos), 2.0);
-        let score_with = get_beam_search_score(&tokens_with_eos, -3.0, Some(eos), 2.0);
+        let score_without =
+            get_beam_search_score(seq_without.logprobs.len(), seq_without.cum_logprob, 2.0);
+        let score_with = get_beam_search_score(seq_with.logprobs.len(), seq_with.cum_logprob, 2.0);
 
+        assert!((score_without - (-3.0 / 9.0)).abs() < 1e-6,
+            "score must use the 3 generated tokens, EOS included");
         assert!((score_without - score_with).abs() < 1e-6,
-            "including EOS should not change the score since EOS subtracts 1 from length");
+            "whether `tokens` keeps the EOS must not change the score");
     }
 
     // -----------------------------------------------------------------------
@@ -1024,10 +1015,12 @@ mod tests {
             let parent = &next_active[candidate.parent_seq];
             let mut tokens = parent.tokens.clone();
             tokens.push(candidate.token_id);
+            let mut logprobs = parent.logprobs.clone();
+            logprobs.push(candidate.logprobs.clone());
             step2_active.push(BeamSearchSequence {
                 tokens,
                 cum_logprob: candidate.cum_logprob,
-                logprobs: vec![],
+                logprobs,
                 finish_reason: None,
                 stop_reason: None,
                 lora_request: None,
@@ -1043,10 +1036,8 @@ mod tests {
 
         // --- Final ranking ---
         completed.sort_by(|a, b| {
-            let score_a =
-                get_beam_search_score(&a.tokens, a.cum_logprob, eos, length_penalty);
-            let score_b =
-                get_beam_search_score(&b.tokens, b.cum_logprob, eos, length_penalty);
+            let score_a = get_beam_search_score(a.logprobs.len(), a.cum_logprob, length_penalty);
+            let score_b = get_beam_search_score(b.logprobs.len(), b.cum_logprob, length_penalty);
             score_b.total_cmp(&score_a)
         });
 
