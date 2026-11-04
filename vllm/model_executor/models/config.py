@@ -1061,7 +1061,8 @@ def _default_rocm_aiter_fa_gluon(vllm_config: "VllmConfig") -> None:
         logger.info_once(
             "Defaulting full-attention layers to ROCM_AITER_FA_GLUON (gfx950, "
             "shuffle KV-cache layout, head size 256, GQA group 6); pass "
-            "--attention-backend ROCM_AITER_FA to opt out."
+            "--attention-backend ROCM_ATTN or unset "
+            "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT to opt out."
         )
 
 
