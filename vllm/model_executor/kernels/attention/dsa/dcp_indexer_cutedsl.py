@@ -41,17 +41,32 @@ def _dcp_merge_topk_and_interleave(vllm_config: Any) -> tuple[int, int]:
     return topk, cp_interleave
 
 
+def dcp_topk_score_bits(logits_dtype: torch.dtype) -> int:
+    """High score bits that rank: BF16 logits, upcast to FP32 for the top-k,
+    have a zero low half. Derived from the configured logits dtype, so every
+    DCP rank (even one with no logits this step) and the warm-up agree."""
+    return 16 if logits_dtype == torch.bfloat16 else 32
+
+
+def dcp_topk_id_bits(num_positions: int) -> int:
+    """Bits that hold every candidate id (a position below num_positions)."""
+    return max(1, min(32, (num_positions - 1).bit_length()))
+
+
 def stable_topk_from_gathered_candidates_cutedsl(
     gathered: torch.Tensor,
     topk: int,
     out: torch.Tensor | None = None,
+    score_bits: int = 32,
+    id_bits: int = 32,
 ) -> torch.Tensor:
     """Select each row's global top-``topk`` from all ranks' candidates.
 
     ``gathered`` is rank-major ``[world_size, rows, topk, 2]``, as produced by a
     dim-0 all-gather of each rank's ``[rows, topk, 2]`` candidates, and is read
     in place: a dim-1 gather into ``[rows, world_size * topk, 2]`` would cost a
-    full reorder copy.
+    full reorder copy. The key ranks only the high ``score_bits`` of each score
+    (see ``dcp_topk_score_bits``) and the low ``id_bits`` of each id.
     """
     assert gathered.dim() == 4 and gathered.shape[2:] == (topk, 2), (
         f"Expected [world_size, rows, {topk}, 2] candidates, "
@@ -66,7 +81,9 @@ def stable_topk_from_gathered_candidates_cutedsl(
             dtype=torch.int32,
             device=gathered.device,
         )
-    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL(gathered, out, topk=topk)
+    _STABLE_TOPK_FROM_GATHERED_CANDIDATES_KERNEL(
+        gathered, out, topk=topk, score_bits=score_bits, id_bits=id_bits
+    )
     return out
 
 
@@ -288,8 +305,6 @@ class StableTopKFromGatheredCandidatesKernel(
     hist_bins = 2048
     radix_bits = (hist_bins - 1).bit_length()
     key_bits = Uint64.width
-    radix_passes = (key_bits + radix_bits - 1) // radix_bits
-    final_radix_bits = key_bits - radix_bits * (radix_passes - 1)
     hist_chunks = (hist_bins + tb_size - 1) // tb_size
     warps_per_block = tb_size // cute.arch.WARP_SIZE
 
@@ -297,6 +312,11 @@ class StableTopKFromGatheredCandidatesKernel(
     class CompileKey:
         topk: int
         num_candidates: int
+        # The key holds the top score_bits of the score (16 for upcast BF16
+        # logits, whose low half is zero) and the id_bits that hold every
+        # token id, so the radix never spends a pass on constant bits.
+        score_bits: int = 32
+        id_bits: int = 32
 
     @staticmethod
     def kernel(compile_key: CompileKey) -> Any:
@@ -304,8 +324,14 @@ class StableTopKFromGatheredCandidatesKernel(
         hist_bins = StableTopKFromGatheredCandidatesKernel.hist_bins
         radix_bits = StableTopKFromGatheredCandidatesKernel.radix_bits
         key_bits = StableTopKFromGatheredCandidatesKernel.key_bits
-        radix_passes = StableTopKFromGatheredCandidatesKernel.radix_passes
-        final_radix_bits = StableTopKFromGatheredCandidatesKernel.final_radix_bits
+        score_bits = compile_key.score_bits
+        id_bits = compile_key.id_bits
+        assert 0 < score_bits <= 32 and 0 < id_bits <= 32
+        used_bits = score_bits + id_bits
+        radix_passes = (used_bits + radix_bits - 1) // radix_bits
+        final_radix_bits = used_bits - radix_bits * (radix_passes - 1)
+        id_shift = key_bits - used_bits
+        id_mask = (1 << id_bits) - 1
         hist_chunks = StableTopKFromGatheredCandidatesKernel.hist_chunks
         warps_per_block = StableTopKFromGatheredCandidatesKernel.warps_per_block
         topk = compile_key.topk
@@ -374,8 +400,10 @@ class StableTopKFromGatheredCandidatesKernel(
             mask = Uint32(0x80000000)
             if (bits & Uint32(0x80000000)) != Uint32(0):
                 mask = Uint32(0xFFFFFFFF)
-            score_key = Uint64(bits ^ mask) << Uint64(32)
-            id_key = Uint64(~Uint32(token_id))
+            score_key = Uint64((bits ^ mask) >> Uint32(32 - score_bits)) << Uint64(
+                key_bits - score_bits
+            )
+            id_key = Uint64(~Uint32(token_id) & Uint32(id_mask)) << Uint64(id_shift)
             key = score_key | id_key
             if token_id < Int32(0):
                 key = Uint64(0)
@@ -416,7 +444,10 @@ class StableTopKFromGatheredCandidatesKernel(
 
             prefix_bits = step * Int32(radix_bits)
             num_bins = 1 << bits
-            block_scan_iterations = (num_bins + tb_size - 1) // tb_size
+            # Narrow final passes still scan whole tb_size slices; bins at or
+            # above num_bins stay zero.
+            scan_bins = max(num_bins, tb_size)
+            block_scan_iterations = scan_bins // tb_size
             shift = Int32(key_bits) - prefix_bits - Int32(bits)
             bin_mask = Uint64(num_bins - 1)
             prefix = prefix_smem.load()
@@ -447,7 +478,7 @@ class StableTopKFromGatheredCandidatesKernel(
             iter = Int32(0)
             threshold_found = threshold_found_smem.load()
             while threshold_found == Int32(0) and iter < Int32(block_scan_iterations):
-                bin_idx = Int32(num_bins - 1) - (iter * Int32(tb_size) + tid)
+                bin_idx = Int32(scan_bins - 1) - (iter * Int32(tb_size) + tid)
                 count = hist_smem[bin_idx]
                 chunk_inclusive = block_scan_inclusive_i32(
                     count,
@@ -493,7 +524,12 @@ class StableTopKFromGatheredCandidatesKernel(
                             scope="cta",
                         )
                         if dst < Int32(topk):
-                            output[dst] = recast_val(~Uint32(key), Int32)
+                            # Padding keys are 0 and decode to -1.
+                            token_id = Int32(-1)
+                            if key != Uint64(0):
+                                id_key = Uint32(key >> Uint64(id_shift))
+                                token_id = recast_val(~id_key & Uint32(id_mask), Int32)
+                            output[dst] = token_id
             cute.arch.sync_threads()
 
             pass_finished = include_threshold_bin_smem.load()
@@ -584,9 +620,17 @@ class StableTopKFromGatheredCandidatesKernel(
         # slices of each rank's candidates.
         if topk <= 0 or topk % self.tb_size != 0:
             return []
+        model_config = vllm_config.model_config
+        kpool = getattr(model_config.hf_text_config, "index_kpool", None) or 1
+        logits_dtype = vllm_config.attention_config.resolve_indexer_logits_dtype(
+            "float32"
+        )
         return self._trace_dispatch(self.dispatch)(
             topk=topk,
             num_candidates=topk * dcp_world_size,
+            score_bits=dcp_topk_score_bits(getattr(torch, logits_dtype)),
+            # Candidate ids are positions (pool ids for kpool) in max_model_len.
+            id_bits=dcp_topk_id_bits(model_config.max_model_len // kpool),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
@@ -618,10 +662,14 @@ class StableTopKFromGatheredCandidatesKernel(
         out: torch.Tensor,
         *,
         topk: int,
+        score_bits: int = 32,
+        id_bits: int = 32,
     ) -> CuTeDSLLaunchSpec[CompileKey]:
         compile_key = self.dispatch(
             topk=topk,
             num_candidates=gathered.shape[0] * topk,
+            score_bits=score_bits,
+            id_bits=id_bits,
         )
         return compile_key, (gathered, out)
 

@@ -116,6 +116,8 @@ def _merge_dcp_topk_global(
     dcp_world_size: int,
     cp_interleave: int,
     row_starts: torch.Tensor | None = None,
+    logits_dtype: torch.dtype = torch.float32,
+    num_positions: int | None = None,
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -128,6 +130,9 @@ def _merge_dcp_topk_global(
     score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
     padding); the attention backend localizes them back to physical slots per
     rank.
+    The selector keys only the score bits that ``logits_dtype`` (the dtype the
+    MQA logits were computed in, before the FP32 upcast) carries and the id
+    bits that positions below ``num_positions`` use.
     """
     if dcp_world_size <= 1:
         return
@@ -137,6 +142,8 @@ def _merge_dcp_topk_global(
     # stable-topk selector.
     _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
+        dcp_topk_score_bits,
         pack_dcp_topk_candidates_cutedsl,
         stable_topk_from_gathered_candidates_cutedsl,
     )
@@ -163,6 +170,8 @@ def _merge_dcp_topk_global(
         gathered.view(dcp_world_size, *packed.shape),
         topk_tokens,
         out=topk_indices,
+        score_bits=dcp_topk_score_bits(logits_dtype),
+        id_bits=32 if num_positions is None else dcp_topk_id_bits(num_positions),
     )
 
 
@@ -1019,6 +1028,8 @@ def sparse_attn_indexer(
                     dcp_world_size,
                     cp_kv_cache_interleave_size,
                     row_starts=row_starts,
+                    logits_dtype=logits_dtype,
+                    num_positions=max_model_len,
                 )
             # Free this chunk's logits before the next chunk allocates its own.
             del logits
@@ -1228,6 +1239,8 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+                logits_dtype=logits_dtype,
+                num_positions=max_model_len,
             )
 
         if needs_padded_path:
