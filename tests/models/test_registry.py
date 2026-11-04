@@ -21,6 +21,7 @@ from vllm.model_executor.models.registry import (
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
+    _ModelRegistry,
 )
 from vllm.platforms import current_platform
 
@@ -229,6 +230,21 @@ def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
     assert result is cached_model_info
     assert len(loaded_hashes) == 1
     assert loaded_hashes[0]
+
+
+def test_fill_model_info_cache(monkeypatch, tmp_path):
+    """After one fill, inspecting a model reads the cache instead of starting a
+    subprocess."""
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    arch = "LlamaForCausalLM"
+    registry = _ModelRegistry({arch: ModelRegistry.models[arch]})
+    registry.fill_model_info_cache()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Model info should come from the filled cache"),
+    )
+    assert registry.models[arch].inspect_model_cls().is_text_generation_model
 
 
 def test_hf_registry_coverage():

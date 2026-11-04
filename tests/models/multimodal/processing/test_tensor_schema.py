@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from vllm import ModelRegistry
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
@@ -121,6 +122,12 @@ def create_batched_mm_kwargs(
             for item in mm_kwargs[modality]
         ]
     )
+
+
+@pytest.fixture(scope="module", autouse=True)
+def fill_model_info_cache() -> None:
+    # Every case builds a different model: inspect them all once, not per case.
+    ModelRegistry.fill_model_info_cache()
 
 
 # TODO(Isotr0py): Don't initialize model during test
