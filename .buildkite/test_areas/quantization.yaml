@@ -145,6 +145,8 @@ steps:
   - vllm/model_executor/models/mimo_v2.py
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/model_loader/reload/
+  - vllm/model_executor/model_loader/default_loader.py
+  - vllm/models/glm5next/
   - tests/models/quantization
   - tests/quantization/test_fp8_dequant.py
   commands:

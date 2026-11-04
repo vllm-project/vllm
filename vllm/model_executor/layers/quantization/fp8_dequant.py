@@ -247,6 +247,9 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             )
             scale.cols = input_size_per_partition
         scale.weight_block_size = self.weight_block_size
+        # absent when the checkpoint stores the weight in BF16 (strict
+        # loaded-weights check)
+        scale.optional_in_checkpoint = True
         layer.register_parameter("weight_scale_inv", scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
