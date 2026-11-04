@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 import torch.distributed as dist
 from torch._ops import OpOverload
@@ -14,7 +15,8 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.torch_utils import async_tensor_h2d, direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -2701,6 +2703,60 @@ class rocm_aiter_ops:
             and cls._kda_gluon_prefill_importable()
         )
 
+    @staticmethod
+    @functools.cache
+    def _kda_flashkda_paged_prefill_importable() -> bool:
+        import inspect
+
+        try:
+            from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
+        except ImportError:
+            return False
+        # AITER releases before v0.1.23 export it without the paged
+        # state_cache / out arguments.
+        return "state_cache" in inspect.signature(chunk_kimi_delta_attn).parameters
+
+    @classmethod
+    @if_aiter_supported
+    def is_kda_flashkda_prefill_available(cls) -> bool:
+        """Whether AITER's FlashKDA prefill with paged state can run here.
+
+        Limited to gfx950, the only arch AITER's FlashKDA Gluon kernels target.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            cls._AITER_ENABLED
+            and on_gfx950()
+            and cls._kda_flashkda_paged_prefill_importable()
+        )
+
+    @staticmethod
+    @functools.cache
+    def _causal_conv1d_prefill_importable() -> bool:
+        try:
+            from aiter.ops.causal_conv1d_fwd_split_qkv import (  # noqa: F401
+                causal_conv1d_split_qkv_hip_fn,
+            )
+        except ImportError:
+            return False
+        return True
+
+    @classmethod
+    @if_aiter_supported
+    def is_causal_conv1d_prefill_available(cls) -> bool:
+        """Whether AITER's HIP prefill causal conv1d with split q/k/v can run here.
+
+        Limited to gfx950, the only arch it has been checked on.
+        """
+        from vllm.platforms.rocm import on_gfx950
+
+        return (
+            cls._AITER_ENABLED
+            and on_gfx950()
+            and cls._causal_conv1d_prefill_importable()
+        )
+
     @classmethod
     def get_aiter_allreduce(cls):
         """Return the TP device communicator's AITER custom-allreduce if it has
@@ -5304,6 +5360,126 @@ class rocm_aiter_ops:
             state_cache=state_cache,
             state_indices=state_indices,
             has_initial_state=has_initial_state,
+        )
+
+    @staticmethod
+    def kda_flashkda_prefill(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        A_log: torch.Tensor,
+        dt_bias: torch.Tensor,
+        lower_bound: float,
+        cu_seqlens: torch.Tensor,
+        state_cache: torch.Tensor,
+        state_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run AITER FlashKDA chunked prefill over a paged recurrent state.
+
+        ``q``, ``k`` and ``v`` are ``[1, T, H, 128]`` bf16, ``g`` is the raw
+        gate of the same shape and ``beta`` the raw ``[1, T, H]`` logits; the
+        gate activation and the sigmoid run in the kernel. ``A_log`` is
+        ``[H]`` and ``dt_bias`` ``[H * 128]``, both fp32. ``state_cache`` is the
+        fp32 V-first ``[slots, H, V, K]`` pool: sequence ``n`` reads and writes
+        row ``state_indices[n]`` in place. ``out`` must be contiguous with
+        ``v``'s shape. Returns ``out``.
+        """
+        from aiter.ops.triton.kimi_delta_attn import chunk_kimi_delta_attn
+
+        logger.info_once("Dispatching AITER FlashKDA KDA prefill.")
+        # AITER reads cu_seqlens on the host to plan its chunks and segments.
+        with gpu_sync_allowed():
+            chunk_kimi_delta_attn(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                use_qk_l2norm_in_kernel=True,
+                use_gate_in_kernel=True,
+                use_beta_sigmoid_in_kernel=True,
+                safe_gate=True,
+                lower_bound=lower_bound,
+                state_v_first=True,
+                # 32 selects the FlashKDA kernels, the only ones that take
+                # state_cache and out.
+                chunk_size=32,
+                cu_seqlens=cu_seqlens,
+                out=out,
+                state_cache=state_cache,
+                state_indices=state_indices,
+                has_initial_state=has_initial_state,
+            )
+        return out
+
+    @staticmethod
+    def causal_conv1d_prefill_split_qkv(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+        conv_states: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        k_dim: int,
+        v_dim: int,
+        cache_indices: torch.Tensor,
+        has_initial_state: torch.Tensor,
+        metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run AITER's HIP prefill causal conv1d (width 4, SiLU) on q|k|v.
+
+        Takes what ``causal_conv1d_fn`` takes, with bf16 weights: ``x`` is bf16
+        ``[dim, tokens]`` with the channels contiguous and ordered q|k|v,
+        ``weight`` bf16 ``[dim, 4]``, and ``conv_states`` the bf16
+        ``[lines, dim, 3]`` cache, updated in place. ``metadata`` is the step's
+        GDN attention metadata. Returns contiguous ``q``, ``k`` and ``v``,
+        ``[tokens, k_dim]``, ``[tokens, k_dim]`` and ``[tokens, v_dim]``.
+        """
+        from aiter.ops.causal_conv1d_fwd_split_qkv import (
+            causal_conv1d_split_qkv_hip_fn,
+        )
+
+        block_m = 32
+        nums_dict = metadata.nums_dict
+        if block_m not in nums_dict:
+            # The metadata builder makes the 8-token chunk schedule on the host.
+            # The 32-token one follows from its chunk counts, as
+            # ceil(ceil(n / 8) / 4) = ceil(n / 32), so AITER need not copy
+            # query_start_loc back. Built once per step, for all its layers.
+            nums = (-(-nums_dict[8]["nums"] // (block_m // 8))).numpy()
+            tot = int(nums.sum())
+            chunk_ids = np.arange(tot) - np.repeat(np.cumsum(nums) - nums, nums)
+            nums_dict[block_m] = {
+                "tot": tot,
+                "batch_ptr": async_tensor_h2d(
+                    np.repeat(np.arange(nums.size), nums), x.device, torch.int32
+                ),
+                "token_chunk_offset_ptr": async_tensor_h2d(
+                    chunk_ids, x.device, torch.int32
+                ),
+            }
+        # AITER reads the flags as uint8. A bool tensor's bytes already are, so a
+        # view saves its cast, one kernel per layer.
+        if has_initial_state.dtype == torch.bool:
+            has_initial_state = has_initial_state.view(torch.uint8)
+        return causal_conv1d_split_qkv_hip_fn(
+            x,
+            weight,
+            bias,
+            conv_states,
+            query_start_loc,
+            k_dim,
+            v_dim,
+            cache_indices=cache_indices,
+            has_initial_state=has_initial_state,
+            activation="silu",
+            block_m=block_m,
+            metadata=metadata,
         )
 
 
