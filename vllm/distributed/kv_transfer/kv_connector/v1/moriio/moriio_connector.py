@@ -3054,8 +3054,8 @@ class MoRIIOConnectorWorker:
         A READ still in flight when the wait gives up fails the step in both
         modes: RDMA may still write into its blocks, so the forward must not
         consume them. If every READ is terminal, failures are reported via
-        get_block_ids_with_load_errors when there is one KV cache group, and
-        re-raised otherwise, as the scheduler cannot recover them.
+        get_block_ids_with_load_errors when block-level recovery is supported,
+        and re-raised otherwise.
         """
         statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
@@ -3078,7 +3078,7 @@ class MoRIIOConnectorWorker:
             if not self._block_load_errors_supported:
                 logger.exception(
                     "MoRIIO READ failed before the forward; aborting because "
-                    "load-error recovery needs a single KV cache group."
+                    "this KV cache layout cannot report load errors per block."
                 )
                 raise
             logger.exception(
@@ -3098,8 +3098,7 @@ class MoRIIOConnectorWorker:
     def _record_failed_recv(self, req_id: ReqId) -> None:
         """Hand a failed read to scheduler recovery.
 
-        The scheduler's invalid-block recovery requires exactly one KV cache
-        group and raises otherwise. Multi-group failures are raised before the
+        Without block-level recovery the failure is raised before the
         forward instead, in _await_reads_issued_this_step.
         """
         if not self._block_load_errors_supported:
@@ -3228,9 +3227,8 @@ class MoRIIOConnectorWorker:
         the collective (raising early would hang the peers still waiting for it).
         Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
         which engines failed. A failed engine is returned rather than raised so
-        only its requests fail; the next step retries the missing ranks. With
-        several KV cache groups it still raises, as the scheduler cannot
-        recover their load errors.
+        only its requests fail; the next step retries the missing ranks. It
+        still raises when block-level recovery is unsupported.
 
         Returns:
             Remote engines whose handshake failed on at least one TP worker.
@@ -3341,8 +3339,8 @@ class MoRIIOConnectorWorker:
                 if not self._block_load_errors_supported:
                     raise HandshakeError(
                         f"Eager MoRIIO handshake failed for {remote_engine_id} "
-                        "on at least one TP rank; load-error recovery needs a "
-                        "single KV cache group"
+                        "on at least one TP rank; this KV cache layout cannot "
+                        "report load errors per block"
                     )
                 failed.add(remote_engine_id)
                 continue
@@ -4208,9 +4206,8 @@ class MoRIIOConnectorWorker:
     def _fail_recv_without_read(self, req_id: ReqId, meta: ReqMeta) -> None:
         """Fail a READ whose prefill handshake failed, without posting it.
 
-        The destination blocks go to the scheduler's load-error recovery, and
-        prefill is asked to release its blocks instead of waiting for its own
-        timeout. The release is best effort: the peer may be unreachable.
+        Its blocks go to load-error recovery, and prefill is asked, best
+        effort, to release its copy instead of waiting for its timeout.
         """
         logger.error(
             "MoRIIO handshake with %s failed; reporting a load error for "

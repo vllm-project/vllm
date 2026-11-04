@@ -497,7 +497,7 @@ def test_failed_handshake_still_fails_the_step_without_block_recovery(
     _fail_handshakes_to(worker, "prefill", monkeypatch)
     metadata = MoRIIOConnectorMetadata()
     metadata.reqs_to_recv["req"] = _meta(["full"], 1)
-    with pytest.raises(HandshakeError, match="single KV cache group"):
+    with pytest.raises(HandshakeError, match="per block"):
         worker._eager_handshake_all_dp_ranks(metadata)
     worker._handshake_initiation_executor.shutdown()
 
