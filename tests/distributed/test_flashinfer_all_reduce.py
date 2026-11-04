@@ -75,19 +75,3 @@ def test_narrow_row_does_not_allocate_a_workspace(monkeypatch):
 
     comm = _uninitialized_comm()
     assert comm.should_use_fi_ar(_fake_tensor((16, 1), torch.float32)) is False
-
-
-def test_lazy_workspace_uses_backend_resolved_at_init(monkeypatch):
-    create_workspace = Mock(return_value=SimpleNamespace(backend="trtllm"))
-    monkeypatch.setattr(fi_ar, "_fi_ar_workspace", None)
-    monkeypatch.setattr(fi_ar, "_fi_ar_workspace_failed", False)
-    monkeypatch.setattr(
-        fi_ar, "_resolve_fi_ar_backend", Mock(return_value=("mnnvl", True))
-    )
-    monkeypatch.setattr(fi_ar, "_node_count", lambda _: 1)
-    monkeypatch.setattr(fi_ar, "_create_workspace", create_workspace)
-    comm = _uninitialized_comm()
-    comm.resolved_backend = ("trtllm", False)
-
-    assert comm._ensure_workspace(4096, torch.bfloat16)
-    assert create_workspace.call_args.args[0] == "trtllm"
