@@ -66,8 +66,12 @@ def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
         (pc.data_parallel_size == 1, "DP > 1"),
         (pc.pipeline_parallel_size == 1, "PP > 1"),
         (not pc.enable_expert_parallel, "EP"),
-        (str(cc.cache_dtype).startswith("fp8"), f"kv cache {cc.cache_dtype}"),
-        (index_dtype == "fp8", f"index cache {index_dtype}"),
+        # both caches fp8 (AITER sparse PA pages) or both NVFP4 (the ROCm NVFP4 pages)
+        (
+            (str(cc.cache_dtype).startswith("fp8") and index_dtype == "fp8")
+            or (str(cc.cache_dtype) == "nvfp4" and index_dtype == "nvfp4"),
+            f"kv cache {cc.cache_dtype} with index cache {index_dtype}",
+        ),
         (cc.block_size == SPARSE_BLOCK, f"block size {cc.block_size}"),
         (max_len <= MAX_CONTEXT, f"max_model_len {max_len} > {MAX_CONTEXT}"),
         (cg is None or not cg.requires_piecewise_compilation(), "piecewise cudagraph"),

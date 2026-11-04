@@ -214,6 +214,10 @@ def mfma_bf16(a, b, c):
     return fx.Vector(rocdl.mfma_f32_16x16x32_bf16(T.vec(4, T.f32), [a, b, c]))
 
 
+def mfma_f16(a, b, c):
+    return fx.Vector(rocdl.mfma_f32_16x16x32_f16(T.vec(4, T.f32), [a, b, c]))
+
+
 def fp8x8_bf16_pk(words):
     """Eight fp8 of two dwords -> bf16 MFMA operand (exact) by
     v_cvt_scalef32_pk_bf16_fp8 (scale 1), two values an instruction."""

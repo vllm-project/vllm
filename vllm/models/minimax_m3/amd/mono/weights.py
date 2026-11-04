@@ -35,9 +35,13 @@ from vllm.models.minimax_m3.amd.mono.config import (
     INTER,
     LOCAL_Q_HEADS,
     N_ROUTED,
+    NVFP4_INDEX_PAGE_BYTES,
+    NVFP4_PAGE_BYTES,
+    NVFP4_ROW,
     O_K,
     ONE_INDEX_HEAD,
     ROTARY_DIM,
+    SPARSE_BLOCK,
     TOP_K,
     TOPK_BLOCKS,
     TP,
@@ -66,7 +70,7 @@ class SparseMoeLayer:
 
     layer_id: int
     attn: object  # MiniMaxM3SparseAttention: layer name, KV cache views, scales
-    index_cache: torch.Tensor  # [blocks, block, head_dim] fp8, shared block ids
+    index_cache: torch.Tensor  # fp8 [blocks, 128, 128] or NVFP4 u8 [blocks, 128, 72]
     g_in: torch.Tensor
     w_qkv: torch.Tensor
     s_qkv: torch.Tensor
@@ -275,19 +279,51 @@ def build_sparse_layer(
         == (TOPK_BLOCKS, 0, 1, False),
         f"layer {layer_id}: sparse selection config",
     )
-    _need(
-        attn.use_aiter_sparse_pa and str(attn.kv_cache_dtype).startswith("fp8"),
-        f"layer {layer_id}: needs the AITER sparse PA path with an fp8 KV cache",
-    )
     index_cache = attn.indexer.index_cache.kv_cache
-    _need(
-        index_cache.numel() > 0
-        and index_cache.dtype == dtypes.fp8
-        and index_cache.dim() == 3
-        and index_cache.shape[2] == HEAD_DIM
-        and index_cache.is_contiguous(),
-        f"layer {layer_id}: index cache {index_cache.dtype} {tuple(index_cache.shape)}",
-    )
+    if getattr(attn, "use_nvfp4_kv", False):
+        # the ROCm NVFP4 pages: [pages, 2, 128, 72] K / V and [pages, 128, 72] index-K,
+        # one layer's pages contiguous (LBHNC) so a 32-bit buffer offset reaches them
+        kv = attn.kv_cache
+        _need(
+            kv.dtype == torch.uint8
+            and tuple(kv.shape[1:]) == (2, SPARSE_BLOCK, NVFP4_ROW)
+            and kv.stride(0) == NVFP4_PAGE_BYTES
+            and kv.stride(3) == 1
+            and kv.shape[0] * NVFP4_PAGE_BYTES < 2**31,
+            f"layer {layer_id}: NVFP4 KV cache {kv.dtype} {tuple(kv.shape)} "
+            f"strides {kv.stride()}",
+        )
+        _need(
+            index_cache.numel() > 0
+            and index_cache.dtype == torch.uint8
+            and tuple(index_cache.shape[1:]) == (SPARSE_BLOCK, NVFP4_ROW)
+            and index_cache.is_contiguous()
+            and index_cache.shape[0] * NVFP4_INDEX_PAGE_BYTES < 2**31,
+            f"layer {layer_id}: NVFP4 index cache {index_cache.dtype} "
+            f"{tuple(index_cache.shape)}",
+        )
+        for name in ("_k_scale", "_v_scale"):
+            s = getattr(attn, name, None)
+            _need(
+                isinstance(s, torch.Tensor)
+                and s.dtype == torch.float32
+                and s.numel() == 1,
+                f"layer {layer_id}: NVFP4 global {name}",
+            )
+    else:
+        _need(
+            attn.use_aiter_sparse_pa and str(attn.kv_cache_dtype).startswith("fp8"),
+            f"layer {layer_id}: needs the AITER sparse PA path with an fp8 KV cache",
+        )
+        _need(
+            index_cache.numel() > 0
+            and index_cache.dtype == dtypes.fp8
+            and index_cache.dim() == 3
+            and index_cache.shape[2] == HEAD_DIM
+            and index_cache.is_contiguous(),
+            f"layer {layer_id}: index cache {index_cache.dtype} "
+            f"{tuple(index_cache.shape)}",
+        )
 
     if heads.count > 1:
         _need(tp_group is not None, f"layer {layer_id}: CP requires tp_group")
