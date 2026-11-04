@@ -684,21 +684,30 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
 )
 def test_logprob_publication_normalizes_per_request_width(sampler_widths):
     worker = _make_worker(1, logprobs_only=True)
-    block_keys = [f"block-{index}" for index in range(5)]
-    metadata = AuxOutputConnectorMetadata(
-        generation=0,
-        requests={"aux": 1},
-        block_hashes={},
-        finished_requests=(),
-        logprobs={"aux": "fingerprint"},
-        prompt_lens={"aux": 18},
-        logprob_widths={"aux": 1},
-    )
-    worker.begin_step(metadata)
-    worker._requests["aux"].logprob_keys = block_keys
+    block_hashes = [bytes([index]) * 32 for index in range(5)]
+    boundaries = tuple(range(4, 24, 4))
+
+    def metadata_for(request_id, *, include_hashes=False):
+        return AuxOutputConnectorMetadata(
+            generation=0,
+            requests={request_id: 1},
+            block_hashes={},
+            finished_requests=(),
+            logprobs={request_id: "fingerprint"},
+            prompt_lens={request_id: 18},
+            logprob_block_hashes=(
+                {request_id: PackedBlockHashes(b"".join(block_hashes), 32)}
+                if include_hashes
+                else {}
+            ),
+            logprob_boundary_token_ids=(
+                {request_id: boundaries} if include_hashes else {}
+            ),
+            logprob_widths={request_id: 1},
+        )
 
     for token_start, sampler_width in zip((17, 18), sampler_widths, strict=True):
-        worker.begin_step(metadata)
+        worker.begin_step(metadata_for("aux", include_hashes=token_start == 17))
         pending = worker.prepare_output(
             _input_batch(["aux"], np.array([token_start]), np.array([0, 1]))
         )
@@ -718,9 +727,17 @@ def test_logprob_publication_normalizes_per_request_width(sampler_widths):
         assert output["aux"].logprobs is not None
         assert output["aux"].logprobs.logprob_token_ids.shape == (1, 1)
 
-    stored = decode_rows(worker._logprob_store.get_concatenated([block_keys[4]]))
-    assert stored.token_ids.shape == (2, 1)
-    np.testing.assert_array_equal(stored.positions, [18, 19])
+    replay_metadata = metadata_for("replay", include_hashes=True)
+    worker.begin_step(replay_metadata)
+    pending = worker.prepare_output(
+        _input_batch(["replay"], np.array([18]), np.array([0, 1]))
+    )
+    assert pending is not None
+    pending.enqueue_cpu_copy(np.ones(1, dtype=np.int32), np.zeros(1, dtype=np.int32))
+    replay = pending.process_output()["replay"].logprobs
+    assert replay is not None
+    np.testing.assert_array_equal(replay.logprob_token_ids, [[0]])
+    np.testing.assert_array_equal(replay.logprobs, [[-1.0]])
     worker.close()
 
 
@@ -2293,28 +2310,49 @@ def test_scheduler_connector_releases_finished_logprob_fingerprint():
     connector = AuxOutputSchedulerConnector(
         _kv_cache_manager({}), enable_routed_experts=False, enable_logprobs=True
     )
-    request = _scheduler_request("request", [], num_tokens=9)
-    request.sampling_params = SimpleNamespace(
-        routed_experts_prompt_start=0,
-        extra_args={"aux_output_enabled": True},
-        num_logprobs=2,
-        logprob_token_ids=None,
+    block_hasher = lambda req: [
+        bytes([index]) * 32
+        for index in range(len(req.block_hashes), req.num_tokens // _BLOCK_SIZE)
+    ]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=[0, 1, 2, 3],
+        sampling_params=SamplingParams(
+            max_tokens=2,
+            logprobs=2,
+            extra_args={"aux_output_enabled": True},
+        ),
+        pooling_params=None,
+        block_hasher=block_hasher,
     )
-    request.all_token_ids = list(range(request.num_tokens))
-    fingerprint = connector._fingerprint(request)
     scheduled_metadata = connector.build_connector_meta(
         _step_output([request.request_id], [0], [1]),
         {request.request_id: request},
     )
     assert scheduled_metadata.logprob_widths == {request.request_id: 3}
 
-    request.block_hashes.append(b"a" * 32)
+    request.append_output_token_ids(4)
     request.num_computed_tokens = _BLOCK_SIZE
     connector.request_finished(request)
     metadata = connector.build_connector_meta(_step_output([], [], []), {})
 
-    assert metadata.logprobs == {request.request_id: fingerprint}
-    assert request.request_id not in connector._logprob_fingerprints
+    assert metadata.finished_requests == (request.request_id,)
+    assert metadata.logprobs == {request.request_id: "('raw_logprobs', 2, None)"}
+    assert list(metadata.logprob_block_hashes[request.request_id]) == [bytes(32)]
+    assert metadata.logprob_boundary_token_ids[request.request_id] == (4,)
+
+    next_request = Request(
+        request_id=request.request_id,
+        prompt_token_ids=[5, 6],
+        sampling_params=SamplingParams(max_tokens=2, logprobs=2),
+        pooling_params=None,
+        block_hasher=block_hasher,
+    )
+    next_metadata = connector.build_connector_meta(
+        _step_output([next_request.request_id], [0], [1]),
+        {next_request.request_id: next_request},
+    )
+    assert next_request.request_id not in next_metadata.logprobs
 
 
 def test_scheduler_connector_reset_derives_emit_start_from_request():
