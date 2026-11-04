@@ -295,8 +295,10 @@ class ParallelConfig:
     into two CUDA green-context pools: the attention of one micro-batch runs on
     the attention pool while the rest of the layer of the other runs on the
     rest pool. Uses the dual batch overlap runtime, so it is mutually exclusive
-    with `enable_dbo`. Pays off only with FULL CUDA graphs, which need CUDA
-    13.4 or later to capture green-context streams."""
+    with `enable_dbo`. With expert parallelism the all-to-all backend must be
+    `deepep_low_latency`, `deepep_v2` or `nixl_ep`. Pays off only with FULL
+    CUDA graphs, which need CUDA 13.4 or later to capture green-context
+    streams."""
     subgpu_attn_sms: int = Field(default=64, ge=8)
     """Number of SMs in the attention pool. One of `subgpu_attn_sms` and
     `subgpu_rest_sms` must be a multiple of 8."""

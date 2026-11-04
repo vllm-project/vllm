@@ -2166,6 +2166,42 @@ def test_subgpu_pipelining_config_validation():
         ParallelConfig(subgpu_pipelining=True, dbo_decode_token_threshold=1)
 
 
+def test_subgpu_pipelining_rejects_stream_switching_all2all_backends(monkeypatch):
+    """The high-throughput and naive prepare/finalize switch streams around
+    their collectives; SubGPU pipelining runs the MoE on the rest pool's
+    stream, so with expert parallelism only the backends whose collectives
+    stay on the caller's stream work: the hook-based low-latency and nixl_ep
+    backends and deepep_v2's blocking collectives."""
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    # opt-125m has no experts; expert parallelism needs an MoE model, so
+    # present it as one (the guard reads only the backend name).
+    monkeypatch.setattr(ModelConfig, "get_num_experts", lambda self: 128)
+
+    def make(backend: str) -> VllmConfig:
+        return VllmConfig(
+            model_config=ModelConfig("facebook/opt-125m", dtype="float16", seed=0),
+            parallel_config=ParallelConfig(
+                subgpu_pipelining=True,
+                enable_expert_parallel=True,
+                all2all_backend=backend,
+            ),
+            compilation_config=CompilationConfig(
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+            ),
+        )
+
+    with pytest.raises(ValueError, match="switches streams"):
+        make("deepep_high_throughput")
+    assert make("deepep_low_latency").parallel_config.use_ubatching
+    # deepep_v2 passes this guard; whether the platform lists it among the
+    # micro-batching backends is a separate check with its own message.
+    try:
+        make("deepep_v2")
+    except ValidationError as e:
+        assert "switches streams" not in str(e)
+        assert "Microbatching currently only supports" in str(e)
+
+
 def test_subgpu_pipelining_selects_the_v2_model_runner(monkeypatch):
     """Microbatching picks the V1 runner until DBO on V2 is stable; SubGPU
     pipelining exists only in V2, so asking for it is the opt-in."""

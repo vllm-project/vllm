@@ -2244,6 +2244,25 @@ class VllmConfig:
                 f"{', '.join('--all2all-backend=' + b for b in supported_backends)}"
                 " and install the matching kernels."
             )
+            # The high-throughput and naive prepare/finalize switch between the
+            # compute and comm streams around their collectives; under SubGPU
+            # pipelining the MoE already runs on the rest pool's stream, so
+            # only the backends whose collectives stay on the caller's stream
+            # work there: deepep_low_latency and nixl_ep hand the receive to
+            # the peer microbatch through a hook, deepep_v2 blocks inline.
+            subgpu_backends = ["deepep_low_latency", "deepep_v2", "nixl_ep"]
+            if (
+                self.parallel_config.subgpu_pipelining
+                and not no_all2all
+                and a2a_backend not in subgpu_backends
+            ):
+                raise ValueError(
+                    "SubGPU pipelining supports the "
+                    f"{', '.join(subgpu_backends)} all2all backends; "
+                    f"{a2a_backend} switches streams inside prepare/finalize. "
+                    "Use one of "
+                    f"{', '.join('--all2all-backend=' + b for b in subgpu_backends)}."
+                )
 
             self._raise_dbo_thresholds_for_spec_decode()
 
