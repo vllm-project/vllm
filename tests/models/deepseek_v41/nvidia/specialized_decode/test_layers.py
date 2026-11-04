@@ -13,8 +13,8 @@ source, 2 a ratio-2 consumer with an Engram, 3 ratio-1 KV, index and
 candidate source, 4 a ratio-1 index source over 3's candidates. Twelve
 requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
-(6 rows each), above 48 rows (inline mHC), padded, row-sharded (12
-requests) and low-batch (one request).
+(6 rows each), above 48 rows (the pinned projections), padded,
+row-sharded (from two requests) and low-batch (one request).
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -153,9 +153,9 @@ class _Probe:
         # proves that the CUDA graphs hold the executor, not the stock layers.
         self.executor_sublayers = 0
 
-        def sublayer_and_keep(boundaries, layer, ffn, state, step, **kwargs):
+        def sublayer_and_keep(boundaries, layer, ffn, state, **kwargs):
             self.executor_sublayers += 1
-            out = sublayer(boundaries, layer, ffn, state, step, **kwargs)
+            out = sublayer(boundaries, layer, ffn, state, **kwargs)
             i = index.get(layer)
             if ffn and i is not None:
                 residual = out[0].residual
@@ -296,6 +296,7 @@ class StepRecorder:
             ),
             "stock_fused_mhc_max_rows": getattr(mhc._all_reduce_mhc, "capacity", None),
             "draft_attention": [type(m.attn).__name__ for m in layers(draft)],
+            "embedding": type(getattr(decode, "embedding", None)).__name__,
         }
 
     def record_steps(self, prompt_lens: list[int]) -> None:
@@ -501,6 +502,8 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["logits"] == ["SpecializedDecodeLogitsProcessor"], rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
+        # The executor embeds from the replicated table.
+        assert rank["embedding"] == "ReplicatedEmbedding", rank
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank

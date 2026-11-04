@@ -50,12 +50,20 @@ def _q_kv_norm_quant_kernel(
     KV_SIZE: tl.constexpr,
     BLOCK: tl.constexpr,
     LAUNCH_PDL: tl.constexpr,
+    TRIGGER_FIRST: tl.constexpr,
 ):
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, BLOCK)
     if LAUNCH_PDL:
+        # Dependents read the outputs only after their own grid-dependency
+        # wait, so triggering first only lets them launch sooner: a decode
+        # step's query projection then loads its weights while this kernel
+        # waits for its input.
+        if TRIGGER_FIRST:
+            tl.extra.cuda.gdc_launch_dependents()
         tl.extra.cuda.gdc_wait()
-        tl.extra.cuda.gdc_launch_dependents()
+        if not TRIGGER_FIRST:
+            tl.extra.cuda.gdc_launch_dependents()
     if tl.program_id(1) == 0:
         groups = tl.arange(0, BLOCK // 32)
         if row < num_tokens:
@@ -93,8 +101,12 @@ def fused_q_kv_rmsnorm_quant(
     q_weight: torch.Tensor,
     kv_weight: torch.Tensor,
     eps: float,
+    early_trigger: bool = False,
 ) -> tuple[QuantizedActivation, torch.Tensor]:
-    """Normalize Q/KV and quantize Q with FlashInfer's swizzled MXFP8 scales."""
+    """Normalize Q/KV and quantize Q with FlashInfer's swizzled MXFP8 scales.
+    With ``early_trigger``, the kernel triggers its PDL dependents before its
+    own grid-dependency wait, for a caller whose query projection loads its
+    weights before its wait."""
     assert qr.ndim == kv.ndim == 2 and qr.shape[0] == kv.shape[0]
     assert qr.stride(-1) == kv.stride(-1) == 1
     assert q_weight.is_contiguous() and kv_weight.is_contiguous()
@@ -126,6 +138,7 @@ def fused_q_kv_rmsnorm_quant(
             kv_size,
             block,
             launch_pdl,
+            launch_pdl and early_trigger,
             num_warps=8 if block >= 2048 else 4,
             launch_pdl=launch_pdl,
         )
