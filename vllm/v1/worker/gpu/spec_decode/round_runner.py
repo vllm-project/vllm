@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The speculative round as the GPU model runner drives it: plan, lay out,
-restore, commit and observe one verify step."""
+restore and commit one verify step."""
 
 from typing import TYPE_CHECKING
 
@@ -39,12 +39,10 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     SpecResources,
     VerifyPlan,
 )
-from vllm.v1.worker.gpu.spec_decode.step_observation import StepObservation
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
     from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -101,8 +99,6 @@ class SpecRound:
         # The spec verify and commit kernels (registry), bound by set_resources.
         self.kernels: KernelRegistry | None = None
         self.kernel_context: KernelContext | None = None
-        # Steps passed to BaseSpeculator.observe_step so far.
-        self.num_observed_steps = 0
 
     def init_tree_verify(self, input_buffers: "InputBuffers") -> None:
         """Buffers of a speculator whose plans branch."""
@@ -335,49 +331,6 @@ class SpecRound:
             CommitStep(result, num_reqs, plan.count, input_batch.seq_lens)
         )
         return accepted_rows(result, num_reqs)
-
-    def observe(
-        self,
-        speculator: "BaseSpeculator",
-        input_batch: "InputBatch",
-        batch_desc: "BatchExecutionDescriptor | None",
-        start_ns: int,
-        num_spec_tokens: int,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-    ) -> None:
-        """Pass the step to ``speculator.observe_step``."""
-        assert batch_desc is not None
-        num_reqs = input_batch.num_reqs
-        num_prefill_tokens = 0
-        if input_batch.has_prefill:
-            prefilling = input_batch.is_prefilling_np[:num_reqs]
-            scheduled = input_batch.num_scheduled_tokens[:num_reqs]
-            num_prefill_tokens = int(scheduled[prefilling].sum())
-        step = self.num_observed_steps
-        self.num_observed_steps = step + 1
-        speculator.observe_step(
-            StepObservation(
-                step=step,
-                start_ns=start_ns,
-                req_ids=input_batch.req_ids,
-                num_reqs=num_reqs,
-                num_reqs_padded=input_batch.num_reqs_after_padding,
-                num_tokens=input_batch.num_tokens,
-                num_tokens_padded=input_batch.num_tokens_after_padding,
-                cudagraph_mode=batch_desc.cg_mode,
-                uniform_token_count=batch_desc.uniform_token_count,
-                num_ubatches=batch_desc.num_ubatches,
-                num_prefill_tokens=num_prefill_tokens,
-                num_spec_tokens=num_spec_tokens,
-                num_scheduled_tokens=input_batch.num_scheduled_tokens,
-                num_computed_tokens=input_batch.num_computed_tokens_np,
-                is_prefilling=input_batch.is_prefilling_np,
-                num_draft_tokens=input_batch.num_draft_tokens_per_req,
-                num_sampled=num_sampled,
-                num_rejected=num_rejected,
-            )
-        )
 
 
 def spec_kernel_layers(runner: "GPUModelRunner") -> list[SpecLayerSpec]:

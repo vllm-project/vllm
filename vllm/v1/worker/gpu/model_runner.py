@@ -1914,9 +1914,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         valid_dummy_state_slots: bool = False,
         randomize_inputs: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        start_ns = (
-            time.perf_counter_ns() if "observe_step" in self.speculator_hooks else 0
-        )
         if not dummy_run:
             self.draft_tokens_handler.begin_step(scheduler_output)
             # Update the request states.
@@ -2283,8 +2280,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
-            batch_desc=batch_desc,
-            start_ns=start_ns,
         )
 
         if not self.is_last_pp_rank:
@@ -2315,8 +2310,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
-        batch_desc = self.execute_model_state.batch_desc
-        start_ns = self.execute_model_state.start_ns
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2463,19 +2456,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ),
         )
         input_batch.accept_result = accept_result
-        # After the commit along the path, before propose: the speculator sees
-        # the step it is about to draft from.
-        if "observe_step" in self.speculator_hooks:
-            assert self.speculator is not None and self.spec_round is not None
-            self.spec_round.observe(
-                self.speculator,
-                input_batch,
-                batch_desc,
-                start_ns,
-                num_spec_tokens,
-                num_sampled,
-                num_rejected,
-            )
 
         if self.speculator is not None:
             assert self.sampler is not None
@@ -2678,10 +2658,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
-    batch_desc: BatchExecutionDescriptor | None = None
-    # time.perf_counter_ns() at execute_model entry, taken only for
-    # BaseSpeculator.observe_step (else 0).
-    start_ns: int = 0
 
 
 class BatchReqState(NamedTuple):

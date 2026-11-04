@@ -113,7 +113,7 @@ kind `"none"`).
 ## Every step, in call order
 
 Steps 1 and 2 run in the scheduler process. State a config keeps there stays
-there. Steps 3 to 8 run on every worker.
+there. Steps 3 to 7 run on every worker.
 
 ### 1. Admission: `SpeculatorConfig.admit_limit`
 
@@ -252,23 +252,7 @@ rejected. Whether the commit moves anything depends on the plan's `is_chain`, no
 the result: a chain commits nothing. A plan that is not a chain runs the bound
 `commit` kernels in the registry.
 
-### 7. Observe: `BaseSpeculator.observe_step`
-
-```python
-def observe_step(self, step: StepObservation) -> None
-```
-
-The runner calls this once per step that ran the target forward and sampled. The
-call comes after the commit and before `propose`. Steps without drafts (budget 1) and
-prefill steps are observed too. Capture and profiling runs are not. With pipeline
-parallelism, only the last rank calls it.
-
-`StepObservation` (`step_observation.py`) holds the step's shape and counts. The
-record holds no copies, and the runner does not sync for it. Reading
-`num_sampled` on the host adds a sync. The default does nothing, and the runner
-builds no record for a speculator that does not override the hook.
-
-### 8. Propose: `BaseSpeculator.propose`
+### 7. Propose: `BaseSpeculator.propose`
 
 The runner calls `propose(..., num_speculative_tokens=)` with the number of drafts
 this step's budget allows. It does not call it when the drafter is skipped (step 2).
@@ -355,8 +339,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
 
 
 class MyChainConfig(Eagle3SpeculatorConfig):
-    speculator_class = "my_package.speculator.MyChainSpeculator"
-
     def candidate_budget(self, view):
         # No drafts when many requests are running: K + 1 rows, else 1.
         k_plus_1 = self.num_speculative_tokens + 1
@@ -364,17 +346,6 @@ class MyChainConfig(Eagle3SpeculatorConfig):
 
     def admit_limit(self, view):
         return max(1, view.max_num_seqs // 2)
-```
-
-```python
-# my_package/speculator.py
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
-
-
-class MyChainSpeculator(EagleSpeculator):
-    def observe_step(self, step):
-        # Host-only bookkeeping. Do not read step.num_sampled on the host.
-        self.last_num_spec_tokens = step.num_spec_tokens
 ```
 
 Register the config with `register_speculative_method` as shown in
@@ -387,6 +358,7 @@ that cannot verify trees, and returns a plan each step. `accept` is optional: th
 default walks the tree on each row's argmax, which only greedy requests accept.
 
 ```python
+from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
 from vllm.v1.worker.gpu.spec_decode.round import (
     PlanBound,
     PlanShape,
@@ -418,7 +390,7 @@ class MyTreeConfig(MyChainConfig):
         return declared
 
 
-class MyTreeSpeculator(MyChainSpeculator):
+class MyTreeSpeculator(EagleSpeculator):
     def bind_resources(self, resources):
         super().bind_resources(resources)
         self.trees = resources.max_branching > 1
