@@ -53,6 +53,7 @@ from vllm.v1.worker.utils import (
     copy_kv_cache_blocks_inplace,
     customize_attention_spec,
     map_kv_caches_to_kernel_blocks,
+    prepare_kernel_block_sizes,
 )
 
 
@@ -91,6 +92,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
+            get_supported_kernel_block_sizes_for_layers=lambda *_, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -112,7 +114,9 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     resolved = attn_utils.get_kv_cache_spec(config)
     assert resolved["main"].block_size == resolved["indexer"].block_size == expected
     dense_backend = layers["dense"].get_attn_backend()
-    assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
+    assert resolved["dense"] == customize_attention_spec(
+        dense_backend, specs["dense"], "dense"
+    )
     assert all(spec.block_size == block_size for spec in specs.values())
 
 
@@ -123,6 +127,7 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     backend = SimpleNamespace(
         customize_spec=AttentionBackend.customize_spec,
         get_supported_kernel_block_sizes=lambda _=None: [16],
+        get_supported_kernel_block_sizes_for_layers=lambda *_: [16],
     )
     layers = {
         name: SimpleNamespace(
@@ -960,6 +965,7 @@ def _packed_group(tokens_per_state, row_bytes, supported_sizes):
     backend = SimpleNamespace(
         get_builder_cls=lambda: _TableBuilder,
         get_supported_kernel_block_sizes=lambda _=None: supported_sizes,
+        get_supported_kernel_block_sizes_for_layers=lambda *_: supported_sizes,
         get_name=lambda: "FAKE",
         customize_spec=lambda spec: spec,
     )
@@ -999,6 +1005,44 @@ def test_split_group_maps_manager_block_table():
     assert table.tolist() == [[0, 1, 2, 3, 8, 9, 10, 11]]
 
 
+class _DraftAwareBackend:
+    """Takes 512-token kernel pages, except on the draft layer."""
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(kv_cache_spec=None):
+        return [64, 512]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes_for_layers(kv_cache_spec, layer_names):
+        return [64] if "draft" in layer_names else [64, 512]
+
+    get_builder_cls = staticmethod(lambda: _TableBuilder)
+    get_name = staticmethod(lambda: "DRAFT_AWARE")
+    customize_spec = staticmethod(lambda spec: spec)
+
+
+def test_kernel_block_sizes_follow_each_groups_layers():
+    """A target and a draft attention group share one KV cache group. Kernel
+    block selection asks the backend about each group's own layers."""
+    spec = FullAttentionSpec(
+        block_size=512, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+    )
+    target = AttentionGroup(_DraftAwareBackend, ["target"], spec, 0)
+    draft = AttentionGroup(_DraftAwareBackend, ["draft"], spec, 0)
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[])],
+        kv_cache_tensors=[],
+    )
+    assert prepare_kernel_block_sizes(kv_cache_config, [[target]]) == [512]
+    assert prepare_kernel_block_sizes(kv_cache_config, [[target, draft]]) == [64]
+
+    draft.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=512)
+    assert draft.kernel_block_size == 64
+    assert customize_attention_spec(
+        _DraftAwareBackend, spec, "draft"
+    ).block_stride_alignment == MultipleOf(64)
+
+
 @pytest.mark.parametrize(
     ("block_size", "page_states"), [(1024, 64), (384, 32), (256, 0)]
 )
@@ -1006,7 +1050,7 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     """Backends taking only fixed kernel blocks align packed blocks to the kernel
     block the final block size is split into, and not at all when unsplit."""
     group = _packed_group(4, 132, [128, 256])
-    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec, "layer.0")
     spec = spec.copy_with_new_block_size(block_size)
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 
