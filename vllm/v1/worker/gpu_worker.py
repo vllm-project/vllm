@@ -1051,10 +1051,11 @@ class Worker(WorkerBase):
         self.requested_memory = self._resolve_requested_memory()
 
     def _resolve_requested_memory(self) -> int:
-        charged_bytes = (
-            self.external_weight_memory - self._external_weight_charges.fallback_bytes
+        return request_memory(
+            self.init_snapshot,
+            self.cache_config,
+            self.external_weight_memory - self._external_weight_charges.fallback_bytes,
         )
-        return request_memory(self.init_snapshot, self.cache_config, charged_bytes)
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
         assert self.use_v2_model_runner
