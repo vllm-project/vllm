@@ -89,13 +89,6 @@ async fn not_supported(method: Method, path: MatchedPath) -> (StatusCode, Json<E
     )
 }
 
-fn server_dev_mode_enabled() -> bool {
-    std::env::var("VLLM_SERVER_DEV_MODE")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .is_some_and(|value| value != 0)
-}
-
 fn runtime_lora_updating_enabled() -> bool {
     std::env::var("VLLM_ALLOW_RUNTIME_LORA_UPDATING")
         .ok()
@@ -104,10 +97,11 @@ fn runtime_lora_updating_enabled() -> bool {
 
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
+    let dev_mode_enabled = state.api_server_options.server_dev_mode;
     let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
     build_router_with_options(
         state,
-        server_dev_mode_enabled(),
+        dev_mode_enabled,
         runtime_lora_updating_enabled(),
         scale_out_endpoints_enabled,
     )

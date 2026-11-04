@@ -86,6 +86,8 @@ pub struct ApiServerOptions {
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
+    /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
+    pub server_dev_mode: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,

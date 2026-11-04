@@ -613,6 +613,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
     assert!(!config.api_server_options.skip_model_name_validation);
+    assert!(!config.api_server_options.server_dev_mode);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -620,8 +621,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
-    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, and
-    // `VLLM_SKIP_MODEL_NAME_VALIDATION`, which bind these hidden flags.
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
+    // and `VLLM_SERVER_DEV_MODE`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -631,10 +632,13 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1048576",
         "--skip-model-name-validation",
         "1",
+        "--server-dev-mode",
+        " 1",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
     assert!(config.api_server_options.skip_model_name_validation);
+    assert!(config.api_server_options.server_dev_mode);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
@@ -645,15 +649,16 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--http-max-request-body-size",
-        "32MiB",
-    ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    for invalid in [
+        ["--http-max-request-body-size", "32MiB"],
+        // Python's `int()` fails startup on a non-integer dev mode.
+        ["--server-dev-mode", "true"],
+    ] {
+        let error =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(&invalid))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
 
 #[test]
@@ -670,6 +675,7 @@ fn args_json_reads_env_only_settings_from_env() {
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
     assert!(!args.api_server_options().skip_model_name_validation);
+    assert!(!args.api_server_options().server_dev_mode);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -680,11 +686,13 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
+        ("VLLM_SERVER_DEV_MODE", " 1"),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
     assert!(args.api_server_options().skip_model_name_validation);
+    assert!(args.api_server_options().server_dev_mode);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -700,6 +708,7 @@ fn args_json_reads_env_only_settings_from_env() {
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
+        apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
     ];
     expect![[r#"
         [
@@ -707,6 +716,7 @@ fn args_json_reads_env_only_settings_from_env() {
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
+            "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
         ]
     "#]]
     .assert_debug_eq(&errors);
@@ -2933,6 +2943,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3061,6 +3072,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3302,6 +3314,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,

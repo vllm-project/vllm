@@ -581,8 +581,9 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub skip_model_name_validation: bool,
 
-    /// Set only through `VLLM_SERVER_DEV_MODE`. Used as the default of
-    /// `--log-error-stack`.
+    /// Register the development routes and default `--log-error-stack`. Like
+    /// Python, it is set only through `VLLM_SERVER_DEV_MODE`, which must be an
+    /// integer.
     #[arg(
         long,
         hide = true,
@@ -974,6 +975,7 @@ impl SharedRuntimeArgs {
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
             skip_model_name_validation: self.skip_model_name_validation,
+            server_dev_mode: self.server_dev_mode,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {

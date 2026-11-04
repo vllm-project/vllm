@@ -835,6 +835,40 @@ async fn scale_out_generate_route_follows_api_server_options() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+/// `VLLM_SERVER_DEV_MODE` reaches the router through `ApiServerOptions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dev_routes_follow_api_server_options() {
+    for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    server_dev_mode,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/get_world_size")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(
+            response.status(),
+            expected,
+            "server_dev_mode={server_dev_mode}"
+        );
+
+        engine_task.abort_and_join().await;
+    }
+}
+
 /// Assert that `method uri` hits the 501 placeholder for the Python route
 /// `route`.
 async fn assert_route_not_supported(app: &axum::Router, method: &str, uri: &str, route: &str) {
