@@ -1920,6 +1920,66 @@ async fn render_rejects_max_tokens_above_max_model_len() {
     assert_eq!(status, StatusCode::OK, "{json}");
 }
 
+/// Python renders an empty user turn, so the render route must accept empty
+/// message content instead of rejecting it.
+#[tokio::test]
+async fn render_chat_accepts_empty_message_content() {
+    let mut app = test_render_app();
+
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["token_ids"].as_array().expect("token_ids").is_empty());
+    }
+}
+
+/// Python renders an assistant turn with null, missing, or `[]` content and no
+/// tool calls as an empty turn, the same as `content: ""`.
+#[tokio::test]
+async fn render_chat_accepts_assistant_turn_without_content() {
+    let mut app = test_render_app();
+    let mut token_ids = Vec::new();
+
+    for assistant in [
+        json!({"role": "assistant", "content": ""}),
+        json!({"role": "assistant", "content": null}),
+        json!({"role": "assistant"}),
+        json!({"role": "assistant", "content": []}),
+        json!({"role": "assistant", "content": null, "tool_calls": []}),
+        json!({"role": "assistant", "content": null, "reasoning": ""}),
+    ] {
+        let (status, json) = post_json(
+            &mut app,
+            "/v1/chat/completions/render",
+            json!({
+                "model": "render-model",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    assistant,
+                    {"role": "user", "content": "hi"},
+                ],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{assistant}: {json}");
+        token_ids.push(json["token_ids"].clone());
+    }
+    assert!(
+        token_ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "{token_ids:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
@@ -9915,23 +9975,26 @@ async fn tokenize_chat_empty_messages_returns_400() {
     assert_eq!(json["error"]["type"], "BadRequestError");
 }
 
+/// Python renders an empty user turn, so empty content is accepted here too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn tokenize_chat_empty_message_content_returns_400() {
+async fn tokenize_chat_accepts_empty_message_content() {
     let mut app = test_app().await;
 
-    let (status, json) = post_json(
-        &mut app,
-        "/tokenize",
-        json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": ""}],
-        }),
-    )
-    .await;
+    for content in [json!(""), json!([])] {
+        let (status, json) = post_json(
+            &mut app,
+            "/tokenize",
+            json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "messages": [{"role": "user", "content": content}],
+            }),
+        )
+        .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["error"]["type"], "BadRequestError");
+        assert_eq!(status, StatusCode::OK, "{json}");
+        assert!(!json["tokens"].as_array().expect("tokens").is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
