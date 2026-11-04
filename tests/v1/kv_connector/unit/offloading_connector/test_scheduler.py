@@ -2726,6 +2726,7 @@ def test_req_context_counts_live_until_request_finished(registered):
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.config = SimpleNamespace(kv_group_configs=())
     scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._events_tracker = SimpleNamespace(on_new_request=lambda *_: None)
     scheduler._step_region = None
     scheduler._req_status = {}
 
@@ -3138,6 +3139,49 @@ def test_sliding_window_chunk_with_null_block_is_not_stored(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=((0, 0), (0, 1), (1, 0), (1, 1)),
     )
+
+
+def test_swa_retry_keeps_internal_null_block_in_store_spec(request_runner):
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        blocks_per_chunk=3,
+        async_scheduling=False,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["swa"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=2 * block_size,
+                ),
+            )
+        ],
+    )
+    runner.new_request(token_ids=[0] * (9 * block_size))
+    runner.manager.prepare_store.return_value = None
+    for _ in range(2):
+        output = runner.scheduler.schedule()
+        assert not output.kv_connector_metadata.store_jobs
+        runner.scheduler.update_from_output(
+            output, create_model_runner_output(runner.scheduler.running, token_id=0)
+        )
+
+    state = runner.connector_scheduler._req_status[str(runner.req_id)].group_states[0]
+    assert state.next_stored_chunk_idx == 0
+    assert state.block_ids[6] == 0
+    runner.manager.prepare_store.side_effect = lambda keys, ctx: generate_store_output(
+        keys
+    )
+    output = runner.scheduler.schedule()
+    [job] = output.kv_connector_metadata.store_jobs.values()
+    assert isinstance(job.src_spec, GPULoadStoreSpec)
+    assert job.src_spec.block_ids.tolist() == state.block_ids[:9]
+    assert job.src_spec.group_sizes == [9]
+    assert job.src_spec.block_indices == [0]
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

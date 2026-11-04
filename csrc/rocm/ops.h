@@ -82,3 +82,11 @@ void fused_norm_rope_attn_rope_cast_prefill_rocm(
     const std::optional<at::Tensor>& attn_sink, double sm_scale,
     const at::Tensor& positions, const at::Tensor& cos_sin_cache,
     bool main_use_fnuz, at::Tensor& out, at::Tensor& out_scale);
+
+// RDNA3.5 only: Fused Gated Delta Net prefill kernel.
+// Mutates `out` and `final_state` in place.
+void rdna35_gdn_chunked(torch::Tensor& q, torch::Tensor& k, torch::Tensor& v,
+                        torch::Tensor& g, torch::Tensor& beta,
+                        std::optional<torch::Tensor> initial_state,
+                        torch::Tensor& cu_seqlens, torch::Tensor& out,
+                        torch::Tensor& final_state, double scale);
