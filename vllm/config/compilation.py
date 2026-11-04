@@ -197,7 +197,7 @@ class PassConfig:
     float in MB.
     Unspecified will fallback to default values
     which are compute capability and world size dependent.
-    See :data:`FI_ALLREDUCE_FUSION_MAX_SIZE_MB`, keyed by device
+    See `FI_ALLREDUCE_FUSION_MAX_SIZE_MB`, keyed by device
     capability."""
     # TODO(luka) better pass enabling system.
 
