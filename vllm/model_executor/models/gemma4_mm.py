@@ -33,6 +33,9 @@ from transformers.models.gemma4.configuration_gemma4 import (
     Gemma4AudioConfig,
     Gemma4TextConfig,
 )
+from transformers.models.gemma4.modeling_gemma4 import (
+    Gemma4VisionPatchEmbedder as HFGemma4VisionPatchEmbedder,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.model import get_served_model_name
@@ -967,6 +970,23 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 # ---------------------------------------------------------------------------
 
 
+class Gemma4VisionPatchEmbedder(HFGemma4VisionPatchEmbedder):
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # Quantized projection weights use a storage dtype, not an activation dtype.
+        pixel_values = (2 * (pixel_values - 0.5)).to(
+            self.position_embedding_table.dtype
+        )
+        hidden_states = self.input_proj(pixel_values)
+        return hidden_states + self._position_embeddings(
+            pixel_position_ids, padding_positions
+        )
+
+
 class Gemma4MultimodalEmbedder(nn.Module):
     """Projects vision/audio soft tokens into LM embedding space.
 
@@ -1100,6 +1120,9 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.vision_tower.patch_embedder = Gemma4VisionPatchEmbedder(
+                config.vision_config
+            )
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -2065,9 +2088,7 @@ class Gemma4ForConditionalGeneration(
         flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
         gathered_states = flat_pooled[gather_indices]
 
-        # Cast to the projection layer's dtype to resolve mixed-precision crash
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        gathered_states = gathered_states.to(target_dtype)
+        gathered_states = gathered_states.to(self.model_dtype)
 
         flat_proj_embs = self.embed_vision(
             inputs_embeds=gathered_states.unsqueeze(0)

@@ -1347,3 +1347,62 @@ def test_custom_inputs_models_heavy(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
     )
+
+
+@pytest.mark.core_model
+@pytest.mark.parametrize(
+    "enforce_eager,encoder_graph",
+    [(True, False), (False, False), (False, True)],
+)
+def test_gemma4_online_fp8_image(
+    vllm_runner, enable_pickle, enforce_eager, encoder_graph
+):
+    """FP8 patch-projection weights must not turn image activations into FP8."""
+    from PIL import Image
+
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerTensorOnlineLinearMethod,
+    )
+
+    with vllm_runner(
+        "google/gemma-4-E4B-it",
+        quantization="fp8",
+        dtype="bfloat16",
+        max_model_len=4096,
+        max_num_seqs=1,
+        enforce_eager=enforce_eager,
+        enable_chunked_prefill=True,
+        compilation_config={
+            "cudagraph_mm_encoder": encoder_graph,
+            "encoder_cudagraph_token_budgets": [280],
+            "encoder_cudagraph_max_vision_items_per_batch": 1,
+            "encoder_cudagraph_max_frames_per_batch": 2,
+        },
+        limit_mm_per_prompt={
+            "image": 1,
+            "video": {"count": 1, "num_frames": 2},
+            "audio": 0,
+        },
+    ) as model:
+        assert model.apply_model(
+            lambda m: isinstance(
+                m.vision_tower.patch_embedder.input_proj.quant_method,
+                Fp8PerTensorOnlineLinearMethod,
+            )
+        ) == [True]
+        prompt = model.llm.get_tokenizer().apply_chat_template(
+            [
+                {
+                    "role": "user",
+                    "content": "<|image|>What color is this image? "
+                    "Answer with one word.",
+                }
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        outputs = model.generate_greedy(
+            [prompt], max_tokens=16, images=[Image.new("RGB", (64, 64), "white")]
+        )
+        assert "white" in outputs[0][1].lower()
