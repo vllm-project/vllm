@@ -67,7 +67,7 @@ def test_deepseek_rocm_adaptive_builders_support_varlen_full_graphs():
         DeepseekV4ROCMAiterMLASparseMetadataBuilder,
         DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
         DeepseekV41ROCMAiterMLASparseMetadataBuilder,
-        v41_rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+        v41_rocm.DeepseekV41ROCMAiterSparseSWAMetadataBuilder,
     ):
         assert (
             builder_cls.get_cudagraph_support(adaptive_config, SimpleNamespace())
@@ -126,7 +126,7 @@ def test_deepseek_v41_rocm_fixed_k_path_is_unchanged(
 
     for builder_cls in (
         DeepseekV41ROCMAiterMLASparseMetadataBuilder,
-        v41_rocm.DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+        v41_rocm.DeepseekV41ROCMAiterSparseSWAMetadataBuilder,
     ):
         assert (
             builder_cls.get_cudagraph_support(fixed_config, SimpleNamespace())

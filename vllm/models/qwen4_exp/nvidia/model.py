@@ -13,9 +13,6 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -60,10 +57,12 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
@@ -82,6 +81,7 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
@@ -91,14 +91,6 @@ from .qsa import Qwen4ExpQSAAttention
 # Transformers v5.18 renamed `qwen_sparse_attention` to `indexed_attention`
 # TODO: Delete qwen_... once Transformers 5.18.0 is the minimum required version.
 _QSA_LAYER_TYPES = ("qwen_sparse_attention", "indexed_attention")
-
-
-def is_hc_sequence_parallel_enabled(vllm_config: VllmConfig) -> bool:
-    """Enable GR/PLE SP explicitly or automatically with sequence-parallel MoE."""
-    parallel_config = vllm_config.parallel_config
-    return parallel_config.tensor_parallel_size > 1 and (
-        parallel_config.enable_hc_sp or parallel_config.use_sequence_parallel_moe
-    )
 
 
 def without_modelopt_fp4(
@@ -195,12 +187,18 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
 
+def get_qsa_topk_buffer_width(config: Qwen4ExpTextConfig) -> int:
+    """Selected indices, including the open group's tail, plus a valid count."""
+    return config.indexer_budget + config.indexer_compress_ratio
+
+
 class Qwen4ExpDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
         layer_type: str,
         prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
@@ -251,10 +249,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     reduce_results=not self.use_hc_sequence_parallel,
                 )
             else:
+                if topk_indices_buffer is None:
+                    raise ValueError("QSA layers require a shared top-k buffer")
                 self.self_attn = Qwen4ExpQSAAttention(
                     vllm_config=vllm_config,
                     config=config,
                     layer_id=self.layer_idx,
+                    topk_indices_buffer=topk_indices_buffer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                     reduce_results=not self.use_hc_sequence_parallel,
@@ -433,7 +434,24 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        # Reserved for all QSA layers to reuse; on the model, not a local, so
+        # the MTP proposer shares it with the draft.
+        self.topk_indices_buffer: torch.Tensor | None
+        if self._qsa_layer_ids:
+            self.topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            )
+        else:
+            self.topk_indices_buffer = None
+        self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
             layer_idx = extract_layer_index(prefix)
@@ -441,15 +459,16 @@ class Qwen4ExpModel(nn.Module):
                 vllm_config,
                 layer_type=config.layer_types[layer_idx],
                 prefix=prefix,
+                topk_indices_buffer=self.topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen4ExpSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         intermediate_size = config.hidden_size * config.hc_count
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -656,7 +675,7 @@ class Qwen4ExpModel(nn.Module):
         )
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -700,8 +719,11 @@ class Qwen4ExpForCausalLM(
     Qwen4ExpMixtureOfExperts,
     IsHybrid,
 ):
+    # The QSA indexer is not listed: quant configs read this mapping before the
+    # model is built, and `Qwen4ExpQSAAttention` fuses `indexer.index_qk_proj`
+    # into `qkv_proj` only when it is quantized like q/k/v.
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj", "indexer.index_qk_proj"],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
         "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
@@ -720,12 +742,6 @@ class Qwen4ExpForCausalLM(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.quant_config = vllm_config.quant_config
@@ -734,11 +750,15 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | PPMissingLayer
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -970,12 +990,6 @@ class Qwen4ExpForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model") -> None:
         nn.Module.__init__(self)
         config: Qwen4ExpConfig = vllm_config.model_config.hf_config
-        if vllm_config.lora_config is not None:
-            # LoRA does not support the merged QKV/indexer projection, so its
-            # packed mapping must keep the indexer separate.
-            self.packed_modules_mapping = self.packed_modules_mapping | {
-                "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            }
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is None:
@@ -1041,7 +1055,9 @@ class Qwen4ExpForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if not get_pp_group().is_first_rank and self.use_deepstack:
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
             assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (

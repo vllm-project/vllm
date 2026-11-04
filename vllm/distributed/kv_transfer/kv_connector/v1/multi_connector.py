@@ -125,11 +125,9 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for connector_id, stats_data in transfer_stats_data.items():
-            assert connector_id in self._prom_metrics, (
-                f"{connector_id} is not contained in the list of registered connectors "
-                f"with Prometheus metrics support: {self._prom_metrics.keys()}"
-            )
-            self._prom_metrics[connector_id].observe(stats_data, engine_idx)
+            prom_metrics = self._prom_metrics.get(connector_id)
+            if prom_metrics is not None:
+                prom_metrics.observe(stats_data, engine_idx)
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
@@ -217,6 +215,24 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return bool(self._connectors) and all(
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
+
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if not connector_cls.supports_lookahead_block_hashes(child_config):
+                return False
+        return True
 
     @property
     def requires_kv_delivery(self) -> bool:
@@ -498,6 +514,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)
+
+    def may_load_async(self, request: "Request") -> bool:
+        return any(c.may_load_async(request) for c in self._connectors)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
