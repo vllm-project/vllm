@@ -274,15 +274,16 @@ async def async_request_openai_completions(
                             saw_done = True
                         else:
                             data = json.loads(chunk)
-                            if data.get("error") or data.get("object") == "error":
-                                stream_error = json.dumps(data.get("error") or data)
-                                continue
                             _update_server_metrics(output, data)
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
                             # want to check a token was generated
-                            if choices := data.get("choices"):
+                            if (error := data.get("error")) or data.get(
+                                "object"
+                            ) == "error":
+                                stream_error = json.dumps(error or data)
+                            elif choices := data.get("choices"):
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
@@ -303,6 +304,7 @@ async def async_request_openai_completions(
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
                 if stream_error is not None:
+                    output.success = False
                     output.error = stream_error
                 elif not first_chunk_received:
                     output.success = False
@@ -311,6 +313,7 @@ async def async_request_openai_completions(
                         "This response will be marked as failed!"
                     )
                 elif not saw_done:
+                    output.success = False
                     output.error = (
                         "Stream ended without [DONE]."
                         "This response will be marked as failed!"
@@ -409,7 +412,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
         return False
     if (
         delta.get("content")
-        or delta.get("reasoning")
+        or delta.get("reasoning")  # vLLM spec
+        or delta.get("reasoning_content")  # SGLang spec
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):
@@ -483,12 +487,13 @@ async def async_request_openai_chat_completions(
                         else:
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
-                            if data.get("error") or data.get("object") == "error":
-                                stream_error = json.dumps(data.get("error") or data)
-                                continue
                             _update_server_metrics(output, data)
 
-                            if (
+                            if (error := data.get("error")) or data.get(
+                                "object"
+                            ) == "error":
+                                stream_error = json.dumps(error or data)
+                            elif (
                                 choices := data.get("choices")
                             ) and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
@@ -512,6 +517,7 @@ async def async_request_openai_chat_completions(
 
                 output.generated_text = generated_text
                 if stream_error is not None:
+                    output.success = False
                     output.error = stream_error
                 elif not first_chunk_received:
                     output.success = False
@@ -520,6 +526,7 @@ async def async_request_openai_chat_completions(
                         "This response will be marked as failed!"
                     )
                 elif not saw_done:
+                    output.success = False
                     output.error = (
                         "Stream ended without [DONE]."
                         "This response will be marked as failed!"
@@ -783,6 +790,7 @@ async def async_request_openai_audio(
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False
+                    stream_error: str | None = None
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
@@ -798,7 +806,9 @@ async def async_request_openai_audio(
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
 
-                                if choices := data.get("choices"):
+                                if error := data.get("error"):
+                                    stream_error = json.dumps(error)
+                                elif choices := data.get("choices"):
                                     content = choices[0]["delta"].get("content")
                                     # First token
                                     if not first_chunk_received:
@@ -822,7 +832,10 @@ async def async_request_openai_audio(
                                     )
 
                     output.generated_text = generated_text
-                    if first_chunk_received:
+                    if stream_error is not None:
+                        output.success = False
+                        output.error = stream_error
+                    elif first_chunk_received:
                         output.success = True
                     else:
                         output.success = False

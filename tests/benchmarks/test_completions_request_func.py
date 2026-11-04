@@ -133,31 +133,38 @@ def test_done_without_output_still_fails(backend: str):
     assert "TTFT" in output.error
 
 
-def test_complete_tool_only_chat_stream_is_a_success():
-    stream = (
-        _sse(
+@pytest.mark.parametrize(
+    "output_field", ["tool_calls", "reasoning", "reasoning_content"]
+)
+@pytest.mark.parametrize("complete", [False, True], ids=["truncated", "complete"])
+def test_non_text_chat_output_requires_done(output_field: str, complete: bool):
+    delta: dict[str, object] = {
+        "tool_calls": [
             {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "tool_calls": [
-                                {
-                                    "index": 0,
-                                    "id": "call_test",
-                                    "type": "function",
-                                    "function": {"name": "weather", "arguments": "{}"},
-                                }
-                            ]
-                        },
-                        "finish_reason": "tool_calls",
-                    }
-                ]
+                "index": 0,
+                "id": "call_test",
+                "type": "function",
+                "function": {"name": "weather", "arguments": "{}"},
             }
-        )
-        + DONE
-    )
+        ]
+    }
+    if output_field != "tool_calls":
+        delta = {output_field: "thinking"}
+    finish_reason = "tool_calls" if output_field == "tool_calls" else "length"
+    stream = _sse(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+    ) + (DONE if complete else b"")
     output = asyncio.run(_request("openai-chat", stream))
-    assert output.success, output.error
+    assert output.success is complete, output.error
+    if not complete:
+        assert "[DONE]" in output.error
     assert output.generated_text == ""
     assert output.ttft > 0

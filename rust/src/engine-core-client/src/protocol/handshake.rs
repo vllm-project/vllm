@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::dtype::ModelDtype;
+use crate::protocol::request::BlockHash;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
@@ -32,6 +33,25 @@ pub struct KvEventsConfig {
     pub hwm: u32,
     pub max_queue_size: u32,
     pub topic: String,
+}
+
+/// What the frontend needs to compute prompt block hashes itself, reported
+/// only when the engine hashes request blocks.
+///
+/// Original Python definition (`PrefixHashConfig`):
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixHashConfig {
+    /// The engine's `--prefix-caching-hash-algo`, e.g. `sha256`.
+    pub hash_algo: String,
+    /// Tokens per hashed block.
+    pub hash_block_size: u64,
+    /// Parent hash of the first block.
+    pub none_hash: BlockHash,
+    /// Tokens after each block that its hash also covers, so a block is
+    /// hashed only once they exist.
+    #[serde(default)]
+    pub num_lookahead_tokens: u64,
 }
 
 /// Post-initialization configuration sent from each engine on the input socket
@@ -108,6 +128,10 @@ pub struct EngineCoreReadyResponse {
     /// engine runs with `VLLM_SERVER_DEV_MODE` (for `/server_info`).
     #[serde(default)]
     pub vllm_config: Option<serde_json::Value>,
+    /// Set when the engine hashes request blocks and accepts prompt block
+    /// hashes from the frontend.
+    #[serde(default)]
+    pub prefix_hash_config: Option<PrefixHashConfig>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
