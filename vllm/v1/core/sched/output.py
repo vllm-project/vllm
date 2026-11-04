@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.utils.gc_utils import untrack_long_lists
 from vllm.v1.kv_cache_interface import StateSlotHandle
 
 if TYPE_CHECKING:
@@ -81,6 +82,18 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+        )
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Workers receive these by pickle and keep them only for this step.
+        untrack_long_lists(
+            (
+                self.prompt_token_ids,
+                self.prefill_token_ids,
+                self.prompt_is_token_ids,
+                *self.block_ids,
+            )
         )
 
     @property
