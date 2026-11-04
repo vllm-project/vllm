@@ -121,7 +121,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -253,7 +256,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -385,7 +391,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -517,7 +526,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -593,7 +605,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -725,7 +740,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -857,7 +875,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -973,7 +994,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1089,7 +1113,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1221,7 +1248,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1353,7 +1383,10 @@
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1485,7 +1518,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1617,7 +1653,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1755,7 +1794,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -1887,7 +1929,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": null,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2019,7 +2064,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": null,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2151,7 +2199,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2283,7 +2334,10 @@
           "deduplicate_contexts": "none",
           "deduplicate_contexts_max_history": null,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2359,7 +2413,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2491,7 +2548,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2623,7 +2683,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2739,7 +2802,10 @@
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2855,7 +2921,10 @@
           "deduplicate_contexts": "all",
           "deduplicate_contexts_max_history": 8192,
           "enforce": false,
-          "prf": "philox"
+          "prf": "philox",
+          "sbw_delta": 2.0,
+          "sbw_gamma": 0.5,
+          "sbw_scheme": "selfhash"
         }
       },
       "trace": {
@@ -2986,6 +3055,7 @@
           "context_width": 1,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "enforce": false,
           "prf": "philox",
           "sbw_delta": 2.0,
           "sbw_gamma": 0.5,
@@ -3120,6 +3190,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "enforce": false,
           "prf": "philox",
           "sbw_delta": 2.0,
           "sbw_gamma": 0.5,
@@ -3254,6 +3325,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "enforce": false,
           "prf": "philox",
           "sbw_delta": 2.0,
           "sbw_gamma": 0.5,
@@ -3372,6 +3444,7 @@
           "context_width": 4,
           "deduplicate_contexts": "single_turn",
           "deduplicate_contexts_max_history": 8192,
+          "enforce": false,
           "prf": "philox",
           "sbw_delta": 2.0,
           "sbw_gamma": 0.5,
