@@ -3,8 +3,8 @@
 // includes the declaration header rather than the kernel header.
 #include "skinny_gemms_int4.h"
 // ops.h carries the public declaration of wvSplitK_int4_g(), so the defining
-// translation unit also sees it (matches attention_dispatch.cu); a mismatch with
-// VLLM_SKINNY_INT4_SIG would otherwise only show up as a link error.
+// translation unit also sees it (matches attention_dispatch.cu); a mismatch
+// with VLLM_SKINNY_INT4_SIG would otherwise only show up as a link error.
 #include "ops.h"
 
 #include <stdexcept>
