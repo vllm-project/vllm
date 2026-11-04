@@ -649,6 +649,36 @@ def test_gemma4_response_template_prompt_state_matches_registered_parser(
     )
 
 
+# A second turn whose generation prompt opens reasoning:
+# <|turn>model\nanswer<turn|><|turn>model\n<|channel>thought\n
+TWO_TURN_PROMPT_TOKEN_IDS = [53, 100, 103, 55, 53, 100, 50, 101]
+
+
+@pytest.mark.parametrize(
+    ("prompt_token_ids", "expected"),
+    [
+        (TWO_TURN_PROMPT_TOKEN_IDS, ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-4:], ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-3:], ("plan", "answer")),
+        (TWO_TURN_PROMPT_TOKEN_IDS[-1:], (None, "plan<channel|>answer")),
+        (None, (None, "plan<channel|>answer")),
+    ],
+    ids=["full", "from_anchor", "past_anchor", "past_opener", "none"],
+)
+def test_prompt_suffix_parses_like_full_prompt_or_no_prompt(prompt_token_ids, expected):
+    """A suffix of the prompt (e.g. from derender) parses like the full prompt
+    while it still holds the reasoning opener, and like no prompt after that."""
+    parser = ResponseTemplateParser(
+        FakeTokenizer(GEMMA4_RESPONSE_TEMPLATE), TOOLS, enable_auto_tools=True
+    )
+    if prompt_token_ids is not None:
+        parser.set_prompt_token_ids(prompt_token_ids)
+
+    reasoning, content, _ = parser.parse("plan<channel|>answer<turn|>", request())
+
+    assert (reasoning, content) == expected
+
+
 def test_gemma4_response_template_reasoning_suppression_matches_registered_parser():
     req = request(include_reasoning=False)
     text = THINKING + "Final answer<turn|>"

@@ -17,6 +17,7 @@ use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
 use zeromq::RouterSendHalf;
 
+use crate::client::readiness::{Readiness, RecheckGuard};
 use crate::client::state::{
     OutputReceiver, OutputSender, RequestRegistry, UtilityReceiver, UtilityRegistry,
 };
@@ -66,6 +67,9 @@ pub(crate) struct ClientInner {
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
     health_tx: watch::Sender<bool>,
+    /// Whether the engines can accept and process new requests, maintained
+    /// around the control calls this client sends.
+    readiness: Arc<Readiness>,
 }
 
 impl ClientInner {
@@ -103,6 +107,7 @@ impl ClientInner {
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
             health_tx: watch::Sender::new(true),
+            readiness: Arc::new(Readiness::new()),
         }
     }
 
@@ -260,9 +265,21 @@ impl ClientInner {
         self.health_tx.subscribe()
     }
 
+    pub fn readiness(&self) -> &Arc<Readiness> {
+        &self.readiness
+    }
+
     /// Call a typed utility method on every engine. See
     /// [`crate::EngineCoreClient::call_utility`].
-    pub async fn call_utility<T, A>(self: &Arc<Self>, method: &str, args: A) -> Result<Vec<T>>
+    ///
+    /// A control call passes its `recheck` guard, which the call holds until
+    /// the engines reply.
+    pub async fn call_utility<T, A>(
+        self: &Arc<Self>,
+        method: &str,
+        args: A,
+        recheck: Option<RecheckGuard>,
+    ) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
@@ -295,6 +312,7 @@ impl ClientInner {
         let inner = self.clone();
         let method_name = method.to_string();
         let call = self.handle.spawn(async move {
+            let _recheck = recheck;
             let outputs = join_all(calls.into_iter().map(|(engine_id, call_id, rx, payload)| {
                 let mut input_send = inner.input_send.clone();
                 let method_name = &method_name;
@@ -328,6 +346,12 @@ impl ClientInner {
             }
         };
         outputs.into_iter().map(|output| output?.into_typed_result(method)).collect()
+    }
+
+    /// Ask every engine whether it can accept and process new requests.
+    pub async fn is_inference_ready(self: &Arc<Self>) -> Result<bool> {
+        let ready: Vec<bool> = self.call_utility("is_inference_ready", (), None).await?;
+        Ok(ready.into_iter().all(|ready| ready))
     }
 
     /// Resolve one utility output to the waiting caller. Returns `true` if a
