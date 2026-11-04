@@ -148,6 +148,8 @@ Hybrid READ transfers every attention group, so drafters that share the target's
 
 Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
 
+On the specialized consumer, set both `VLLM_ROCM_USE_AITER_FP4BMM=0` and `VLLM_ROCM_USE_AITER_FP8BMM=0` to keep the absorbed MLA projections in BF16. The MLA KV cache still uses FP8 E4M3.
+
 Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
 
 ### Different prefill and decode TP sizes

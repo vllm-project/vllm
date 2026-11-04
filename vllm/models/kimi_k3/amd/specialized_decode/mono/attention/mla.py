@@ -74,6 +74,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.mx import (
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     CM_DEV,
     bf16_pair,
+    bf16_weight_operand,
     bf_hi,
     bf_lo,
     butterfly,
@@ -81,6 +82,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
     hw_rsq,
     ld_i32,
     load_ptr64,
+    mfma_bf16,
     row_sum,
     rsrc,
     traced,
@@ -155,6 +157,10 @@ class MlaPreBuild:
     qheads: int = 0
     # DCP1: ``q_out`` bf16 [S, 12, 576] (AITER's mla_gluon's query) for fp8
     qbf16: bool = False
+    # W_UK bf16 [12, 512, 128] (a view of vLLM's BF16 W_UK_T): four 16x16x32
+    # bf16 MFMAs a wave task on the bf16 q_nope as is; else MXFP4 (one FP4 MFMA
+    # on the MXFP4-quantized q_nope)
+    wbf16: bool = False
 
 
 ABI = KernelAbi(
@@ -442,6 +448,53 @@ def pk_fp4_bf16(old, word, scale, j):
     return pk(old, word, scale, j)
 
 
+def uk16_loads(c, h, n, kb):
+    """BF16 W_K ([head][latent][nope], ``wk_sh`` / ``wk_sn`` byte strides, nope
+    dense): latent row ``n``, nope 32 kb .. + 31 as four dwordx4, the A operand
+    of one 16x16x32 MFMA each (nope 32 kb + 8 q ..). The FP4 path's lane K block
+    split in four; ``uk16_mfmas`` takes the q_nope words at the same nope (one K
+    order both operands share, so the dot is unchanged)."""
+    a = c["args"]
+    base = h * a["wk_sh"] + n * a["wk_sn"]
+    return [
+        bf16_weight_operand(a["w_k"], base, kb * 32 + q * 8, a["ks_sk"])
+        for q in range(4)
+    ]
+
+
+def uk16_mfmas(wv, ws):
+    """``uk16_loads``' operands against a lane's 16 q_nope words (its token's
+    nope 32 kb .. + 31, bf16 pairs as polled) -> the 16x16 accumulator (a lane
+    4 latent rows of its token, as the FP4 MFMA's)."""
+    acc = fx.Vector.filled(4, 0.0, fx.Float32)
+    for q in range_constexpr(4):
+        xb = fx.Vector.from_elements([ws[4 * q + j] for j in range(4)], fx.Int32)
+        acc = mfma_bf16(wv[q].bitcast(fx.BFloat16), xb.bitcast(fx.BFloat16), acc)
+    return acc
+
+
+@traced
+def stage_uk16(c, task):
+    """``stage_uk`` with BF16 W_K (``wbf16``): four bf16 MFMAs on the polled
+    bf16 q_nope as is (vLLM's BF16 bmm: bf16 operands, fp32 sums, bf16 out)."""
+    s, lane = c["S"], c["lane"]
+    ng = task % UK_GROUPS
+    h = (task // UK_GROUPS) % NH
+    t0 = task // (UK_GROUPS * NH) * 16
+    n = ng * ROWS + lane % 16
+    kb = lane // 16
+    wv = uk16_loads(c, h, n, kb)
+    t = t0 + lane % 16
+    tc = fx.min(t, s - 1)
+    p0 = (((tc * NH + h) * NOPE) + kb * 32) // 2
+    got = c["poll"]([(c["qn"], p0 + 2 * j, 2) for j in range(8)])
+    ws = [got[j // 2][j % 2] for j in range(16)]
+    acc = uk16_mfmas(wv, ws)
+    v = [bf16r(acc[j]) for j in range(4)]
+    if t < s:
+        put_q(c, t, h, ng * 4 + kb, v)
+
+
 @traced
 def stage_uk(c, task):
     """Wave task (tile, head, 16 latent rows): W_K's rows against the 16 tokens'
@@ -489,8 +542,12 @@ def uk_tasks(c):
     s, bid, wave = c["S"], c["bid"], c["wave"]
     ntask = ((s + 15) // 16) * NH * UK_GROUPS
     first = first_task(bid, UK0) * WAVES + wave
-    for task in range(first, ntask, BLOCKS * WAVES):
-        stage_uk(c, task)
+    if const_expr(c["wbf16"]):
+        for task in range(first, ntask, BLOCKS * WAVES):
+            stage_uk16(c, task)
+    else:
+        for task in range(first, ntask, BLOCKS * WAVES):
+            stage_uk(c, task)
 
 
 # ---------------------------------------------------------------- unpack
@@ -561,6 +618,7 @@ def build(key: MlaPreBuild):
     name = (
         f"k3_mono_mla_pre_s{s}_nb{key.nblocks}_d{int(key.delta)}_r{R}"
         f"_t{int(key.timeline)}_qh{qh}{'_qbf' if key.qbf16 else ''}"
+        f"{'_wb' if key.wbf16 else ''}"
     )
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
@@ -617,6 +675,7 @@ def build(key: MlaPreBuild):
             "R": R,
             "QH": qh,
             "qbf16": key.qbf16,
+            "wbf16": key.wbf16,
             "NS": ns,
             "NB": key.nblocks,
             "tid": tid,
@@ -823,7 +882,22 @@ def mla_pre(
     ``peers`` every rank's peer buffer base (i64 a rank; unread at ranks 1,
     may be None); ``layer`` a slot below
     ``kda.TAG_SLOTS``."""
-    assert w_k.stride(-1) == 1 and kv_cache.stride(-1) == 1
+    assert kv_cache.stride(-1) == 1
+    # W_K's strides go as bytes: MXFP4 u8 with its scales, or (``wbf16``) bf16
+    # (12, 512, 128) without (the scale arguments 0)
+    es = w_k.element_size()
+    if key.wbf16:
+        assert w_k_scale is None and w_k.dtype == torch.bfloat16, w_k.dtype
+        assert w_k.shape == (NH, KVL, NOPE), w_k.shape
+        ks = (0, 0, 0, w_k.stride(2))
+    else:
+        assert w_k.stride(-1) == 1 and w_k_scale is not None and es == 1, w_k.dtype
+        ks = (
+            w_k_scale.data_ptr(),
+            w_k_scale.stride(0),
+            w_k_scale.stride(1),
+            w_k_scale.stride(2),
+        )
     assert slots.dtype == torch.int64 and slots.size(0) == key.tokens
     assert q_out.is_contiguous() and gate_out.is_contiguous()
     assert q_out.shape[1:] == (q_heads(key), ENTRY), q_out.shape
@@ -844,12 +918,9 @@ def mla_pre(
         kv_nw.data_ptr(),
         w_qb.data_ptr(),
         w_k.data_ptr(),
-        w_k.stride(0),
-        w_k.stride(1),
-        w_k_scale.data_ptr(),
-        w_k_scale.stride(0),
-        w_k_scale.stride(1),
-        w_k_scale.stride(2),
+        w_k.stride(0) * es,
+        w_k.stride(1) * es,
+        *ks,
         kv_cache.data_ptr(),
         kv_cache.stride(0),
         kv_cache.stride(1),

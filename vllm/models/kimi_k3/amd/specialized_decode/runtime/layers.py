@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.decode import Step
 
 
+def _mla_bf16(layer) -> bool:
+    return not layer.self_attn.mla_attn.mla_attn.is_aiter_triton_fp4_bmm_enabled
+
+
 def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = False):
     """``m1b``: an MLA layer's K2 that runs its M1b first (``runner.fuse_m1b``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono import layer as k2
@@ -39,6 +43,7 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
             m1b_off=runner.mla_post_off,
             m1b_splits=m1c_splits(runner, tokens),
             m1c=m1c_at(runner, tokens),
+            m1b_wbf16=_mla_bf16(layer),
         )
         if m1b
         else {}
@@ -282,6 +287,7 @@ class FfnLayer(_Layer):
             peer_off=self.runner.mla_peer_off,
             qheads=qheads,
             qbf16=m1c_at(self.runner, self.width),
+            wbf16=_mla_bf16(self.layer),
         )
 
     def _cprr_heads(self) -> int:
@@ -308,6 +314,7 @@ class FfnLayer(_Layer):
             ranks=self.runner.dcp,
             peer_off=self.runner.mla_post_off,
             splits=m1c_splits(self.runner, self.width),
+            wbf16=_mla_bf16(self.layer),
         )
 
     def builds(self) -> list:
@@ -346,6 +353,14 @@ class FfnLayer(_Layer):
             dtype=torch.bfloat16 if m1c else current_platform.fp8_dtype(),
         )  # fmt: skip
         gate = prefix_sum.new_empty(s, m1.GROWS)
+        if a.is_aiter_triton_fp4_bmm_enabled:
+            w_k, w_k_scale = a.W_K, a.W_K_scale
+            w_v, w_v_scale = a.W_V, a.W_V_scale
+        else:
+            # Views of the loaded parameters; in-place reloads remain visible
+            # to captured graphs and require no second device allocation.
+            w_k, w_k_scale = a.W_UK_T.transpose(1, 2), None
+            w_v, w_v_scale = a.W_UV.transpose(1, 2), None
         m1.mla_pre(
             self._m1a_key(prefix_delta is not None, qh),
             prefix=prefix_sum,
@@ -359,8 +374,8 @@ class FfnLayer(_Layer):
             q_nw=w.q_a_layernorm.weight,
             kv_nw=w.kv_a_layernorm.weight,
             w_qb=w.q_b_proj.weight,
-            w_k=a.W_K,
-            w_k_scale=a.W_K_scale,
+            w_k=w_k,
+            w_k_scale=w_k_scale,
             kv_cache=kv_cache,
             slots=slots[:s],
             gate_out=gate,
@@ -382,8 +397,8 @@ class FfnLayer(_Layer):
             lse=lse,
             seq_lens=md.decode.seq_lens,
             qsl=md.query_start_loc,
-            w_v=a.W_V,
-            w_v_scale=a.W_V_scale,
+            w_v=w_v,
+            w_v_scale=w_v_scale,
             gate=gate,
         )
         if runner.fuse_m1b:

@@ -123,10 +123,9 @@ def m1_reasons(vllm_config) -> list[str]:
         ),
         # M1a writes the MLA layers' fp8 (E4M3) KV and hands AITER an fp8 query
         (cc.cache_dtype not in FP8_KV, "an fp8 (E4M3) KV cache"),
-        # M1 runs W_UK / W_UV as AITER's MXFP4 bmms
         (
-            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_FP4BMM),
-            "AITER's MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)",
+            not envs.VLLM_ROCM_USE_AITER_FP4BMM and envs.VLLM_ROCM_USE_AITER_FP8BMM,
+            "BF16 or MXFP4 absorbed MLA projection weights",
         ),
     )
     return [why for bad, why in checks if bad]
