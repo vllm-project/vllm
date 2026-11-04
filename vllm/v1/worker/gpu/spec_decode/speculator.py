@@ -36,6 +36,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.batch_shard import batch_sharded_sampling_enabled
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
@@ -75,8 +76,6 @@ class BaseSpeculator(ABC):
     """
 
     num_query_per_req: int = 1
-    # Extra query slots reserved per request outside the regular queries.
-    num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
@@ -125,6 +124,21 @@ class BaseSpeculator(ABC):
         self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
     ) -> None:
         """Prepare draft-side watermarking before `propose`. No-op by default."""
+        return
+
+    def add_request(self, req_index: int) -> None:
+        """A new request was assigned request-state slot `req_index`, e.g. to
+        reset per-slot state. No-op by default."""
+        return
+
+    def on_requests_finished(self, finished_req_ids: set[str]) -> None:
+        """Requests finished (not preempted), before their request-state slots
+        are freed so their token history is still readable. No-op by default."""
+        return
+
+    def reset_state(self) -> None:
+        """Forget anything learned across requests, called after the warmup
+        requests have finished. No-op by default."""
         return
 
 
@@ -587,7 +601,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_row_mapping=draft_logits.row_mapping,
             )
         else:
-            sampled = logits.argmax(dim=-1)
+            sampled = greedy_argmax(logits)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 
@@ -735,3 +749,11 @@ class DraftModelSpeculator(BaseSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 group.update_draft_decode_metadata(attn_metadata)
+
+    def _map_kernel_block_tables(self) -> None:
+        """Refresh the persistent kernel block tables a FULL graph reads."""
+        for groups in self.attn_groups:
+            for group in groups:
+                group.map_to_kernel_block_table(
+                    self.block_tables.input_block_tables[group.kv_cache_group_id]
+                )

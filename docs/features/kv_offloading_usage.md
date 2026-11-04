@@ -195,6 +195,11 @@ context provides each key's token position through `get_offload_key_position(key
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
 
+Custom policies must also implement `on_request_finished`, which receives the
+request's keys per KV cache group in head-to-tail order and applies the request's
+cache access once, when it finishes. `CachePolicy` no longer has a `touch` method;
+recency updates belong in this hook.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
@@ -406,6 +411,10 @@ Runtime handshake for a P2P (or P/D) pull, once the orchestrator has set the key
 5. The consumer sends a **`FetchMsg`** (`kv_request_id`, block hashes, destination block indexes).
 6. The producer performs the **NIXL WRITE** transfer and sends **`TransferDone`** with a success status.
 7. On `get_finished`, hits are loaded into GPU as ordinary cache hits; misses are recomputed by the engine.
+
+A transfer completion or abort acknowledgement already received when the
+connection closes still settles its load. Disconnect suppresses messages that
+would start new work; it does not discard these buffered terminal confirmations.
 
 In classic **P/D mode** (`remote_prefiller` set, no `remote_kv_source`), the lookup phase (steps 2–4) is skipped: the decode consumer assumes the prefiller holds all of the request's blocks, so every block `lookup()` returns an immediate hit and the consumer jumps straight to the **`FetchMsg`** in step 5. The `LookupMsg`/`LookupRespMsg` round-trip only happens in P2P mode, where the consumer does not know in advance which blocks the peer has cached.
 

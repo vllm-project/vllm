@@ -187,12 +187,18 @@ class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
 
+def get_qsa_topk_buffer_width(config: Qwen4ExpTextConfig) -> int:
+    """Selected indices, including the open group's tail, plus a valid count."""
+    return config.indexer_budget + config.indexer_compress_ratio
+
+
 class Qwen4ExpDecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
         layer_type: str,
         prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         config: Qwen4ExpTextConfig = vllm_config.model_config.hf_text_config
@@ -243,10 +249,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     reduce_results=not self.use_hc_sequence_parallel,
                 )
             else:
+                if topk_indices_buffer is None:
+                    raise ValueError("QSA layers require a shared top-k buffer")
                 self.self_attn = Qwen4ExpQSAAttention(
                     vllm_config=vllm_config,
                     config=config,
                     layer_id=self.layer_idx,
+                    topk_indices_buffer=topk_indices_buffer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
                     reduce_results=not self.use_hc_sequence_parallel,
@@ -425,6 +434,17 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
+        # Reserved for all QSA layers to reuse; on the model, not a local, so
+        # the MTP proposer shares it with the draft.
+        self.topk_indices_buffer: torch.Tensor | None
+        if self._qsa_layer_ids:
+            self.topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            )
+        else:
+            self.topk_indices_buffer = None
         self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -439,6 +459,7 @@ class Qwen4ExpModel(nn.Module):
                 vllm_config,
                 layer_type=config.layer_types[layer_idx],
                 prefix=prefix,
+                topk_indices_buffer=self.topk_indices_buffer,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
