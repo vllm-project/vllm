@@ -826,12 +826,19 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             # Local indices filled by the index-source layer's indexer.
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             block_size = attn_metadata.block_size // self.compress_ratio
+            # Inline V4.1 records are addressed as rows of the whole cache.
+            block_span = (
+                packed_block_span(kv_cache)
+                if self.kv_mxfp8 and kv_cache is not None
+                else None
+            )
             global_indices, extra_sparse_lengths = compute_global_topk_indices_and_lens(
                 self.topk_indices_buffer[:num_decode_tokens],
                 swa_metadata.token_to_req_indices,
                 attn_metadata.block_table[:num_decodes],
                 block_size,
                 is_valid,
+                block_span=block_span,
             )
             extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
 
@@ -852,13 +859,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 swa_metadata.block_size,
                 packed_block_span(self.swa_cache_layer.kv_cache),
             )
-            if kv_cache is not None:
-                assert attn_metadata is not None and extra_sparse_indices is not None
-                extra_sparse_indices = _slots_to_inline_rows(
-                    extra_sparse_indices,
-                    attn_metadata.block_size // self.compress_ratio,
-                    packed_block_span(kv_cache),
-                )
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
             query=q,
             swa_kv_cache=swa_cache,
@@ -922,6 +922,10 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 num_decode_tokens, num_decode_tokens + num_prefill_tokens
             )
             block_size = attn_metadata.block_size // self.compress_ratio
+            block_span = None
+            if self.kv_mxfp8:
+                assert compressed_k_cache is not None
+                block_span = packed_block_span(compressed_k_cache)
             extra_sparse_indices, extra_sparse_lengths = (
                 compute_global_topk_indices_and_lens(
                     local_topk_indices,
@@ -929,15 +933,9 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     attn_metadata.block_table,
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
+                    block_span=block_span,
                 )
             )
-            if self.kv_mxfp8:
-                assert compressed_k_cache is not None
-                extra_sparse_indices = _slots_to_inline_rows(
-                    extra_sparse_indices,
-                    block_size,
-                    packed_block_span(compressed_k_cache),
-                )
 
         assert swa_metadata.prefill_swa_indices is not None
         assert swa_metadata.prefill_swa_lens is not None

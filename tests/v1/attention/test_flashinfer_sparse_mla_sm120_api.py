@@ -11,6 +11,7 @@ from vllm.config import set_current_vllm_config
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     required_sm120_sparse_topk,
 )
+from vllm.models.deepseek_v41.common.ops import compute_global_topk_indices_and_lens
 from vllm.models.deepseek_v41.nvidia import flashinfer_sparse as dsv41_flashinfer
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     _sm120_kv_cache_format,
@@ -130,6 +131,37 @@ def test_inline_rows_skip_other_layers_pages_in_packed_blocks():
 def test_inline_rows_are_slots_without_packing():
     slots = torch.tensor([0, 5, -1], dtype=torch.int32)
     assert dsv41_flashinfer._slots_to_inline_rows(slots, 64, 64) is slots
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_global_topk_indices_address_packed_rows():
+    # Block size 4 packed with two other layers' pages: 12 rows per block.
+    block_size, block_span = 4, 12
+    topk_indices = torch.tensor(
+        [[0, 3, 4, 9, -1, -1], [7, 1, -1, -1, -1, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
+    block_table = torch.tensor([[2, 5, 0], [1, 3, 0]], dtype=torch.int32, device="cuda")
+    is_valid = torch.tensor([True, True], device="cuda")
+
+    slots, slot_lens = compute_global_topk_indices_and_lens(
+        topk_indices, token_to_req, block_table, block_size, is_valid
+    )
+    rows, row_lens = compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req,
+        block_table,
+        block_size,
+        is_valid,
+        block_span=block_span,
+    )
+
+    expected = dsv41_flashinfer._slots_to_inline_rows(slots, block_size, block_span)
+    assert torch.equal(rows, expected)
+    assert torch.equal(row_lens, slot_lens)
+    assert rows[0].tolist() == [24, 27, 60, 1, -1, -1]
 
 
 @pytest.mark.parametrize("major,expected", [(10, False), (12, True)])
