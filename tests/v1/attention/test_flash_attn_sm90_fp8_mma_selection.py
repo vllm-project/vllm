@@ -13,7 +13,11 @@ import torch
 
 from vllm.platforms.interface import DeviceCapability
 
-fa_interface = pytest.importorskip("vllm.vllm_flash_attn.flash_attn_interface")
+fa_interface = pytest.importorskip(
+    "vllm.vllm_flash_attn.flash_attn_interface",
+    reason="requires compiled CUDA flash-attention extensions",
+    exc_type=ImportError,
+)
 
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version  # noqa: E402
 from vllm.v1.attention.backends.flash_attn import (  # noqa: E402
