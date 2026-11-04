@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import re
 import sys
 import types
 
 import pytest
+import regex as re
 
 from vllm.tokenizers import fastokens as fastokens_patch
 from vllm.tokenizers import get_tokenizer
