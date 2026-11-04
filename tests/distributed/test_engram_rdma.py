@@ -16,7 +16,10 @@ from vllm.distributed.engram_share.rdma.owner import (
     build_owner_metadata,
     inspect_checkpoint,
 )
-from vllm.distributed.engram_share.rdma.provider import ReaderRuntime
+from vllm.distributed.engram_share.rdma.provider import (
+    ReaderRuntime,
+    verify_checkpoint_samples,
+)
 from vllm.distributed.engram_share.rdma.runtime import (
     ControlError,
     OwnerClient,
@@ -304,5 +307,37 @@ def test_reader_setup_failure_releases_owner_lease(tmp_path, monkeypatch):
         monkeypatch.setenv("ENGRAM_SHARED_READY", str(ready))
         monkeypatch.setenv("ENGRAM_SHARED_MODEL", str(tmp_path / "missing"))
         with pytest.raises(FileNotFoundError):
-            ReaderRuntime()
+            ReaderRuntime(tmp_path)
         assert owner.lease_count == 0
+
+
+def test_engine_checkpoint_must_match_owner_directory(tmp_path, monkeypatch):
+    """Identical headers and tensor shapes cannot make two checkpoints equal."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    fixture = Row264OwnerCpuTests()
+    fixture.make_checkpoint(a)
+    fixture.make_checkpoint(b)
+    manifest = inspect_checkpoint(a)
+    shard = b / "model-00047-of-00048.safetensors"
+    content = bytearray(shard.read_bytes())
+    content[-1] ^= 1
+    shard.write_bytes(content)
+    assert inspect_checkpoint(b)["checkpoint_identity"] == manifest["checkpoint_identity"]
+    total = sum(spec["nbytes"] for spec in manifest["specs"])
+    _, samples = _copy_and_sample_row264(manifest, memoryview(bytearray(total)), 528)
+    ready = tmp_path / "ready.json"
+    ready.write_text(
+        json.dumps(
+            {
+                "checkpoint_id": manifest["checkpoint_identity"],
+                "sample_validation": samples,
+            }
+        )
+    )
+    monkeypatch.setenv("ENGRAM_SHARED_READY", str(ready))
+    monkeypatch.setenv("ENGRAM_SHARED_MODEL", str(a))
+    verify_checkpoint_samples(a)
+    with pytest.raises(ValueError, match="engine checkpoint differs"):
+        verify_checkpoint_samples(b)

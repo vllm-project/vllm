@@ -140,8 +140,13 @@ owner and reader lifecycle control in `vllm.distributed.engram_share.rdma`; set
 GPU GET transport remains a separately built NIXL dependency. The current
 prototype needs the experimental ABI-3 shim, not an ordinary NIXL wheel.
 See the [setup and verification example](../../examples/disaggregated/engram_rdma/README.md).
-An alternative provider must expose `get_reader()` and `close_reader()` and
-implement the Engram lookup contract.
+An alternative provider must expose `get_reader(checkpoint_path=None)` and
+`close_reader()` and implement the Engram lookup contract. The model loader
+initializes the reader with its checkpoint path before lookups use it.
+
+The engine model and `ENGRAM_SHARED_MODEL` must resolve to the same local
+checkpoint directory. Remote table readers do not support online weight
+updates or weight reload; restart the engine and owner with the new checkpoint.
 
 The prototype supports DeepSeek V4.1 on CUDA, CPU-offload mode and data parallel
 size 1.

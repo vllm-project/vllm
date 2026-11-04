@@ -53,7 +53,7 @@ def main():
     )
     initial_leases = client.status()["leases"]
     manifest = inspect_checkpoint(args.model)
-    reader = VllmRemoteReader()
+    reader = VllmRemoteReader(args.model)
     queued = []
     try:
         for layer, rows in zip((1, 14), manifest["rows"]):

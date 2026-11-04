@@ -691,6 +691,9 @@ class Worker(WorkerBase):
         weights_path: str | None = None,
         is_checkpoint_format: bool = True,
     ) -> None:
+        engram = self.vllm_config.engram_config
+        if engram is not None and engram.rdma_provider:
+            raise RuntimeError("remote Engram does not support weight reload")
         # Kernel-format weights are copied into place, needing no room.
         kv_cache_loan = (
             kv_cache_lent_for_weight_update(
@@ -1742,6 +1745,9 @@ class Worker(WorkerBase):
             self._start_weight_update(is_draft=True)
 
     def _start_weight_update(self, is_draft: bool = False) -> None:
+        engram = self.vllm_config.engram_config
+        if engram is not None and engram.rdma_provider:
+            raise RuntimeError("remote Engram does not support online weight updates")
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
 

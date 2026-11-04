@@ -1747,8 +1747,6 @@ class DeepseekV41LLMForCausalLM(
         return getattr(self.model, "_mtp_hidden_buffer", None)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         if self.model.vllm_config.engram_config and (
             self.model.vllm_config.engram_config.rdma_provider
         ):
@@ -1759,7 +1757,12 @@ class DeepseekV41LLMForCausalLM(
             )
             # Validate the owner and establish the registered reader before
             # accepting externally backed parameters as loaded.
-            provider.get_reader()
+            provider.get_reader(self.model.vllm_config.model_config.model)
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.vllm_config.engram_config and (
+            self.model.vllm_config.engram_config.rdma_provider
+        ):
             loaded_params.update(
                 name
                 for name, param in self.named_parameters()

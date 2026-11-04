@@ -13,7 +13,7 @@ os.environ.pop("ENGRAM_SHARED_PREFETCH", None)
 
 
 class FakeRuntime:
-    def __init__(self):
+    def __init__(self, checkpoint_path):
         self.prefetch_enabled = False
         self.storage_layout = "row264"
         self.used = []
@@ -35,7 +35,7 @@ class FakeRuntime:
 
 
 vllm_rdma_provider.ReaderRuntime = FakeRuntime
-vllm_rdma_provider.verify_checkpoint_samples = lambda: None
+vllm_rdma_provider.verify_checkpoint_samples = lambda checkpoint_path: None
 VllmRemoteReader = vllm_rdma_provider.VllmRemoteReader
 
 
@@ -58,7 +58,7 @@ def main():
     block = torch.arange(8, device="cuda")
     raw = ((selected.abs()[..., None] % 7) + 1 + col % 4).to(torch.float8_e4m3fn)
     scales = (127 + (selected.abs()[..., None] + block) % 3).to(torch.uint8)
-    reader = VllmRemoteReader()
+    reader = VllmRemoteReader(".")
     for dtype, width in ((torch.bfloat16, 255), (torch.uint8, 263)):
         try:
             reader.lookup(

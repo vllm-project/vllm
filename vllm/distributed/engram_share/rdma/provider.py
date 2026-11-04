@@ -17,7 +17,7 @@ import triton.language as tl
 from vllm.distributed.engram_share.rdma.runtime import Context, OwnerClient
 
 
-def verify_checkpoint_samples():
+def verify_checkpoint_samples(checkpoint_path):
     """Reject mismatched owner weights using published boundary-row samples."""
     from vllm.distributed.engram_share.rdma.owner import inspect_checkpoint
 
@@ -25,7 +25,14 @@ def verify_checkpoint_samples():
     samples = ready.get("sample_validation")
     if not isinstance(samples, list) or {s.get("layer") for s in samples} != {1, 14}:
         raise ValueError("owner did not publish the required checkpoint samples")
-    manifest = inspect_checkpoint(Path(os.environ["ENGRAM_SHARED_MODEL"]))
+    try:
+        model = Path(checkpoint_path).resolve(strict=True)
+        configured = Path(os.environ["ENGRAM_SHARED_MODEL"]).resolve(strict=True)
+    except (OSError, TypeError) as exc:
+        raise ValueError("remote Engram requires a local engine checkpoint") from exc
+    if not model.is_dir() or model != configured:
+        raise ValueError("engine checkpoint differs from ENGRAM_SHARED_MODEL")
+    manifest = inspect_checkpoint(model)
     if manifest["checkpoint_identity"] != ready["checkpoint_id"]:
         raise ValueError("checkpoint metadata identity differs from owner")
     for sample in samples:
@@ -91,7 +98,8 @@ _quarantined = []
 
 
 class ReaderRuntime:
-    def __init__(self):
+    def __init__(self, checkpoint_path):
+        self.checkpoint_path = Path(checkpoint_path).resolve(strict=True)
         config = json.loads(Path(os.environ["ENGRAM_SHARED_READY"]).read_text())
         self.client = OwnerClient(
             config["host"],
@@ -120,7 +128,7 @@ class ReaderRuntime:
         self.storage_layout = md.get("storage_layout")
         if self.storage_layout != "row264":
             raise ValueError("remote Engram requires row264 owner tables")
-        model = Path(os.environ["ENGRAM_SHARED_MODEL"])
+        model = self.checkpoint_path
         for name, field in (
             ("config.json", "config_sha256"),
             ("model.safetensors.index.json", "index_sha256"),
@@ -203,11 +211,12 @@ class ReaderRuntime:
 
 
 class VllmRemoteReader:
-    def __init__(self):
+    def __init__(self, checkpoint_path):
         if os.environ.get("ENGRAM_SHARED_PREFETCH") == "1":
             raise RuntimeError("vLLM prototype requires ENGRAM_SHARED_PREFETCH=0")
-        verify_checkpoint_samples()
-        self.runtime = ReaderRuntime()
+        verify_checkpoint_samples(checkpoint_path)
+        self.checkpoint_path = Path(checkpoint_path).resolve(strict=True)
+        self.runtime = ReaderRuntime(self.checkpoint_path)
         if self.runtime.storage_layout != "row264":
             self.runtime.close()
             raise RuntimeError("vLLM prototype requires packed row264 tables")
@@ -279,10 +288,16 @@ class VllmRemoteReader:
 _reader = None
 
 
-def get_reader():
+def get_reader(checkpoint_path=None):
     global _reader
     if _reader is None:
-        _reader = VllmRemoteReader()
+        if checkpoint_path is None:
+            raise RuntimeError("remote reader must be initialized by the model loader")
+        _reader = VllmRemoteReader(checkpoint_path)
+    elif checkpoint_path is not None and (
+        Path(checkpoint_path).resolve(strict=True) != _reader.checkpoint_path
+    ):
+        raise ValueError("remote reader belongs to a different engine checkpoint")
     return _reader
 
 
