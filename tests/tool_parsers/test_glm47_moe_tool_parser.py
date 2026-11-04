@@ -295,6 +295,62 @@ class TestGlm47Streaming:
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
 
+    @pytest.mark.parametrize(
+        "body,expected",
+        [
+            (
+                [
+                    "<arg_key>city</arg_key>",
+                    "<arg_value>",
+                    "Beijing",
+                    "</arg_value>",
+                    "<arg_key>date</arg_key>",
+                    "<arg_value>",
+                    "today",
+                    "</arg_value>",
+                ],
+                {"city": "Beijing", "date": "today"},
+            ),
+            (
+                [
+                    "<arg_key>city</arg_key>\n<arg_",
+                    "value>Bei",
+                    "jing</arg_value>",
+                ],
+                {"city": "Beijing"},
+            ),
+            (
+                ["<arg_key>city</arg_key>", "<arg", "_x", "</arg_value>"],
+                {"city": "<arg_x"},
+            ),
+        ],
+        ids=["own_chunk_two_args", "split_tag", "tag_prefix_without_tag"],
+    )
+    def test_open_tag_stays_out_of_arguments(
+        self, glm47_tool_parser, mock_request, body, expected
+    ):
+        """The value must not count as open while its text can still turn out to
+        be the optional <arg_value> tag: open values are streamed verbatim."""
+        _reset(glm47_tool_parser)
+        chunks = ["<tool_call>", "get_weather\n", *body, "</tool_call>"]
+        current_text = ""
+        arguments = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            for tool_call in (delta.tool_calls or []) if delta else []:
+                if tool_call.function and tool_call.function.arguments:
+                    arguments.append(tool_call.function.arguments)
+        assert json.loads("".join(arguments)) == expected
+
     def test_missing_arg_value_open_tag(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
         chunks = [
