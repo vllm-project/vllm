@@ -40,8 +40,9 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
     CanonicalKVCaches,
-    GPULoadStoreSpec,
+    DevicePointers,
     LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
@@ -301,18 +302,20 @@ class RegionMirrorHeadWorker(OffloadingWorker):
         self._head = head
 
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        return self._inner.submit_store(job_id, src_spec, dst_spec)
+        return self._inner.submit_store(job_id, device_ptrs, dst_spec)
 
     def submit_load(
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: GPULoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        return self._inner.submit_load(job_id, src_spec, dst_spec, expedited=expedited)
+        return self._inner.submit_load(
+            job_id, src_spec, device_ptrs, expedited=expedited
+        )
 
     def get_finished(self) -> list[TransferResult]:
         return self._inner.get_finished()
@@ -338,14 +341,10 @@ def slot_planners(
 
     The slot holds each KV tensor's chunk page in turn, as on the head node.
     """
-    gpu_rows = [
-        TensorRows.of(t.tensor.view(torch.int8).view(-1, t.page_size_bytes))
-        for t in kv_caches.tensors
-    ]
     cpu_rows = []
     offset = 0
-    for rows in gpu_rows:
-        size = rows.size * blocks_per_chunk
+    for t in kv_caches.tensors:
+        size = t.page_size_bytes * blocks_per_chunk
         cpu_rows.append(
             TensorRows(slot_base + offset, layout.row_stride, size, layout.num_chunks)
         )
@@ -356,7 +355,7 @@ def slot_planners(
             f"the head region holds {layout.size}"
         )
     plan = functools.partial(
-        CopyPlanner, gpu_rows, cpu_rows, blocks_per_chunk, kv_caches.group_data_refs
+        CopyPlanner, cpu_rows, blocks_per_chunk, kv_caches.group_data_refs
     )
     return plan(gpu_to_cpu=True), plan(gpu_to_cpu=False)
 
@@ -524,9 +523,10 @@ class RegionMirrorWorker(OffloadingWorker):
             ) from self._stuck
 
     def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        gpu, head, sizes = self._store_planner.copy_ops(src_spec, dst_spec)
+        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+        gpu, head, sizes = self._store_planner.copy_ops(device_ptrs, dst_spec)
         self._enqueue(job_id, self._client.write, gpu, head, sizes, is_load=False)
         return True
 
@@ -534,10 +534,11 @@ class RegionMirrorWorker(OffloadingWorker):
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: GPULoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        head, gpu, sizes = self._load_planner.copy_ops(src_spec, dst_spec)
+        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
+        head, gpu, sizes = self._load_planner.copy_ops(device_ptrs, src_spec)
         self._enqueue(
             job_id,
             self._client.read,
