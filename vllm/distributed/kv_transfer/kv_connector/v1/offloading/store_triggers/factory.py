@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_c
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_handoff import (  # noqa: E501
     OnHandoffStoreHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_overwrite import (  # noqa: E501
+    OnOverwriteStoreHandler,
+)
 from vllm.v1.kv_offload.base import StoreTrigger
 
 if TYPE_CHECKING:
@@ -119,3 +122,4 @@ class StoreHandlerFactory:
 # Register built-in handlers here.
 StoreHandlerFactory.register_handler(OnComputeStoreHandler)
 StoreHandlerFactory.register_handler(OnHandoffStoreHandler)
+StoreHandlerFactory.register_handler(OnOverwriteStoreHandler)

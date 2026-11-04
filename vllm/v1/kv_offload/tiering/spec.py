@@ -64,6 +64,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    StoreMode,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -400,6 +401,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             if int(self.extra_config.get("store_threshold", 0)) >= 2:
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
+                )
+            if self.store_mode is not StoreMode.EAGER:
+                raise ValueError(
+                    f"store_mode {self.store_mode.value} is not supported for "
+                    "TieringOffloadingSpec"
                 )
 
             scheduler_mmap: SharedOffloadRegion | None = None

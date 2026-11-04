@@ -79,7 +79,8 @@ class CachePolicy(ABC):
     ) -> None:
         """Observe store misses before their cache entries are inserted.
 
-        req_context is None for a store after the request finishes.
+        req_context is None for a store after the request finishes
+        (StoreTrigger.ON_OVERWRITE).
 
         Policies may override this hook when a miss has distinct semantics,
         such as ARC adapting to a ghost-list hit.

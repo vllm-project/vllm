@@ -169,6 +169,23 @@ class StoreTrigger(Enum):
     # The KV cache manager hands off a state block that is about to be reused.
     # The source is short-lived, so the store cannot be postponed.
     ON_HANDOFF = auto()
+    # The block pool gives blocks of the chunks to new requests in this step.
+    # req_context is None, and the call can come after on_request_finished.
+    ON_OVERWRITE = auto()
+
+
+class StoreMode(Enum):
+    """When a manager asks for the chunks of a request.
+
+    Set with the store_mode key of kv_connector_extra_config. The manager
+    gives the store triggers of its mode in store_triggers.
+    """
+
+    # Ask for each chunk when it is computed (StoreTrigger.ON_COMPUTE).
+    EAGER = "eager"
+    # Ask for each chunk when the block pool gives its blocks to new requests
+    # (StoreTrigger.ON_OVERWRITE). The lazy store.
+    LAZY = "lazy"
 
 
 class OffloadPolicy(Enum):
@@ -416,8 +433,8 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params), or
-                None when no request owns the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
+                None for StoreTrigger.ON_OVERWRITE.
             trigger: why the connector asks for the store.
 
         Returns:
@@ -444,8 +461,8 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params), or
-                None when no request owns the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
+                None for StoreTrigger.ON_OVERWRITE.
             trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
@@ -823,6 +840,13 @@ class OffloadingSpec(ABC):
         self.offload_prompt_only: bool = bool(
             self.extra_config.get("offload_prompt_only", True)
         )
+        store_modes = {mode.value: mode for mode in StoreMode}
+        store_mode = self.extra_config.get("store_mode", "eager")
+        if store_mode not in store_modes:
+            raise ValueError(
+                f"store_mode must be one of {list(store_modes)}, got {store_mode!r}"
+            )
+        self.store_mode = store_modes[store_mode]
 
         self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
         self.tokens_per_hash = config.cache.tokens_per_hash

@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    StoreMode,
     StoreTrigger,
     get_offload_group_idx,
 )
@@ -71,6 +72,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
         info: CPUOffloadingInfo | None = None,
+        store_mode: StoreMode = StoreMode.EAGER,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
@@ -88,6 +90,18 @@ class CPUOffloadingManager(OffloadingManager):
         self._num_evictable_cache_chunks: int = 0
         # Track chunks with an in-flight store (ref_cnt -1, not yet completed).
         self._num_write_pending_chunks: int = 0
+
+        self._store_triggers: tuple[StoreTrigger, ...] = (
+            (StoreTrigger.ON_OVERWRITE,)
+            if store_mode is StoreMode.LAZY
+            else (StoreTrigger.ON_COMPUTE,)
+        )
+        # A late store (store_threshold >= 2) needs a second offer of a chunk,
+        # and an ON_OVERWRITE store offers its chunk once.
+        if StoreTrigger.ON_OVERWRITE in self._store_triggers and store_threshold >= 2:
+            raise ValueError(
+                "store_threshold >= 2 is not supported with ON_OVERWRITE stores"
+            )
 
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
@@ -297,6 +311,11 @@ class CPUOffloadingManager(OffloadingManager):
                 self._num_evictable_cache_chunks += 1  # ref_cnt 1 -> 0
                 self._policy.mark_evictable(key)
 
+    @property
+    @override
+    def store_triggers(self) -> tuple[StoreTrigger, ...]:
+        return self._store_triggers
+
     @override
     def prepare_store(
         self,
@@ -305,6 +324,11 @@ class CPUOffloadingManager(OffloadingManager):
         *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
+        assert trigger in self._store_triggers, (
+            f"{trigger} not in {self._store_triggers}"
+        )
+        # The request of an ON_OVERWRITE store is finished.
+        assert (req_context is None) == (trigger == StoreTrigger.ON_OVERWRITE)
         return self._prepare_store(keys, req_context)
 
     def _prepare_store(

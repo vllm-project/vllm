@@ -11,8 +11,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
-from vllm.v1.kv_offload.base import OffloadKey
-from vllm.v1.request import RequestStatus
+from vllm.v1.kv_offload.base import OffloadKey, make_offload_key
+from vllm.v1.request import Request, RequestStatus
 
 
 class StoreCandidates(NamedTuple):
@@ -20,6 +20,8 @@ class StoreCandidates(NamedTuple):
 
     num_offloadable_tokens: int
     keys: list[OffloadKey]
+    # (config_idx, chunk_idx) of each key
+    chunk_positions: list[tuple[int, int]]
     # (start_chunk_idx, end_chunk_idx) of each group
     group_ranges: list[tuple[int, int]]
 
@@ -69,6 +71,7 @@ def select_store_candidates(
     # Filter out chunks skipped due to sliding window attention / SSM
     # or unreachable by the load path's alignment constraints.
     new_offload_keys: list[OffloadKey] = []
+    chunk_positions: list[tuple[int, int]] = []
     group_store_ranges: list[tuple[int, int]] = []
 
     apply_eagle_drop = not config.num_hash_lookahead_tokens
@@ -78,8 +81,8 @@ def select_store_candidates(
         if req.shared_prefix_boundary:
             reachable_boundaries += (req.shared_prefix_boundary,)
 
-    for group_config, group_state, stored_chunk_idx in zip(
-        config.kv_group_configs, req_status.group_states, start_chunk_idxs
+    for config_idx, (group_config, group_state, stored_chunk_idx) in enumerate(
+        zip(config.kv_group_configs, req_status.group_states, start_chunk_idxs)
     ):
         num_chunks = req_status.storable_chunks(
             group_config, group_state, num_offloadable_tokens, apply_eagle_drop
@@ -195,8 +198,19 @@ def select_store_candidates(
             ):
                 continue
             new_offload_keys.append(offload_key)
+            chunk_positions.append((config_idx, abs_chunk_idx))
 
-    return StoreCandidates(num_offloadable_tokens, new_offload_keys, group_store_ranges)
+    return StoreCandidates(
+        num_offloadable_tokens, new_offload_keys, chunk_positions, group_store_ranges
+    )
+
+
+def block_key(
+    req: Request, group_config: GroupOffloadConfig, block_idx: int
+) -> OffloadKey:
+    """The key of the data in one GPU block of a request."""
+    hash_idx = (block_idx + 1) * group_config.hashes_per_block - 1
+    return make_offload_key(req.block_hashes[hash_idx], group_config.group_idx)
 
 
 def _reachable_store_block_mask(

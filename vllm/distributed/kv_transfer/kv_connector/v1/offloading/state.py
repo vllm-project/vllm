@@ -39,6 +39,7 @@ class GroupOffloadConfig(NamedTuple):
     tokens_per_block: int
     tokens_per_chunk: int
     hashes_per_chunk: int
+    hashes_per_block: int
     # KV cache spec metadata propagated onto emitted BlockStored events so
     # KV-aware consumers can classify and filter the group.
     kv_event_group_spec: OffloadingEventGroupSpec
@@ -223,6 +224,7 @@ class SchedulerOffloadConfig(NamedTuple):
                         (tokens_per_block * spec.blocks_per_chunk)
                         // spec.tokens_per_hash
                     ),
+                    hashes_per_block=tokens_per_block // spec.tokens_per_hash,
                     sliding_window_size_in_chunks=group.sliding_window_size_in_chunks,
                     kv_cache_spec=kv_spec,
                     manager_cls=manager_cls,
