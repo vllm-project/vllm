@@ -20,7 +20,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -33,7 +32,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     get_scheduler_metadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 

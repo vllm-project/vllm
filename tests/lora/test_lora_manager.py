@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -12,6 +13,7 @@ import vllm.utils.gpu_sync_debug as gpu_sync_debug
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
+    BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
@@ -168,7 +170,7 @@ def test_text_only_lora_binds_to_multimodal_language_model(
     manager.supports_mm = True
     manager.mm_mapping = MultiModelKeys.from_string_field(language_model=lm_prefix)
 
-    def weights(name):
+    def weights(name: str) -> LoRALayerWeights:
         return LoRALayerWeights(name, 8, 16, torch.zeros(8, 4), torch.zeros(4, 8))
 
     text_lora = weights(text_name)
@@ -452,8 +454,9 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
         fully_sharded_loras=True,
     )
 
-    class DummyModule:
+    class DummyModule(BaseLayerWithLoRA):
         def __init__(self, tp_size: int, fully_sharded: bool):
+            super().__init__()
             self.tp_size = tp_size
             self.fully_sharded = fully_sharded
 
@@ -469,6 +472,97 @@ def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
     }
 
     assert manager.get_dummy_lora_warmup_rank(8) == 32
+
+
+def _bare_manager(modules=None, packed_modules=None):
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.modules = modules or {}
+    manager.packed_modules = packed_modules or {}
+    manager.is_pooling_model = False
+    manager._is_3d_moe_model = True
+    manager._enable_mixed_moe_lora_format = False
+    return manager
+
+
+@pytest.fixture
+def count_pins(monkeypatch):
+    pinned = []
+
+    def fake_pin(self):
+        pinned.append(self)
+        return self.clone()
+
+    monkeypatch.setattr("vllm.lora.model_manager.PIN_MEMORY", True)
+    monkeypatch.setattr(torch.Tensor, "pin_memory", fake_pin)
+    return pinned
+
+
+@pytest.mark.parametrize("v_only", [False, True])
+def test_pin_memory_for_packed_lora(count_pins, v_only):
+    def make(name):
+        return LoRALayerWeights(name, 4, 4, torch.zeros(4, 8), torch.zeros(8, 4))
+
+    subloras = [None, None, make("v_proj")] if v_only else [make("q_proj")] * 3
+    lora_model = LoRAModel(1, 4, {"qkv_proj": PackedLoRALayerWeights.pack(subloras)})
+
+    _bare_manager()._create_merged_loras_inplace(lora_model)
+
+    assert len(count_pins) == 2 * sum(t is not None for t in subloras)
+
+
+def test_3d_moe_lora_pinned_once(count_pins):
+    num_experts, rank = 2, 4
+    module = MagicMock(spec=FusedMoE3DWithLoRA)
+    module.w13_lora_a_stacked = (torch.zeros(1, num_experts, rank, 8),)
+    module.global_num_experts = num_experts
+    module.ep_rank = 0
+
+    gate_up = LoRALayerWeights(
+        "experts.base_layer",
+        rank,
+        rank,
+        torch.randn(rank * num_experts, 8),
+        torch.randn(16, rank * num_experts),
+    )
+    down = LoRALayerWeights(
+        "experts",
+        rank,
+        rank,
+        torch.randn(rank * num_experts, 16),
+        torch.randn(8, rank * num_experts),
+    )
+    lora_model = LoRAModel(1, rank, {"experts.base_layer": gate_up, "experts": down})
+
+    _bare_manager(modules={"experts": module})._create_merged_loras_inplace(lora_model)
+
+    assert list(lora_model.loras) == ["experts"]
+    assert len(count_pins) == 4
+
+
+@pytest.mark.parametrize("ep_size", [1, 2, 3])
+def test_dummy_3d_moe_lora_is_sized_by_global_experts(ep_size):
+    global_experts, rank = 6, 4
+    local = global_experts // ep_size
+
+    class FusedMoE3DWithLoRA(BaseLayerWithLoRA):
+        w2_input_size, w2_output_size = 16, 8
+        w13_input_size, w13_output_size = 8, 32
+
+        def __init__(self):
+            super().__init__()
+            self.w2_lora_a_stacked = (torch.zeros(1, local, rank, 16),)
+            self.w13_lora_a_stacked = (torch.zeros(1, local, rank, 8),)
+            self.global_num_experts = global_experts
+
+    manager = _bare_manager()
+    manager.model = nn.ModuleDict({"experts": FusedMoE3DWithLoRA()})
+    manager.supported_lora_modules = ["experts"]
+    manager._match_target_modules = lambda name: True
+    manager._get_punica_wrapper = lambda name: object()
+    dummy = manager.create_dummy_lora(1, rank, EMBEDDING_MODULES)
+
+    assert dummy.loras["experts"].lora_a.shape[0] == rank * global_experts
+    assert dummy.loras["experts.base_layer"].lora_a.shape[0] == rank * global_experts
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -922,6 +1016,7 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     punica_wrapper = worker_adapter_manager._adapter_manager.punica_wrapper_mapping.get(
         DEFAULT_LANGUAGE_WRAPPER_KEY
     )
+    assert punica_wrapper is not None
     assert punica_wrapper.device == device
 
 
@@ -1079,30 +1174,61 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     packed_lora = model_lora.get_lora("gate_up_proj")
     assert packed_lora and isinstance(packed_lora, PackedLoRALayerWeights)
 
-    torch.testing.assert_close(
-        packed_lora.lora_a[0], model_lora_clone.get_lora("gate_proj").lora_a
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_b[0], model_lora_clone.get_lora("gate_proj").lora_b
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_a[1], model_lora_clone.get_lora("up_proj").lora_a
-    )
-    torch.testing.assert_close(
-        packed_lora.lora_b[1], model_lora_clone.get_lora("up_proj").lora_b
-    )
+    gate_lora = model_lora_clone.get_lora("gate_proj")
+    assert gate_lora is not None
+    torch.testing.assert_close(packed_lora.lora_a[0], gate_lora.lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[0], gate_lora.lora_b)
+    up_lora = model_lora_clone.get_lora("up_proj")
+    assert up_lora is not None
+    torch.testing.assert_close(packed_lora.lora_a[1], up_lora.lora_a)
+    torch.testing.assert_close(packed_lora.lora_b[1], up_lora.lora_b)
 
     packed_lora1 = model_lora1.get_lora("gate_up_proj")
     assert packed_lora1 and isinstance(packed_lora1, PackedLoRALayerWeights)
 
     assert packed_lora1.lora_a[0] is None
     assert packed_lora1.lora_b[0] is None
-    torch.testing.assert_close(
-        packed_lora1.lora_a[1], model_lora_clone1.get_lora("up_proj").lora_a
+    up_lora1 = model_lora_clone1.get_lora("up_proj")
+    assert up_lora1 is not None
+    torch.testing.assert_close(packed_lora1.lora_a[1], up_lora1.lora_a)
+    torch.testing.assert_close(packed_lora1.lora_b[1], up_lora1.lora_b)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_packed_loras_layer_override(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
+):
+    model = dummy_model_gate_up
+    model.gate_up_proj.lora_packed_modules = ["gate_proj", "gate_proj"]
+    model_lora = create_packed_lora(
+        1,
+        model,
+        module_name="gate_up_proj",
+        replaced_module_names=["gate_proj", "up_proj"],
+        device=device,
+        empty_replaced_module_name="up_proj",
     )
-    torch.testing.assert_close(
-        packed_lora1.lora_b[1], model_lora_clone1.get_lora("up_proj").lora_b
+    gate_lora = model_lora.get_lora("gate_proj")
+    assert gate_lora is not None
+
+    manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+        vllm_config=default_vllm_config,
     )
+    assert manager.add_adapter(model_lora)
+
+    packed_lora = model_lora.get_lora("gate_up_proj")
+    assert isinstance(packed_lora, PackedLoRALayerWeights)
+    for i in range(2):
+        torch.testing.assert_close(packed_lora.lora_a[i], gate_lora.lora_a)
+        torch.testing.assert_close(packed_lora.lora_b[i], gate_lora.lora_b)
 
 
 def _test_target_modules(
@@ -1254,7 +1380,7 @@ def test_adapter_slot_views_alias_the_forward_buffers(
     assert slot == manager.lora_index_to_id.index(1)
 
     for name in ("dense1", "dense2", "lm_head"):
-        weights = expected.get_lora(name)
+        weights = expected.loras[name]
         _assert_slot_holds(manager, 1, name, weights.lora_a, weights.lora_b)
 
     # A write through the view lands in the buffer the forward reads.
@@ -1279,9 +1405,10 @@ def test_updated_adapter_weights_survive_eviction(
     manager.add_adapter(lora2)
     manager.activate_adapter(1)
 
-    new_a = torch.rand_like(lora1.get_lora("dense1").lora_a)
-    new_b = torch.rand_like(lora1.get_lora("dense1").lora_b)
-    untouched = lora1.clone(1).get_lora("dense2")
+    new_a = torch.rand_like(lora1.loras["dense1"].lora_a)
+    new_b = torch.rand_like(lora1.loras["dense1"].lora_b)
+    untouched = lora1.loras["dense2"]
+    untouched_a, untouched_b = untouched.lora_a.clone(), untouched.lora_b.clone()
     manager.update_adapter_weights(1, {"dense1": (new_a, new_b)})
     _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
 
@@ -1290,12 +1417,12 @@ def test_updated_adapter_weights_survive_eviction(
     assert manager.get_adapter_slot(1) is None
     manager.activate_adapter(1)
     _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
-    _assert_slot_holds(manager, 1, "dense2", untouched.lora_a, untouched.lora_b)
+    _assert_slot_holds(manager, 1, "dense2", untouched_a, untouched_b)
 
     # An inactive adapter is updated in the cache and picks it up on activation.
     newer_a = torch.rand_like(new_a)
     manager.update_adapter_weights(2, {"dense1": (newer_a, new_b)})
-    torch.testing.assert_close(lora2.get_lora("dense1").lora_a, newer_a)
+    torch.testing.assert_close(lora2.loras["dense1"].lora_a, newer_a)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -1304,11 +1431,12 @@ def test_gpu_only_update_requires_a_pinned_adapter(
 ):
     manager = _slot_manager(dummy_model, default_vllm_config, device)
     lora = create_lora(1, manager.model, ["dense1"], device)
-    cached = lora.clone(1).get_lora("dense1")
     manager.add_adapter(lora)
     manager.activate_adapter(1)
-    new_a = torch.rand_like(cached.lora_a)
-    new_b = torch.rand_like(cached.lora_b)
+    cached = lora.loras["dense1"]
+    cached_a, cached_b = cached.lora_a.clone(), cached.lora_b.clone()
+    new_a = torch.rand_like(cached_a)
+    new_b = torch.rand_like(cached_b)
 
     with pytest.raises(ValueError, match="pinned"):
         manager.update_adapter_weights(
@@ -1320,7 +1448,8 @@ def test_gpu_only_update_requires_a_pinned_adapter(
     )
     _assert_slot_holds(manager, 1, "dense1", new_a, new_b)
     # The cached copy is left as it was.
-    torch.testing.assert_close(lora.get_lora("dense1").lora_a, cached.lora_a)
+    torch.testing.assert_close(cached.lora_a, cached_a)
+    torch.testing.assert_close(cached.lora_b, cached_b)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -1330,12 +1459,12 @@ def test_update_adapter_weights_validates_before_writing(
 ):
     manager = _slot_manager(dummy_model, default_vllm_config, device)
     lora = create_lora(1, manager.model, ["dense1", "dense2"], device)
-    before = lora.clone(1)
     manager.add_adapter(lora)
     manager.activate_adapter(1)
     manager.pin_adapter(1)
-    good = before.get_lora("dense1")
-    bad = before.get_lora("dense2")
+    good = lora.loras["dense1"]
+    good_a, good_b = good.lora_a.clone(), good.lora_b.clone()
+    bad = lora.loras["dense2"]
     with pytest.raises(ValueError, match="dense2 slice 0 A"):
         manager.update_adapter_weights(
             1,
@@ -1346,8 +1475,9 @@ def test_update_adapter_weights_validates_before_writing(
             update_cpu_cache=update_cpu_cache,
         )
     # dense1 came first in the mapping and must not have been written.
-    _assert_slot_holds(manager, 1, "dense1", good.lora_a, good.lora_b)
-    torch.testing.assert_close(lora.get_lora("dense1").lora_a, good.lora_a)
+    _assert_slot_holds(manager, 1, "dense1", good_a, good_b)
+    torch.testing.assert_close(good.lora_a, good_a)
+    torch.testing.assert_close(good.lora_b, good_b)
 
     with pytest.raises(ValueError, match="not registered"):
         manager.update_adapter_weights(7, {})
@@ -1518,7 +1648,7 @@ def test_update_one_slice_of_a_packed_module(
     )
     manager.add_adapter(lora)
     manager.activate_adapter(1)
-    packed = lora.get_lora("gate_up_proj")
+    packed = lora.loras["gate_up_proj"]
     gate_a, gate_b = packed.lora_a[0].clone(), packed.lora_b[0].clone()
     up_a, up_b = torch.rand_like(packed.lora_a[1]), torch.rand_like(packed.lora_b[1])
 
@@ -1554,8 +1684,8 @@ def test_update_skips_modules_of_other_pipeline_ranks(
     lora = create_lora(1, manager.model, ["dense1"], device)
     manager.add_adapter(lora)
     manager.activate_adapter(1)
-    new_a = torch.rand_like(lora.get_lora("dense1").lora_a)
-    new_b = torch.rand_like(lora.get_lora("dense1").lora_b)
+    new_a = torch.rand_like(lora.loras["dense1"].lora_a)
+    new_b = torch.rand_like(lora.loras["dense1"].lora_b)
     elsewhere = (torch.rand(8, 100), torch.rand(10, 8))
 
     manager.update_adapter_weights(
@@ -1576,7 +1706,7 @@ def test_update_adapter_loaded_under_inference_mode(
         lora = create_lora(1, manager.model, ["dense1"], device)
         manager.add_adapter(lora)
         manager.activate_adapter(1)
-    new_a = torch.rand_like(lora.get_lora("dense1").lora_a)
-    new_b = torch.rand_like(lora.get_lora("dense1").lora_b)
+    new_a = torch.rand_like(lora.loras["dense1"].lora_a)
+    new_b = torch.rand_like(lora.loras["dense1"].lora_b)
     manager.update_adapter_weights(1, {"dense1": (new_a, new_b)})
     _assert_slot_holds(manager, 1, "dense1", new_a, new_b)

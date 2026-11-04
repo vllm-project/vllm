@@ -14,6 +14,7 @@ from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.exceptions import RetryableRequestError
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -68,7 +69,7 @@ async def generate(
     "model",
     [
         "ibm-research/PowerMoE-3b",
-        "hmellor/tiny-random-LlamaForCausalLM",
+        "vllm-project/tiny-random-LlamaForCausalLM",
     ],
 )
 @pytest.mark.parametrize(
@@ -276,7 +277,7 @@ async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
 # When expert_parallel=False: uses non-MoE model (DP replicas as separate engines).
 # When expert_parallel=True: uses MoE model + EP (DPEngineCoreProc, sync pause path).
 
-DP_PAUSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+DP_PAUSE_MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 
@@ -388,12 +389,23 @@ async def test_dp_pause_late_request_does_not_block_drain():
         )
         assert not await _poll_flag(engine, True, timeout=5)
 
-        # The late request was held rather than dropped: it completes on resume.
+        # The engine rejected it rather than carrying it across the boundary.
+        with pytest.raises(RetryableRequestError):
+            await asyncio.wait_for(collector.get(), timeout=60)
+        assert not engine.output_processor.has_unfinished_requests()
         await engine.resume_generation()
-        while True:
-            out = await asyncio.wait_for(collector.get(), timeout=60)
-            if out.finished:
-                break
+
+        # The rejection must not leave the next request stranded.
+        await asyncio.wait_for(
+            _consume(
+                engine.generate(
+                    request_id="after-resume",
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=SamplingParams(max_tokens=5),
+                )
+            ),
+            timeout=60,
+        )
 
 
 @pytest.mark.asyncio

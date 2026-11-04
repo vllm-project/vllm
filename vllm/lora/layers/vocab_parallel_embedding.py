@@ -61,6 +61,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
         # A is stored transposed (vocab, rank) for the embedding lookup; the
         # transposed view keeps the (rank, vocab) orientation set_lora takes.
+        # B includes embed_scale when the base embedding applies it.
         return (self.lora_a_stacked[index].T,), (self.lora_b_stacked[index, 0],)
 
     def set_lora(
@@ -81,6 +82,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index, 0, : lora_b.shape[0], : lora_b.shape[1]].copy_(
             lora_b, non_blocking=True
         )
+        # A scaled embedding (e.g. a Transformers `*ScaledWordEmbedding`) scales
+        # the lookup in its forward; PEFT scales the LoRA delta by the same factor.
+        embed_scale = getattr(self.base_layer, "embed_scale", None)
+        if embed_scale is not None:
+            self.lora_b_stacked[index].mul_(embed_scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NB: Don't use torch.narrow here. torch.narrow triggers some
