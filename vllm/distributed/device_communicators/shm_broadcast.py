@@ -845,7 +845,7 @@ class MessageQueue:
     ) -> bool:
         """Wait for the current block to be readable by this reader."""
 
-        def check_readable():
+        def check_readable() -> bool:
             return self._is_readable(metadata_buffer)
 
         if SPINLOOP_EXT_ENABLED and not check_readable():

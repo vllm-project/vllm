@@ -1905,7 +1905,12 @@ class EngineCoreProc(EngineCore):
             spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
             while not self._deferred_inputs and not poll():
                 if pending_inputs:
-                    self._handle_input_during_step(self.input_queue.get_nowait())
+                    req = self.input_queue.get_nowait()
+                    # Some kinds of request must wait until the step completes.
+                    if req[0] in _INPUTS_HANDLED_DURING_STEP:
+                        self._handle_client_request(*req)
+                    else:
+                        self._deferred_inputs.append(req)
                 elif time.monotonic() < spin_deadline:
                     sched_yield()
                 else:
@@ -1914,14 +1919,6 @@ class EngineCoreProc(EngineCore):
                     break
 
         return future.result()
-
-    def _handle_input_during_step(self, req: tuple[EngineCoreRequestType, Any]) -> None:
-        """Handle an input received while a step is in flight. Some kinds of
-        request must wait until the step completes."""
-        if req[0] in _INPUTS_HANDLED_DURING_STEP:
-            self._handle_client_request(*req)
-        else:
-            self._deferred_inputs.append(req)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
