@@ -39,7 +39,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
-from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.hisparse.binding import unbind_hisparse_caches
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -77,8 +78,8 @@ class BatchExecutionDescriptor:
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
     # Upper bound on per-request query length. Varlen decode graphs leave
-    # uniform_token_count unset, so this is what keeps a prefill batch out of one:
-    # the runner passes None for any batch with a prefill.
+    # uniform_token_count unset; the runner passes None for batches that are
+    # not decode-graph eligible, even if their queries fit within the bound.
     max_query_len: int | None = None
     num_active_loras: int = 0
     # Number of microbatches the batch is split into (DBO). 1 means no splitting.
@@ -179,6 +180,9 @@ class CudaGraphManager:
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
+        # The stream of the last capture; graphs replayed inside these ones (in
+        # their eager breaks) can capture on it to share the pool's free blocks.
+        self.capture_stream: torch.cuda.Stream | None = None
 
         self._graphs_captured = False
 
@@ -193,7 +197,7 @@ class CudaGraphManager:
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
         self.use_breakable_cg = (
-            is_breakable_cudagraph_enabled()
+            is_breakable_cudagraph_enabled(self.compilation_config)
             and self.cudagraph_mode.has_piecewise_cudagraphs()
         )
         self.breakable_cg_runner: BreakableCUDAGraphWrapper | None = None
@@ -425,6 +429,7 @@ class CudaGraphManager:
         self,
         create_forward_fn: CreateForwardFn,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         """Capture CUDA graphs.
 
@@ -435,9 +440,11 @@ class CudaGraphManager:
                 because attention backends may mutate or lazily initialize
                 metadata during warmup.
             progress_bar_desc: Description shown on the capture progress bar.
+            stream: Capture on this stream instead of a new one.
 
         """
-        with graph_capture(device=self.device), ExitStack() as stack:
+        with graph_capture(self.device, stream) as context, ExitStack() as stack:
+            self.capture_stream = context.stream
             if self.ubatch_runner is not None:
                 # Join parked threads on failure to avoid blocking later captures.
                 stack.callback(self.ubatch_runner.abort_pending_run)
@@ -715,7 +722,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     input_batch,
                     input_block_tables,
                     block_tables.get_dummy_slot_mappings(num_tokens),
-                    cg_mode=CUDAGraphMode.FULL,
+                    desc,
                     for_capture=True,
                 )
                 # Capture with dummy rows marked as padding.
@@ -835,6 +842,7 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
+    slot_mappings_buffer: torch.Tensor | None = None,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -849,6 +857,13 @@ def prepare_inputs_to_capture(
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
+    if slot_mappings_buffer is not None:
+        # CUDA graphs capture the slot-mapping pointer, so use the same buffer
+        # that the runtime forward updates when it has a custom mapping buffer.
+        assert slot_mappings_buffer.shape[0] == slot_mappings.shape[0]
+        assert slot_mappings_buffer.shape[1] >= num_tokens
+        slot_mappings_buffer.fill_(PAD_SLOT_ID)
+        slot_mappings = slot_mappings_buffer[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )
@@ -935,7 +950,10 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
     partition reclaims the storages of earlier cudagraph recordings once the
     real capture records new ones, leading to use-after-free crashes).
     """
-    if runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+    if (
+        runner.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        and not runner.needs_cudagraph_capture()
+    ):
         return 0
 
     gc.collect()
@@ -970,7 +988,7 @@ def profile_cudagraph_memory(runner: "GPUModelRunner") -> int:
         speculator = getattr(runner, "speculator", None)
         spec_manager_names: list[str] = []
         try:
-            if not manager.needs_capture():
+            if not runner.needs_cudagraph_capture():
                 return 0
             manager.pool = throwaway_pool
             if manager.use_breakable_cg:
@@ -1091,7 +1109,7 @@ def _teardown_profiling_state(runner: "GPUModelRunner") -> None:
     if (model := getattr(runner, "model", None)) is not None:
         layers = itertools.chain(layers, model.modules())
     clear_layer_kv_caches(layers)
-    release_hisparse_profiling_cache(runner.compilation_config.static_forward_context)
+    unbind_hisparse_caches(runner.compilation_config.static_forward_context)
     runner.cache_config.num_gpu_blocks = None
     runner.maybe_remove_all_loras(runner.lora_config)
     gc.collect()
