@@ -232,7 +232,14 @@ steps:
     - vllm/v1/worker/gpu_worker.py
   commands:
     - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s v1/e2e/test_replayssm_decode.py
-    - VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+    - >-
+      VLLM_TEST_REQUIRE_REPLAYSSM=1 pytest -v -s
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_materializes_only_accepted_boundary_with_compacted_rows
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_postprocess_commits_staged_transition
+      kernels/mamba/test_ssu_dispatch.py::test_shared_prefill_selected_slots_and_reuse
+      kernels/mamba/test_ssu_dispatch.py::test_shared_graph_mixed_flush_checkpoint_bytes
+      kernels/mamba/test_ssu_dispatch.py::test_shared_bolt_t8_acceptance_and_ring_wrap
+      kernels/mamba/test_ssu_dispatch.py::test_replayssm_quantized_cache_copies_payload_and_scale
   mirror:
     amd:
       automatic_shard: true

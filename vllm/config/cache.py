@@ -322,6 +322,13 @@ class CacheConfig:
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
     Kimi-K3 speculative decode does not use B. Default 16."""
+    replayssm_state_dtype: Literal["auto", "fp8", "int8"] = "auto"
+    """Checkpoint format for FlashInfer ReplaySSM. The default 'auto' preserves
+    floating-point state. FP8 E4M3FN and INT8 use FP32 scales per state row.
+    Quantized checkpoints require BF16 activations, Mamba2 head dimension 64,
+    state size 128, and mamba_ssm_cache_dtype='auto'. Decode checkpoint writes
+    honor the Mamba stochastic-rounding settings. Prefill uses nearest rounding.
+    Quantization can change model output."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.

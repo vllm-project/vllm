@@ -1724,6 +1724,7 @@ class VllmConfig:
         if (
             self.mamba_config.enable_stochastic_rounding
             and self.cache_config.mamba_ssm_cache_dtype != "float16"
+            and self.cache_config.replayssm_state_dtype == "auto"
         ):
             raise ValueError(
                 "Stochastic rounding for Mamba cache requires "
@@ -3930,6 +3931,35 @@ class VllmConfig:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
             )
+        return self
+
+    @model_validator(mode="after")
+    def validate_replayssm_read_state(self) -> "VllmConfig":
+        if self.cache_config.replayssm_state_dtype == "auto":
+            return self
+        if not self.use_flashinfer_replayssm:
+            raise ValueError(
+                "--replayssm-state-dtype requires --use-replayssm and "
+                "--mamba-backend flashinfer"
+            )
+        if self.cache_config.mamba_ssm_cache_dtype != "auto":
+            raise ValueError(
+                "Quantized ReplaySSM requires --mamba-ssm-cache-dtype auto"
+            )
+        if self.mamba_config.ssu_algorithm not in (None, "auto"):
+            raise ValueError("Quantized ReplaySSM requires the automatic SSU algorithm")
+        if self.model_config is not None:
+            if self.model_config.dtype != torch.bfloat16:
+                raise ValueError("Quantized ReplaySSM requires BF16 activations")
+            config = self.model_config.hf_text_config
+            if (
+                getattr(config, "mamba_head_dim", None) != 64
+                or getattr(config, "ssm_state_size", None) != 128
+            ):
+                raise ValueError(
+                    "Quantized ReplaySSM requires Mamba2 head dimension 64 "
+                    "and state size 128"
+                )
         return self
 
     @model_validator(mode="after")

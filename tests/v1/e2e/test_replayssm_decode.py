@@ -304,6 +304,7 @@ def _check_replayssm_prefix_caching(
     speculative_method: str | None = None,
     mamba_backend: str = "flashinfer",
     tensor_parallel_size: int = 1,
+    replayssm_state_dtype: str = "auto",
 ):
     common = dict(
         max_model_len=8192,
@@ -333,6 +334,10 @@ def _check_replayssm_prefix_caching(
             enable_mamba_cache_stochastic_rounding=True,
             mamba_cache_philox_rounds=5,
         )
+    if replayssm_state_dtype != "auto":
+        common.update(
+            dtype="bfloat16", mamba_cache_dtype="bfloat16", mamba_ssm_cache_dtype="auto"
+        )
     outputs = []
     try:
         with monkeypatch.context() as patch:
@@ -343,6 +348,9 @@ def _check_replayssm_prefix_caching(
                     model_name,
                     use_replayssm=use_replayssm,
                     replayssm_buffer_len=16,
+                    replayssm_state_dtype=replayssm_state_dtype
+                    if use_replayssm
+                    else "auto",
                     # Shared prompts must not populate the baseline's cache.
                     enable_prefix_caching=use_replayssm,
                     **common,
@@ -398,10 +406,12 @@ def _check_replayssm_prefix_caching(
 @requires_flashinfer_replayssm_materialization
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 @pytest.mark.parametrize(
-    ("use_v2", "use_ngram"),
+    ("use_v2", "use_ngram", "state_dtype"),
     [
-        pytest.param(False, True, id="align-v1-ngram-t4"),
-        pytest.param(True, False, id="align-v2-stp"),
+        pytest.param(False, True, "auto", id="align-v1-ngram-t4"),
+        pytest.param(True, False, "auto", id="align-v2-stp"),
+        pytest.param(True, False, "fp8", id="align-v2-fp8"),
+        pytest.param(True, False, "int8", id="align-v2-int8"),
     ],
 )
 def test_flashinfer_replayssm_prefix_cache_tp1(
@@ -410,6 +420,7 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
     monkeypatch: pytest.MonkeyPatch,
     use_v2: bool,
     use_ngram: bool,
+    state_dtype: str,
 ):
     _check_replayssm_prefix_caching(
         vllm_runner,
@@ -417,6 +428,7 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
         monkeypatch,
         speculative_method="ngram" if use_ngram else None,
         use_v2=use_v2,
+        replayssm_state_dtype=state_dtype,
     )
 
 
