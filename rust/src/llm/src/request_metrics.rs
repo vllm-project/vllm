@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_engine_core_client::protocol::output::{
@@ -47,7 +48,8 @@ pub(crate) struct RequestMetricsTracker {
     arrival_time: f64,
     prompt_len: u32,
     max_tokens_param: Option<u32>,
-    n_param: u32,
+    /// Set when this request is one child of a parallel-sampling request.
+    parallel_sampling: Option<Arc<ParallelSamplingStats>>,
     is_prefilling: bool,
     queued_ts: f64,
     scheduled_ts: f64,
@@ -58,6 +60,39 @@ pub(crate) struct RequestMetricsTracker {
     num_preemptions: u64,
     latest_num_cached_tokens: u32,
     is_corrupted: bool,
+}
+
+/// Request-level metric state shared by the `n` children of one
+/// parallel-sampling request.
+///
+/// Like Python's `ParentRequest`, the `n` and max-generation-tokens histograms
+/// describe the whole request: they are observed once, when the last child
+/// finishes, while every other request metric is per child.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/913fccd11847f5b4d4769e3a69c8925f955bc29e/vllm/v1/engine/parallel_sampling.py#L134-L156>
+pub(crate) struct ParallelSamplingStats {
+    n: u32,
+    unfinished_children: AtomicU32,
+    max_generation_tokens: AtomicU32,
+}
+
+impl ParallelSamplingStats {
+    pub(crate) fn new(n: u32) -> Self {
+        Self {
+            n,
+            unfinished_children: AtomicU32::new(n),
+            max_generation_tokens: AtomicU32::new(0),
+        }
+    }
+
+    /// Record one finished child, returning the request's max generation
+    /// token count once the last child has finished.
+    fn observe_finished_child(&self, num_generation_tokens: u32) -> Option<u32> {
+        self.max_generation_tokens.fetch_max(num_generation_tokens, Ordering::AcqRel);
+        (self.unfinished_children.fetch_sub(1, Ordering::AcqRel) == 1)
+            .then(|| self.max_generation_tokens.load(Ordering::Acquire))
+    }
 }
 
 /// Cached request metric handles for one model and engine index.
@@ -153,14 +188,14 @@ impl RequestMetricsTracker {
         arrival_time: f64,
         prompt_len: u32,
         max_tokens_param: Option<u32>,
-        n_param: u32,
+        parallel_sampling: Option<Arc<ParallelSamplingStats>>,
     ) -> Self {
         Self {
             handles,
             arrival_time,
             prompt_len,
             max_tokens_param,
-            n_param,
+            parallel_sampling,
             is_prefilling: true,
             queued_ts: 0.0,
             scheduled_ts: 0.0,
@@ -244,13 +279,24 @@ impl RequestMetricsTracker {
         self.handles
             .request_generation_tokens
             .observe(self.num_generation_tokens as f64);
-        self.handles
-            .request_max_num_generation_tokens
-            .observe(self.num_generation_tokens as f64);
+        // (max generation tokens, n), once per request.
+        let request_level = match &self.parallel_sampling {
+            None => Some((self.num_generation_tokens, 1)),
+            Some(parallel_sampling) => parallel_sampling
+                .observe_finished_child(self.num_generation_tokens)
+                .map(|max_generation_tokens| (max_generation_tokens, parallel_sampling.n)),
+        };
+        if let Some((max_generation_tokens, _)) = request_level {
+            self.handles
+                .request_max_num_generation_tokens
+                .observe(max_generation_tokens as f64);
+        }
         if let Some(max_tokens_param) = self.max_tokens_param {
             self.handles.request_params_max_tokens.observe(max_tokens_param as f64);
         }
-        self.handles.request_params_n.observe(self.n_param as f64);
+        if let Some((_, n)) = request_level {
+            self.handles.request_params_n.observe(n as f64);
+        }
         self.handles
             .request_prefill_kv_computed_tokens
             .observe(prefill_kv_computed_tokens as f64);
@@ -442,7 +488,7 @@ mod tests {
     fn tracker_updates_timing_state_across_prefill_decode_and_finish() {
         METRICS.request.set_max_model_len(4096);
         let handles = Arc::new(resolve_request_metric_handles("model", 2, true));
-        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), 1);
+        let mut tracker = RequestMetricsTracker::new(handles, 100.0, 64, Some(128), None);
 
         tracker.observe_output(
             10.0,

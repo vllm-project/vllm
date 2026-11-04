@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use axum::Json;
@@ -84,6 +85,7 @@ fn lower_render_request(
     state: &RenderState,
     text_request: TextRequest,
     model: String,
+    n: Option<u32>,
     stream: bool,
     stream_options: Option<StreamOptions>,
     return_token_ids: Option<bool>,
@@ -103,7 +105,7 @@ fn lower_render_request(
         model: Some(model),
         token_ids,
         sampling_params: GenerateSamplingParams {
-            n: None,
+            n,
             stop: None,
             include_stop_str_in_output: None,
             trace_decode_token_ids: None,
@@ -160,6 +162,7 @@ async fn render_chat(
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Result<Json<GenerateRequest>, ApiError> {
     let model = response_model(&state, body.model.as_deref());
+    let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
@@ -172,7 +175,9 @@ async fn render_chat(
     )?;
     let text_request = state
         .chat
-        .prepare(chat_request, &state.text)
+        // The parallel samples of `n` are the generate request's to fan out;
+        // its output grammar is the same for every sample.
+        .prepare(chat_request, NonZeroU32::MIN, &state.text)
         .await
         .map_err(|error| ApiError::invalid_request(error.to_report_string(), None))?
         .text_request;
@@ -180,6 +185,7 @@ async fn render_chat(
         &state,
         text_request,
         model,
+        n,
         stream,
         stream_options,
         return_token_ids,
@@ -192,6 +198,7 @@ async fn render_completion(
     ValidatedJson(body): ValidatedJson<CompletionRequest>,
 ) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
     let model = response_model(&state, body.model.as_deref());
+    let n = body.n;
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
@@ -212,6 +219,7 @@ async fn render_completion(
         &state,
         text_request,
         model,
+        n,
         stream,
         stream_options,
         return_token_ids,

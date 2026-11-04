@@ -690,6 +690,24 @@ impl Usage {
                 .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
     }
+
+    /// Fold in the usage of another choice of the same request. Like Python
+    /// for `n > 1`, the prompt counts once, while completion and reasoning
+    /// tokens add up over the choices.
+    pub(crate) fn add_choice(&mut self, other: &Usage) {
+        if let (Some(completion_tokens), Some(other)) =
+            (&mut self.completion_tokens, other.completion_tokens)
+        {
+            *completion_tokens += other;
+        }
+        if let (Some(details), Some(other)) = (
+            &mut self.completion_tokens_details,
+            &other.completion_tokens_details,
+        ) {
+            details.reasoning_tokens += other.reasoning_tokens;
+        }
+        self.total_tokens = self.prompt_tokens + self.completion_tokens.unwrap_or_default();
+    }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
