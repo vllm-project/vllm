@@ -3,6 +3,8 @@
 """Compare the with and without prefix caching."""
 
 import copy
+import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -14,6 +16,7 @@ import torch
 
 import vllm.v1.core.kv_cache_manager as kv_cache_manager
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+from vllm.config import VllmConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
     MEDIUM_GPU,
@@ -21,6 +24,7 @@ from vllm.distributed.kv_events import (
     BlockRemoved,
     BlockStored,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -97,6 +101,7 @@ def make_request(
     lora_request: LoRARequest | None = None,
     num_hash_lookahead_tokens: int = 0,
     session_id: str | None = None,
+    sampling_params: SamplingParams | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -110,7 +115,8 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
-    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    if sampling_params is None:
+        sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
 
     return Request(
@@ -128,11 +134,14 @@ def make_request(
     )
 
 
-def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheManager:
+def make_kv_cache_manager(
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig | None = None, **kwargs
+) -> KVCacheManager:
     """Build a ``KVCacheManager``, deriving ``scheduler_block_size`` from the
     config (LCM of group block sizes) unless explicitly provided. This mirrors
     ``resolve_kv_cache_block_sizes`` for the non-context-parallel case used by
-    these tests, so callers don't have to pass it at every site."""
+    these tests, so callers don't have to pass it at every site. With
+    ``vllm_config``, a HiSparseConnector builds the HiSparse coordinator."""
     kwargs.setdefault(
         "scheduler_block_size",
         lcm(*(g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups)),
@@ -144,7 +153,12 @@ def make_kv_cache_manager(kv_cache_config: KVCacheConfig, **kwargs) -> KVCacheMa
         )
     manager = KVCacheManager(kv_cache_config, **kwargs)
     if kv_cache_config.hisparse_host_num_blocks is not None:
-        get_hisparse_coordinator(manager)
+        if vllm_config is not None:
+            HiSparseConnector(
+                vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+            ).bind_kv_cache_manager(manager)
+        else:
+            get_hisparse_coordinator(manager)
     return manager
 
 
@@ -240,11 +254,13 @@ def make_hisparse_kv_cache_manager(
     max_in_flight_tokens: int | None = None,
     enable_caching: bool = False,
     num_prefill_lookahead: int = 0,
+    vllm_config: VllmConfig | None = None,
     **config_kwargs,
 ) -> KVCacheManager:
     config = make_hisparse_kv_cache_config(num_blocks, host_num_blocks, **config_kwargs)
     return make_kv_cache_manager(
         config,
+        vllm_config,
         max_model_len=max_model_len,
         max_in_flight_tokens=max_in_flight_tokens,
         enable_caching=enable_caching,
@@ -420,6 +436,37 @@ def test_hisparse_residency_update_sends_only_changed_pages():
 
     assert update[request.request_id].pages == [0]
     assert update[request.request_id].block_ids == ([0],)
+
+
+def test_hisparse_teardown_with_live_request_frees_pools():
+    """Untracked request block lists must not keep the pools alive through
+    block -> pool -> reuse watcher -> coordinator -> manager -> list."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    _publish_hisparse_pages(manager)
+    pool = manager.block_pool
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    # The request is never freed, so its lists are alive at teardown.
+    assert pool._reuse_watchers
+    assert not gc.is_tracked(
+        coordinator.resident_managers[0].req_to_blocks[request.request_id]
+    )
+    host_manager = coordinator.host_manager
+    assert host_manager is not None
+    assert not gc.is_tracked(host_manager.req_to_blocks[request.request_id])
+
+    refs = [weakref.ref(obj) for obj in (coordinator, pool, host_pool)]
+    del coordinator, host_manager, hot_manager, host_pool, manager, pool
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None, None]
 
 
 def test_hisparse_readmitted_request_resends_its_full_residency():
@@ -648,7 +695,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 1
     restore = transfers[0]
-    assert restore.restore and not restore.after_forward
+    assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
     request.num_computed_tokens = count
@@ -777,7 +824,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
 
     spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     assert len(spills) == 2
-    assert all(spill.after_forward for spill in spills)
+    assert not any(spill.restore for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     spill_counts = {spill.transfer_id: 1 for spill in spills}
@@ -919,15 +966,11 @@ def test_hisparse_inflight_host_import_reserves_remaining_gpu_pages():
     assert required == 4
 
 
-@pytest.mark.parametrize("host_num_blocks,admitted", [(5, False), (6, True)])
-def test_hisparse_async_admission_requires_full_prompt_host_pages(
-    host_num_blocks, admitted, tmp_path
-):
-    """An async load is admitted only if its whole prompt's host pages fit.
-
-    The in-flight prefill's host page is not free, so the waiting request's
-    four prompt pages need six host blocks including the null block.
-    """
+def _make_hisparse_scheduler(
+    tmp_path, host_num_blocks: int, matched_tokens: int, **kwargs
+) -> tuple[Scheduler, KVCacheManager]:
+    """A scheduler over a HiSparse manager whose async mock connector matches
+    ``matched_tokens``."""
     from .utils import create_scheduler, mock_kv
 
     (tmp_path / "config.json").write_text(
@@ -937,73 +980,121 @@ def test_hisparse_async_admission_requires_full_prompt_host_pages(
         model=str(tmp_path),
         skip_tokenizer_init=True,
         max_model_len=128,
-        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
+        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
+        **kwargs,
     )
-    manager = make_hisparse_kv_cache_manager(32, host_num_blocks)
+    manager = make_hisparse_kv_cache_manager(
+        32, host_num_blocks, vllm_config=scheduler.vllm_config
+    )
     scheduler.kv_cache_manager = manager
     scheduler.kv_cache_config = manager.kv_cache_config
     assert scheduler.scheduler_reserve_full_isl
-    inflight = make_request(
-        "inflight", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    scheduler.add_request(inflight)
-    scheduler.schedule()
-    assert inflight in scheduler._inflight_prefills
+    return scheduler, manager
 
+
+def _add_hisparse_request(
+    scheduler: Scheduler, request_id: str, num_pages: int, offset: int = 0
+) -> Request:
     request = make_request(
-        "waiting", list(range(4 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    scheduler.add_request(request)
-    scheduler.schedule()
-
-    assert (request in scheduler._inflight_prefills) == admitted
-    assert bool(manager.get_blocks(request.request_id).blocks[0]) == admitted
-
-
-def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(tmp_path):
-    """Admitted async loads must not strand each other on host capacity.
-
-    Waiting requests keep their blocks and are never preempted, so two imports
-    that each hold a host page while together needing more than the pool has
-    left would never be scheduled again. HiSparse relies on full-ISL admission:
-    a load is admitted only if its whole prompt's host pages fit, so the newest
-    admitted load can always finish and free host blocks for the others.
-    """
-    from .utils import create_scheduler, mock_kv
-
-    (tmp_path / "config.json").write_text(
-        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
-    )
-    scheduler = create_scheduler(
-        model=str(tmp_path),
-        skip_tokenizer_init=True,
-        max_model_len=128,
-        use_kv_connector=mock_kv(matched_tokens=HISPARSE_BLOCK_SIZE, is_async=True),
-    )
-    # One null block plus three usable host blocks.
-    manager = make_hisparse_kv_cache_manager(32, 4)
-    scheduler.kv_cache_manager = manager
-    scheduler.kv_cache_config = manager.kv_cache_config
-    assert scheduler.scheduler_reserve_full_isl
-    first = make_request(
-        "first", list(range(3 * HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
-    )
-    second = make_request(
-        "second",
-        list(range(1000, 1000 + 3 * HISPARSE_BLOCK_SIZE)),
+        request_id,
+        list(range(offset, offset + num_pages * HISPARSE_BLOCK_SIZE)),
         HISPARSE_BLOCK_SIZE,
         sha256,
     )
-    for request in (first, second):
-        scheduler.add_request(request)
-        scheduler.schedule()
+    scheduler.add_request(request)
+    scheduler.schedule()
+    return request
+
+
+def test_hisparse_async_admission_fits_beside_inflight_import(tmp_path):
+    """The in-flight import's three prompt pages stay reserved, so the waiting
+    request's four prompt pages fit in eight host blocks including the null
+    block."""
+    scheduler, manager = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
+    inflight = _add_hisparse_request(scheduler, "inflight", 3)
+    assert inflight in scheduler._inflight_prefills
+
+    request = _add_hisparse_request(scheduler, "waiting", 4)
+    assert request in scheduler._inflight_prefills
+    assert manager.get_blocks(request.request_id).blocks[0]
+
+
+@pytest.mark.parametrize("release,second_pages", [("free", 6), ("resume", 4)])
+def test_hisparse_import_reservation_released(release, second_pages, tmp_path):
+    """An import stops reserving host pages once it allocates them or is freed.
+
+    Seven usable host blocks: the first import holds one page and reserves two.
+    Once it is released, the second import fits only if nothing is still
+    reserved for the first.
+    """
+    scheduler, manager = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
+    first = _add_hisparse_request(scheduler, "first", 3)
+    assert first in scheduler._inflight_prefills
+    if release == "free":
+        # What abort and preemption run; the mock connector cannot finish a
+        # request over several cache groups.
+        manager.free(first)
+    else:
+        scheduler.finished_recving_kv_req_ids.add(first.request_id)
+        assert scheduler.schedule().num_scheduled_tokens[first.request_id] > 0
+
+    second = _add_hisparse_request(scheduler, "second", second_pages, offset=1000)
+    assert second in scheduler._inflight_prefills
+
+
+@pytest.mark.parametrize(
+    "host_num_blocks,first_pages,matched_tokens,num_speculative_tokens",
+    [
+        # Once first imports one page, three are free: enough for second's
+        # prompt but not beside first's remaining three.
+        (5, 4, HISPARSE_BLOCK_SIZE, None),
+        # Both prompts are fully imported; first's draft tokens need a fourth
+        # page on resume.
+        (7, 3, 3 * HISPARSE_BLOCK_SIZE - 1, 4),
+    ],
+)
+def test_hisparse_admitted_async_loads_can_finish_with_nothing_running(
+    tmp_path, host_num_blocks, first_pages, matched_tokens, num_speculative_tokens
+):
+    """Admitted async loads must not strand each other on host capacity.
+
+    Waiting requests keep their blocks and are never preempted, so two imports
+    that each hold host pages while together needing more than the pool has
+    left would never be scheduled again. A load is admitted only if its whole
+    sequence, including the spec decode step, fits beside the pages earlier
+    imports still need.
+    """
+    scheduler, _ = _make_hisparse_scheduler(
+        tmp_path,
+        host_num_blocks,
+        matched_tokens,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+    _add_hisparse_request(scheduler, "first", first_pages)
+    _add_hisparse_request(scheduler, "second", 3, offset=1000)
     admitted = {r.request_id for r in scheduler._inflight_prefills}
+    assert admitted == {"first"}
 
     scheduler.finished_recving_kv_req_ids.update(admitted)
-    num_scheduled_tokens = 0
-    for _ in range(4):
-        num_scheduled_tokens += scheduler.schedule().total_num_scheduled_tokens
-    assert num_scheduled_tokens > 0
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens.get("first", 0) > 0
+
+
+def test_hisparse_import_reservation_does_not_gate_local_admissions(tmp_path):
+    """Like the GPU pool's, the host reservation only gates async loads; a
+    local admission runs and can be preempted, so it cannot strand an import."""
+    # Seven usable host blocks: the import holds one and reserves five, leaving
+    # one, so gating the local request's two pages on the reservation fails.
+    scheduler, _ = _make_hisparse_scheduler(tmp_path, 8, HISPARSE_BLOCK_SIZE)
+    _add_hisparse_request(scheduler, "import", 6)
+    match_external = scheduler.connector.get_num_new_matched_tokens
+    scheduler.connector.get_num_new_matched_tokens = lambda request, num_computed: (
+        (0, False)
+        if request.request_id == "local"
+        else match_external(request, num_computed)
+    )
+    local = _add_hisparse_request(scheduler, "local", 2, offset=1000)
+    assert local in scheduler.running
 
 
 @pytest.mark.parametrize(
@@ -3045,6 +3136,73 @@ def test_computed_blocks_not_evicted():
     assert blocks.blocks[0][0].block_id == 2
 
 
+@pytest.mark.parametrize(
+    "start,prompt_logprobs,for_connector,expected_hit",
+    [(0, None, False, 0), (5, None, False, 4), (5, 0, False, 4), (5, None, True, 4)],
+)
+def test_fixed_token_scores_reuse_only_unscored_prefix(
+    start, prompt_logprobs, for_connector, expected_hit
+):
+    block_size = 4
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 8),
+        max_model_len=32,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    tokens = list(range(16))
+    warm = make_request("warm", tokens, block_size, sha256)
+    assert manager.allocate_slots(warm, len(tokens)) is not None
+    manager.free(warm)
+    scoring = make_request(
+        "scoring",
+        tokens,
+        block_size,
+        sha256,
+        sampling_params=SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (len(tokens) - 1 - start),
+            prompt_logprob_start=start,
+            prompt_logprobs=prompt_logprobs,
+            skip_reading_prefix_cache=False,
+        ),
+    )
+    lookup = (
+        manager.get_computed_blocks_for_connector
+        if for_connector
+        else manager.get_computed_blocks
+    )
+    assert lookup(scoring)[1] == expected_hit
+    if expected_hit:
+        assert lookup(scoring, max_cache_hit_length=len(tokens))[1] == expected_hit
+        assert lookup(scoring, max_cache_hit_length=block_size - 1)[1] == 0
+
+
+@pytest.mark.parametrize(
+    "kwargs,expected_limit",
+    [
+        ({}, None),
+        ({"skip_reading_prefix_cache": True}, 0),
+        # Prompt scoring skips cache reads by default.
+        ({"prompt_logprobs": 1, "prompt_logprob_start": 5}, 0),
+        ({"prompt_logprobs": 1, "skip_reading_prefix_cache": False}, 0),
+        (
+            {
+                "prompt_logprobs": 1,
+                "prompt_logprob_start": 5,
+                "skip_reading_prefix_cache": False,
+            },
+            5,
+        ),
+    ],
+)
+def test_prefix_cache_hit_limit(kwargs, expected_limit):
+    request = make_request(
+        "req", list(range(16)), 4, sha256, sampling_params=SamplingParams(**kwargs)
+    )
+    assert request.prefix_cache_hit_limit == expected_limit
+    assert request.skip_reading_external_kv == (expected_limit is not None)
+
+
 def test_basic_prefix_caching_disabled():
     """This tests that the prefix caching is disabled."""
     block_size = 4
@@ -3527,8 +3685,11 @@ def test_reset_prefix_cache():
     manager.free(req0)
     manager.free(req1)
 
+    cache = manager.block_pool.cached_block_hash_to_block
     assert manager.reset_prefix_cache()
-    assert not manager.block_pool.cached_block_hash_to_block
+    # Cleared in place, so the map stays out of the cyclic GC.
+    assert manager.block_pool.cached_block_hash_to_block is cache
+    assert not cache and not gc.is_tracked(cache._cache)
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
@@ -3577,33 +3738,27 @@ def test_maybe_evict_cached_block():
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {
-            block0.block_id: block0,
-            block3.block_id: block3,
-        },
-        block_hash1: block1,
-        block_hash2: block2,
-    }
+    cache = pool.cached_block_hash_to_block
+    # Only bytes and block ids, and explicitly untracked: never traversed by GC.
+    assert not gc.is_tracked(cache._cache)
+    assert cache._cache == {block_hash0: 0, block_hash1: 1, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block1
     pool._maybe_evict_cached_block(block1)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block0.block_id: block0, block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 0, block_hash2: 2}
+    assert cache._dup_ids == {block_hash0: {0: None, 3: None}}
     # Evict block0: block_hash0 entry should NOT be removed, as block3
     # also use the same hash
     pool._maybe_evict_cached_block(block0)
-    assert pool.cached_block_hash_to_block._cache == {
-        block_hash0: {block3.block_id: block3},
-        block_hash2: block2,
-    }
+    assert cache._cache == {block_hash0: 3, block_hash2: 2}
+    assert cache.get_one_block(block_hash0) is block3
+    assert cache._dup_ids == {}
     # Evict block2
     pool._maybe_evict_cached_block(block2)
-    assert pool.cached_block_hash_to_block._cache == {block_hash0: {3: block3}}
+    assert cache._cache == {block_hash0: 3}
     # Evict block3
     pool._maybe_evict_cached_block(block3)
-    assert pool.cached_block_hash_to_block._cache == {}
+    assert cache._cache == {}
 
 
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
@@ -5442,12 +5597,11 @@ def test_hybrid_mamba_retention_lookahead_keeps_last_prompt_boundary():
 
 
 def test_block_lookup_cache_single_block_per_key():
-    cache = BlockHashToBlockMap()
+    block0, block1 = blocks = [KVCacheBlock(0), KVCacheBlock(1)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
     key2 = BlockHashWithGroupId(b"hash2")
-    block0 = KVCacheBlock(0)
-    block1 = KVCacheBlock(1)
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None
@@ -5485,13 +5639,11 @@ def test_block_lookup_cache_single_block_per_key():
 
 
 def test_block_lookup_cache_multi_blocks_per_key():
-    cache = BlockHashToBlockMap()
+    blocks = [KVCacheBlock(i) for i in range(12)]
+    cache = BlockHashToBlockMap(blocks)
     key0 = BlockHashWithGroupId(b"hash0")
     key1 = BlockHashWithGroupId(b"hash1")
-    block00 = KVCacheBlock(0)
-    block01 = KVCacheBlock(1)
-    block10 = KVCacheBlock(10)
-    block11 = KVCacheBlock(11)
+    block00, block01, block10, block11 = blocks[0], blocks[1], blocks[10], blocks[11]
 
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None

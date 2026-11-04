@@ -246,6 +246,17 @@ impl BenchConfig {
             ));
         }
 
+        if args.max_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--max-concurrency must be greater than 0".into(),
+            ));
+        }
+        if args.multi_turn_concurrency == Some(0) {
+            return Err(BenchError::Config(
+                "--multi-turn-concurrency must be greater than 0".into(),
+            ));
+        }
+
         let base_url = args.resolve_base_url();
         let api_url = args.resolve_api_url();
 
@@ -566,6 +577,27 @@ impl BenchConfig {
                         .into(),
                 ));
             }
+        }
+
+        // Synthetic datasets generate their own prompts and never read a
+        // dataset file, so a path given with one would be silently ignored.
+        if let Some(path) = &args.dataset_path
+            && matches!(
+                args.dataset_name,
+                DatasetName::Random
+                    | DatasetName::RandomMm
+                    | DatasetName::RandomRerank
+                    | DatasetName::PrefixRepetition
+            )
+        {
+            let name = clap::ValueEnum::to_possible_value(&args.dataset_name)
+                .expect("DatasetName has no skipped variants");
+            return Err(BenchError::Config(format!(
+                "Cannot use '{}' dataset with --dataset-path. Please specify the \
+                 appropriate --dataset-name (e.g., 'sharegpt', 'custom', 'hf') for \
+                 your dataset file: {path}",
+                name.get_name()
+            )));
         }
 
         // Custom dataset validation
@@ -933,6 +965,20 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
         Some(s) => s,
     };
 
+    // The ramp-up schedule replaces the request rate. Accepting one anyway
+    // would stamp the result JSON and its filename with a rate that never ran.
+    for (flag, set) in [
+        ("--request-rate", args.request_rate.is_finite()),
+        ("--sweep-request-rate", args.sweep_request_rate.is_some()),
+    ] {
+        if set {
+            return Err(BenchError::Config(format!(
+                "{flag} cannot be combined with --ramp-up-strategy; \
+                 the ramp-up parameters control the request rate"
+            )));
+        }
+    }
+
     let start_rps = args.ramp_up_start_rps.ok_or_else(|| {
         BenchError::Config("--ramp-up-start-rps is required when --ramp-up-strategy is set".into())
     })?;
@@ -944,6 +990,11 @@ fn parse_ramp_up(args: &BenchServeArgs) -> Result<Option<RampUpConfig>> {
     if start_rps <= 0.0 || end_rps <= 0.0 {
         return Err(BenchError::Config(
             "Ramp-up RPS values must be positive".into(),
+        ));
+    }
+    if start_rps > end_rps {
+        return Err(BenchError::Config(
+            "--ramp-up-start-rps must not exceed --ramp-up-end-rps".into(),
         ));
     }
 
@@ -1063,6 +1114,58 @@ mod tests {
         let mut args = base_timed_trace_args();
         args.extend(["--sweep-max-concurrency", "8,16"]);
         assert!(BenchConfig::from_args(&parse_args(args)).is_ok());
+    }
+
+    fn ramp_up_args(start: &'static str, end: &'static str) -> Vec<&'static str> {
+        vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--ramp-up-strategy",
+            "linear",
+            "--ramp-up-start-rps",
+            start,
+            "--ramp-up-end-rps",
+            end,
+        ]
+    }
+
+    /// The result filename names the ramp-up, as Python's does, instead of the
+    /// unused `--request-rate` (`infqps`).
+    #[test]
+    fn test_ramp_up_result_filename() {
+        let mut args = ramp_up_args("2", "10");
+        args.extend(["--max-concurrency", "8"]);
+        let config = BenchConfig::from_args(&parse_args(args)).unwrap();
+        assert_eq!(
+            crate::output::json::compute_result_filename(&config, "org/model", "20261028-120000"),
+            "openai-ramp-up-linear-2qps-10qps-concurrency8-model-20261028-120000.json"
+        );
+    }
+
+    /// The ramp-up schedule replaces the request rate, so a rate given next to
+    /// it would never run but still label the result.
+    #[test]
+    fn test_ramp_up_rejects_request_rate_flags() {
+        for flag in [
+            vec!["--request-rate", "5"],
+            vec!["--sweep-request-rate", "1,5"],
+        ] {
+            let mut args = ramp_up_args("2", "10");
+            args.extend(flag.iter().copied());
+            let msg = BenchConfig::from_args(&parse_args(args))
+                .expect_err("ramp-up should reject request-rate flags")
+                .to_string();
+            assert!(msg.contains(flag[0]), "{flag:?}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_ramp_up_rejects_start_above_end() {
+        let msg = BenchConfig::from_args(&parse_args(ramp_up_args("10", "2")))
+            .expect_err("start > end should be rejected")
+            .to_string();
+        assert!(msg.contains("must not exceed"), "{msg}");
     }
 
     #[test]
@@ -1398,6 +1501,112 @@ mod tests {
 
         assert!(BenchConfig::from_args(&args).is_err());
     }
+
+    #[test]
+    fn test_synthetic_dataset_rejects_dataset_path() {
+        // Pair each dataset with a backend it supports, so --dataset-path is
+        // the only invalid argument.
+        for (name, backend) in [
+            ("random", "openai"),
+            ("random-mm", "openai-chat"),
+            ("random-rerank", "vllm-rerank"),
+            ("prefix_repetition", "openai"),
+        ] {
+            let args = parse_args([
+                "vllm-bench",
+                "--backend",
+                backend,
+                "--dataset-name",
+                name,
+                "--dataset-path",
+                "workload.jsonl",
+            ]);
+            let msg = BenchConfig::from_args(&args)
+                .expect_err("a synthetic dataset must reject --dataset-path")
+                .to_string();
+            assert!(
+                msg.contains(&format!("Cannot use '{name}' dataset with --dataset-path")),
+                "{name}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_dataset_rejects_dataset_path() {
+        // --dataset-name defaults to random, so a forgotten --dataset-name must
+        // not silently benchmark random prompts instead of the given file.
+        let args = parse_args(["vllm-bench", "--dataset-path", "workload.jsonl"]);
+        let msg = BenchConfig::from_args(&args)
+            .expect_err("the default random dataset must reject --dataset-path")
+            .to_string();
+        assert!(msg.contains("Cannot use 'random' dataset"), "{msg}");
+    }
+
+    #[test]
+    fn test_file_dataset_accepts_dataset_path() {
+        let args = parse_args([
+            "vllm-bench",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            "workload.jsonl",
+        ]);
+        assert!(BenchConfig::from_args(&args).is_ok());
+    }
+
+    #[test]
+    fn test_zero_max_concurrency_fails() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--max-concurrency",
+            "0",
+        ]);
+        let err = BenchConfig::from_args(&args).expect_err("0 concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--max-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_positive_max_concurrency_passes() {
+        for value in ["1", "16"] {
+            let args = parse_args(vec![
+                "vllm-bench",
+                "--model",
+                "test-model",
+                "--max-concurrency",
+                value,
+            ]);
+            assert!(
+                BenchConfig::from_args(&args).is_ok(),
+                "value {value} should pass"
+            );
+        }
+    }
+
+    #[test]
+    fn test_zero_multi_turn_concurrency_fails() {
+        let args = parse_args(vec![
+            "vllm-bench",
+            "--model",
+            "test-model",
+            "--multi-turn",
+            "--multi-turn-concurrency",
+            "0",
+        ]);
+        let err =
+            BenchConfig::from_args(&args).expect_err("0 multi-turn concurrency must be rejected");
+        assert!(
+            err.to_string().contains("--multi-turn-concurrency must be greater than 0"),
+            "{}",
+            err
+        );
+    }
+
     #[test]
     fn test_range_ratio_parse_float() {
         let rr = RangeRatio::parse("0.2").unwrap();

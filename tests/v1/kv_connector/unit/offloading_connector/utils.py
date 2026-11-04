@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    DevicePointers,
     GPULoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
@@ -80,10 +81,14 @@ class MockLoadStoreSpec(LoadStoreSpec):
 
 
 class MockOffloadingWorker(OffloadingWorker):
-    def __init__(self):
+    def __init__(self, gpu_spec_map: dict[int, "GPULoadStoreSpec"]):
+        self._gpu_spec_map = gpu_spec_map
         self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
+        # When set, loads submitted from now on complete as failed.
+        self.fail_loads = False
+        self._failing_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
         self.flushed_jobs: set[int] = set()
 
@@ -93,9 +98,10 @@ class MockOffloadingWorker(OffloadingWorker):
         return finished
 
     def submit_store(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (gpu_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -103,11 +109,14 @@ class MockOffloadingWorker(OffloadingWorker):
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (src_spec, gpu_spec)
         self.waiting_jobs.add(job_id)
+        if self.fail_loads:
+            self._failing_jobs.add(job_id)
         return True
 
     def complete_jobs(self, job_ids: set[int]) -> None:
@@ -117,7 +126,7 @@ class MockOffloadingWorker(OffloadingWorker):
                 self.completed_jobs.append(job_id)
                 result = TransferResult(
                     job_id=job_id,
-                    success=True,
+                    success=job_id not in self._failing_jobs,
                     transfer_size=None,
                     transfer_time=None,
                 )
@@ -139,7 +148,21 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.get_stats.return_value = None
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
-        self.handler = MockOffloadingWorker()
+
+        self._gpu_spec_map: dict[int, GPULoadStoreSpec] = {}
+        self.handler = MockOffloadingWorker(self._gpu_spec_map)
+
+        import vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker as _cm
+        from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers as _orig
+
+        def _tracking_resolve(
+            device_spec: GPULoadStoreSpec, kv_caches: CanonicalKVCaches
+        ) -> DevicePointers:
+            result = _orig(device_spec, kv_caches)
+            self._gpu_spec_map[id(result)] = device_spec
+            return result
+
+        _cm.resolve_device_pointers = _tracking_resolve
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
@@ -232,6 +255,9 @@ class RequestRunner:
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
+        )
+        vllm_config.num_hash_lookahead_tokens = (
+            vllm_config._resolve_num_hash_lookahead_tokens()
         )
         vllm_config.kv_events_config = KVEventsConfig(
             # Enable so the offloading events tracker is active, but use the
@@ -358,7 +384,10 @@ class RequestRunner:
         self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(block_size, sha256)
+        # Mirror EngineCore's choice of hash protocol.
+        self._block_hasher = get_request_block_hasher(
+            block_size, sha256, self.scheduler.num_hash_lookahead_tokens
+        )
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},
@@ -535,7 +564,7 @@ class RequestRunner:
                 self.offloading_spec.complete_transfers()
 
             self.worker_connector.wait_for_save()
-            finished_sending, finished_recving = self.worker_connector.get_finished(
+            transfer_results = self.worker_connector.get_transfer_results(
                 scheduler_output.finished_req_ids
             )
             worker_meta = (
@@ -547,10 +576,11 @@ class RequestRunner:
 
             model_runner_output = create_model_runner_output(
                 reqs=self.scheduler.running,
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
+                finished_sending=transfer_results.finished_sending,
+                finished_recving=transfer_results.finished_recving,
                 token_id=token_id or 0,
                 kv_connector_worker_meta=worker_meta,
+                failed_recving=transfer_results.failed_recving,
             )
 
             prev_token_id = token_id
