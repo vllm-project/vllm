@@ -14,7 +14,7 @@ from tests.utils import RemoteOpenAIServer
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
 
-MODEL_NAME = "intfloat/e5-small"
+MODEL_NAME = "vllm-project/e5-small"
 MAIN_SCORE = 0.7422994752439667
 
 

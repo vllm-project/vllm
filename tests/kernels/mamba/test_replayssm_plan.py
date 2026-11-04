@@ -11,10 +11,7 @@ runner used to compute on the CPU from each request's admission length.
 import pytest
 import torch
 
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    plan_replayssm_decode,
-    reset_replayssm_ring_trackers,
-)
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import plan_replayssm_decode
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -44,25 +41,13 @@ class _Planner:
     def __init__(self, buffer_len: int, align_block_size: int = 0):
         self.buffer_len = buffer_len
         self.align_block_size = align_block_size
-        self.trackers = [
-            torch.zeros(NUM_SLOTS, dtype=torch.int32, device=DEVICE) for _ in range(3)
-        ]
+        self.ring_pos = torch.zeros(NUM_SLOTS, dtype=torch.int32, device=DEVICE)
         self.write_pos = torch.full((NUM_SLOTS,), -1, dtype=torch.int32, device=DEVICE)
         self.is_flush = torch.full((NUM_SLOTS,), -1, dtype=torch.int8, device=DEVICE)
 
-    @property
-    def ring_pos(self) -> torch.Tensor:
-        return self.trackers[0]
-
     def reset(self, slots: list[int]) -> None:
         """What a prefill of these slots does."""
-        ring_start, prev_num_accepted, prev_query_len = self.trackers
-        reset_replayssm_ring_trackers(
-            ring_start,
-            prev_num_accepted,
-            prev_query_len,
-            torch.tensor(slots, dtype=torch.int32, device=DEVICE),
-        )
+        self.ring_pos[torch.tensor(slots, dtype=torch.int32, device=DEVICE)] = 0
 
     def step(
         self, slots: list[int], seq_lens: list[int]
