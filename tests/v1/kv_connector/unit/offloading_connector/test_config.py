@@ -1547,8 +1547,13 @@ def test_mirror_registration_follows_the_resolved_spec(
     spec_module_path, starts the same mirror, so it registers the KV cache."""
     from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-    monkeypatch.setitem(
-        OffloadingSpecFactory._registry, "TieringAlias", lambda: TieringOffloadingSpec
+    # The factory has no public way to unregister: register on a copy of the
+    # registry, which monkeypatch restores at teardown.
+    monkeypatch.setattr(
+        OffloadingSpecFactory, "_registry", dict(OffloadingSpecFactory._registry)
+    )
+    OffloadingSpecFactory.register_spec(
+        "TieringAlias", "vllm.v1.kv_offload.tiering.spec", "TieringOffloadingSpec"
     )
     transfer = _offloading_transfer_config(
         {**spec_config, "secondary_tiers": [{"type": "example"}]}
