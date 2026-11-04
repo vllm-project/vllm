@@ -524,18 +524,19 @@ def _user_moe_activation_override_is_set() -> bool:
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
+    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
+    activation key. An explicit override wins, ``null`` included (BF16)."""
     user_override = _user_moe_activation_override()
     if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
-    if model_activation_key is None or model_activation_key == user_override:
-        return user_override
-    raise ValueError(
-        f"checkpoint declares MoE activation={model_activation_key} but "
-        f"quantization_config.moe.activation={user_override}; remove the "
-        f"override or align it with the checkpoint."
-    )
+    if model_activation_key is not None and model_activation_key != user_override:
+        logger.warning_once(
+            "Overriding the checkpoint MoE activation=%s with "
+            "quantization_config.moe.activation=%s.",
+            model_activation_key,
+            user_override,
+        )
+    return user_override
 
 
 def _humming_input_schema(model_activation_key: QuantKey | None):

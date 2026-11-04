@@ -145,6 +145,11 @@ def test_resolve_shorthand_only_populates_both_slots():
 def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     """Checkpoint metadata determines whether an MXFP shorthand is online."""
     assert resolve_quantization_config(quantization, None) is None
+    # The shorthand's defaults are merged by `get_quant_config` for online
+    # models only: an override alone quantizes no layer a checkpoint skips.
+    override = {"moe": {"activation": "mxfp8"}}
+    args = resolve_quantization_config(quantization, override)
+    assert args == QuantizationConfigArgs(moe=QuantSpec(activation=kMxfp8Dynamic))
 
 
 @pytest.mark.parametrize(

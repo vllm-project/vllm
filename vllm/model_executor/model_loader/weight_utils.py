@@ -206,6 +206,7 @@ def get_quant_config(
     from vllm.config.quantization import (
         _ONLINE_SHORTHANDS,
         QuantizationConfigArgs,
+        merge_quantization_config,
         resolve_quantization_config,
     )
     from vllm.model_executor.layers.quantization.modelopt import (
@@ -365,8 +366,10 @@ def get_quant_config(
             assert fp8_args is not None
             return OnlineQuantizationConfig(args=fp8_args)
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         return maybe_compose_online_quantization(quant_cls())
 
@@ -377,8 +380,10 @@ def get_quant_config(
     ]
     if len(quant_config_files) == 0:
         if model_config.quantization in _ONLINE_SHORTHANDS:
-            args = online_args or _ONLINE_SHORTHANDS[model_config.quantization]
-            assert isinstance(args, QuantizationConfigArgs)
+            assert not isinstance(online_args, dict)
+            args = merge_quantization_config(
+                _ONLINE_SHORTHANDS[model_config.quantization], online_args
+            )
             return OnlineQuantizationConfig(args=args)
         raise ValueError(f"Cannot find the config file for {model_config.quantization}")
     if len(quant_config_files) > 1:

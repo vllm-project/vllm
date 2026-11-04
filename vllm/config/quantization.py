@@ -354,8 +354,21 @@ def resolve_quantization_config(
     if isinstance(quantization_config, dict):
         quantization_config = QuantizationConfigArgs(**quantization_config)
 
-    if base is None:
+    # A deferred shorthand may name the checkpoint format: its defaults are only
+    # merged in by `get_quant_config` once the model is known to be unquantized,
+    # so that an override alone does not quantize layers a checkpoint skips.
+    if base is None or quantization in _DEFERRED_ONLINE_SHORTHANDS:
         return quantization_config
+    return merge_quantization_config(base, quantization_config)
+
+
+def merge_quantization_config(
+    base: QuantizationConfigArgs, override: QuantizationConfigArgs | None
+) -> QuantizationConfigArgs:
+    """Apply the fields explicitly set in `override` on top of a shorthand's
+    `base` config."""
+    if override is None:
+        return base
 
     def merge_spec(
         base_spec: QuantSpec | None,
@@ -380,8 +393,8 @@ def resolve_quantization_config(
         )
 
     return QuantizationConfigArgs(
-        linear=merge_spec(base.linear, quantization_config.linear),
-        moe=merge_spec(base.moe, quantization_config.moe),
-        ignore=quantization_config.ignore or base.ignore,
-        targets=quantization_config.targets or base.targets,
+        linear=merge_spec(base.linear, override.linear),
+        moe=merge_spec(base.moe, override.moe),
+        ignore=override.ignore or base.ignore,
+        targets=override.targets or base.targets,
     )
