@@ -15,6 +15,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -198,6 +199,9 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        # Holds only ints and grows with the context: hide it from the cyclic GC.
+        # It is only ever mutated in place.
+        gc_untrack(self._output_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
@@ -229,8 +233,9 @@ class Request:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         # Prompt block hashes precomputed by the frontend; the hasher continues
-        # from the first block they don't cover.
-        self.block_hashes: list[BlockHash] = block_hashes or []
+        # from the first block they don't cover. Hidden from the cyclic GC: it
+        # only holds bytes, one per block.
+        self.block_hashes: list[BlockHash] = gc_untrack(block_hashes or [])
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -296,6 +301,16 @@ class Request:
         """Compute block hashes for any new full blocks and append them."""
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
+
+    def truncate_block_hashes(
+        self, hash_block_size: int, num_hash_lookahead_tokens: int = 0
+    ) -> None:
+        """Discard hashes invalidated by truncating the request's tokens."""
+        num_valid_hashes = (
+            max(0, self.num_tokens - num_hash_lookahead_tokens) // hash_block_size
+        )
+        del self.block_hashes[num_valid_hashes:]
+        self._prompt_embeds_per_block_hashes.clear()
 
     @property
     def use_structured_output(self) -> bool:
