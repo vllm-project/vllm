@@ -86,6 +86,7 @@ steps:
   - tests/models/test_hy_v3_expert_loading.py
   - tests/models/test_routed_expert_loaders.py
   - tests/models/test_minimax_m3_expert_loading.py
+  - tests/models/test_bailing_moe_expert_loading.py
   commands:
     - >-
       pytest -v -s
@@ -107,6 +108,7 @@ steps:
       models/test_hy_v3_expert_loading.py
       models/test_routed_expert_loaders.py
       models/test_minimax_m3_expert_loading.py
+      models/test_bailing_moe_expert_loading.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"

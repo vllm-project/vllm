@@ -39,6 +39,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -1512,7 +1513,6 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
         ]
-        expert_mappings = list(self.get_expert_mapping())
 
         def load_param(name: str, tensor: torch.Tensor, shard_id=None) -> bool:
             if name not in params_dict or is_pp_missing_parameter(name, self):
@@ -1523,12 +1523,8 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             )
             if shard_id is None:
                 weight_loader(param, tensor)
-            elif isinstance(shard_id, int):
-                weight_loader(param, tensor, shard_id)
             else:
-                weight_loader(
-                    param, tensor, name, expert_id=shard_id[0], shard_id=shard_id[1]
-                )
+                weight_loader(param, tensor, shard_id)
             loaded_params.add(name)
             return True
 
@@ -1560,11 +1556,9 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 continue
 
             if ".mlp.experts." in name:
-                for param_name, weight_name, expert_id, shard_id in expert_mappings:
-                    if weight_name in name:
-                        mapped = name.replace(weight_name, param_name)
-                        load_param(mapped, weight, (expert_id, shard_id))
-                        break
+                expert_params = load_routed_experts_weight(self, name, weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
                 continue
 
             load_param(name, weight)

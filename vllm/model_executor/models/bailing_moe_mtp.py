@@ -13,6 +13,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -258,7 +259,6 @@ class BailingMoeV25MTPModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        expert_params_mapping = list(self.get_expert_mapping())
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         loaded_mtp_layers: set[int] = set()
@@ -281,16 +281,8 @@ class BailingMoeV25MTPModel(nn.Module):
             )
             if shard_id is None:
                 weight_loader(param, loaded_weight)
-            elif isinstance(shard_id, int):
-                weight_loader(param, loaded_weight, shard_id)
             else:
-                weight_loader(
-                    param,
-                    loaded_weight,
-                    name,
-                    expert_id=shard_id[0],
-                    shard_id=shard_id[1],
-                )
+                weight_loader(param, loaded_weight, shard_id)
             loaded_params.add(name)
             return True
 
@@ -353,19 +345,9 @@ class BailingMoeV25MTPModel(nn.Module):
                 continue
 
             if "mlp.experts" in name:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, expert_shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    mapped_name = name.replace(weight_name, param_name)
-                    if load_param(
-                        mapped_name,
-                        loaded_weight,
-                        (expert_id, expert_shard_id),
-                    ):
-                        loaded = True
-                        break
-                if loaded:
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
                     loaded_mtp_layers.add(spec_layer)
                 continue
 

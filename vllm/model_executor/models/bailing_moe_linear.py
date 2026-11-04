@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -580,9 +581,6 @@ class BailingMoeV25Model(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        # Expert parameter mappings from FusedMoEFactory
-        expert_mappings = list(self.get_expert_mapping())
-
         def load_param(name: str, tensor: torch.Tensor, shard_id=None) -> bool:
             """Load a single parameter."""
             if name not in params_dict or is_pp_missing_parameter(name, self):
@@ -597,13 +595,8 @@ class BailingMoeV25Model(nn.Module):
 
             if shard_id is None:
                 weight_loader(param, tensor)
-            elif isinstance(shard_id, int):
-                weight_loader(param, tensor, shard_id)
             else:
-                # Expert param: (expert_id, shard_id)
-                weight_loader(
-                    param, tensor, name, expert_id=shard_id[0], shard_id=shard_id[1]
-                )
+                weight_loader(param, tensor, shard_id)
 
             loaded_params.add(name)
             return True
@@ -671,17 +664,9 @@ class BailingMoeV25Model(nn.Module):
                         continue
 
                 # Routed experts
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_mappings:
-                    if weight_name not in norm_name:
-                        continue
-                    mapped = norm_name.replace(weight_name, param_name)
-                    if load_param(mapped, weight, (expert_id, expert_shard_id)):
-                        break
+                expert_params = load_routed_experts_weight(self, norm_name, weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
                 continue
 
             # General parameters
