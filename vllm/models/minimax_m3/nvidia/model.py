@@ -448,7 +448,8 @@ class MiniMaxM3MLP(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=reduce_results,
+            # Under SP the forward reduce-scatters the output itself.
+            reduce_results=reduce_results and not use_sequence_parallel,
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
