@@ -5,14 +5,26 @@ from __future__ import annotations
 
 import torch
 
+from vllm.model_executor.kernels.linear.phase_split import (
+    ActivationMode,
+    DualActivationKernel,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
+from vllm.utils.b12x import (
+    B12xWarmupUnit,
+    plan_b12x_linear,
+    reuse_packed_weight_storage,
+)
+from vllm.utils.b12x import (
+    get_b12x_blockscaled as _import_b12x_blockscaled,
+)
 from vllm.utils.b12x import (
     get_b12x_mxfp8_linear as _import_b12x_mxfp8,
 )
@@ -42,8 +54,15 @@ def _apply_b12x_mxfp8_packed_linear(
     return output.view(*output_shape)
 
 
-class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
-    """ModelOpt MXFP8 linear through the native b12x SM120 dense GEMM path."""
+class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
+    """ModelOpt MXFP8 linear through the native b12x SM120 dense GEMM path.
+
+    b12x picks BF16 or MXFP8 activations per call by row count. With a phase
+    split, each phase's calls use its activations instead."""
+
+    @classmethod
+    def activation_modes(cls) -> frozenset[ActivationMode]:
+        return frozenset((None, kMxfp8Dynamic))
 
     @classmethod
     def is_supported(
@@ -103,6 +122,16 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
         replace_parameter(layer, "weight", weight.new_empty((0,)))
         replace_parameter(layer, "weight_scale", weight_scale.new_empty((0,)))
         layer.b12x_warmup_provider = self
+        if self.phase is not None:
+            blockscaled = _import_b12x_blockscaled()
+            assert blockscaled is not None
+            layer.b12x_mxfp8_plans = plan_b12x_linear(
+                blockscaled,
+                layer.b12x_mxfp8_packed_weight,
+                "mxfp8",
+                self.phase,
+                getattr(layer, "b12x_mxfp8_plans", None),
+            )
 
     def get_b12x_warmup_unit(
         self,
@@ -110,6 +139,8 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
         token_counts: tuple[int, ...],
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
+        if self.phase is not None:
+            return self._get_phase_warmup_unit(layer, token_counts, output_dtype)
         packed_weight = layer.b12x_mxfp8_packed_weight
         device = torch.device(packed_weight.weight.values.device)
 
@@ -142,10 +173,68 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel):
             compile=compile,
         )
 
+    def _get_phase_warmup_unit(
+        self,
+        layer: torch.nn.Module,
+        token_counts: tuple[int, ...],
+        output_dtype: torch.dtype,
+    ) -> B12xWarmupUnit:
+        plans = layer.b12x_mxfp8_plans
+        mode = kMxfp8Dynamic if any(plans.quantized) else None
+        planned = {m for plan in plans.plans for m in plan.token_counts}
+        packed_weight = layer.b12x_mxfp8_packed_weight
+
+        def compile() -> None:
+            for tokens in sorted(set(token_counts) | planned):
+                source = torch.zeros(
+                    (tokens, int(packed_weight.in_features)),
+                    dtype=output_dtype,
+                    device=packed_weight.weight.values.device,
+                )
+                self.apply_weights(layer, source, mode=mode)
+
+        return B12xWarmupUnit(
+            name="MXFP8",
+            # Every layer owns a plan that must be prepared before capture.
+            key=(type(self), *(plan.handle for plan in plans.plans), output_dtype),
+            compile=compile,
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        *,
+        mode: ActivationMode = None,
     ) -> torch.Tensor:
-        return _apply_b12x_mxfp8_packed_linear(layer, x, bias)
+        if self.phase is None:
+            return _apply_b12x_mxfp8_packed_linear(layer, x, bias)
+        if mode is not None and mode != kMxfp8Dynamic:
+            raise ValueError(f"b12x MXFP8 does not support activations {mode}")
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        # Rows beyond the planned capacity (e.g. an encoder batch) run in
+        # capacity-sized chunks; an unplanned call would prepare on first use.
+        capacity = layer.b12x_mxfp8_plans.query.num_tokens
+        quantize = mode is not None
+        if x_2d.shape[0] <= capacity:
+            output = self._mm(layer, x_2d, quantize)
+        else:
+            output = torch.cat(
+                [self._mm(layer, c, quantize) for c in x_2d.split(capacity)]
+            )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], output.shape[-1])
+
+    @staticmethod
+    def _mm(layer: torch.nn.Module, x: torch.Tensor, quantize: bool) -> torch.Tensor:
+        mxfp8 = _import_b12x_mxfp8()
+        assert mxfp8 is not None
+        plan, quantized = layer.b12x_mxfp8_plans.select(x.shape[0], quantize)
+        return mxfp8.mm(
+            x,
+            layer.b12x_mxfp8_packed_weight,
+            plan=plan,
+            required_mode="quantized" if quantized else "a16",
+        )

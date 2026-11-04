@@ -430,7 +430,10 @@ class KernelConfig:
     step, and run the FP4 GEMM, which speeds up long prefills but is lossy.
     Outputs therefore depend on batch composition. Must be at least the largest
     CUDA graph capture size; not supported with data parallelism or encoder CUDA
-    graphs. None (default) keeps BF16 activations for every input."""
+    graphs. None (default) keeps BF16 activations for every input. Alias for
+    quantization_config.linear.phase with decode "unquantized", prefill "nvfp4",
+    max_decode_tokens set to this value and scale "dynamic_tensor". The lm_head
+    copies of draft_lm_head_quantization keep BF16 activations."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod

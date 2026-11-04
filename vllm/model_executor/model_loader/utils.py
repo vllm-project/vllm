@@ -148,6 +148,7 @@ def process_weights_after_loading(
     """
     # Reclaim memory when an explicit lm_head has been
     # loaded, but it is identical to the input embeddings.
+    from vllm.model_executor.kernels.linear import check_linear_phase_served
     from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
@@ -219,6 +220,7 @@ def process_weights_after_loading(
 
     # Every other module's own post-load hook, after the per-layer passes.
     finalize_model_weights(model)
+    check_linear_phase_served(model)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`

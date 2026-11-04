@@ -108,6 +108,52 @@ quantization:
 vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_32
 ```
 
+### Separate decode and prefill activations
+
+`linear.phase` sets the activations of small linear calls (decode) and large
+ones (prefill) separately, served from one weight copy. A call with at most
+`max_decode_tokens` input rows uses `decode`; under CUDA graphs the rows are
+the padded capture size. Each phase is `unquantized` (the model dtype) or the
+quantized format of the weights:
+
+| Weights | Linear backend | `decode` | `prefill` | `scale` |
+| ------- | -------------- | -------- | --------- | ------- |
+| NVFP4 W4A16 | b12x | `unquantized` or `nvfp4` | `unquantized` or `nvfp4` | `dynamic_tensor` (default) with `nvfp4`, else unset |
+| MXFP8, checkpoint or online | b12x | `unquantized` or `mxfp8` | `unquantized` or `mxfp8` | unset |
+
+`max_decode_tokens` is required when `decode` and `prefill` differ. A phase
+applies to NVFP4 linears when it uses `nvfp4` or only `unquantized`, and to
+MXFP8 linears when it uses `mxfp8` or only `unquantized`; mixing `nvfp4` and
+`mxfp8` is rejected, since it needs two weight copies. For example, to keep
+BF16 activations for decode and quantize prefills to NVFP4:
+
+```bash
+vllm serve <model> --linear-backend b12x \
+    --quantization-config '{"linear": {"phase": {"decode": "unquantized",
+        "prefill": "nvfp4", "max_decode_tokens": 1024,
+        "scale": "dynamic_tensor"}}}'
+```
+
+Loading raises an error when a linear the phase applies to cannot serve it,
+naming the weight format, the phases and the platform, and logs a warning when
+no linear does, for example in an unquantized model. Other linears keep their
+own activations: unquantized linears and `draft_lm_head_quantization` lm_head
+copies use the model dtype. `phase` cannot be combined with `activation`,
+`moe.phase` is not supported, and online-quantized linears reject it unless
+their weights are MXFP8 (`--quantization mxfp8`).
+
+`dynamic_tensor` shares one NVFP4 scale, computed from the absolute maximum,
+across every request in a call, so outputs depend on batch composition. NVFP4
+decode calls run in CUDA graphs and take the scale from the rows the model
+runner marks as real, which requires `VLLM_MOE_SKIP_PADDING=1` (the default);
+CUDA graph capture fails for forward passes that do not mark them, such as
+draft models. With unquantized decode and NVFP4 prefill, `max_decode_tokens`
+must be at least the largest CUDA graph capture size. NVFP4 phases do not
+support data parallelism, encoder CUDA graphs or `VLLM_BATCH_INVARIANT`.
+MXFP8 activations have per-block scales, so padding rows cannot affect other
+rows; a split still depends on the rows in a step and is not supported with
+`VLLM_BATCH_INVARIANT`.
+
 ### Re-quantizing layers to a different precision
 
 An online target can re-quantize a checkpoint-quantized (prequantized) layer at load time.

@@ -273,6 +273,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"activation override (activation={spec.activation}) is not "
                 f"yet supported for online {cls.__name__}"
             )
+        # Online MXFP8 linears select their kernel as checkpoint MXFP8 ones do,
+        # so the phase applies; other online methods pick their own kernels.
+        if spec.phase is not None and cls is not Mxfp8OnlineLinearMethod:
+            raise ValueError(
+                f"quantization_config.linear.phase ({spec.phase}) is not "
+                f"supported for online {cls.__name__}"
+            )
         return cls
 
     def resolve_quant_method_cls(

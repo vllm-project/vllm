@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import regex as re
 from pydantic import (
@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kNvfp4DynamicTensor,
     kNvfp4DynamicToken,
     kNvfp4Static,
 )
@@ -78,6 +79,74 @@ QuantKeyField = Annotated[
 
 
 @config
+class PhaseSpec:
+    """Activation formats for decode and prefill, served from one weight copy.
+
+    A linear call with at most `max_decode_tokens` input rows (normally the
+    tokens scheduled in the step, after CUDA graph padding) uses `decode`;
+    larger calls use `prefill`. The two may differ in precision but not in
+    quantized format: a phase applies to NVFP4 linears when it uses "nvfp4" or
+    only "unquantized", and to MXFP8 linears when it uses "mxfp8" or only
+    "unquantized".
+    """
+
+    decode: Literal["unquantized", "nvfp4", "mxfp8"] = "unquantized"
+    """Activations of small calls: "unquantized" keeps the model dtype."""
+
+    prefill: Literal["unquantized", "nvfp4", "mxfp8"] = "nvfp4"
+    """Activations of large calls."""
+
+    max_decode_tokens: int | None = Field(default=None, ge=1)
+    """Largest call, in rows, that uses `decode`. Required when `decode` and
+    `prefill` differ."""
+
+    scale: Literal["dynamic_tensor"] | None = None
+    """Global scale of NVFP4 activations: "dynamic_tensor", the default with
+    "nvfp4", shares one scale per call, computed from the absolute maximum of
+    its rows. MXFP8 activations only have per-block scales; leave it unset."""
+
+    @model_validator(mode="after")
+    def _validate_formats(self) -> "PhaseSpec":
+        if self.decode != self.prefill and self.max_decode_tokens is None:
+            raise ValueError(
+                "phase.max_decode_tokens is required when decode and prefill differ"
+            )
+        quantized = {self.decode, self.prefill} - {"unquantized"}
+        if len(quantized) > 1:
+            raise ValueError(
+                f"phase.decode={self.decode} and phase.prefill={self.prefill} "
+                "need two weight copies; use one quantized format or unquantized"
+            )
+        if "nvfp4" in quantized:
+            self.scale = self.scale or "dynamic_tensor"
+        elif self.scale is not None:
+            raise ValueError("phase.scale only applies to nvfp4 activations")
+        return self
+
+    @property
+    def quantized_format(self) -> str | None:
+        """The quantized activation format the phase uses, if any."""
+        return next(
+            (f for f in (self.decode, self.prefill) if f != "unquantized"), None
+        )
+
+    def activation_modes(self) -> tuple[QuantKey | None, QuantKey | None]:
+        """(decode, prefill) activation keys; None is unquantized."""
+        keys = {
+            "unquantized": None,
+            "nvfp4": kNvfp4DynamicTensor,
+            "mxfp8": kMxfp8Dynamic,
+        }
+        return keys[self.decode], keys[self.prefill]
+
+    def __str__(self) -> str:
+        return (
+            f"decode={self.decode}, prefill={self.prefill}, "
+            f"max_decode_tokens={self.max_decode_tokens}, scale={self.scale}"
+        )
+
+
+@config
 class QuantSpec:
     """Quantization spec for one layer kind (linear or MoE).
 
@@ -90,6 +159,17 @@ class QuantSpec:
 
     activation: QuantKeyField = None
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
+
+    phase: PhaseSpec | None = None
+    """Separate decode and prefill activation formats for one weight copy.
+    Linear only; mutually exclusive with `activation`. Online-quantized linears
+    only support it with MXFP8 weights."""
+
+    @model_validator(mode="after")
+    def _validate_phase(self) -> "QuantSpec":
+        if self.phase is not None and self.activation is not None:
+            raise ValueError("phase and activation are mutually exclusive")
+        return self
 
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:
@@ -175,6 +255,12 @@ class QuantizationConfigArgs:
                         f"targets key {pattern} is not a valid regex: {e}"
                     ) from e
         return v
+
+    @model_validator(mode="after")
+    def _validate_moe_phase(self) -> "QuantizationConfigArgs":
+        if self.moe is not None and self.moe.phase is not None:
+            raise ValueError("quantization_config.moe.phase is not supported")
+        return self
 
     @model_validator(mode="after")
     def _validate_targets_exclusivity(self) -> "QuantizationConfigArgs":
@@ -278,8 +364,17 @@ def resolve_quantization_config(
     if base is None:
         return quantization_config
 
+    linear = quantization_config.linear
+    if (
+        linear is not None
+        and base.linear is not None
+        and linear.weight is None
+        and linear.activation is None
+    ):
+        # A spec that only sets the phase keeps the shorthand's weight format.
+        linear = QuantSpec(weight=base.linear.weight, phase=linear.phase)
     return QuantizationConfigArgs(
-        linear=quantization_config.linear or base.linear,
+        linear=linear or base.linear,
         moe=quantization_config.moe or base.moe,
         ignore=quantization_config.ignore or base.ignore,
         targets=quantization_config.targets or base.targets,
