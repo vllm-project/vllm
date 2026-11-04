@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::dtype::ModelDtype;
@@ -132,6 +134,10 @@ pub struct EngineCoreReadyResponse {
     /// hashes from the frontend.
     #[serde(default)]
     pub prefix_hash_config: Option<PrefixHashConfig>,
+    /// `CacheConfig.metrics_info()` after initialization: the labels of
+    /// `vllm:cache_config_info`.
+    #[serde(default)]
+    pub cache_config_info: Option<BTreeMap<String, String>>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
