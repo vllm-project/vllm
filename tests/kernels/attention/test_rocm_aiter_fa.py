@@ -852,6 +852,7 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
         create_standard_kv_cache_spec,
         create_vllm_config,
     )
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import set_current_vllm_config
     from vllm.model_executor.layers.attention import Attention
     from vllm.v1.attention.backends import rocm_aiter_fa
@@ -862,14 +863,15 @@ def test_aiter_fa_chunked_extend_with_sinks_matches_reference(monkeypatch, use_s
     )
 
     _assert_aiter_supported()
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", False)
     # 32 context tokens per request per chunk: context lens 128, 32 and 69 give
-    # 4 chunks, and the second request has empty chunks 1-3.
+    # 4 chunks, with empty chunks 1-3 for the second request and 3 for the third.
     monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 96)
     set_random_seed(42)
     batch_spec = BatchSpec(seq_lens=[160, 48, 77], query_lens=[32, 16, 8])
     num_blocks = 64
-    # head_dim 64, as in gpt-oss: at 128 aiter routes bf16 varlen calls to its
-    # v3 kernel, which ignores sinks.
+    # head_dim 64, as in gpt-oss: at 128, aiter < 0.1.28 routes bf16 varlen calls
+    # to its v3 kernel, which ignores sinks (ROCm/aiter#6906).
     config = create_vllm_config(
         model_name="Qwen/Qwen2.5-0.5B-Instruct",
         dtype="bfloat16",
