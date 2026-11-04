@@ -2,12 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Free device memory corrected by amdgpu's exact VRAM count.
 
-hipMemGetInfo counts each allocation as at least 2 MB on purpose (amdgpu
-commit 1ac354beecfd), unless the GPU's memory is kept in system memory
-(kernel apu_prefer_gtt), while the driver checks allocations at their exact
-sizes. Small kernel code objects loaded during warmup thus hide free memory.
-amdgpu's sysfs mem_info_vram_used counts exact sizes for the whole device,
-plus page tables, queue save areas, reserved ranges and graphics buffers.
+hipMemGetInfo counts each allocation as at least 2 MB, so small allocations
+hide free memory; amdgpu's sysfs mem_info_vram_used counts exact sizes.
 """
 
 import os
@@ -123,10 +119,7 @@ def free_memory_correction(
     baseline: the drop in free memory less the growth of the exact count.
     Other processes' allocations change both alike.
 
-    Never negative, and never more than the total less the exact count. That
-    still includes KFD's page-table reserve ((system RAM + VRAM) / 16384) and
-    RAS pages, which the exact count leaves out: about 80 MB on an R9700. The
-    3 GiB ROCm floor in KV_CACHE_MARGIN_FLOOR_BYTES covers them.
+    Never negative, and never more than the total less the exact count.
     """
     # The exact count must have grown by at least what this process
     # allocated; if not, memory left VRAM or was freed meanwhile and the
