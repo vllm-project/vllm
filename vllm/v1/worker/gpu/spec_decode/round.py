@@ -142,8 +142,6 @@ class VerifyPlan:
     """``[R, C]`` int32 candidate tokens (``tokens[r, 0]`` is ignored: the root token is
     known). None only for the runner's chain plan, whose tokens are in its draft
     buffer."""
-    draft_probs: torch.Tensor | None = None
-    """``[R, C, vocab]`` float32 for probabilistic verification, else None."""
     is_chain: bool = False
     """Host flag set by the builder when every ``parent[r, i] == i - 1`` by
     construction. The runner then runs the chain-only path: positions stay

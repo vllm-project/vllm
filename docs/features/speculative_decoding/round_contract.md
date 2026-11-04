@@ -160,7 +160,6 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | `parent` | `[R, C]` int32. `parent[r, 0] == -1`. `parent[r, i]` is the row candidate `i` continues, in `[0, i)`. Rows are ordered parent first. A chain has `parent[r, i] == i - 1`. |
 | `count` | `[R]` int32 in `[1, C]`. 1 is a plain decode. Entries past `count[r]` are ignored. |
 | `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. |
-| `draft_probs` | `[R, C, vocab]` float32 for probabilistic verification, else `None`. |
 | `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
 
 Row 0 is the root, the request's last committed token. Each row writes its KV at the
