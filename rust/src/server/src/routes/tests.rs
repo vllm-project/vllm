@@ -53,8 +53,8 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
-use vllm_tokenizer::Tokenizer as _;
 use vllm_tokenizer::test_utils::TestTokenizer;
+use vllm_tokenizer::{Tokenizer as _, UnavailableTokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -453,6 +453,8 @@ struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
     sampling_hints: vllm_text::SamplingHints,
+    /// Serve without a tokenizer, like `--skip-tokenizer-init`.
+    skip_tokenizer_init: bool,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -478,6 +480,14 @@ impl FakeChatBackend {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
             sampling_hints: Default::default(),
+            skip_tokenizer_init: false,
+        }
+    }
+
+    fn without_tokenizer() -> Self {
+        Self {
+            skip_tokenizer_init: true,
+            ..Self::new()
         }
     }
 
@@ -486,6 +496,7 @@ impl FakeChatBackend {
             model_id: model_id.into(),
             multimodal_model_info: None,
             sampling_hints: Default::default(),
+            skip_tokenizer_init: false,
         }
     }
 
@@ -496,6 +507,7 @@ impl FakeChatBackend {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
             sampling_hints: Default::default(),
+            skip_tokenizer_init: false,
         }
     }
 }
@@ -514,7 +526,14 @@ impl TextBackend for FakeChatBackend {
     }
 
     fn tokenizer(&self) -> DynTokenizer {
+        if self.skip_tokenizer_init {
+            return Arc::new(UnavailableTokenizer::new(1024));
+        }
         Arc::new(fake_chat_tokenizer())
+    }
+
+    fn has_tokenizer(&self) -> bool {
+        !self.skip_tokenizer_init
     }
 
     fn model_id(&self) -> &str {
@@ -846,6 +865,40 @@ async fn scale_out_generate_route_follows_api_server_options() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// `VLLM_SERVER_DEV_MODE` reaches the router through `ApiServerOptions`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dev_routes_follow_api_server_options() {
+    for (server_dev_mode, expected) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
+        let (chat, engine_task) = test_chat_with_engine_handle().await;
+        let app = build_router(Arc::new(
+            AppState::new(vec!["model".to_string()], chat).with_api_server_options(
+                ApiServerOptions {
+                    server_dev_mode,
+                    ..Default::default()
+                },
+            ),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/get_world_size")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(
+            response.status(),
+            expected,
+            "server_dev_mode={server_dev_mode}"
+        );
+
+        engine_task.abort_and_join().await;
+    }
 }
 
 /// Assert that `method uri` hits the 501 placeholder for the Python route
@@ -6977,6 +7030,68 @@ async fn completions_echo_stream_emits_separate_prompt_chunk() {
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 
+/// Under `--skip-tokenizer-init`, token-ID completions run and return no text,
+/// and everything that needs the tokenizer is a 400. Chat requests are covered
+/// by `vllm-chat`'s tokenizer-less backend.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn skip_tokenizer_init_serves_token_id_completions_only() {
+    let (mut app, engine_task) = test_app_with_backend_and_stream_output_specs(
+        Arc::new(FakeChatBackend::without_tokenizer()),
+        default_stream_output_specs(),
+    )
+    .await;
+    let completion = |extra: serde_json::Value| {
+        let mut body = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "prompt": [104, 105]});
+        body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        body
+    };
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/completions",
+        completion(json!({"return_token_ids": true})),
+    )
+    .await;
+    engine_task.await.expect("mock engine task");
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let choice = &json["choices"][0];
+    assert_eq!(choice["text"], "");
+    assert_eq!(choice["prompt_token_ids"], json!([104, 105]));
+    assert_eq!(choice["token_ids"].as_array().map(Vec::len), Some(3));
+
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        ("/v1/completions", completion(json!({"prompt": "hi"}))),
+        ("/v1/completions", completion(json!({"echo": true}))),
+        (
+            "/v1/completions",
+            completion(json!({"stop": ["x"], "request_id": "stop"})),
+        ),
+        ("/v1/completions", completion(json!({"logprobs": 2}))),
+        (
+            "/v1/completions",
+            completion(json!({"structured_outputs": {"choice": ["a", "b"]}})),
+        ),
+        ("/tokenize", json!({"prompt": "hi"})),
+        ("/detokenize", json!({"tokens": [104]})),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        errors.push(format!("{uri} {status}: {}", json["error"]["message"]));
+    }
+    expect_test::expect![[r#"
+        [
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"Failed to decode token-ID prompt for echo: this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"text request `cmpl-stop` stop strings require detokenization; enable it or use stop token IDs\"",
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/v1/completions 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/tokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+            "/detokenize 400 Bad Request: \"this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set\"",
+        ]
+    "#]].assert_debug_eq(&errors);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
@@ -10536,6 +10651,91 @@ async fn access_log_disabled_logs_nothing() {
     .await;
 
     assert_eq!(lines, Vec::<String>::new());
+}
+
+/// Captures the `--log-error-stack` events as `LEVEL field=value ...`.
+#[derive(Clone, Default)]
+struct ErrorLogCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorLogCapture {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "vllm_server::middleware::error_log" {
+            return;
+        }
+        let mut line = event.metadata().level().to_string();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn fmt::Debug| {
+                line.push_str(&format!(" {}={value:?}", field.name()));
+            },
+        );
+        self.0.lock().expect("error log lock").push(line);
+    }
+}
+
+/// Send one good and two bad requests, and return what got logged.
+async fn error_log_lines(log_error_stack: bool) -> Vec<String> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["test-model".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                log_error_stack,
+                ..Default::default()
+            },
+        ),
+    ));
+    let capture = ErrorLogCapture::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+
+    let chat = |body: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .expect("build request")
+    };
+    let requests = [
+        Request::builder()
+            .method("GET")
+            .uri("/v1/models")
+            .body(Body::empty())
+            .expect("build request"),
+        chat(r#"{"model":"missing","messages":[{"role":"user","content":"hi"}]}"#),
+        chat("{not json"),
+    ];
+    for request in requests {
+        let response = app.clone().oneshot(request).await.expect("call app");
+        to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    }
+
+    engine_task.abort_and_join().await;
+    capture.0.lock().expect("error log lock").clone()
+}
+
+/// Only the failed requests are logged.
+#[tokio::test]
+#[serial]
+async fn log_error_stack_logs_error_responses() {
+    expect_test::expect![[r#"
+        [
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=404 error_type=\"NotFoundError\" error=\"The model `missing` does not exist.\"",
+            "ERROR message=Error response method=POST path=\"/v1/chat/completions\" status=400 error_type=\"Bad Request\" error=\"Failed to parse the request body as JSON: key must be a string at line 1 column 2\"",
+        ]
+    "#]].assert_debug_eq(&error_log_lines(true).await);
+}
+
+/// Without `--log-error-stack`, error responses are not logged.
+#[tokio::test]
+#[serial]
+async fn log_error_stack_disabled_logs_nothing() {
+    assert_eq!(error_log_lines(false).await, Vec::<String>::new());
 }
 
 /// Captures the events `--enable-log-outputs` logs, one `LEVEL field=value ...`
