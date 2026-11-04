@@ -85,6 +85,7 @@ def test_embed_rmsnorm(n: int, t: int, ids_dtype: torch.dtype) -> None:
 
     # Gather + embed_norm (base model / MTP prefill embed path).
     out = embed_rmsnorm(ids, table, w, EPS)
+    assert isinstance(out, torch.Tensor)
     assert out.shape == (t, n)
     assert torch.equal(out, rmsnorm(ref_emb, w, EPS) if t else ref_emb)
 
