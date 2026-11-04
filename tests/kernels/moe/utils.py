@@ -736,7 +736,14 @@ def make_routed_experts(
         max_num_tokens=16,
     )
     return RoutedExperts(
-        layer_name, dtype, moe_config, None, expert_map_manager, *ckpt_names
+        layer_name,
+        dtype,
+        moe_config,
+        None,
+        expert_map_manager,
+        ckpt_gate_proj_name=ckpt_names[0],
+        ckpt_down_proj_name=ckpt_names[1],
+        ckpt_up_proj_name=ckpt_names[2],
     )
 
 
@@ -780,14 +787,22 @@ def fake_moe_layer(
     tp: tuple[int, int] = (1, 0),
     ep: tuple[int, int] = (1, 0),
     lora: bool = False,
-    **kwargs,
+    num_redundant_experts: int = 0,
+    activation: MoEActivation = MoEActivation.SILU,
+    ckpt_names: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
 ) -> torch.nn.Module:
     """A decoder layer stand-in for model loader tests: `mlp.experts` is a
     `MoERunner` (optionally LoRA-wrapped) around a real CPU `RoutedExperts`
-    whose params are filled with -7, and `mlp.gate.weight` is the router.
-    `kwargs` go to `make_routed_experts`."""
+    whose params are filled with -7, and `mlp.gate.weight` is the router."""
     experts = make_routed_experts(
-        num_experts, hidden_size, intermediate_size, tp=tp, ep=ep, **kwargs
+        num_experts,
+        hidden_size,
+        intermediate_size,
+        tp=tp,
+        ep=ep,
+        num_redundant_experts=num_redundant_experts,
+        activation=activation,
+        ckpt_names=ckpt_names,
     )
     for param in experts.parameters():
         param.data.fill_(-7.0)
