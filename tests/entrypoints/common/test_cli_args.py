@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 import vllm.entrypoints.common.cli_args as cli_args_module
 from tests.utils import VLLM_PATH
@@ -177,6 +178,21 @@ def test_multiple_valid_inputs(serve_parser):
         ),
     ]
     assert args.lora_modules == expected
+
+
+def test_lora_modules_from_yaml_config(vllm_parser, tmp_path):
+    """YAML mappings in a list are passed to `--lora-modules` as JSON."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        yaml.safe_dump({"lora-modules": ["module1=/path/to/module1", LORA_MODULE]})
+    )
+    args = vllm_parser.parse_args(["serve", "model", "--config", str(config_file)])
+    assert args.lora_modules == [
+        LoRAModulePath(name="module1", path="/path/to/module1"),
+        LoRAModulePath(
+            name="module2", path="/path/to/module2", base_model_name="llama"
+        ),
+    ]
 
 
 ### Tests for serve argument validation that run prior to loading
