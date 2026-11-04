@@ -30,7 +30,6 @@ from functools import cache
 
 import torch
 
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -141,8 +140,7 @@ def column_sharded_down_supported(moe_config: FusedMoEConfig) -> bool:
     parallel_config = moe_config.moe_parallel_config
     tp_size = parallel_config.tp_size
     return (
-        envs.VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN
-        and tp_size > 1
+        tp_size > 1
         and not parallel_config.use_ep
         and moe_config.activation == MoEActivation.SILU
         and not moe_config.has_bias

@@ -823,8 +823,7 @@ class MuseSparkQuarkOCPMXFusedMoE(QuarkOCP_MX_MoEMethod):
             logger.info_once(
                 "MuseSpark column-sharded MoE down projection: %.2f GiB of "
                 "extra w2 per MXFP4 layer on each rank, used for batches of "
-                ">= %d tokens. Set VLLM_ROCM_MUSE_MOE_COLUMN_SHARDED_DOWN=0 to "
-                "give it to the KV cache instead.",
+                ">= %d tokens.",
                 (weights.w2.nbytes + weights.w2_scale.nbytes) / 2**30,
                 _COLUMN_SHARDED_MIN_TOKENS,
             )
