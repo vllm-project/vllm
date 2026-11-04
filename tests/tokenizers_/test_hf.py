@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pickle
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 import pytest
@@ -12,6 +13,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.hf import (
     CachedHfTokenizer,
     ThreadSafeHFTokenizerMixin,
+    _copy_for_pool,
     get_cached_tokenizer,
     maybe_make_thread_pool,
 )
@@ -94,6 +96,40 @@ def test_thread_pool_tokenizer_pickle(model_id: str):
 
     # Idempotence: wrapping an already-pooled tokenizer returns it unchanged.
     assert maybe_make_thread_pool(pooled_tokenizer) is pooled_tokenizer  # type: ignore[type-var]
+
+
+@pytest.mark.parametrize("model_id", ["openai-community/gpt2"])
+def test_thread_pool_tokenizer_copies_only_backend(model_id: str):
+    """Pool copies get their own Rust backend tokenizer and share the
+    Python-side state, which the pooled methods only read."""
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+    tokenizer_copy = _copy_for_pool(tokenizer)
+
+    assert tokenizer_copy._tokenizer is not tokenizer._tokenizer
+    assert tokenizer_copy.init_kwargs is tokenizer.init_kwargs
+    assert tokenizer_copy.encode("prompt") == tokenizer.encode("prompt")
+
+
+@pytest.mark.parametrize("model_id", ["openai-community/gpt2"])
+def test_thread_pool_tokenizer_concurrent_calls(model_id: str):
+    """Concurrent calls that set different truncation lengths on the Rust
+    backend tokenizer must each get their own backend, or they raise
+    `RuntimeError: Already borrowed` or truncate to another call's length."""
+    reference_tokenizer = AutoTokenizer.from_pretrained(model_id)
+    pooled_tokenizer = maybe_make_thread_pool(deepcopy(reference_tokenizer), copies=4)
+
+    calls = [("hello world " * (1 + i % 32), 4 + i % 8) for i in range(512)]
+
+    def encode(tokenizer, prompt: str, max_length: int) -> list[int]:
+        return tokenizer(prompt, truncation=True, max_length=max_length)["input_ids"]
+
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        results = list(
+            executor.map(lambda call: encode(pooled_tokenizer, *call), calls)
+        )
+
+    assert results == [encode(reference_tokenizer, *call) for call in calls]
 
 
 @pytest.mark.parametrize("model_id", ["openai-community/gpt2"])

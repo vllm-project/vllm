@@ -24,16 +24,30 @@ class ThreadSafeHFTokenizerMixin:
     pass
 
 
+def _copy_for_pool(tokenizer: TokenizersBackend) -> TokenizersBackend:
+    """Copy `tokenizer` so that the copy can be used concurrently with it.
+
+    Only the Rust backend tokenizer (`_tokenizer`) is copied: it is the part
+    that raises `RuntimeError: Already borrowed` when used from several threads
+    at once. Everything else is shared, as the pooled methods only read it.
+    Deep-copying the whole tokenizer would also duplicate its Python-side
+    vocabulary and merges, which takes seconds for large vocabularies.
+    """
+    tokenizer_copy = copy.copy(tokenizer)
+    tokenizer_copy._tokenizer = copy.deepcopy(tokenizer._tokenizer)
+    return tokenizer_copy
+
+
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     """If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
-    through a deep-copied tokenizer pool.
+    through a pool of copies, each with its own Rust backend tokenizer.
 
     Note that:
     - Only ``TokenizerLike``'s public interface is thread-safe.
       This doesn't include ``_tokenizer`` property nor any mutation
       methods like ``add_special_tokens`` or ``add_tokens``.
-    - Adjacent method calls could happen on different deep copies.
+    - Adjacent method calls could happen on different copies.
     """
     if not isinstance(tokenizer, TokenizersBackend) or isinstance(
         tokenizer, ThreadSafeHFTokenizerMixin
@@ -44,7 +58,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
 
     tokenizer_pool: queue.Queue[TokenizersBackend] = queue.Queue()
     for _ in range(copies):
-        tokenizer_pool.put(copy.deepcopy(og_tokenizer))
+        tokenizer_pool.put(_copy_for_pool(og_tokenizer))
 
     @contextlib.contextmanager
     def _borrow_from_pool():
@@ -52,7 +66,7 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
             tok = tokenizer_pool.get_nowait()
             yield tok
         except queue.Empty:
-            tok = copy.deepcopy(og_tokenizer)
+            tok = _copy_for_pool(og_tokenizer)
             yield tok
         finally:
             tokenizer_pool.put(tok)
