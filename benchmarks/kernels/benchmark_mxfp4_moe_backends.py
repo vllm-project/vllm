@@ -500,8 +500,13 @@ def main() -> None:
             for name, forward in invokes.items():
                 out = forward(hidden, logits)
                 if name == NVFP4_REFERENCE:
-                    usable = out.shape == hidden.shape and bool(out.isfinite().all())
-                    print(f"  {name:32s} n/a, own weights (shape/finite ok: {usable})")
+                    finite = bool(out.isfinite().all())
+                    if out.shape != hidden.shape or not finite:
+                        raise RuntimeError(
+                            f"{name} output is invalid: shape {tuple(out.shape)} "
+                            f"(expected {tuple(hidden.shape)}), all finite: {finite}"
+                        )
+                    print(f"  {name:32s} n/a, own weights (shape and values ok)")
                     continue
                 print(f"  {name:32s} {relative_error(out, expected):.4f}")
 
