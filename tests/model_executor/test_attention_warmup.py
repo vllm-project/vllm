@@ -179,3 +179,77 @@ def test_flashinfer_attention_warmup_gate(
 
     expected_warmup_calls = pp_group.world_size if expected_warmup else 0
     assert len(warmup_workers) == expected_warmup_calls
+
+
+@dataclass
+class _MiniMaxM3Worker:
+    vllm_config: object
+    modules: list[object]
+
+    def get_model(self):
+        class _Model:
+            def __init__(self, modules):
+                self._modules = modules
+
+            def modules(self):
+                return self._modules
+
+        return _Model(self.modules)
+
+
+@pytest.mark.parametrize(
+    ("has_msa_by_rank", "expected_warmup"),
+    [
+        ((True,), True),
+        ((False,), False),
+        ((True, True), True),
+        ((False, True), True),
+        ((True, False), True),
+        ((False, False), False),
+    ],
+)
+@pytest.mark.cpu_test
+def test_minimax_m3_msa_warmup_gate(monkeypatch, has_msa_by_rank, expected_warmup):
+    from vllm.model_executor.warmup import minimax_m3_msa_warmup
+    from vllm.models.minimax_m3.nvidia.model import MiniMaxM3SparseAttention
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda cap: cap == 100
+    )
+    monkeypatch.setattr(
+        minimax_m3_msa_warmup, "_msa_prebuild_kwargs", lambda *args: None
+    )
+
+    warmup_workers = []
+    monkeypatch.setattr(
+        minimax_m3_msa_warmup,
+        "mixed_batch_attention_warmup",
+        lambda worker: warmup_workers.append(worker),
+    )
+
+    msa_module = MiniMaxM3SparseAttention.__new__(MiniMaxM3SparseAttention)
+    other_module = object()
+
+    workers = [
+        _MiniMaxM3Worker(
+            vllm_config=SimpleNamespace(speculative_config=None),
+            modules=[msa_module if has_msa else other_module],
+        )
+        for has_msa in has_msa_by_rank
+    ]
+
+    pp_group = _PPGroup(len(workers))
+    monkeypatch.setattr(parallel_state, "get_pp_group", lambda: pp_group)
+
+    with ThreadPoolExecutor(max_workers=pp_group.world_size) as executor:
+        futures = [
+            executor.submit(minimax_m3_msa_warmup.minimax_m3_msa_warmup, worker)
+            for worker in workers
+        ]
+        for future in futures:
+            future.result()
+
+    expected_warmup_calls = pp_group.world_size if expected_warmup else 0
+    assert len(warmup_workers) == expected_warmup_calls

@@ -10,6 +10,7 @@ import torch
 
 from vllm import PoolingParams, SamplingParams
 from vllm.config import VllmConfig
+from vllm.distributed import parallel_state
 from vllm.logger import init_logger
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.utils.math_utils import cdiv
@@ -152,10 +153,21 @@ def run_mixed_prefill_decode_warmup(
     prefill_block_counts = [block_count(prefill_len, s) for s in kv_cache_specs]
     required_blocks = sum(decode_block_counts) + sum(prefill_block_counts)
     num_blocks = num_committable_kv_blocks(model_runner)
-    if num_blocks <= required_blocks:
+    has_capacity = num_blocks > required_blocks
+    if parallel_state.model_parallel_is_initialized():
+        pp_group = parallel_state.get_pp_group()
+        if pp_group.world_size > 1:
+            capacity_tensor = torch.tensor(
+                [int(has_capacity)], dtype=torch.int32, device="cpu"
+            )
+            pp_group.cpu_all_reduce_(capacity_tensor)
+            has_capacity = bool(capacity_tensor.item() == pp_group.world_size)
+
+    if not has_capacity:
         logger.warning(
-            "Skipping V2 mixed prefill+decode warmup because only %d KV blocks "
-            "are available for %d required warmup blocks.",
+            "Skipping V2 mixed prefill+decode warmup because insufficient KV "
+            "blocks are available for required warmup blocks across pipeline "
+            "stages (local: %d / %d).",
             num_blocks,
             required_blocks,
         )
