@@ -448,8 +448,9 @@ class MoRIIOWriter:
         if offsets is None:
             group = self.worker.layer_to_group[task.layer_name]
             assert request_info.block_ids is not None
-            local_blocks = task.local_block_ids[group]
-            remote_blocks = request_info.block_ids[group]
+            skip = request_info.num_skip_blocks
+            local_blocks = task.local_block_ids[group][skip:]
+            remote_blocks = request_info.block_ids[group][skip:]
             if self.worker._has_mamba:
                 # D can reserve a tail block for the token recomputed locally.
                 remote_blocks = remote_blocks[: len(local_blocks)]
@@ -1092,6 +1093,7 @@ class MoRIIOWrapper:
                     if isinstance(block_notify_list[0], int)
                     else block_notify_list
                 ),
+                num_skip_blocks=int(data.get("num_skip_blocks", 0)),
                 decode_dp_rank=decode_dp_rank,
             )
 
