@@ -9,7 +9,9 @@ use futures::Stream;
 use trait_set::trait_set;
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
 use vllm_llm::{RequestTimestamps, WeightVersionSpan};
-use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs};
+use vllm_text::{
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, EffectiveSampling,
+};
 
 use crate::FinishReason;
 use crate::error::{Error, Result};
@@ -43,14 +45,20 @@ pub struct CollectedAssistantMessage {
 pub struct ChatEventStream {
     request_id: String,
     prompt_text: Option<String>,
+    sampling: EffectiveSampling,
     inner: Pin<Box<dyn Stream<Item = Result<ChatEvent>> + Send>>,
 }
 
 impl ChatEventStream {
-    pub(crate) fn new(request_id: String, inner: impl crate::output::ChatEventStream) -> Self {
+    pub(crate) fn new(
+        request_id: String,
+        sampling: EffectiveSampling,
+        inner: impl crate::output::ChatEventStream,
+    ) -> Self {
         Self {
             request_id,
             prompt_text: None,
+            sampling,
             inner: Box::pin(inner),
         }
     }
@@ -78,6 +86,12 @@ impl ChatEventStream {
     /// consumer can move it into its first chunk without a copy.
     pub fn take_prompt_text(&mut self) -> Option<String> {
         self.prompt_text.take()
+    }
+
+    /// Return the sampling values the engine uses for this request, after
+    /// model defaults are applied.
+    pub fn sampling(&self) -> EffectiveSampling {
+        self.sampling
     }
 
     /// Collect the stream to completion and return the final assembled
@@ -178,14 +192,25 @@ mod tests {
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     };
 
-    use super::{ChatEventStream, CollectedAssistantMessage};
+    use super::{ChatEventStream, CollectedAssistantMessage, EffectiveSampling};
     use crate::error::Error;
     use crate::event::{ChatEvent, ChatTokenUsage};
+
+    fn test_sampling() -> EffectiveSampling {
+        EffectiveSampling {
+            temperature: 1.0,
+            top_p: 1.0,
+            max_tokens: 16,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
+        }
+    }
 
     #[tokio::test]
     async fn collect_message_requires_terminal_done_event() {
         let stream = ChatEventStream::new(
             "chat-missing-done".to_string(),
+            test_sampling(),
             stream::iter([Ok(ChatEvent::Start {
                 prompt_token_ids: vec![].into(),
                 prompt_logprobs: None,
@@ -204,6 +229,7 @@ mod tests {
     async fn collect_message_retains_prompt_and_sample_logprobs() {
         let stream = ChatEventStream::new(
             "chat-logprobs".to_string(),
+            test_sampling(),
             stream::iter(vec![
                 Ok(ChatEvent::Start {
                     prompt_token_ids: vec![10, 11].into(),
