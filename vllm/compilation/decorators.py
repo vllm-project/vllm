@@ -316,10 +316,14 @@ def _try_load_aot_compiled_fn(
             ds_config = model.compilation_config.dynamic_shapes_config
             if not ds_config.evaluate_guards:
                 loaded_fn.disable_guard_check()
-            # Eagerly load compiled artifacts now that traced_files
-            # is populated by _verify_source_unchanged.
-            with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
-                loaded_fn._artifacts.compiled_fn.finalize_loading(model.vllm_config)
+            from .caching import VllmSerializableFunction
+
+            compiled_fn = loaded_fn._artifacts.compiled_fn
+            if isinstance(compiled_fn, VllmSerializableFunction):
+                # The vLLM backend defers artifact loading until traced_files
+                # is populated by _verify_source_unchanged.
+                with maybe_use_cudagraph_partition_wrapper(model.vllm_config):
+                    compiled_fn.finalize_loading(model.vllm_config)
             compilation_counter.num_aot_artifacts_loaded += 1
             tag = getattr(model, "_compile_tag", "")
             log_prefix = f"[{tag}] " if tag else ""
@@ -578,7 +582,26 @@ def _support_torch_compile(
                 hash_key,
             )
 
-            # Hash-level dir; shared across ranks on the same node.
+            from vllm.platforms import current_platform
+
+            parallel_config = self.vllm_config.parallel_config
+            if current_platform.is_cpu() and (
+                parallel_config.enable_expert_parallel
+                or parallel_config.data_parallel_size > 1
+            ):
+                from vllm.distributed import get_ep_group
+
+                ep_group = get_ep_group()
+                communicator = ep_group.device_communicator
+                if communicator is not None and communicator.use_all2all:
+                    # CPU opaque ops capture this subgroup and rank. Shared
+                    # Inductor artifacts can otherwise replay another rank's op.
+                    group_name = ep_group.unique_name.replace(":", "_")
+                    cache_dir = os.path.join(
+                        cache_dir,
+                        f"cpu_{group_name}_rank_{ep_group.rank_in_group}",
+                    )
+
             self.compilation_config.local_cache_dir = cache_dir
             inductor_cache = os.path.join(cache_dir, "inductor_cache")
             os.makedirs(inductor_cache, exist_ok=True)

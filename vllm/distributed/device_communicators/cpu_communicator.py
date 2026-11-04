@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import torch
 from torch.distributed import ProcessGroup
 
 from vllm.distributed.utils import pickle
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -18,6 +19,8 @@ logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
+    _CPUSHM_GROUP_KINDS = {"tp", "pp"}
+
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -30,6 +33,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             cpu_group, device, device_group, unique_name, use_all2all=use_all2all
         )
         self.dist_module = torch.distributed
+        use_cpushm_group = self._is_cpushm_group_name(unique_name)
 
         if (
             (
@@ -39,11 +43,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 or current_platform.get_cpu_architecture() == CpuArchEnum.S390X
             )
             and hasattr(torch.ops._C, "init_shm_manager")
-            and (unique_name.startswith("tp") or unique_name.startswith("pp"))
+            and use_cpushm_group
             and self._all_group_ranks_share_shm_group_name()
         ):
             self.dist_module = _CPUSHMDistributed(self)
-        elif unique_name.startswith("tp") or unique_name.startswith("pp"):
+        elif use_cpushm_group:
             logger.info(
                 "CPU SHM communicator disabled for group %s: ranks do not share "
                 "the same SHM group name, falling back to torch.distributed.",
@@ -52,6 +56,16 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
         # send/recv tensor_dict is only supported through the SHM communicator backend
         self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
+        if unique_name.split(":", maxsplit=1)[0] in {"dp", "ep"}:
+            logger.info(
+                "CPU group %s uses %s: ranks=%s, rank_in_group=%d, "
+                "GLOO_SOCKET_IFNAME=%s.",
+                unique_name,
+                torch.distributed.get_backend(self.cpu_group),
+                self.ranks,
+                self.rank_in_group,
+                os.environ.get("GLOO_SOCKET_IFNAME", "auto"),
+            )
 
         if self.use_all2all:
             if self.all2all_backend not in (
@@ -67,6 +81,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
             self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
             logger.info("Using allgather_reducescatter all2all manager.")
+            self._register_ep_custom_ops()
+
+    @classmethod
+    def _is_cpushm_group_name(cls, unique_name: str) -> bool:
+        group_kind = unique_name.split(":", maxsplit=1)[0]
+        return group_kind in cls._CPUSHM_GROUP_KINDS
 
     def _all_group_ranks_share_shm_group_name(self) -> bool:
         """CPUSHM requires all ranks in this group to agree on one SHM group name.
@@ -79,7 +99,14 @@ class CpuCommunicator(DeviceCommunicatorBase):
             local_name,
             group=self.device_group,
         )
-        return len(set(names)) == 1
+        shared_name = len(set(names)) == 1
+        if not shared_name:
+            logger.debug(
+                "CPU SHM group-name mismatch for group %s: %s",
+                self.unique_name,
+                names,
+            )
+        return shared_name
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
@@ -145,6 +172,153 @@ class CpuCommunicator(DeviceCommunicatorBase):
         )
         return output_tensor
 
+    def _validate_sizes(self, sizes: list[int]) -> None:
+        if len(sizes) != self.world_size or any(
+            not isinstance(size, int) or isinstance(size, bool) or size < 0
+            for size in sizes
+        ):
+            raise ValueError(
+                "sizes must contain one nonnegative integer per subgroup rank "
+                f"(world_size={self.world_size}), got {sizes}."
+            )
+
+    @staticmethod
+    def _validate_cpu_tensor(tensor: torch.Tensor) -> None:
+        if tensor.device.type != "cpu" or tensor.layout != torch.strided:
+            raise ValueError("CPU collectives require dense CPU tensors.")
+        if tensor.ndim == 0:
+            raise ValueError(
+                "CPU variable-size collectives require a tensor dimension."
+            )
+
+    def _all_gatherv_uniform(
+        self,
+        tensor: torch.Tensor,
+        rows_per_rank: int,
+    ) -> torch.Tensor:
+        output = torch.empty(
+            (self.world_size * rows_per_rank,) + tensor.shape[1:],
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        self.dist_module.all_gather_into_tensor(
+            output,
+            tensor.contiguous(),
+            group=self.device_group,
+        )
+        return output
+
+    def _trim_ragged_rows(
+        self,
+        gathered: torch.Tensor,
+        sizes: list[int],
+        padded_rows: int,
+    ) -> torch.Tensor:
+        """Copy rank contributions out of the padded gather buffer."""
+        total_rows = sum(sizes)
+        output = torch.empty(
+            (total_rows,) + gathered.shape[1:],
+            dtype=gathered.dtype,
+            device=gathered.device,
+        )
+        offset = 0
+        for rank, n in enumerate(sizes):
+            if n:
+                output.narrow(0, offset, n).copy_(
+                    gathered.narrow(0, rank * padded_rows, n)
+                )
+            offset += n
+        return output
+
+    def _all_gatherv_ragged(
+        self,
+        tensor: torch.Tensor,
+        sizes: list[int],
+    ) -> torch.Tensor:
+        padded_rows = max(sizes)
+        padded_input = tensor.new_zeros((padded_rows,) + tensor.shape[1:])
+        padded_input[: tensor.shape[0]].copy_(tensor.contiguous())
+
+        gathered = tensor.new_empty((self.world_size * padded_rows,) + tensor.shape[1:])
+        self.dist_module.all_gather_into_tensor(
+            gathered,
+            padded_input,
+            group=self.device_group,
+        )
+
+        return self._trim_ragged_rows(gathered, sizes, padded_rows)
+
+    def _gather_single_gatherv(
+        self,
+        t: torch.Tensor,
+        sizes: list[int] | None,
+    ) -> torch.Tensor:
+        total_rows = sum(sizes) if sizes is not None else t.shape[0] * self.world_size
+        if total_rows == 0 or 0 in t.shape[1:]:
+            return t.new_empty((total_rows,) + t.shape[1:])
+        if sizes is None or all(size == sizes[0] for size in sizes):
+            return self._all_gatherv_uniform(t, t.shape[0])
+        return self._all_gatherv_ragged(t, sizes)
+
+    def all_gatherv(
+        self,
+        input_: torch.Tensor | list[torch.Tensor],
+        dim: int = 0,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor | list[torch.Tensor]:
+        """Variable-length all-gather over dim 0."""
+        if dim != 0:
+            raise NotImplementedError("CpuCommunicator.all_gatherv only supports dim=0")
+
+        if sizes is not None:
+            self._validate_sizes(sizes)
+        tensors = [input_] if isinstance(input_, torch.Tensor) else input_
+        for tensor in tensors:
+            self._validate_cpu_tensor(tensor)
+            if sizes is not None and tensor.shape[0] != sizes[self.rank_in_group]:
+                raise ValueError(
+                    f"Local rows {tensor.shape[0]} do not match "
+                    f"sizes[{self.rank_in_group}]={sizes[self.rank_in_group]}."
+                )
+        gathered = [self._gather_single_gatherv(tensor, sizes) for tensor in tensors]
+        return gathered[0] if isinstance(input_, torch.Tensor) else gathered
+
+    def reduce_scatterv(
+        self,
+        input_: torch.Tensor,
+        dim: int = -1,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Reduce-scatter with variable output sizes via all_reduce + local slice."""
+        self._validate_cpu_tensor(input_)
+        if not -input_.ndim <= dim < input_.ndim:
+            raise ValueError(f"Invalid dim {dim} for tensor with shape {input_.shape}.")
+        dim %= input_.ndim
+
+        if sizes is not None:
+            self._validate_sizes(sizes)
+            if input_.shape[dim] != sum(sizes):
+                raise ValueError(
+                    f"Scatter dimension {input_.shape[dim]} does not match "
+                    f"sum(sizes)={sum(sizes)}."
+                )
+        else:
+            if input_.shape[dim] % self.world_size:
+                raise ValueError(
+                    "Implicit reduce_scatterv requires the scatter dimension "
+                    f"{input_.shape[dim]} to be divisible by world_size "
+                    f"{self.world_size}."
+                )
+            sizes = [input_.shape[dim] // self.world_size] * self.world_size
+
+        reduced = input_.clone(memory_format=torch.contiguous_format)
+        if reduced.numel():
+            self.dist_module.all_reduce(reduced, group=self.device_group)
+        start = sum(sizes[: self.rank_in_group])
+        return reduced.narrow(dim, start, sizes[self.rank_in_group]).clone(
+            memory_format=torch.contiguous_format
+        )
+
     def send_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
@@ -168,6 +342,144 @@ class CpuCommunicator(DeviceCommunicatorBase):
             )
         return self.dist_module.recv_tensor_dict(src)
 
+    def _register_ep_custom_ops(self) -> None:
+        """Keep CPU collectives opaque to torch.compile."""
+        from .all2all import AgRsAll2AllManager
+
+        assert self.all2all_manager is not None
+        mgr = cast(AgRsAll2AllManager, self.all2all_manager)
+        safe_name = (
+            self.unique_name.replace("-", "_").replace("/", "_").replace(":", "_")
+        )
+        # Fake shapes bind local rows to this rank; Inductor caches are shared.
+        safe_name += f"_rank{self.rank_in_group}"
+
+        def _dispatch_rows(
+            hidden_states: torch.Tensor,
+            is_sequence_parallel: bool,
+            sizes: list[int],
+        ) -> int:
+            group = mgr._get_comm_group(is_sequence_parallel)
+            if not sizes:
+                return hidden_states.shape[0] * group.world_size
+            torch._check(len(sizes) == group.world_size)
+            for size in sizes:
+                torch._check_is_size(size)
+            torch._check(sizes[group.rank_in_group] == hidden_states.shape[0])
+            return sum(sizes)
+
+        @torch.library.custom_op(
+            f"vllm::cpu_ep_dispatch_rl_{safe_name}", mutates_args=()
+        )
+        def _dispatch_rl(
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            is_sequence_parallel: bool,
+            sizes: list[int],
+            extra_tensors: list[torch.Tensor],
+        ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]],
+                mgr.dispatch_router_logits(
+                    hidden_states,
+                    router_logits,
+                    is_sequence_parallel,
+                    extra_tensors,
+                    sizes_override=sizes or None,
+                ),
+            )
+
+        @_dispatch_rl.register_fake
+        def _(
+            hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            is_sequence_parallel: bool,
+            sizes: list[int],
+            extra_tensors: list[torch.Tensor],
+        ) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+            n = _dispatch_rows(hidden_states, is_sequence_parallel, sizes)
+            return (
+                hidden_states.new_empty((n,) + hidden_states.shape[1:]),
+                router_logits.new_empty((n,) + router_logits.shape[1:]),
+                [t.new_empty((n,) + t.shape[1:]) for t in extra_tensors],
+            )
+
+        @torch.library.custom_op(f"vllm::cpu_ep_dispatch_{safe_name}", mutates_args=())
+        def _dispatch(
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            is_sequence_parallel: bool,
+            sizes: list[int],
+            extra_tensors: list[torch.Tensor],
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+            return cast(
+                tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]],
+                mgr.dispatch(
+                    hidden_states,
+                    topk_weights,
+                    topk_ids,
+                    is_sequence_parallel,
+                    extra_tensors,
+                    sizes_override=sizes or None,
+                ),
+            )
+
+        @_dispatch.register_fake
+        def _(
+            hidden_states: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            is_sequence_parallel: bool,
+            sizes: list[int],
+            extra_tensors: list[torch.Tensor],
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]:
+            n = _dispatch_rows(hidden_states, is_sequence_parallel, sizes)
+            return (
+                hidden_states.new_empty((n,) + hidden_states.shape[1:]),
+                topk_weights.new_empty((n,) + topk_weights.shape[1:]),
+                topk_ids.new_empty((n,) + topk_ids.shape[1:]),
+                [t.new_empty((n,) + t.shape[1:]) for t in extra_tensors],
+            )
+
+        @torch.library.custom_op(f"vllm::cpu_ep_combine_{safe_name}", mutates_args=())
+        def _combine(
+            hidden_states: torch.Tensor, is_sequence_parallel: bool, sizes: list[int]
+        ) -> torch.Tensor:
+            return mgr.combine(
+                hidden_states, is_sequence_parallel, sizes_override=sizes or None
+            )
+
+        @_combine.register_fake
+        def _(
+            hidden_states: torch.Tensor, is_sequence_parallel: bool, sizes: list[int]
+        ) -> torch.Tensor:
+            group = mgr._get_comm_group(is_sequence_parallel)
+            if sizes:
+                torch._check(len(sizes) == group.world_size)
+                for size in sizes:
+                    torch._check_is_size(size)
+                torch._check(hidden_states.shape[0] == sum(sizes))
+                rows = sizes[group.rank_in_group]
+            else:
+                torch._check(hidden_states.shape[0] % group.world_size == 0)
+                rows = hidden_states.shape[0] // group.world_size
+            return hidden_states.new_empty((rows,) + hidden_states.shape[1:])
+
+        self._ep_dispatch_rl_op = _dispatch_rl
+        self._ep_dispatch_op = _dispatch
+        self._ep_combine_op = _combine
+
+    def _get_ep_sizes(self) -> list[int]:
+        assert self.all2all_manager is not None
+        if self.all2all_manager.dp_world_size == 1:
+            return []
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+        return sizes
+
     def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
@@ -178,16 +490,17 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """Dispatch the hidden states and router logits to the appropriate device.
-        This is a no-op in the base class.
-        """
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch_router_logits(
+        hidden, logits, extras = self._ep_dispatch_rl_op(
             hidden_states,
             router_logits,
             is_sequence_parallel,
-            extra_tensors,
+            self._get_ep_sizes(),
+            [] if extra_tensors is None else extra_tensors,
         )
+        if extra_tensors is None:
+            return hidden, logits
+        return hidden, logits, extras
 
     def dispatch(
         self,
@@ -200,28 +513,25 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
-        """Dispatch the hidden states and topk weights/ids to the appropriate device.
-        This is a no-op in the base class.
-        """
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch(
+        hidden, weights, ids, extras = self._ep_dispatch_op(
             hidden_states,
             topk_weights,
             topk_ids,
             is_sequence_parallel,
-            extra_tensors=extra_tensors,
+            self._get_ep_sizes(),
+            [] if extra_tensors is None else extra_tensors,
         )
+        if extra_tensors is None:
+            return hidden, weights, ids
+        return hidden, weights, ids, extras
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
-        """Combine the hidden states and router logits from the appropriate device.
-        This is a no-op in the base class.
-        """
         assert self.all2all_manager is not None
-        return self.all2all_manager.combine(
-            hidden_states,
-            is_sequence_parallel,
+        return self._ep_combine_op(
+            hidden_states, is_sequence_parallel, self._get_ep_sizes()
         )
 
 
