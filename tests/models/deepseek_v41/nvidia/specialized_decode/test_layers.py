@@ -163,7 +163,7 @@ class _Probe:
                 self._keep_ffn_input(i, out[1])
             return out
 
-        Boundaries.sublayer = sublayer_and_keep
+        Boundaries.sublayer = sublayer_and_keep  # type: ignore[method-assign]
 
     def _keep_residual(self, i):
         def hook(module, args, out):
@@ -307,13 +307,15 @@ class StepRecorder:
         self._prompt_lens = prompt_lens
         self._steps: list[dict] = []
         self._full = False
-        run_fullgraph = runner.cudagraph_manager.run_fullgraph
+        manager = runner.cudagraph_manager
+        assert manager is not None
+        run_fullgraph = manager.run_fullgraph
 
         def run_and_flag(desc):
             self._full = True
             return run_fullgraph(desc)
 
-        runner.cudagraph_manager.run_fullgraph = run_and_flag
+        manager.run_fullgraph = run_and_flag  # type: ignore[method-assign]
         execute_model = runner.execute_model
 
         def execute_and_record(*args, **kwargs):
