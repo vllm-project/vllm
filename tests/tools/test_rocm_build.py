@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ROCm image keys in .buildkite/scripts/rocm/keys.sh must cover every
+"""The ROCm image keys in .buildkite/scripts/rocm/build.sh must cover every
 build-context file the keyed Dockerfile parts read, or editing that file would
 ship a stale image."""
 
 import hashlib
 import os
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -33,10 +32,10 @@ def context_sources(dockerfile: str) -> set[str]:
 
 
 def key_paths(name: str, stack: str = "") -> set[str]:
-    script = (ROOT / ".buildkite/scripts/rocm/keys.sh").read_text()
+    script = (ROOT / ".buildkite/scripts/rocm/build.sh").read_text()
     # keys_at() computes both keys, indented in its body.
     block_match = re.search(rf"^\s*{name}=\$\(.*?sha256sum", script, re.M | re.S)
-    assert block_match is not None, f"{name}= block not found in keys.sh"
+    assert block_match is not None, f"{name}= block not found in build.sh"
     pattern = r"\b(?:requirements|tools|tests)/[\w./-]+|\brust-toolchain\.toml\b"
     paths = set(re.findall(pattern, block_match.group(0)))
     # therock_wheels.py is injected into Ks via a helper variable (rocm stack only)
@@ -68,11 +67,7 @@ def run_build(
     FAILURE=appear those of APPEARS refs once they appear, FAILURE=fetch-main and
     FAILURE=merge-base the lookup of main. FAKE_CLOCK=<file> makes every `date` call
     advance a minute; REAL_SLEEP=1 makes `sleep` real."""
-    if mode == "prebuild":  # it rewrites the stack inputs in the checkout
-        shutil.copytree(ROOT / "docker", tmp_path / "docker")
-        (tmp_path / "tools/vllm-rocm").mkdir(parents=True)
-    else:
-        (tmp_path / "docker").symlink_to(ROOT / "docker")
+    (tmp_path / "docker").symlink_to(ROOT / "docker")
     fake = tmp_path / "bin"
     fake.mkdir()
     calls = tmp_path / "calls"
@@ -89,10 +84,10 @@ case $1 in
   rev-parse) [[ $2 == HEAD ]] && echo "${HEAD_REV:-c1}" || echo "${2%%^*}" ;;
   log) echo 0 ;;
   archive) tar -ch docker ;;
-  diff) exit "${RECIPE_DIFF:-0}" ;;
   fetch) [[ $FAILURE == fetch-main && " $* " == *" main "* ]] && exit 1 ;;
   merge-base) [[ $FAILURE == merge-base ]] && exit 1; echo mb ;;
   show) cat "${2#*:}" ;;
+  diff) exit "${RECIPE_DIFF:-0}" ;;
   ls-tree)
     for f in "${@:4}"; do
       [[ $2 == HEAD && " $CHANGED " == *" $f "* ]] && echo "100644 blob changed $f"
@@ -350,29 +345,6 @@ def test_only_release_builders_share_the_host_network(tmp_path, mode):
     assert ("network=host" in builder) == (mode == "release"), stderr
 
 
-def test_prebuild_copies_the_pr_stack_images_with_this_merges_key(tmp_path):
-    # The fake git lists no files, so Ks hashes only the layer format line.
-    ks = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]
-    pin = "@sha256:" + "a" * 64
-    stack = f"rocm/vllm-dev:pr7-stack-rocm-{ks}{pin}"
-    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{ks}-wheels{pin}"
-    images = " ".join([stack, wheels, f"rocm/vllm-dev:pr8-stack-rocm-{ks}{pin}"])
-    env = dict(ROCM_PREBUILD_PR="7", ROCM_PREBUILD_SHA="a" * 40)
-    for recipe_diff, copied in (("0", [wheels, stack]), ("1", [])):
-        out = tmp_path / recipe_diff
-        out.mkdir()
-        status, stderr, calls = run_build(
-            out,
-            "prebuild",
-            ROCM_PREBUILD_IMAGES=images,
-            RECIPE_DIFF=recipe_diff,  # the PR built with another build.sh or bake file
-            **env,
-        )
-        assert status == 0, stderr
-        assert [c[7:] for c in calls if c.startswith("create ")] == copied
-        assert bool(built_tags(calls, stderr)) == (not copied)
-
-
 def untrusted_base(tmp_path, **env):
     return run_build(
         tmp_path,
@@ -550,3 +522,59 @@ def test_the_heartbeat_does_not_hold_up_the_build(tmp_path):
     )
     assert status == 0, stderr
     assert time.monotonic() - start < 15
+
+
+# The fake git lists no files of the promoted commit: its Ks hashes only the
+# layer format.
+PROMOTE_KS = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]
+PIN = "@sha256:" + "a" * 64
+PR_WHEELS = f"rocm/vllm-dev:pr7-stack-rocm-{PROMOTE_KS}-wheels{PIN}"
+PR_STACK = f"rocm/vllm-dev:pr7-stack-rocm-{PROMOTE_KS}{PIN}"
+
+
+def promote(tmp_path: Path, images: list[str], **env: str):
+    return run_build(
+        tmp_path,
+        "promote",
+        ROCM_PROMOTE_PR="7",
+        ROCM_PROMOTE_SHA="a" * 40,
+        ROCM_PROMOTE_IMAGES=" ".join(images),
+        **env,
+    )
+
+
+def copied(calls: list[str]) -> list[str]:
+    return [c.removeprefix("create ") for c in calls if c.startswith("create ")]
+
+
+def test_promote_copies_the_stack_pair_the_pr_recorded(tmp_path):
+    other_pr = f"rocm/vllm-dev:pr8-stack-rocm-{PROMOTE_KS}{PIN}"
+    status, stderr, calls = promote(tmp_path, [PR_STACK, other_pr, PR_WHEELS])
+    assert status == 0, stderr
+    # -wheels first: the stack tag marks the pair complete.
+    assert copied(calls) == [PR_WHEELS, PR_STACK]
+    assert not any(call.startswith("bake") for call in calls)
+
+
+def test_promote_skips_tags_main_already_has(tmp_path):
+    status, stderr, calls = promote(
+        tmp_path,
+        [PR_WHEELS, PR_STACK],
+        existing=(f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}",),
+    )
+    assert status == 0, stderr
+    assert not copied(calls)
+
+
+@pytest.mark.parametrize(
+    ("images", "env", "message"),
+    [
+        ([PR_STACK], {}, "recorded no"),
+        ([PR_WHEELS, PR_STACK], {"RECIPE_DIFF": "1"}, "another build.sh or bake file"),
+        ([PR_WHEELS, PR_STACK], {"ROCM_CI_REPO": "rocm/vllm-dev"}, "only pushes"),
+    ],
+)
+def test_promote_refuses_what_main_would_not_build(tmp_path, images, env, message):
+    status, stderr, calls = promote(tmp_path, images, **env)
+    assert status != 0 and message in stderr
+    assert not copied(calls)

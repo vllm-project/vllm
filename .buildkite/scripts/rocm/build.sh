@@ -13,16 +13,16 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
-#   prebuild Only the stack, from main with the stack inputs of a PR merged into main
-#            (ROCM_PREBUILD_PR/SHA): `/amd-ci cache` starts it in a main build of AMD CI, and
-#            main reuses it if Ks matches.
+#   promote  Copy the stack images a PR's CI built into the trusted repo (vLLM's /amd-ci cache), so
+#            main reuses them after the merge instead of rebuilding the stack.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; only prebuild reads it)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
+#                                          except promote: images a maintainer vouched for)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
@@ -66,38 +66,6 @@ case $STACK in
   rocm) SDF=docker/Dockerfile.rocm_base ;;
   *) echo "Unknown stack: $STACK" >&2; exit 2 ;;
 esac
-
-# prebuild: everything but the two stack inputs stays main's, this script and the bake file included.
-if [[ $MODE == prebuild ]]; then
-  [[ $REPO == "$TRUSTED" ]] || { echo "prebuild only pushes to $TRUSTED" >&2; exit 2; }
-  # Its own cache ref, which main never reads: main takes only the stack-rocm-<Ks> image from it.
-  CACHE_TO=$CACHE:prebuild-pr${ROCM_PREBUILD_PR:?}-
-  git fetch -q origin +refs/heads/main:refs/rocm-prebuild/main \
-    "+refs/pull/${ROCM_PREBUILD_PR:?}/head:refs/rocm-prebuild/pr"
-  [[ $(git rev-parse --is-shallow-repository) == false ]] || git fetch -q --unshallow origin
-  # Later commits (e.g. merges of main) may follow it; a force-push past it may not.
-  git merge-base --is-ancestor "${ROCM_PREBUILD_SHA:?}" refs/rocm-prebuild/pr 2>/dev/null \
-    || { echo "$ROCM_PREBUILD_SHA is no longer on #$ROCM_PREBUILD_PR" >&2; exit 1; }
-  mb=$(git merge-base refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA")
-  # Only content changes merge below; their key would differ from main's after the merge.
-  if git diff --summary "$mb" "$ROCM_PREBUILD_SHA" -- "$SDF" tools/vllm-rocm/therock_wheels.py \
-      | grep -E '^ (delete|mode change)' >&2; then
-    echo "#$ROCM_PREBUILD_PR deletes or changes the mode of a stack input: it cannot be pre-built" >&2
-    exit 1
-  fi
-  for f in "$SDF" tools/vllm-rocm/therock_wheels.py; do   # each as merged into current main
-    git show "$mb:$f" > "$f.base" 2>/dev/null || : > "$f.base"   # not there yet: empty
-    git show "$ROCM_PREBUILD_SHA:$f" > "$f.pr" 2>/dev/null || : > "$f.pr"
-    git show "refs/rocm-prebuild/main:$f" > "$f"
-    git merge-file "$f" "$f.base" "$f.pr" \
-      || { echo "$f of #$ROCM_PREBUILD_PR does not merge cleanly into main" >&2; exit 1; }
-    rm "$f.base" "$f.pr"
-  done
-  git add -- "$SDF" tools/vllm-rocm/therock_wheels.py
-  git -c user.name=vllm-ci -c user.email=noreply@vllm.ai commit -q --allow-empty \
-    -m "ROCm stack pre-build for #$ROCM_PREBUILD_PR"
-  BUILDKITE_COMMIT=$(git rev-parse HEAD)
-fi
 
 # ---------------------------------------------------------------------------
 # BuildKit builder
@@ -193,8 +161,35 @@ pushed() {
 # ---------------------------------------------------------------------------
 # Content keys
 # ---------------------------------------------------------------------------
-# shellcheck source=keys.sh
-source "$(dirname "${BASH_SOURCE[0]}")/keys.sh"
+# Ks (stack key): hash of the stack Dockerfile + therock_wheels.py.
+#   A Ks cache miss triggers a full stack rebuild (hours).
+# Kr (runtime key): Ks + the portion of Dockerfile.rocm above the per-commit
+#   marker + all pip requirement files.
+#   A Kr cache miss triggers a runtime rebuild (minutes).
+
+_trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
+# keys_at <rev>  — print "Ks Kr" for the files at <rev>. In $(), set -e is off: failures are returned.
+keys_at() {
+  local rev=$1 Ks Kr
+  # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
+  # identity: an image left in an older format would hand later builds a second copy of the same layers.
+  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
+    || return 1
+  Kr=$(
+    {
+      echo "$Ks"
+      git show "$rev:docker/Dockerfile.rocm" | sed -n '1,/^# ==== per-commit stages/p' || exit 1
+      git ls-tree "$rev" -- \
+        requirements/common.txt \
+        requirements/rocm.txt \
+        requirements/test/rocm.txt \
+        rust-toolchain.toml \
+        tests/vllm_test_utils \
+        tools/install_torchcodec_rocm.sh
+    } | sha256sum | cut -c1-16
+  ) || return 1
+  echo "$Ks $Kr"
+}
 keys=$(keys_at HEAD) || { echo "cannot compute the image keys of HEAD" >&2; exit 1; }
 read -r Ks Kr <<<"$keys"
 
@@ -390,20 +385,24 @@ case $MODE in
     fi
     ;;
 
-  prebuild)
-    # ROCM_PREBUILD_IMAGES: the stack images the PR's CI recorded. The maintainer's /amd-ci cache
-    # vouches for them: copy them when their key is this merge's and that commit used main's recipe.
-    if git diff --quiet refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA" -- \
-        .buildkite/scripts/rocm/build.sh .buildkite/scripts/rocm/keys.sh docker/docker-bake-rocm.hcl; then
-      for tag in "stack-$STACK-$Ks-wheels" "stack-$STACK-$Ks"; do   # the stack tag completes the pair
-        ref=$(tr ' ' '\n' <<<"${ROCM_PREBUILD_IMAGES:-}" \
-          | grep -xE "rocm/vllm-dev:pr$ROCM_PREBUILD_PR-$tag@sha256:[0-9a-f]{64}") || break
-        digest "$TRUSTED:$tag" >/dev/null && continue
-        echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
-        docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
-      done
-    fi
-    ensure base "stack-$STACK-$Ks" -wheels
+  promote)
+    # /amd-ci cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # ROCM_PROMOTE_SHA recorded. Copy the stack pair here under the key main's keys_at gives that
+    # commit, if it was built with main's recipe; main reuses it once it gets that key.
+    [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }
+    git fetch -q origin "${ROCM_PROMOTE_SHA:?}"
+    git diff --quiet HEAD "$ROCM_PROMOTE_SHA" -- .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl \
+      || { echo "$ROCM_PROMOTE_SHA builds with another build.sh or bake file than main" >&2; exit 1; }
+    keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
+    read -r pKs _ <<<"$keys"
+    for tag in "stack-$STACK-$pKs-wheels" "stack-$STACK-$pKs"; do   # the stack tag completes the pair
+      ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
+        | grep -xE "rocm/vllm-dev:pr${ROCM_PROMOTE_PR:?}-$tag@sha256:[0-9a-f]{64}") \
+        || { echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1; }
+      if digest "$TRUSTED:$tag" >/dev/null; then echo "$TRUSTED:$tag already exists" >&2; continue; fi
+      echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
+      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
+    done
     ;;
 
   release|release-base)

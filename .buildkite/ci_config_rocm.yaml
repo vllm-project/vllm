@@ -9,7 +9,6 @@ run_all_patterns:
   - ".buildkite/hardware_tests/amd.yaml"
   - ".buildkite/ci_config_rocm.yaml"
   - ".buildkite/scripts/rocm/build.sh"
-  - ".buildkite/scripts/rocm/keys.sh"
   - ".buildkite/scripts/rocm/select_aiter_nightly_wheel.py"
   - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
   - ".buildkite/scripts/hardware_ci/amd_ci_fast_exit.py"

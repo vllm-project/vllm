@@ -95,8 +95,7 @@ class FakeGitHub:
     ) -> None:
         self.comments = comments or []
         self.files = files or []
-        # main's blob of each ROCm stack input; /amd-ci cache keys its builds on them.
-        self.main_blobs: dict[str, str] = {}
+        self.labels: list[str] = []
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -148,14 +147,11 @@ class FakeGitHub:
     def add_comment(self, issue_number: int, body: str) -> None:
         self.comments.append(body)
 
-    def list_pr_files(self, number: int) -> list[dict[str, Any]]:
-        return [
-            {"filename": f, "status": "modified", "sha": "blob"} for f in self.files
-        ]
+    def list_pr_files(self, number: int) -> list[str]:
+        return self.files
 
-    def get_file_sha(self, path: str, ref: str) -> str:
-        assert ref == "main"  # the only ref /amd-ci cache reads blobs from
-        return self.main_blobs.get(path, "none")
+    def add_label(self, issue_number: int, label: str) -> None:
+        self.labels.append(label)
 
 
 class FakeBranchUpdater:
@@ -197,7 +193,6 @@ class FakeBuildkite:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: tuple[str, ...] = (),
-        jobs: bool = False,
     ) -> list[dict[str, Any]]:
         self.list_calls.append((commit, metadata))
         self.list_requests.append(
@@ -224,10 +219,6 @@ class FakeBuildkite:
     ) -> dict[str, Any]:
         self.retry_calls.append((build_number, states))
         return {"retried_jobs_count": 3}
-
-    def retry_job(self, build_number: int, job_id: str) -> dict[str, Any]:
-        self.retry_calls.append((build_number, job_id))
-        return {}
 
     def cancel_build(self, build_number: int) -> dict[str, Any]:
         self.cancel_calls.append(build_number)
@@ -1640,50 +1631,63 @@ class RunCiCommandTest(unittest.TestCase):
 
 
 STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
-STACK_INPUTS = (
-    "docker/Dockerfile.rocm_base=blob:none,tools/vllm-rocm/therock_wheels.py=none:none"
-)
+STACK_IMAGES = {"rocm-rocm-stack": "s@d1", "rocm-rocm-stack-wheels": "w@d2"}
 
 
-def cache_build(state: str, inputs: str = STACK_INPUTS) -> dict[str, Any]:
+def ci_build(**overrides: Any) -> dict[str, Any]:
     return {
-        "created_at": "2026-11-03",
-        "meta_data": {"rocm-prebuild-pr": "42", "rocm-prebuild-inputs": inputs},
-        "number": 7,
-        "state": state,
-        "web_url": "https://buildkite.example/amd-ci/builds/7",
-    }
-
-
-def ci_build(job_state: str) -> dict[str, Any]:
-    return {
-        "created_at": "2026-11-03",
-        "jobs": [
-            {
-                "id": "old",
-                "step_key": "rocm-base-image-cache",
-                "state": "failed",
-                "retried": True,
-            },
-            {"id": "j1", "step_key": "rocm-base-image-cache", "state": job_state},
-        ],
-        "number": 9,
+        "created_at": "1",
+        "meta_data": STACK_IMAGES,
         "pull_request": {"id": 42},
-        "web_url": "https://buildkite.example/ci/builds/9",
+        "web_url": "https://buildkite.example/ci/builds/2",
+        **overrides,
     }
 
 
 class RocmCacheTest(unittest.TestCase):
     def cache(
-        self,
-        github: FakeGitHub,
-        amd_lists: list[list[dict[str, Any]]],
-        ci_lists: list[list[dict[str, Any]]] = (),
-        actor: str = "reviewer",
-    ) -> tuple[FakeBuildkite, FakeBuildkite]:
-        amd, ci = FakeBuildkite(list(amd_lists)), FakeBuildkite(list(ci_lists))
-        run(make_event(COMMAND_CACHE_AMD, actor), github, amd, ci_buildkite=ci)
-        return amd, ci
+        self, github: FakeGitHub, ci_builds: list[dict[str, Any]], actor="reviewer"
+    ) -> FakeBuildkite:
+        amd = FakeBuildkite([[]])
+        run(
+            make_event(COMMAND_CACHE_AMD, actor),
+            github,
+            amd,
+            ci_buildkite=FakeBuildkite([ci_builds]),
+        )
+        return amd
+
+    def test_cache_copies_the_images_this_prs_ci_recorded(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        builds = [
+            ci_build(meta_data={key: "old" for key in STACK_IMAGES}, created_at="0"),
+            ci_build(),
+            ci_build(created_at="2", pull_request={"id": 7}),  # another PR
+            ci_build(created_at="3", meta_data={"rocm-rocm-stack": "s"}),  # partial
+        ]
+
+        amd = self.cache(github, builds)
+
+        (build,) = amd.created_builds
+        self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
+        self.assertEqual(
+            build["env"],
+            {
+                "ROCM_PROMOTE_PR": "42",
+                "ROCM_PROMOTE_SHA": "0123456789abcdef",
+                "ROCM_PROMOTE_IMAGES": "w@d2 s@d1",
+            },
+        )
+        self.assertEqual(github.labels, ["rocm-base-cached"])
+        self.assertIn("ci/builds/2", github.comments[0])
+
+    def test_cache_needs_a_ci_build_that_recorded_the_images(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        amd = self.cache(github, [ci_build(meta_data={})])
+
+        self.assertEqual((amd.created_builds, github.labels), ([], []))
+        self.assertIn("recorded its ROCm stack images yet", github.comments[0])
 
     def test_only_maintainers_with_write_access_can_cache(self) -> None:
         # The author, with CI delegated to them by an approval.
@@ -1694,86 +1698,15 @@ class RocmCacheTest(unittest.TestCase):
             reviews=[{"user": {"login": "reviewer"}, "state": "APPROVED"}],
         )
 
-        amd, _ = self.cache(github, [], actor="author")
+        amd = self.cache(github, [ci_build()], actor="author")
 
-        self.assertEqual(amd.created_builds, [])
+        self.assertEqual((amd.created_builds, github.labels), ([], []))
         self.assertIn("Only maintainers with write access", github.comments[0])
-
-    def test_cache_starts_a_main_build_with_the_prs_ci_images(self) -> None:
-        github = FakeGitHub(files=STACK_PR_FILES)
-        images = {"rocm-rocm-stack": "s", "rocm-rocm-stack-wheels": "w"}
-        source = {
-            "created_at": "1",
-            "meta_data": images,
-            "pull_request": {"id": 42},
-            "web_url": "https://buildkite.example/ci/builds/2",
-        }
-        other_pr = {**source, "created_at": "2", "pull_request": {"id": 7}}
-        partial = {**source, "created_at": "3", "meta_data": {"rocm-rocm-stack": "s"}}
-
-        amd, ci = self.cache(github, [[], []], [[source, other_pr, partial]])
-
-        (build,) = amd.created_builds
-        self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
-        self.assertEqual(
-            build["env"],
-            {
-                "ROCM_PREBUILD_PR": "42",
-                "ROCM_PREBUILD_SHA": "0123456789abcdef",
-                "ROCM_PREBUILD_IMAGES": "s w",
-            },
-        )
-        self.assertEqual(build["meta_data"]["rocm-prebuild-inputs"], STACK_INPUTS)
-        self.assertEqual(ci.list_requests[0]["commit"], "0123456789abcdef")
-        self.assertIn("ci/builds/2", github.comments[0])
-
-    def test_commenting_again_follows_the_cache_build(self) -> None:
-        cases = [
-            (cache_build("running"), [], False, [], "still caching"),
-            (
-                cache_build("passed"),
-                [[ci_build("failed")]],
-                False,
-                [(9, "j1")],
-                "retried the `ROCm base image cache` job",
-            ),
-            (
-                cache_build("passed"),
-                [[ci_build("passed")]],
-                False,
-                [],
-                "no failed `ROCm base image cache` job",
-            ),
-            (cache_build("failed"), [[]], True, [], "Started"),
-            # The PR changed its stack inputs since that build.
-            (cache_build("passed", "other"), [[]], True, [], "Started"),
-        ]
-        for build, ci_lists, starts, retried, text in cases:
-            with self.subTest(build=build, ci_lists=ci_lists):
-                github = FakeGitHub(files=STACK_PR_FILES)
-
-                amd, ci = self.cache(github, [[build], []], ci_lists)
-
-                self.assertEqual(bool(amd.created_builds), starts)
-                self.assertEqual(ci.retry_calls, retried)
-                self.assertIn(text, github.comments[0])
-
-    def test_a_stack_change_on_main_needs_a_new_cache_build(self) -> None:
-        github = FakeGitHub(files=STACK_PR_FILES)
-        github.main_blobs = {"docker/Dockerfile.rocm_base": "newer"}
-
-        amd, _ = self.cache(github, [[cache_build("passed")], []], [[]])
-
-        (build,) = amd.created_builds
-        self.assertIn(
-            "docker/Dockerfile.rocm_base=blob:newer",
-            build["meta_data"]["rocm-prebuild-inputs"],
-        )
 
     def test_cache_is_a_noop_without_stack_changes(self) -> None:
         github = FakeGitHub(files=["vllm/foo.py"])
 
-        amd, _ = self.cache(github, [])
+        amd = self.cache(github, [ci_build()])
 
         self.assertEqual(amd.created_builds, [])
         self.assertIn("nothing to cache", github.comments[0])

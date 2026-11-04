@@ -81,16 +81,13 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
-# CI fails a PR that changes these in its "ROCm base image cache" job until
-# main's stack image for it exists (ci-infra); `/amd-ci cache` builds that image
-# in AMD CI and then retries the job.
-ROCM_STACK_INPUTS = (
-    "docker/Dockerfile.rocm_base",
-    "tools/vllm-rocm/therock_wheels.py",
-)
-ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
-# Written by build.sh base mode: the stack images the PR's CI built.
-ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack", "rocm-rocm-stack-wheels")
+# pre-commit.yml fails a PR that changes these until it has one of these labels:
+# `/amd-ci cache` adds the first; maintainers add the second to skip caching.
+ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
+ROCM_CACHED_LABEL = "rocm-base-cached"
+ROCM_CACHE_SKIP_LABEL = "rocm-base-cache-skip"
+# build.sh base mode records the stack images it built under these keys.
+ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
 
 
 class ApiError(RuntimeError):
@@ -346,17 +343,16 @@ class GitHubClient:
             method="POST",
         )
 
-    def list_pr_files(self, number: int) -> list[dict[str, Any]]:
-        return self._paginate(self._repo_path(f"/pulls/{number}/files"))
+    def list_pr_files(self, number: int) -> list[str]:
+        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
+        return [str(file["filename"]) for file in files]
 
-    def get_file_sha(self, path: str, ref: str) -> str:
-        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
-        try:
-            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
-        except ApiError as error:
-            if error.status == 404:
-                return "none"
-            raise
+    def add_label(self, issue_number: int, label: str) -> None:
+        self._request(
+            self._repo_path(f"/issues/{issue_number}/labels"),
+            body={"labels": [label]},
+            method="POST",
+        )
 
 
 class BuildkiteClient:
@@ -425,10 +421,9 @@ class BuildkiteClient:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: Sequence[str] = (),
-        jobs: bool = False,
     ) -> list[dict[str, Any]]:
         query = [
-            *([] if jobs else [("exclude_jobs", "true")]),
+            ("exclude_jobs", "true"),
             ("exclude_pipeline", "true"),
             ("per_page", "100"),
         ]
@@ -459,11 +454,6 @@ class BuildkiteClient:
             method="PUT",
             path=f"/{number}/retry_failed_jobs",
         )
-
-    def retry_job(self, build_number: int, job_id: str) -> dict[str, Any]:
-        number = urllib.parse.quote(str(build_number), safe="")
-        job = urllib.parse.quote(job_id, safe="")
-        return self._request(method="PUT", path=f"/{number}/jobs/{job}/retry")
 
     def cancel_build(self, build_number: int) -> dict[str, Any]:
         number = urllib.parse.quote(str(build_number), safe="")
@@ -1212,56 +1202,21 @@ def handle_cancel_ci(
     )
 
 
-def rocm_stack_changes(github: GitHubClient, pr: Mapping[str, Any]) -> dict[str, str]:
-    """The PR's blob of each stack input it changes ("none": removed)."""
-    return {
-        file["filename"]: "none" if file["status"] == "removed" else file["sha"]
-        for file in github.list_pr_files(pr["number"])
-        if file["filename"] in ROCM_STACK_INPUTS
-    }
+def changes_rocm_stack(github: GitHubClient, pr: Mapping[str, Any]) -> bool:
+    return any(path in ROCM_STACK_INPUTS for path in github.list_pr_files(pr["number"]))
 
 
 def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
     try:
-        if not rocm_stack_changes(github, pr):
+        if not changes_rocm_stack(github, pr):
             return ""
     except ApiError as error:  # never fail the run command over a reminder
         print(f"Could not check the ROCm stack inputs: {error}", file=sys.stderr)
         return ""
     return (
-        "\n\nℹ️ This PR changes the ROCm base image, so CI's `ROCm base image "
-        "cache` job fails until that image is cached. Once the rest of CI is green, "
-        f"a maintainer with write access comments `{COMMAND_CACHE_AMD}`, then again "
-        "once that AMD CI build passes to retry the job."
-    )
-
-
-def retry_rocm_cache_job(ci_buildkite: BuildkiteClient, pr: Mapping[str, Any]) -> str:
-    builds = [
-        build
-        for build in ci_buildkite.list_builds(pr["head"]["sha"], jobs=True)
-        if is_build_for_pr(build, pr["number"])
-    ]
-    build = max(builds, key=lambda build: build.get("created_at", ""), default=None)
-    job = next(
-        (
-            job
-            for job in (build or {}).get("jobs") or []
-            if job.get("step_key") == ROCM_CACHE_STEP_KEY
-            and not job.get("retried")
-            and job.get("state") in {"failed", "timed_out", "expired"}
-        ),
-        None,
-    )
-    if not build or not job:
-        return (
-            "there is no failed `ROCm base image cache` job in CI for "
-            f"`{pr['head']['sha'][:12]}` to retry."
-        )
-    ci_buildkite.retry_job(build["number"], job["id"])
-    return (
-        "retried the `ROCm base image cache` job in "
-        f"[Buildkite CI #{build['number']}]({build['web_url']})."
+        "\n\nℹ️ This PR changes the ROCm base image. Before it merges, a maintainer "
+        f"comments `{COMMAND_CACHE_AMD}` once this CI built the image, or adds the "
+        f"`{ROCM_CACHE_SKIP_LABEL}` label; `pre-commit` fails until then."
     )
 
 
@@ -1273,75 +1228,43 @@ def handle_cache_amd(
     github: GitHubClient,
     pr: Mapping[str, Any],
 ) -> str:
-    changes = rocm_stack_changes(github, pr)
-    if not changes:
+    if not changes_rocm_stack(github, pr):
         return "This PR does not change the ROCm base image; nothing to cache."
     sha = pr["head"]["sha"]
-    # A cache build stays good while these files keep their blobs on the PR and on
-    # main; CI's job checks for the image main needs either way.
-    inputs = ",".join(
-        f"{p}={changes.get(p, 'none')}:{github.get_file_sha(p, 'main')}"
-        for p in ROCM_STACK_INPUTS
-    )
-    builds = [
-        build
-        for build in buildkite.list_builds(
-            None, branch="main", metadata=("rocm-prebuild-pr", str(pr["number"]))
-        )
-        if (build.get("meta_data") or {}).get("rocm-prebuild-inputs") == inputs
-    ]
-    build = max(builds, key=lambda build: build.get("created_at", ""), default=None)
-    if build and is_active_build(build):
-        return (
-            f"[Buildkite AMD CI #{build['number']}]({build['web_url']}) is still "
-            f"caching the ROCm base image. Comment `{COMMAND_CACHE_AMD}` again once "
-            "it passes."
-        )
-    if build and build.get("state") == "passed":
-        return (
-            f"[Buildkite AMD CI #{build['number']}]({build['web_url']}) cached the "
-            f"ROCm base image; {retry_rocm_cache_job(ci_buildkite, pr)}"
-        )
-
-    # The PR's CI build of this commit that recorded its ROCm images: build.sh
-    # copies those whose keys match instead of rebuilding them.
+    # The images this PR's own CI built, by the digests it recorded: copied as
+    # built, whatever happens to their tags afterwards.
     sources = [
-        candidate
-        for source in (buildkite, ci_buildkite)
-        for candidate in source.list_builds(sha)
-        if is_build_for_pr(candidate, pr["number"])
-        and all(
-            (candidate.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS
-        )
+        build
+        for client in (buildkite, ci_buildkite)
+        for build in client.list_builds(sha)
+        if is_build_for_pr(build, pr["number"])
+        and all((build.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS)
     ]
     source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
-    env = {"ROCM_PREBUILD_PR": str(pr["number"]), "ROCM_PREBUILD_SHA": sha}
-    if source:
-        env["ROCM_PREBUILD_IMAGES"] = " ".join(
-            source["meta_data"][key] for key in ROCM_STACK_IMAGE_KEYS
+    if source is None:
+        raise CiPreparationError(
+            f"No CI build of `{sha[:12]}` recorded its ROCm stack images yet. Run "
+            f"`{COMMAND_RUN_AMD_CI}` or `{COMMAND_RUN_CI}`, then `{COMMAND_CACHE_AMD}`."
         )
     build = buildkite.create_build(
         {
             "commit": "HEAD",
             "branch": "main",
-            "message": f"ROCm base image cache for PR #{pr['number']} by @{actor}",
-            "env": env,
-            "meta_data": {
-                "rocm-prebuild-pr": str(pr["number"]),
-                "rocm-prebuild-inputs": inputs,
+            "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
+            "env": {
+                "ROCM_PROMOTE_PR": str(pr["number"]),
+                "ROCM_PROMOTE_SHA": sha,
+                "ROCM_PROMOTE_IMAGES": " ".join(
+                    source["meta_data"][key] for key in ROCM_STACK_IMAGE_KEYS
+                ),
             },
         }
     )
-    origin = (
-        f"copying the images of [this PR's CI]({source['web_url']}) where they match"
-        if source
-        else "building it: no CI build of this commit recorded its ROCm images"
-    )
+    github.add_label(pr["number"], ROCM_CACHED_LABEL)
     return (
-        f"Started [Buildkite AMD CI #{build['number']}]({build['web_url']}) to cache "
-        f"the ROCm base image of `{sha[:12]}`, {origin}. Comment "
-        f"`{COMMAND_CACHE_AMD}` again once it passes to retry CI's "
-        "`ROCm base image cache` job."
+        f"Started [Buildkite AMD CI #{build['number']}]({build['web_url']}) to copy "
+        f"the ROCm stack images of [this PR's CI]({source['web_url']}) into "
+        f"`rocm/vllm-ci`, and added `{ROCM_CACHED_LABEL}`."
     )
 
 
