@@ -547,7 +547,7 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ran
 
 
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
@@ -587,7 +587,7 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank(
 
 
 def test_deferred_write_timeout_notifies_every_fanout_target(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     wrapper = _real_wrapper()
     sent: list[tuple[str, int, str]] = []
@@ -666,7 +666,7 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
 
 
 def test_write_rejects_unmappable_tp_before_scheduling_any_layer(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     from unittest.mock import Mock
 

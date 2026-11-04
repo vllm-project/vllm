@@ -77,7 +77,7 @@ def _stub_worker_shutdown(
     worker: MooncakeConnectorWorker, shutdown: Callable[[], object]
 ) -> None:
     # Keep the stub installed through __del__, after the test's patch scopes end.
-    setattr(worker, "shutdown", shutdown)  # noqa: B010
+    worker.shutdown = shutdown  # type: ignore[method-assign]
 
 
 @pytest.mark.parametrize(

@@ -708,7 +708,6 @@ class TestNixlHandshake:
         pcp_size,
         dcp_size,
         expected_tracked,
-        *,
         monkeypatch: pytest.MonkeyPatch,
     ):
         """Replicated PCP is canonicalized; PCP-DCP publishes every shard."""
@@ -2342,7 +2341,7 @@ def test_multi_kv_connector_stats_aggregation():
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_scheduler_kv_connector_stats_aggregation(*, monkeypatch: pytest.MonkeyPatch):
+def test_scheduler_kv_connector_stats_aggregation(monkeypatch: pytest.MonkeyPatch):
     """Test scheduler and worker KV connector stats aggregation."""
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -2474,7 +2473,7 @@ class RequestIdMapper:
     def __init__(self, output_processor: OutputProcessor):
         self.req_id_mapping: dict[str, str] = {}
         self.original_add_request = output_processor.add_request
-        setattr(output_processor, "add_request", self._add_request)  # noqa: B010
+        output_processor.add_request = self._add_request  # type: ignore[method-assign]
 
     def _add_request(self, request: EngineCoreRequest, *args, **kwargs):
         assert request.external_req_id is not None

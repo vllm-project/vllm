@@ -245,7 +245,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
     worker._record_slice_layouts(caches)
     # Built without __init__: there is no engine to shut down.
     # Keep this stub through __del__; a scoped patch would restore real cleanup.
-    setattr(worker, "shutdown", lambda: None)  # noqa: B010
+    worker.shutdown = lambda: None  # type: ignore[method-assign]
     return Rank(tp_rank, tp_size, caches, regions, worker)
 
 
@@ -258,7 +258,6 @@ def _connect(
     producer: Rank,
     consumers: list[Rank],
     dp_engine: str,
-    *,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Route the producer's sessions and notifications to the decode ranks."""

@@ -44,7 +44,7 @@ from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(
-    nested, *, monkeypatch: pytest.MonkeyPatch
+    nested, monkeypatch: pytest.MonkeyPatch
 ):
     """Composite binding must reach HiSparse and existing pool-only connectors."""
     hisparse = object.__new__(HiSparseConnector)
@@ -155,7 +155,7 @@ def test_hisparse_host_residency_reported_as_hisparse_metrics():
 
 
 def test_no_forward_enqueues_deferred_hisparse_transfers(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """A zero-token step must still enqueue deferred post-forward transfers."""
     connector = object.__new__(ActiveKVConnector)
@@ -174,7 +174,7 @@ def test_no_forward_enqueues_deferred_hisparse_transfers(
 
 
 def test_full_graph_step_prepares_host_mirror_outside_model(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Graph replay must restore host-mirror state cleared at step start."""
     runtime = SimpleNamespace(

@@ -458,7 +458,7 @@ class TestPushWriterRegSend:
     stale-engine eviction (X1)."""
 
     def _reg_send_worker(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> tuple[_StubWriterWorker, list]:
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
@@ -467,7 +467,7 @@ class TestPushWriterRegSend:
         return w, failures
 
     def test_sends_to_all_agents_with_prefix_and_payload(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         w, failures = self._reg_send_worker(monkeypatch=monkeypatch)
         w._remote_agents["prefill-engine"] = {(0, 0): "agent-0", (0, 1): "agent-1"}
@@ -492,7 +492,7 @@ class TestPushWriterRegSend:
             ]
 
     def test_queues_failed_request_when_engine_not_handshaked(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         w, failures = self._reg_send_worker(monkeypatch=monkeypatch)
 
@@ -504,7 +504,7 @@ class TestPushWriterRegSend:
         w.nixl_wrapper.send_notif.assert_not_called()
 
     def test_agent_read_is_serialized_with_handshake_lock(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         """While another thread holds ``_handshake_lock`` (as the handshake
         done-callback does while writing ``_remote_agents``), the writer's
@@ -641,7 +641,7 @@ class TestPushWriterStartLoadKv:
         assert w.start_push_calls[0][0] == "req-C"
         assert "req-C" not in w._pending_d_registrations
 
-    def test_start_load_kv_enqueues_to_writer(self, *, monkeypatch: pytest.MonkeyPatch):
+    def test_start_load_kv_enqueues_to_writer(self, monkeypatch: pytest.MonkeyPatch):
         """``start_load_kv`` should hand registrations + finished blocks
         to the writer queues without doing matching itself."""
         w = _StubWriterWorker.fresh()
@@ -669,7 +669,7 @@ class TestPushWriterStartLoadKv:
 
     @pytest.mark.parametrize("sharded", [False, True])
     def test_noncanonical_pcp_rank_only_pushes_distinct_shards(
-        self, sharded, *, monkeypatch: pytest.MonkeyPatch
+        self, sharded, monkeypatch: pytest.MonkeyPatch
     ):
         w = _StubWriterWorker.fresh()
         w.pcp_rank = 1
@@ -700,7 +700,7 @@ def _real_do_start_push_kv(w, *args):
 
 
 def test_do_start_push_kv_defers_then_writes_when_handshake_ready(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Full happy-path lifecycle: an in-flight handshake defers the WRITE (no
     NIXL op from the writer or the executor callback); once it resolves the
@@ -744,7 +744,7 @@ def test_do_start_push_kv_defers_then_writes_when_handshake_ready(
 
 
 def test_do_start_push_kv_drops_request_on_handshake_failure(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Handshake raises: the request is dropped (not re-queued, no WRITE) and
     the failure is logged. Blocks are reclaimed by the lease/watchdog, matching
@@ -806,7 +806,7 @@ def test_writer_loop_drains_deferred_push_inbox():
 
 
 def _eviction_worker(
-    engine_ttl: float, *, monkeypatch: pytest.MonkeyPatch
+    engine_ttl: float, monkeypatch: pytest.MonkeyPatch
 ) -> _StubWriterWorker:
     """A push worker wired to drive the base ``_ensure_handshake`` eviction
     path (``_evict_stale_engines`` + ``_cleanup_remote_engine``)."""
@@ -830,7 +830,7 @@ def _eviction_worker(
     return w
 
 
-def test_active_push_refreshes_engine_last_active(*, monkeypatch: pytest.MonkeyPatch):
+def test_active_push_refreshes_engine_last_active(monkeypatch: pytest.MonkeyPatch):
     """The base ``_ensure_handshake`` refreshes liveness only on a new
     handshake, so an active push to an already-connected engine must refresh
     ``_engine_last_active`` itself or it is reaped mid-stream (S1)."""
@@ -846,7 +846,7 @@ def test_active_push_refreshes_engine_last_active(*, monkeypatch: pytest.MonkeyP
     assert w.writes == ["req"]
 
 
-def test_stale_engine_evicted_on_push(*, monkeypatch: pytest.MonkeyPatch):
+def test_stale_engine_evicted_on_push(monkeypatch: pytest.MonkeyPatch):
     """A push drives ``_ensure_handshake`` -> ``_evict_stale_engines``, so a D
     engine silent past its TTL is reaped -- no _remote_agents / NIXL agent leak
     across D scale up/down (S1)."""
@@ -864,7 +864,7 @@ def test_stale_engine_evicted_on_push(*, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_cleanup_remote_engine_pops_under_handshake_lock(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Regression (X1): eviction must not remove ``_remote_agents`` entries
     while another thread is inside the lock's critical section (e.g. the
@@ -907,7 +907,7 @@ def _recv_metadata(remote_engine_id: str, req_id: str = "req") -> NixlConnectorM
 
 
 def test_start_load_kv_refreshes_engine_last_active_on_d_side(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """D receiving a push refreshes ``_engine_last_active`` for the prefill
     remote, but only once that engine is connected (handshaked into
@@ -930,7 +930,7 @@ def test_start_load_kv_refreshes_engine_last_active_on_d_side(
 
 
 def test_start_load_kv_skips_liveness_for_unconnected_engine(
-    *, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """If the prefill engine was never handshaked into ``_remote_agents`` (e.g.
     its heartbeat handshake never succeeded), the D-side refresh must NOT record
@@ -1082,7 +1082,7 @@ class TestPushWriterNotifs:
 
     @pytest.mark.parametrize("release_fails", [False, True])
     def test_push_submission_failure_is_remembered_after_sibling_success(
-        self, release_fails, *, monkeypatch: pytest.MonkeyPatch
+        self, release_fails, monkeypatch: pytest.MonkeyPatch
     ):
         """A submission error remains a failure even if later polls succeed."""
         w = self._pollable_worker()
@@ -1349,7 +1349,7 @@ class TestPushWriterNegative:
         assert w._push_writer_wake.is_set()
 
     def test_failed_push_transfer_does_not_evict_writer_state(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         w = _StubWriterWorker.fresh()
         w.nixl_wrapper = MagicMock()
@@ -1392,7 +1392,7 @@ class TestPushWriterNegative:
         assert w.xfer_stats.data["num_notifications_after_expiry"] == [1]
 
     def test_start_load_kv_with_empty_metadata_is_noop(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
@@ -1541,7 +1541,7 @@ class TestPushWriterMlaReplication:
     leave the un-written ranks decoding against stale KV."""
 
     @staticmethod
-    def _mla_worker_writing_to(d_ranks, *, monkeypatch: pytest.MonkeyPatch):
+    def _mla_worker_writing_to(d_ranks, monkeypatch: pytest.MonkeyPatch):
         from types import SimpleNamespace
 
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
@@ -1580,9 +1580,7 @@ class TestPushWriterMlaReplication:
         w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
-    def test_mla_hetero_tp_writes_every_d_rank(
-        self, *, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_mla_hetero_tp_writes_every_d_rank(self, monkeypatch: pytest.MonkeyPatch):
         from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
             RemoteMeta,
             ReqMeta,
@@ -1625,7 +1623,7 @@ class TestPushWriterMlaReplication:
         assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]
 
     def test_csa_linear_writes_every_group_to_each_target(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         from types import SimpleNamespace
 
@@ -1716,7 +1714,7 @@ class TestPushPrefixCaching:
 
     @staticmethod
     def _worker_driving_xfer(
-        engine_id: str = "decode-engine", *, monkeypatch: pytest.MonkeyPatch
+        monkeypatch: pytest.MonkeyPatch, engine_id: str = "decode-engine"
     ):
         from types import SimpleNamespace
 
@@ -1772,7 +1770,7 @@ class TestPushPrefixCaching:
         return list(args[2]), list(args[4])
 
     def test_partial_prefix_hit_end_trims_producer_blocks(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         """D registered only its 2 uncomputed suffix blocks; P finished the
         full 5-block sequence. P must WRITE its LAST 2 blocks into D's slots."""
@@ -1789,7 +1787,7 @@ class TestPushPrefixCaching:
         assert remote == [500, 501]
 
     def test_no_prefix_hit_leaves_blocks_untrimmed(
-        self, *, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch
     ):
         """Equal counts (no prefix cache hit on D): nothing is trimmed."""
         w, _ = self._worker_driving_xfer(monkeypatch=monkeypatch)
@@ -1803,7 +1801,7 @@ class TestPushPrefixCaching:
 
     @pytest.mark.parametrize("groups_match", [False, True])
     def test_push_requires_each_layer_in_the_same_cache_group(
-        self, groups_match, *, monkeypatch: pytest.MonkeyPatch
+        self, groups_match, monkeypatch: pytest.MonkeyPatch
     ):
         """A layer in a pooled remote region still receives its blocks; a layer
         in another cache group on D is refused."""
