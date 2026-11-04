@@ -1327,6 +1327,276 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
+@pytest.fixture
+def placeholder_producer():
+    config = _make_worker_vllm_config(
+        "kv_producer", {"bootstrap_server_address": "127.0.0.1:12345"}
+    )
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies(),
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        try:
+            yield worker
+        finally:
+            worker.shutdown()
+
+
+async def _wait_for_placeholder_condition(condition):
+    async def poll():
+        while not condition():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(poll(), timeout=10)
+
+
+def _placeholder_pull(transfer_id="unknown"):
+    # A release-only pull has no destination buffers and needs no registered KV.
+    return _xfer_meta([], {"d-req": (transfer_id, [])})
+
+
+async def _record_placeholder_request(worker, transfer_id="unknown", *, ready=False):
+    allocation = MooncakeConnectorMetadata()
+    allocation.add_new_req(
+        request_id="p-req",
+        local_block_ids=[[1]] if ready else [],
+        kv_transfer_params={"transfer_id": transfer_id},
+        load_remote_cache=False,
+    )
+    await worker.record_send_reqs(allocation)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal", ["timeout", "cancel", "reply-error"])
+async def test_unknown_transfer_placeholder_is_reclaimed(
+    placeholder_producer, monkeypatch, terminal
+):
+    """Unclaimed placeholders must not outlive their final waiting pull."""
+    worker = placeholder_producer
+    monkeypatch.setenv(
+        "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480" if terminal == "cancel" else "0"
+    )
+    sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+    if terminal == "reply-error":
+        sock.send_multipart.side_effect = RuntimeError("reply failed")
+    task = asyncio.create_task(
+        worker.send_kv_to_decode(b"d", sock, _placeholder_pull())
+    )
+    if terminal == "cancel":
+        await _wait_for_placeholder_condition(
+            lambda: "unknown" in worker.reqs_need_send
+        )
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif terminal == "reply-error":
+        with pytest.raises(RuntimeError, match="reply failed"):
+            await task
+    else:
+        await task
+        response = worker._xfer_resp_decoder.decode(
+            sock.send_multipart.call_args.args[0][1]
+        )
+        assert response.err_reqs == ["d-req"]
+    assert worker.reqs_need_send == {}
+    assert await worker.fetch_finished_sending_reqs() == set()
+
+    # A late real request can create a fresh event and serve the same ID.
+    await _record_placeholder_request(worker)
+    await _record_placeholder_request(worker, ready=True)
+    sock.send_multipart.side_effect = None
+    await worker.send_kv_to_decode(b"d", sock, _placeholder_pull())
+    response = worker._xfer_resp_decoder.decode(
+        sock.send_multipart.call_args.args[0][1]
+    )
+    assert response.ok_reqs == ["d-req"]
+    assert worker.reqs_need_send == {}
+    assert await worker.fetch_finished_sending_reqs() == {"p-req"}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("claim", ["allocated", "ready", "replacement"])
+async def test_unknown_placeholder_timeout_preserves_scheduler_record(
+    placeholder_producer, monkeypatch, claim
+):
+    """Timeout cleanup must preserve a scheduler claim or a newer generation."""
+    worker = placeholder_producer
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "0")
+    original = None
+    claimed = None
+
+    async def claim_at_reply(_message):
+        nonlocal original, claimed
+        original = worker.reqs_need_send["unknown"]
+        if claim == "replacement":
+            abort = MooncakeConnectorMetadata()
+            abort.reqs_not_processed = {"unknown"}
+            await worker.record_send_reqs(abort)
+        await _record_placeholder_request(worker)
+        if claim == "ready":
+            await _record_placeholder_request(worker, ready=True)
+        claimed = worker.reqs_need_send["unknown"]
+
+    sock = AsyncMock(
+        spec=zmq.asyncio.Socket, send_multipart=AsyncMock(side_effect=claim_at_reply)
+    )
+    await worker.send_kv_to_decode(b"d", sock, _placeholder_pull())
+    assert worker.reqs_need_send["unknown"] is claimed
+    assert claimed.p_req_id == "p-req"
+    assert (claimed is original) == (claim != "replacement")
+    sock.send_multipart.side_effect = None
+    if claim != "ready":
+        await _record_placeholder_request(worker, ready=True)
+    await worker.send_kv_to_decode(b"d", sock, _placeholder_pull())
+    response = worker._xfer_resp_decoder.decode(
+        sock.send_multipart.call_args.args[0][1]
+    )
+    assert response.ok_reqs == ["d-req"]
+    assert await worker.fetch_finished_sending_reqs() == {"p-req"}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_unknown_placeholder_cleanup_before_ready_wait(
+    placeholder_producer,
+):
+    """A failed expired-ID reply must clean unknown IDs before waiters exist."""
+    worker = placeholder_producer
+    await _record_placeholder_request(worker, "expired")
+    await _record_placeholder_request(worker, "expired", ready=True)
+    expired_at = worker.reqs_need_send["expired"].expire_time + 1
+    with patch.object(mooncake_connector.time, "perf_counter", return_value=expired_at):
+        assert await worker.fetch_finished_sending_reqs() == {"p-req"}
+    sock = AsyncMock(
+        spec=zmq.asyncio.Socket,
+        send_multipart=AsyncMock(side_effect=RuntimeError("reply failed")),
+    )
+    metadata = _xfer_meta(
+        [], {"d-expired": ("expired", []), "d-unknown": ("unknown", [])}
+    )
+    with pytest.raises(RuntimeError, match="reply failed"):
+        await worker.send_kv_to_decode(b"d", sock, metadata)
+    response = worker._xfer_resp_decoder.decode(
+        sock.send_multipart.call_args.args[0][1]
+    )
+    assert response.err_reqs == ["d-expired"]
+    assert worker.reqs_need_send == {}
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_unknown_placeholder_is_shared_until_last_pull_finishes(
+    placeholder_producer, monkeypatch
+):
+    """One timed-out pull must not orphan another pull's ready event."""
+    worker = placeholder_producer
+    monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "0")
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    tasks = []
+    for index in range(2):
+
+        async def hold_reply(_message, index=index):
+            entered[index].set()
+            await release[index].wait()
+
+        sock = AsyncMock(
+            spec=zmq.asyncio.Socket, send_multipart=AsyncMock(side_effect=hold_reply)
+        )
+        tasks.append(
+            asyncio.create_task(
+                worker.send_kv_to_decode(b"d", sock, _placeholder_pull())
+            )
+        )
+        await asyncio.wait_for(entered[index].wait(), timeout=10)
+    placeholder = worker.reqs_need_send["unknown"]
+    try:
+        release[0].set()
+        await tasks[0]
+        assert worker.reqs_need_send["unknown"] is placeholder
+        release[1].set()
+        await tasks[1]
+        assert "unknown" not in worker.reqs_need_send
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_terminal", ["timeout", "cancel"])
+async def test_unknown_placeholder_keeps_another_pull_connected(
+    placeholder_producer, monkeypatch, first_terminal
+):
+    """The remaining waiter must receive the scheduler's eventual ready signal."""
+    worker = placeholder_producer
+    monkeypatch.setenv(
+        "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
+        "0" if first_terminal == "timeout" else "480",
+    )
+    timed_out = asyncio.Event()
+    release_reply = asyncio.Event()
+
+    async def hold_reply(_message):
+        timed_out.set()
+        await release_reply.wait()
+
+    first_sock = AsyncMock(
+        spec=zmq.asyncio.Socket, send_multipart=AsyncMock(side_effect=hold_reply)
+    )
+    first = asyncio.create_task(
+        worker.send_kv_to_decode(b"first", first_sock, _placeholder_pull())
+    )
+    second = None
+    try:
+        await _wait_for_placeholder_condition(
+            lambda: "unknown" in worker.reqs_need_send
+        )
+        placeholder = worker.reqs_need_send["unknown"]
+        if first_terminal == "timeout":
+            await asyncio.wait_for(timed_out.wait(), timeout=10)
+        monkeypatch.setenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
+        second_sock = AsyncMock(spec=zmq.asyncio.Socket, send_multipart=AsyncMock())
+        second = asyncio.create_task(
+            worker.send_kv_to_decode(b"second", second_sock, _placeholder_pull())
+        )
+        await _wait_for_placeholder_condition(lambda: placeholder.pending_pulls == 2)
+        if first_terminal == "cancel":
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            release_reply.set()
+            await first
+        assert worker.reqs_need_send["unknown"] is placeholder
+        assert placeholder.pending_pulls == 1
+        await _record_placeholder_request(worker)
+        await _record_placeholder_request(worker, ready=True)
+        await asyncio.wait_for(second, timeout=10)
+        response = worker._xfer_resp_decoder.decode(
+            second_sock.send_multipart.call_args.args[0][1]
+        )
+        assert response.ok_reqs == ["d-req"]
+        assert "unknown" not in worker.reqs_need_send
+        assert await worker.fetch_finished_sending_reqs() == {"p-req"}
+    finally:
+        first.cancel()
+        if second is not None:
+            second.cancel()
+        await asyncio.gather(
+            *[task for task in (first, second) if task is not None],
+            return_exceptions=True,
+        )
+
+
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
