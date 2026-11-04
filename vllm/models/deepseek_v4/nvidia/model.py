@@ -30,6 +30,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClam
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
@@ -1130,6 +1131,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    expert_params = load_routed_experts_weight(
+                        self, name, loaded_weight
+                    )
+                    if expert_params is not None:
+                        loaded_params.update(expert_params)
+                        continue
+                    # MegaMoE experts are not under a MoERunner: own mapping.
+                    name_mapped: str | None = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1155,6 +1164,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
+                    if name_mapped is None:
+                        raise KeyError(name)
                     loaded_params.add(name_mapped)
                     continue
                 else:
