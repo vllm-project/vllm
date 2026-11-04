@@ -98,23 +98,24 @@ manifest，并分别记录 main/draft 的 tensor 数量、字节数和 manifest 
 `start_weight_update → metadata/update buckets → finish_weight_update`，不会
 替调用方 pause、sleep、清 cache、发送请求或 resume。
 
-## 可选 lifecycle wrapper
+## lifecycle wrapper
 
-一次调用完成普通更新，严格执行
-`pause(keep) → reset prefix cache → publisher → resume`：
+服务端必须带 `--enable-sleep-mode` 启动。wrapper 默认执行完整的 RL
+colocated/offload cycle，一次调用完成：可选 abort 在最前面；随后
+`reset → sleep(2) → wake(weights) → pause → reset → publisher → resume →
+wake(kv_cache)`。这样能测出 level-2 sleep 丢弃、但更新不会重写的状态。
+VIME 只有在丢弃未完成 rollout 时才执行 abort，因此必须显式启用。
 
 ```bash
-./run_vllm_lifecycle.sh http://<server-host>:8000 -- \
+./run_vllm_lifecycle.sh http://<server-host>:8000 --abort-inflight -- \
   .venv/bin/python run_vllm_weight_update.py <publisher arguments>
 ```
 
-需要完整 colocated/offload cycle 时仍只调用一次：可选 abort 在最前面；随后
-`reset → sleep(2) → wake(weights) → pause → reset → publisher → resume →
-wake(kv_cache)`。VIME 只有在丢弃未完成 rollout 时才执行 abort，因此必须显式启用。
+`--no-offload` 跳过 sleep/wake，只执行
+`pause(keep) → reset prefix cache → publisher → resume`：
 
 ```bash
-./run_vllm_lifecycle.sh http://<server-host>:8000 \
-  --abort-inflight --offload -- \
+./run_vllm_lifecycle.sh http://<server-host>:8000 --no-offload -- \
   .venv/bin/python run_vllm_weight_update.py <publisher arguments>
 ```
 

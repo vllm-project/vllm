@@ -21,7 +21,7 @@ Megatron, or Transformers dependency — it talks to vLLM directly.
 | --- | --- |
 | `hf_checkpoint_nccl_publisher.py` | Checkpoint manifest, canonical source, stateful NCCL publisher |
 | `run_vllm_weight_update.py` | Minimal CLI: one checkpoint NCCL weight-update transaction |
-| `run_vllm_lifecycle.sh` | Optional wrapper orchestrating pause / reset / sleep / wake / resume around the publisher |
+| `run_vllm_lifecycle.sh` | Wrapper orchestrating pause / reset / sleep / wake / resume around the publisher; level-2 sleep/wake by default |
 | `validation/` | Fixed-token oracle, GSM8K eval, and pre/post comparison |
 | `provenance/write_run_sidecars.py` | Emits `.meta.json` provenance sidecars for a result directory |
 
@@ -30,13 +30,18 @@ Full usage notes are in
 
 ### Server contract
 
-The server must use the NCCL backend with `packed` enabled; packed buffer size
-and count use vLLM defaults, and the inference worker world size does not change
-during an update:
+The server must use the NCCL backend with `packed` enabled and run with sleep
+mode, as RL rollouts do; packed buffer size and count use vLLM defaults, and the
+inference worker world size does not change during an update:
 
 ```bash
---weight-transfer-config '{"backend":"nccl","packed":true}'
+--enable-sleep-mode --weight-transfer-config '{"backend":"nccl","packed":true}'
 ```
+
+Verify updates through `run_vllm_lifecycle.sh`: by default it runs the RL cycle
+`sleep(2) → wake(weights) → update → wake(kv_cache)`, so state that level-2
+sleep discards and the update does not rewrite is caught. `--no-offload` skips
+the sleep/wake cycle.
 
 Client and server containers must share the same vLLM runtime.
 The publisher trainer rank and serving ranks must use different physical GPUs.

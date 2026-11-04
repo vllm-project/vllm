@@ -2,17 +2,20 @@
 set -Eeuo pipefail
 
 usage() {
-  echo "usage: $0 URL [--abort-inflight] [--offload] -- PUBLISHER..." >&2
+  echo "usage: $0 URL [--abort-inflight] [--no-offload] -- PUBLISHER..." >&2
 }
 [[ $# -ge 3 ]] || { usage; exit 2; }
 base_url=${1%/}
 shift
 abort_inflight=false
-offload=false
+# RL colocates training: every update runs the level-2 sleep/wake cycle
+# unless --no-offload (the server needs --enable-sleep-mode)
+offload=true
 while [[ ${1:-} != -- ]]; do
   case ${1:-} in
     --abort-inflight) abort_inflight=true ;;
     --offload) offload=true ;;
+    --no-offload) offload=false ;;
     *) usage; exit 2 ;;
   esac
   shift
