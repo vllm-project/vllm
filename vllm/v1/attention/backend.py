@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.platforms.interface import DeviceCapability
-    from vllm.v1.hisparse.runtime import HiSparseCacheHandle
     from vllm.v1.kv_cache_interface import (
         AttentionSpec,
         KVCacheLayout,
@@ -105,6 +104,11 @@ class AttentionBackend(ABC):
     def supports_head_size(cls, head_size: int) -> bool:
         supported_head_sizes = cls.get_supported_head_sizes()
         return (not supported_head_sizes) or head_size in supported_head_sizes
+
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        """Whether the backend can serve a V head size that differs from K's."""
+        return head_size_v == head_size
 
     @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
@@ -468,11 +472,6 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
-    replayssm_decode_base_cpu: torch.Tensor | None = None
-    """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
-    at the current decode run's last full-state write. write_pos counts from
-    here, so a preemption-resumed request re-anchors past the prompt boundary."""
-
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None
 
@@ -485,6 +484,14 @@ class CommonAttentionMetadata:
 
     def replace(self, **kwargs) -> "CommonAttentionMetadata":
         return replace(self, **kwargs)
+
+    def invalidate_cached_layout(self) -> None:
+        """Drop values cached from query_start_loc and seq_lens.
+
+        Call after updating either in place.
+        """
+        self._num_computed_tokens_cache = None
+        self._token_to_req_indices_cache = None
 
     def compute_num_computed_tokens(self) -> torch.Tensor:
         """Compute num_computed_tokens on device (seq_lens - query_lens)."""
@@ -547,7 +554,6 @@ class CommonAttentionMetadata:
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             req_idx=maybe_slice_reqs(self.req_idx),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
-            replayssm_decode_base_cpu=maybe_slice_reqs(self.replayssm_decode_base_cpu),
         )
 
 
@@ -1034,8 +1040,10 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
 
-    hisparse_cache: "HiSparseCacheHandle | None" = None
     supports_pcp: bool = True
+
+    def get_fp8_ds_mla_row_bytes(self) -> int:
+        return 656
 
     @abstractmethod
     def __init__(

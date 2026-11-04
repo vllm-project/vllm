@@ -9,15 +9,15 @@ namespace vllm {
 namespace topk_histogram_4096 {
 
 // Visit a row with vectorized loads and a scalar tail.
-template <uint32_t BlockSize, uint32_t VecSize, typename Visit>
-__device__ __forceinline__ void scan_scores(const float* __restrict__ scores,
+template <uint32_t BlockSize, uint32_t VecSize, typename InT, typename Visit>
+__device__ __forceinline__ void scan_scores(const InT* __restrict__ scores,
                                             uint32_t length, Visit visit) {
   static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   const uint32_t tx = threadIdx.x;
 
   if constexpr (VecSize == 1) {
     for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-      visit(idx, scores[idx]);
+      visit(idx, to_float(scores[idx]));
     }
     return;
   }
@@ -27,20 +27,20 @@ __device__ __forceinline__ void scan_scores(const float* __restrict__ scores,
   for (uint32_t base = tx * VecSize; base < aligned_length;
        base += BlockSize * VecSize) {
     if constexpr (VecSize == 4) {
-      const float4 values = *reinterpret_cast<const float4*>(scores + base);
+      const float4 values = load_score4(scores + base);
       visit(base, values.x);
       visit(base + 1, values.y);
       visit(base + 2, values.z);
       visit(base + 3, values.w);
     } else {
-      const float2 values = *reinterpret_cast<const float2*>(scores + base);
+      const float2 values = load_score2(scores + base);
       visit(base, values.x);
       visit(base + 1, values.y);
     }
   }
 
   for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
-    visit(idx, scores[idx]);
+    visit(idx, to_float(scores[idx]));
   }
 }
 
@@ -69,12 +69,12 @@ constexpr uint32_t kExactCandidateOffset = 16 * 1024;
 // use and correctness are independent of coarse-bin occupancy. Recovery can
 // resume at StartRound from a known prefix, and with FinalCandidateCapacity
 // the last round stages its candidates so the output pass skips a row scan.
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
-          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0>
-__device__ void exact_topk_rescan(const float* __restrict__ scores,
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
+          uint32_t StartRound, uint32_t FinalCandidateCapacity, typename InT>
+__device__ void exact_topk_rescan(const InT* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
-                                  void* _smem, uint32_t initial_prefix = 0,
-                                  uint32_t initial_remaining = TopK) {
+                                  void* _smem, uint32_t initial_prefix,
+                                  uint32_t initial_remaining) {
   static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   using Radix = ExactRadixTraits;
   constexpr uint32_t kHistogramBins = Radix::kBins;
@@ -215,7 +215,7 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
     if (candidate_count <= FinalCandidateCapacity) {
       for (uint32_t i = tx; i < candidate_count; i += BlockSize) {
         const uint32_t idx = final_candidates[i];
-        collect(idx, scores[idx]);
+        collect(idx, to_float(scores[idx]));
       }
     } else if (smem->pivot_count == candidate_count) {
       // Every key under the final prefix equals the pivot (heavy ties), so
@@ -240,9 +240,9 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
   __syncthreads();
 }
 
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize, typename InT>
 __device__ __noinline__ void exact_topk_rescan_cold(
-    const float* __restrict__ scores, int32_t* __restrict__ output,
+    const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem) {
   exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem);
 }
@@ -335,9 +335,10 @@ __device__ __forceinline__ void select_coarse_refine_digit(
 // values, so two radix-2048 passes select the exact pivot. A bin holding a
 // single key (e.g. all-equal scores) needs no refinement: that key is the
 // pivot, so the first pass also tracks the bin's min and max key.
-template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread>
+template <uint32_t TopK, uint32_t HistBits, uint32_t VecsPerThread,
+          typename Vec>
 __device__ __forceinline__ bool exact_topk_refine_registers(
-    const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
+    const Vec (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem) {
   constexpr uint32_t kBins = kCoarseRefineBins;
   constexpr uint32_t kDigitBits = kCoarseRefineDigitBits;
@@ -373,14 +374,14 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
     bool done = false;
 #pragma unroll
     for (uint32_t v = 0; v < VecsPerThread && !done; ++v) {
-      const float* values = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
       for (uint32_t e = 0; e < 4 && !done; ++e) {
         const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+        const float value = vec_score(vecs[v], e);
         if (idx >= length) {
           done = true;
-        } else if (extract_coarse_bin_N<HistBits>(values[e]) == coarse_bin) {
-          const uint32_t key = convert_to_uint32_v2(values[e]);
+        } else if (extract_coarse_bin_N<HistBits>(value) == coarse_bin) {
+          const uint32_t key = convert_to_uint32_v2(value);
           const uint32_t delta = key - base_key;
           if (round == 0) {
             key_min = min(key_min, key);
@@ -427,14 +428,13 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
   bool done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VecsPerThread && !done; ++v) {
-    const float* values = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
     for (uint32_t e = 0; e < 4 && !done; ++e) {
       const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
       if (idx >= length) {
         done = true;
       } else {
-        const uint32_t key = convert_to_uint32_v2(values[e]);
+        const uint32_t key = convert_to_uint32_v2(vec_score(vecs[v], e));
         if (key > pivot) {
           const uint32_t pos = atomicAdd(&smem->output_counter, 1);
           output[pos] = static_cast<int32_t>(idx);
