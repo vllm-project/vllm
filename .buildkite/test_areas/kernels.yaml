@@ -860,16 +860,20 @@ steps:
       - vllm/model_executor/layers/fused_moe/router/gate_linear.py
       - vllm/model_executor/layers/fused_moe/router/rocm_fp32_router_gemm.py
       - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_rocm.py
+      - vllm/model_executor/layers/fused_moe/router/rocm_bf16_router_gemm.py
+      - vllm/model_executor/kernels/linear/mxfp8/rocm_block32_gemm.py
       - vllm/platforms/rocm.py
       - tests/kernels/test_rocm_fp32_router_gemm.py
       - tests/kernels/test_gate_linear_rocm_dispatch.py
       - tests/kernels/test_bf16x3_router_gemm_rocm.py
+      - tests/kernels/test_rocm_bf16_router_gemm.py
       commands:
       - >-
         pytest -v -s
         tests/kernels/test_rocm_fp32_router_gemm.py
         tests/kernels/test_gate_linear_rocm_dispatch.py
         tests/kernels/test_bf16x3_router_gemm_rocm.py
+        tests/kernels/test_rocm_bf16_router_gemm.py
 
 # Disabled until b12x transitive dependencies are locked.
 # - label: ":nvidia: (DGX Spark) [Nightly] b12x Linear Kernels"
