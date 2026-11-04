@@ -269,10 +269,14 @@ def test_video_cache_is_independent_of_image_kwargs(
     depend on cache warmth.
     """
     request_kwargs = {"images_kwargs": image_kwargs}
-    # A rescale_factor override only changes pixels when the processor rescales.
+    # A rescale_factor override only changes pixels when the processor
+    # rescales, so test it with device-side normalization off.
+    model_config_kwargs = (
+        {"mm_device_do_normalize": False} if "rescale_factor" in image_kwargs else None
+    )
     ctx = build_model_context(
         model_id,
-        model_config_kwargs={"mm_device_do_normalize": False},
+        model_config_kwargs=model_config_kwargs,
         limit_mm_per_prompt={"image": 1, "video": 1},
         mm_processor_cache_gb=1,
     )
