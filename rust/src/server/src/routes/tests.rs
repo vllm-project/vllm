@@ -59,8 +59,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
-    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
+    RouteGates, build_router, build_router_with_gates, render::build_router as build_render_router,
     strip_root_path, with_root_path,
 };
 use crate::config::{
@@ -70,6 +69,8 @@ use crate::lora::LoadLoraError;
 use crate::model_names::ServedModelNames;
 use crate::render::RenderState;
 use crate::state::AppState;
+
+mod responses;
 
 fn request_output(
     request_id: &str,
@@ -451,6 +452,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 struct FakeChatBackend {
     model_id: String,
     multimodal_model_info: Option<vllm_chat::multimodal::MultimodalModelInfo>,
+    sampling_hints: vllm_text::SamplingHints,
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
@@ -475,6 +477,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: None,
+            sampling_hints: Default::default(),
         }
     }
 
@@ -482,6 +485,7 @@ impl FakeChatBackend {
         Self {
             model_id: model_id.into(),
             multimodal_model_info: None,
+            sampling_hints: Default::default(),
         }
     }
 
@@ -491,6 +495,7 @@ impl FakeChatBackend {
         Self {
             model_id: "test-model".to_string(),
             multimodal_model_info: Some(multimodal_model_info),
+            sampling_hints: Default::default(),
         }
     }
 }
@@ -504,6 +509,10 @@ impl fmt::Debug for FakeChatBackend {
 }
 
 impl TextBackend for FakeChatBackend {
+    fn sampling_hints(&self) -> vllm_text::Result<vllm_text::SamplingHints> {
+        Ok(self.sampling_hints.clone())
+    }
+
     fn tokenizer(&self) -> DynTokenizer {
         Arc::new(fake_chat_tokenizer())
     }
@@ -794,12 +803,16 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    build_router_with_dev_mode(
+    build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        dev_mode_enabled,
+        RouteGates {
+            dev_mode: dev_mode_enabled,
+            scale_out: true,
+            ..RouteGates::default()
+        },
     )
 }
 
@@ -884,9 +897,72 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
+        ("POST", "/generative_scoring"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cohere_routes_follow_the_python_gates() {
+    const CHAT: &str = "/cohere/v2/chat";
+    const RENDER: &str = "/cohere/v2/chat/render";
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-cohere-routes",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    async fn post_status(app: &axum::Router, uri: &str) -> StatusCode {
+        app.clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+    }
+
+    let enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            cohere_api: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_route_not_supported(&enabled, "POST", CHAT, CHAT).await;
+    assert_route_not_supported(&enabled, "POST", RENDER, RENDER).await;
+
+    let no_scale_out = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            cohere_api: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_route_not_supported(&no_scale_out, "POST", CHAT, CHAT).await;
+    assert_eq!(
+        post_status(&no_scale_out, RENDER).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let disabled = build_router_with_gates(
+        state,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
+    assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -933,9 +1009,12 @@ async fn scale_out_generate_route_can_be_enabled() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -973,12 +1052,18 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     .await;
     let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
 
-    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    let enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
     for uri in ROUTES {
         assert_route_not_supported(&enabled, "POST", uri, uri).await;
     }
 
-    let disabled = build_router_with_scale_out_endpoints(state, false);
+    let disabled = build_router_with_gates(state, RouteGates::default());
     for uri in ROUTES {
         let response = disabled
             .clone()
@@ -1061,12 +1146,15 @@ async fn test_dev_mode_app_with_ready(
     .expect("connect client");
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let app = build_router_with_dev_mode(
+    let app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
     );
     (app, engine_task)
 }
@@ -1185,7 +1273,15 @@ where
 {
     let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
     (
-        build_router_with_dev_mode_and_lora(state, true, true),
+        build_router_with_gates(
+            state,
+            RouteGates {
+                dev_mode: true,
+                runtime_lora_updating: true,
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        ),
         engine_task,
     )
 }
@@ -1280,7 +1376,13 @@ async fn static_lora_module_loads_and_lists_with_parent() {
     assert_eq!(request.lora_name, "alice");
     assert_eq!(request.lora_int_id, 1);
 
-    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let mut app = build_router_with_gates(
+        state,
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
     let models = app
         .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
         .await
@@ -1377,12 +1479,15 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router_with_scale_out_endpoints(
+        build_router_with_gates(
             Arc::new(AppState::new(
                 vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
                 chat,
             )),
-            true,
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
         ),
         engine_task,
     )
@@ -1927,9 +2032,12 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut generate_app = build_router_with_scale_out_endpoints(
+    let mut generate_app = build_router_with_gates(
         Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
     let generate_response = generate_app
         .call(
@@ -3312,6 +3420,45 @@ async fn invalid_request_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_unconnected_data_parallel_rank_reports_connected_ranks() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        EngineId::from_engine_index(3),
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("X-data-parallel-rank", "0")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    expect_test::expect![[r#""engine-core error: data parallel rank 0 is not connected to this frontend; connected ranks: [3]""#]]
+    .assert_eq(&json["error"]["message"].to_string());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
     let mut app = test_app().await;
     let response = app
@@ -3409,7 +3556,6 @@ async fn non_stream_chat_returns_json_response() {
         (choice, "routed_experts"),
         (choice, "weight_versions"),
         (message, "refusal"),
-        (message, "annotations"),
         (message, "audio"),
         (message, "function_call"),
         (message, "reasoning"),
@@ -3421,8 +3567,15 @@ async fn non_stream_chat_returns_json_response() {
             "expected explicit null `{key}`: {json}"
         );
     }
-    // ...except `tool_calls`, which Python pops from the payload when empty.
-    assert!(!message.contains_key("tool_calls"), "{json}");
+    // ...except `tool_calls`, which Python pops from the payload when empty,
+    // and the fields the OpenAI spec types as non-nullable.
+    for (object, key) in [
+        (message, "tool_calls"),
+        (message, "annotations"),
+        (usage, "prompt_tokens_details"),
+    ] {
+        assert!(!object.contains_key(key), "expected no `{key}`: {json}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4821,6 +4974,11 @@ async fn engine_request_errors_map_to_http_status() {
                 status,
             ),
             ("/inference/v1/generate", raw(false), status),
+            (
+                "/v1/responses",
+                json!({"model": model, "input": "hello"}),
+                status,
+            ),
             ("/inference/v1/generate", raw(true), StatusCode::OK),
         ];
         for (uri, request, expected_status) in cases {
@@ -4843,9 +5001,12 @@ async fn engine_request_errors_map_to_http_status() {
                 Arc::new(FakeChatBackend::new()),
             )
             .await;
-            let mut app = build_router_with_scale_out_endpoints(
+            let mut app = build_router_with_gates(
                 Arc::new(AppState::new(vec![model.to_string()], chat)),
-                true,
+                RouteGates {
+                    scale_out: true,
+                    ..RouteGates::default()
+                },
             );
             let response = app
                 .call(
@@ -5148,6 +5309,8 @@ async fn non_stream_completions_return_json_response() {
             "expected explicit null `{key}`: {json}"
         );
     }
+    // The OpenAI spec types prompt token details as an object, not nullable.
+    assert!(!usage.contains_key("prompt_tokens_details"), "{json}");
 }
 
 /// With `--enable-prompt-tokens-details`, chat and completions report the
@@ -6142,12 +6305,15 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -6269,12 +6435,15 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -7576,6 +7745,43 @@ async fn reset_prefix_cache_route_sends_expected_utility_call() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn reset_prefix_cache_route_accepts_python_spelled_bool_query_values() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("reset_prefix_cache"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::from(true), Value::from(false)])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/reset_prefix_cache?reset_running_requests=True&reset_external=0")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn reset_mm_cache_route_sends_expected_utility_call() {
     let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
@@ -8339,6 +8545,44 @@ async fn pause_route_uses_python_compatible_default_query_values() {
     );
 }
 
+/// `requests` encodes Python's `False` as `False`; the RL test helpers send it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn pause_route_accepts_python_spelled_bool_query_value() {
+    let (app, engine_task) = test_admin_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("pause_generation"));
+            assert_eq!(
+                array[3],
+                Value::Array(vec![Value::from("abort"), Value::from(false)])
+            );
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/pause?mode=abort&clear_cache=False")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    engine_task.await.expect("mock engine task");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn pause_route_rejects_invalid_mode() {
@@ -8559,12 +8803,12 @@ async fn abort_requests_route_accepts_empty_id_list() {
 #[serial]
 async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let app = build_router_with_dev_mode(
+    let app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        false,
+        RouteGates::default(),
     );
 
     for (method, uri) in [
@@ -9733,6 +9977,32 @@ async fn world_size_endpoint_is_dev_mode_only() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn world_size_route_accepts_python_spelled_bool_query_value() {
+    let ready = EngineCoreReadyResponse {
+        world_size: 6,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/get_world_size?include_dp=False")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
+        json!({ "world_size": 6 })
+    );
 }
 
 // ========================= Profiler route tests =========================
