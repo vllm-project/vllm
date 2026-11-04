@@ -46,7 +46,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.utils import copy_weight_
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -1445,8 +1449,9 @@ class MolmoForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        weights = _get_weights_with_merged_embedding(weights)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded: set[str] = set()  # a lone embedding half written directly
+        weights = load_split_embedding(self.model.embed_tokens, weights, loaded)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper) | loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""
@@ -1457,21 +1462,58 @@ class MolmoForCausalLM(
         )
 
 
-def _get_weights_with_merged_embedding(
+def load_split_embedding(
+    embed_tokens: VocabParallelEmbedding,
     weights: Iterable[tuple[str, torch.Tensor]],
+    loaded: set[str],
 ) -> Iterable[tuple[str, torch.Tensor]]:
-    embedding_weights = {}
+    """Load the checkpoint's two vocabulary halves, ``wte.embedding`` (the
+    first rows) and ``wte.new_embedding`` (the rows after them), and pass the
+    other weights through.
+
+    Both halves in one call are concatenated into ``model.embed_tokens.weight``
+    for its weight loader. A weight update may send them in different
+    ``load_weights`` calls: a half that arrives alone is written into its rows
+    of this rank's vocab shard and ``model.embed_tokens.weight`` is added to
+    ``loaded``; a full load (completeness check enabled) needs both."""
+    halves: dict[str, torch.Tensor] = {}
     for name, weight in weights:
         if "wte.embedding" in name:
-            embedding_weights["embedding"] = weight
+            halves["embedding"] = weight
         elif "wte.new_embedding" in name:
-            embedding_weights["new_embedding"] = weight
+            halves["new_embedding"] = weight
         else:
-            yield (name, weight)
-    # this is compatible with most of quantization,
-    # because they won't quantize embed_tokens
-    embedding_weights = torch.cat(
-        [embedding_weights["embedding"], embedding_weights["new_embedding"]],
-        dim=0,
-    )
-    yield ("model.embed_tokens.weight", embedding_weights)
+            yield name, weight
+    if len(halves) == 2:
+        # embed_tokens is not quantized
+        weight = torch.cat([halves["embedding"], halves["new_embedding"]])
+        yield "model.embed_tokens.weight", weight
+    elif halves:
+        if is_mtp_completeness_check_enabled():  # a full load needs both
+            raise ValueError("Checkpoint is missing wte.embedding or wte.new_embedding")
+        ((half, weight),) = halves.items()
+        _load_embedding_half(embed_tokens, half, weight)
+        loaded.add("model.embed_tokens.weight")
+
+
+def _load_embedding_half(
+    embed_tokens: VocabParallelEmbedding, half: str, weight: torch.Tensor
+) -> None:
+    param = embed_tokens.weight
+    if param.is_meta:
+        raise RuntimeError(
+            "wte.embedding and wte.new_embedding must arrive in the same "
+            "load_weights call under layerwise reload"
+        )
+    vocab = embed_tokens.org_vocab_size
+    offset = 0 if half == "embedding" else vocab - len(weight)
+    if offset < 0 or offset + len(weight) > vocab:
+        raise ValueError(f"wte.{half} has {len(weight)} rows; the vocab has {vocab}")
+    shard = embed_tokens.shard_indices
+    start, end = shard.org_vocab_start_index, shard.org_vocab_end_index
+    lo, hi = max(start, offset), min(end, offset + len(weight))
+    if lo < hi:
+        copy_weight_(
+            param.data[lo - start : hi - start], weight[lo - offset : hi - offset]
+        )
+    param.data[end - start :].zero_()  # vocab padding, as the weight loader

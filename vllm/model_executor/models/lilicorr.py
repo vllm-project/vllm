@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Static
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.utils import refill_derived
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
 
@@ -242,6 +245,10 @@ class LiLiCorrHead(nn.Module):
             quant_config=None,
             prefix=maybe_prefix(prefix, "in_head"),
         )
+        # materialize_inference_buffers reads these weights after post-load
+        # processing, which on CPU would repack them away (as MLA's kv_b_proj)
+        for proj in (self.factor_input_proj, self.out_head, self.in_head):
+            proj._cpu_skip_gemm_dispatch = True
         self.anchor_out_head = ReplicatedLinear(
             hidden_size,
             self.factor_dim,
@@ -550,10 +557,14 @@ class LiLiCorrForCausalLM(DFlashQwen3ForCausalLM):
         super().load_weights(normalized_weights())
         AutoWeightsLoader(self.model.lilicorr).load_weights(head_weights)
         missing = expected - seen
-        if missing:
+        # a weight update may send the checkpoint over several calls
+        if missing and is_mtp_completeness_check_enabled():
             raise ValueError(
                 f"LiLiCorr checkpoint coverage mismatch: missing={sorted(missing)}"
             )
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
         head = self.model.lilicorr
         parameter = head.slot_embedding
         head.materialize_inference_buffers(parameter.device, parameter.dtype)
