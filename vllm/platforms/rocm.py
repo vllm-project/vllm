@@ -220,9 +220,18 @@ def _query_apu_pool_sizes(device_id: int) -> tuple[int, int] | None:
         vram_total = int((device_path / "mem_info_vram_total").read_text())
         gtt_total = int((device_path / "mem_info_gtt_total").read_text())
     except Exception as e:
-        logger.debug("Failed to read APU memory pools: %s", e)
+        logger.warning(
+            "Could not read the APU memory pool sizes from amdgpu sysfs (%s); "
+            "assuming GTT-backed allocations and bounding device memory by "
+            "host memory.",
+            e,
+        )
         return None
     return vram_total, gtt_total
+
+
+# HIP reports the backing pool's size exactly; allow a little slack.
+_APU_POOL_MATCH_TOLERANCE = 0.01
 
 
 def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
@@ -231,7 +240,14 @@ def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
     Which pool amdgpu uses depends on the kernel version (always VRAM before
     6.10, always GTT before 6.15, the smaller of the two after), so compare
     the pool size HIP reports against both instead of predicting it. Native
-    MI300A has no carve-out. Assumes GTT if the sizes cannot be read.
+    MI300A has no carve-out.
+
+    Only a match with the carve-out counts as carve-out-backed; anything
+    else, including unreadable sysfs, equal pool sizes, or a GTT pool that
+    sysfs does not report exactly (KFD reports ``ttm.pages_limit`` while
+    sysfs reports the deprecated ``amdgpu.gttsize`` when it is set), is
+    treated as GTT-backed. That errs towards bounding the device by host
+    memory, which can only make startup stricter, never cause an OOM.
     """
     pool_sizes = _query_apu_pool_sizes(device_id)
     if pool_sizes is None:
@@ -239,7 +255,9 @@ def _apu_allocates_from_gtt(device_id: int, device_total: int) -> bool:
     vram_total, gtt_total = pool_sizes
     if vram_total == 0:
         return True
-    return abs(device_total - gtt_total) < abs(device_total - vram_total)
+    vram_distance = abs(device_total - vram_total)
+    matches_vram = vram_distance <= _APU_POOL_MATCH_TOLERANCE * vram_total
+    return not (matches_vram and vram_distance < abs(device_total - gtt_total))
 
 
 def _get_gcn_arch() -> str:
@@ -1175,7 +1193,7 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod

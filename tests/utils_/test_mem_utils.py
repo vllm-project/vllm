@@ -174,6 +174,54 @@ def test_rocm_integrated_gpu_memory_info(
     assert 0 <= free <= total
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize(
+    ("pools", "device_total", "expected"),
+    [
+        # 0.5 GiB carve-out, 100 GiB GTT: HIP reports the GTT pool.
+        ((0.5, 100), 100, True),
+        # 64 GiB carve-out, 37.7 GiB GTT: HIP reports the carve-out.
+        ((64, 37.7), 64, False),
+        # 64 GiB carve-out, 100 GiB GTT: HIP reports the GTT pool.
+        ((64, 100), 100, True),
+        # Native MI300A has no carve-out.
+        ((0, 128), 120, True),
+        # GTT-backed, but sysfs reports amdgpu.gttsize (100 GiB) while HIP
+        # reports ttm.pages_limit (32 GiB), which is closer to the carve-out.
+        ((8, 100), 32, True),
+        # Equal pool sizes are ambiguous: assume GTT.
+        ((64, 64), 64, True),
+        # sysfs unreadable: assume GTT.
+        (None, 64, True),
+    ],
+)
+def test_rocm_apu_allocates_from_gtt(
+    tmp_path,
+    pools: tuple[float, float] | None,
+    device_total: float,
+    expected: bool,
+):
+    from vllm.platforms import rocm
+
+    bdf = "0000:c3:00.0"
+    if pools is not None:
+        device_path = tmp_path / bdf
+        device_path.mkdir()
+        (device_path / "mem_info_vram_total").write_text(f"{int(pools[0] * GiB)}\n")
+        (device_path / "mem_info_gtt_total").write_text(f"{int(pools[1] * GiB)}\n")
+    props = MagicMock(pci_domain_id=0, pci_bus_id=0xC3, pci_device_id=0)
+
+    rocm._query_apu_pool_sizes.cache_clear()
+    try:
+        with (
+            patch.object(rocm, "_PCI_DEVICES_PATH", tmp_path),
+            patch.object(rocm.torch.cuda, "get_device_properties", return_value=props),
+        ):
+            assert rocm._apu_allocates_from_gtt(0, int(device_total * GiB)) == expected
+    finally:
+        rocm._query_apu_pool_sizes.cache_clear()
+
+
 def test_memory_snapshot_uses_cuda_on_discrete_gpu():
     """On discrete GPUs, free_memory should come from accelerator  get_memory_info."""
     mock_cuda_free = 70 * 1024**3
