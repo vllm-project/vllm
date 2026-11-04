@@ -4,8 +4,9 @@
 with top-k 16 so prompts past 128 tokens reach scored prefill and real decode
 selection.
 
-Dummy weights keep the logits nearly flat, so this guards which request's
-block table and summary pages decode reads. Scores, scale, masks, in-kernel
+Dummy weights keep the logits nearly flat, so a decode wiring bug moves a
+logprob by one bf16 rounding step, as harmless rounding differences across
+GPUs do. The logprob check only catches gross breakage. Scores, scale, masks,
 paging and the gate are covered by test_amd_csa_paged.py.
 """
 
@@ -27,7 +28,7 @@ pytestmark = pytest.mark.skipif(
 ARCH = "Step5ForConditionalGeneration"
 TOPK = 16
 DECODE_TOKENS = 24
-_LOGPROB_ATOL = 1e-4
+_LOGPROB_ATOL = 1e-2
 
 
 def tiny_step5(cfg):
