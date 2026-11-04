@@ -59,6 +59,16 @@ struct ScaledQuant<
       return float_to_int8_rn(x / scale);
     }
   }
+
+  template <int N>
+  static __device__ __forceinline__ void quant_vec_fn(quant_type_t* dst,
+                                                      const float* x,
+                                                      float const scale) {
+#pragma unroll
+    for (int i = 0; i < N; ++i) {
+      dst[i] = quant_fn(x[i], scale);
+    }
+  }
 };
 
 template <typename quant_type_t, bool is_scale_inverted>
@@ -73,6 +83,21 @@ struct ScaledQuant<quant_type_t, is_scale_inverted,
     } else {
       return float_to_fp8<quant_type_t>(x / scale);
     }
+  }
+
+  template <int N>
+  static __device__ __forceinline__ void quant_vec_fn(quant_type_t* dst,
+                                                      const float* x,
+                                                      float const scale) {
+#if VLLM_FP8_CVT_X2
+    scaled_fp8_conversion_vec<is_scale_inverted, quant_type_t, N>(dst, x,
+                                                                  scale);
+#else
+  #pragma unroll
+    for (int i = 0; i < N; ++i) {
+      dst[i] = quant_fn(x[i], scale);
+    }
+#endif
   }
 };
 

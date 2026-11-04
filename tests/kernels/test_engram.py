@@ -574,6 +574,7 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
     layer.head_start = 0
     layer.cpu_offload = cpu_offload
     layer.dp_shared_memory = False
+    layer.peer_rows = 0
     layer.part_num_embeddings = rows
     # A window strictly inside the table, so unowned rows are exercised too.
     layer.vocab_start_idx, layer.vocab_end_idx = rows // 4, rows // 4 + rows // 2
@@ -598,6 +599,25 @@ def _make_embedding(cpu_offload, rows=4096, dim=256, block=32):
 
 
 @pytest.mark.parametrize(
+    "cpu_offload,use_thp", [(False, False), (True, False), (True, True)]
+)
+def test_engram_meta_initialization_does_not_allocate_host_tables(
+    dist_init, cpu_offload, use_thp
+):
+    """Encoder-only language-model placeholders must not allocate host storage."""
+    with torch.device("meta"):
+        layer = ParallelEngramEmbedding(
+            36, 64, (17, 19), cpu_offload=cpu_offload, use_thp=use_thp
+        )
+
+    assert layer.weight.is_meta and layer.weight_scale_inv.is_meta
+    assert layer.weight.shape == (36, 64)
+    assert layer.weight_scale_inv.shape == (36, 2)
+    assert layer.weight.dtype == torch.float8_e4m3fn
+    assert layer.weight_scale_inv.dtype == torch.uint8
+
+
+@pytest.mark.parametrize(
     "tp_size,dp_size,n_heads", [(1, 4, 5), (2, 2, 5), (4, 1, 6), (8, 1, 6)]
 )
 def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch):
@@ -608,7 +628,8 @@ def test_engram_rejects_empty_head_shards(tp_size, dp_size, n_heads, monkeypatch
     monkeypatch.setattr(engram_ops, "get_engram_dp_size", lambda: dp_size)
     monkeypatch.setattr(engram_ops, "get_tensor_model_parallel_rank", lambda: 0)
     with pytest.raises(AssertionError, match="ranks without hash heads"):
-        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads)
+        # GPU tables at TP1 shard rows across DP instead of heads.
+        ParallelEngramEmbedding(n_heads * 17, 64, (17,) * n_heads, cpu_offload=True)
 
 
 @pytest.mark.skipif(
@@ -792,7 +813,7 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_shared_prefetch_stream_waits_per_layer():
+def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
     """Consuming a layer must not wait for later layers on the shared stream."""
     stream = torch.cuda.Stream()
     modules = []
@@ -808,13 +829,24 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
         modules.append(module)
     hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
     modules[0].prepare_embeddings(hashes[:, 0])
-    with torch.cuda.stream(stream):
-        torch.cuda._sleep(100_000_000)  # ~50 ms ahead of the second lookup
     modules[1].prepare_embeddings(hashes[:, 1])
-    rows = modules[0].embed(hashes[:, 0])
+
+    # Independent CUDA streams can serialize; check the requested dependency
+    # instead of assuming the second lookup is still running at a given time.
+    waits = []
+    wait_event = torch.cuda.Stream.wait_event
+
+    def record_wait_event(consumer, event):
+        waits.append((consumer, event))
+        return wait_event(consumer, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda.Stream, "wait_event", record_wait_event)
+        rows = modules[0].embed(hashes[:, 0])
+
+    assert modules[0]._prefetch_done is not None
+    assert waits == [(torch.cuda.current_stream(), modules[0]._prefetch_done)]
     torch.cuda.current_stream().synchronize()
-    assert modules[1]._prefetch_done is not None
-    assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
         layer.weight.cuda(),
