@@ -3916,6 +3916,9 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 retryable: true,
                             },
                         ),
+                        watermarking: Some(
+                            true,
+                        ),
                     },
                 ],
                 scheduler_stats: None,

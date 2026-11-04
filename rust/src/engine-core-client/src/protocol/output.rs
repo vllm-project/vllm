@@ -149,6 +149,11 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Whether the sampler watermarks this request, after EngineCore applied
+    /// `watermark_config.enforce`. Set on the first output, and only when the
+    /// engine has a `watermark_config`.
+    #[serde(default)]
+    pub watermarking: Option<bool>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -595,6 +600,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            watermarking: None,
                         },
                     ],
                     scheduler_stats: None,

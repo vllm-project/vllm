@@ -139,14 +139,22 @@ impl Llm {
         let max_tokens_param =
             (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
         let prompt_len = prepared.prompt_token_ids().len() as u32;
+        let watermark_requested =
+            (prepared.engine_request.sampling_params.as_ref()).is_some_and(|p| p.watermarking);
 
         let stream = self.client.call(prepared.engine_request).await?;
 
         let handles = (self.request_metric_handles.get(&stream.engine_index()))
             .expect("requests are routed only to connected engines")
             .clone();
-        let request_metrics =
-            RequestMetricsTracker::new(handles, arrival_time, prompt_len, max_tokens_param, 1);
+        let request_metrics = RequestMetricsTracker::new(
+            handles,
+            arrival_time,
+            prompt_len,
+            max_tokens_param,
+            1,
+            watermark_requested,
+        );
         let guard = self.inflight.track(external_request_id, internal_request_id);
 
         Ok(GenerateOutputStream::new(
