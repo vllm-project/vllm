@@ -8,7 +8,7 @@ import mmap
 import queue
 import threading
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
@@ -29,11 +29,11 @@ class BlockObjectStoreError(RuntimeError):
 
 
 class VariableBlockObjectStore:
-    """Bounded byte store for typed auxiliary-output artifacts.
+    """Byte-capped store for typed auxiliary-output artifacts.
 
     R3 uses :class:`BlockObjectStore`, whose fixed-size arena is intentional.
     Logprob rows have a request-dependent width, so they use this store while
-    sharing the same retain/release and LRU semantics.
+    sharing the same retain/release, LRU, and growth semantics.
     """
 
     def __init__(self, *, max_bytes: int) -> None:
@@ -63,10 +63,14 @@ class VariableBlockObjectStore:
             reclaimed += len(payload)
             if reclaimed >= required:
                 return victims
-        raise BlockObjectStoreError(
-            "auxiliary output store cannot retain the requested batch: "
-            f"limit={self._max_bytes} bytes"
+        # Referenced artifacts cannot be evicted, so grow like BlockObjectStore
+        # rather than failing the step.
+        self._max_bytes = max(self._used_bytes + extra, 2 * self._max_bytes)
+        logger.warning(
+            "Auxiliary output store grows to %d bytes: all objects are referenced.",
+            self._max_bytes,
         )
+        return victims
 
     def put(
         self,
@@ -209,6 +213,12 @@ class BackgroundBlockObjectStore:
         self._queue.join()
         self._raise_if_failed()
         return self._store.get_optional(key)
+
+    def get_optional_many(self, keys: Sequence[str]) -> dict[str, bytes | None]:
+        """Read several optional artifacts behind a single queue barrier."""
+        self._queue.join()
+        self._raise_if_failed()
+        return {key: self._store.get_optional(key) for key in keys}
 
     def close(self) -> None:
         if self._closed:

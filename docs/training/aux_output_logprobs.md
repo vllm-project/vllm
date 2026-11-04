@@ -27,11 +27,22 @@ outputs = llm.generate(
 token_logprobs = outputs[0].outputs[0].logprobs
 ```
 
+The same configuration is available on the command line:
+
+```bash
+vllm serve facebook/opt-125m \
+    --enable-prefix-caching \
+    --aux-output-config '{"enable_return_logprobs": true}'
+```
+
 The `aux_output_enabled` request flag opts that request into the auxiliary
 path. It requires `logprobs` to be set and rejects prompt logprobs, full
 vocabulary requests (`logprobs=-1`), non-raw `logprobs_mode`, and online weight
-updates. The engine must use Model Runner V2 and prefix caching. Logprobs-only
-configuration supports dense and MoE models.
+updates.
+
+Enabling `enable_return_logprobs` requires Model Runner V2
+(`VLLM_USE_V2_MODEL_RUNNER=1` when vLLM would otherwise fall back to V1) and
+prefix caching.
 
 This is separate from [prompt token ID logprobs](prompt_token_id_logprobs.md),
 which scores caller-provided candidate IDs during prompt processing.

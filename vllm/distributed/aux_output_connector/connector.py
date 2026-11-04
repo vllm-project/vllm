@@ -263,10 +263,10 @@ class AuxOutputSchedulerConnector:
     def _get_request_start(self, request: Request) -> int:
         assert request.sampling_params is not None
         if not self._output_fields:
-            return max(
-                request.num_prompt_tokens,
-                0 if request.num_output_tokens == 0 else request.num_tokens - 1,
-            )
+            # Logprobs start at the first generated token. Keep this stable
+            # across decode steps: the logprobs-only worker path has no emit
+            # cursor to advance (see AuxOutputWorkerConnector.begin_step).
+            return request.num_prompt_tokens
         prompt_start: int = min(
             getattr(request.sampling_params, field) for _, field in self._output_fields
         )

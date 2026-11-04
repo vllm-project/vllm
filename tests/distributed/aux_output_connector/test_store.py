@@ -27,6 +27,7 @@ from vllm.distributed.aux_output_connector.connector import (
 )
 from vllm.distributed.aux_output_connector.logprobs import (
     LogprobRows,
+    concat_rows,
     decode_rows,
     encode_rows,
 )
@@ -42,7 +43,7 @@ from vllm.distributed.aux_output_connector.worker import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -91,6 +92,58 @@ def test_variable_store_round_trips_logprob_rows():
     np.testing.assert_array_equal(decoded.token_ids, rows.token_ids)
     np.testing.assert_array_equal(decoded.values, rows.values)
     np.testing.assert_array_equal(decoded.ranks, rows.ranks)
+    store.close()
+
+
+def test_concat_rows_sorts_and_collapses_duplicate_positions():
+    """Publishing merges an earlier artifact with a later chunk, so merged rows
+    must stay ordered and free of duplicate positions."""
+    first = LogprobRows(
+        positions=np.array([6, 5], dtype=np.int64),
+        token_ids=np.array([[60], [50]], dtype=np.int32),
+        values=np.array([[-0.6], [-0.5]], dtype=np.float32),
+        ranks=np.array([0, 1], dtype=np.int32),
+    )
+    second = LogprobRows(
+        positions=np.array([5, 7], dtype=np.int64),
+        token_ids=np.array([[51], [70]], dtype=np.int32),
+        values=np.array([[-0.51], [-0.7]], dtype=np.float32),
+        ranks=np.array([2, 0], dtype=np.int32),
+    )
+
+    merged = concat_rows([first, second])
+
+    assert merged is not None
+    np.testing.assert_array_equal(merged.positions, [5, 6, 7])
+    np.testing.assert_array_equal(merged.token_ids[merged.positions != 5, 0], [60, 70])
+
+
+def test_variable_store_grows_with_a_warning_when_every_object_is_referenced():
+    """Logprob artifacts follow BlockObjectStore's growth contract, not a hard
+    failure, when every retained object is still referenced."""
+    store = VariableBlockObjectStore(max_bytes=6)
+    store.put([BlockObject("unused", b"uuu"), BlockObject("kept", b"kkk")])
+    store.put([], retain_keys=["kept"])
+
+    with patch.object(store_module.logger, "warning") as warning:
+        store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
+
+    warning.assert_called_once()
+    assert store.get_concatenated(["kept", "first", "second"]) == b"kkk111222"
+    with pytest.raises(BlockObjectStoreError, match="does not exist"):
+        store.get_concatenated(["unused"])
+    store.close()
+
+
+def test_variable_store_reads_several_artifacts_after_one_barrier():
+    store = BackgroundBlockObjectStore(
+        VariableBlockObjectStore(max_bytes=64), max_pending_batches=2
+    )
+    store.put([BlockObject("first", b"111"), BlockObject("second", b"222")])
+
+    artifacts = store.get_optional_many(["first", "absent", "second"])
+
+    assert artifacts == {"first": b"111", "absent": None, "second": b"222"}
     store.close()
 
 
@@ -216,15 +269,24 @@ def _make_worker(
     max_store_blocks: int | None = None,
     indexer_shape: tuple[int, int] | None = None,
     enable_r3: bool = True,
+    logprobs_only: bool = False,
 ) -> AuxOutputWorkerConnector:
+    # Logprobs-only workers have no R3 capture, buffer, or fixed-size store.
+    enable_r3 = enable_r3 and not logprobs_only
     r3_nbytes = int(np.prod(_SHAPE)) if enable_r3 else 0
     shape = (r3_nbytes + int(np.prod(indexer_shape)) * 4,) if indexer_shape else _SHAPE
     object_nbytes = _BLOCK_SIZE * int(np.prod(shape))
-    store = _make_store(
-        max_bytes=(
-            1 << 20 if max_store_blocks is None else max_store_blocks * object_nbytes
-        ),
-        object_nbytes=object_nbytes,
+    store = (
+        None
+        if logprobs_only
+        else _make_store(
+            max_bytes=(
+                1 << 20
+                if max_store_blocks is None
+                else max_store_blocks * object_nbytes
+            ),
+            object_nbytes=object_nbytes,
+        )
     )
     worker = object.__new__(AuxOutputWorkerConnector)
     worker._indexer = (
@@ -242,14 +304,27 @@ def _make_worker(
     worker._r3_dtype = _DTYPE
     worker._r3_shape = _SHAPE
     worker._store = store
-    worker._buffer = AuxOutputBuffer(
-        _DTYPE,
-        shape,
-        _BLOCK_SIZE,
-        max_num_seqs,
-        max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
-        max_concurrent_batches,
+    worker._buffer = (
+        None
+        if logprobs_only
+        else AuxOutputBuffer(
+            _DTYPE,
+            shape,
+            _BLOCK_SIZE,
+            max_num_seqs,
+            max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
+            max_concurrent_batches,
+        )
     )
+    worker._logprob_store = (
+        BackgroundBlockObjectStore(
+            VariableBlockObjectStore(max_bytes=1 << 20), max_pending_batches=4
+        )
+        if logprobs_only
+        else None
+    )
+    worker._logprob_block_size = _BLOCK_SIZE
+    worker._enable_logprobs = logprobs_only
     worker._requests = {}
     worker._generation = 0
     worker._step_metadata = None
@@ -284,11 +359,14 @@ def test_worker_rejects_run_and_finish_in_one_step():
     worker.close()
 
 
-def _input_batch(request_ids, token_starts, query_start_loc):
+def _input_batch(request_ids, token_starts, query_start_loc, num_scheduled_tokens=None):
+    if num_scheduled_tokens is None:
+        num_scheduled_tokens = np.diff(query_start_loc)[: len(request_ids)]
     return SimpleNamespace(
         req_ids=request_ids,
         num_computed_tokens_np=token_starts,
         query_start_loc_np=query_start_loc,
+        num_scheduled_tokens=np.asarray(num_scheduled_tokens, dtype=np.int32),
     )
 
 
@@ -297,6 +375,8 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._indexer = None
     worker._store = None
     worker._buffer = None
+    worker._logprob_store = None
+    worker._logprob_block_size = _BLOCK_SIZE
     worker._routed_experts_capturer = Mock()
     worker._step_metadata = Mock()
     assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
@@ -533,6 +613,68 @@ def test_worker_rejects_scheduler_emit_cursor_ahead():
             ),
         )
 
+    worker.close()
+
+
+def test_logprobs_only_request_start_does_not_advance_with_output():
+    """The logprobs stream starts at the first generated token and must stay
+    fixed: begin_step advances the worker emit cursor only for R3 capture."""
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}), enable_routed_experts=False, enable_logprobs=True
+    )
+    for num_output_tokens in (0, 1, 3):
+        request = _SchedulerRequest(
+            "request",
+            [],
+            num_tokens=5 + num_output_tokens,
+            num_output_tokens=num_output_tokens,
+        )
+        assert connector._get_request_start(request) == 5
+
+
+@pytest.mark.parametrize(
+    "with_boundaries", [False, True], ids=["per-request", "cumulative"]
+)
+def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
+    """Logprobs tensors cover the whole sampler batch, so an opted-in request
+    must not be served the rows of a batch member that precedes it."""
+    worker = _make_worker(2, logprobs_only=True)
+    metadata = AuxOutputConnectorMetadata(
+        generation=0,
+        requests={"plain": 1, "aux": 1},
+        block_hashes={},
+        finished_requests=(),
+        logprobs={"aux": "fingerprint"},
+        prompt_lens={"plain": 1, "aux": 1},
+    )
+    worker.begin_step(metadata)
+    pending = worker.prepare_output(
+        _input_batch(["plain", "aux"], np.array([1, 1]), np.array([0, 1, 2]))
+    )
+    assert pending is not None
+    assert pending.request_ids == ["aux"]
+
+    pending.enqueue_cpu_copy(
+        np.ones(2, dtype=np.int32),
+        np.zeros(2, dtype=np.int32),
+        logprobs=LogprobsTensors(
+            torch.tensor([[111], [222]], dtype=torch.int32),
+            torch.tensor([[-0.5], [-0.9]], dtype=torch.float32),
+            torch.tensor([0, 1], dtype=torch.int32),
+            cu_num_generated_tokens=[0, 1, 2] if with_boundaries else None,
+        ),
+    )
+
+    output = pending.process_output()
+
+    logprobs = output["aux"].logprobs
+    assert logprobs is not None
+    np.testing.assert_array_equal(
+        logprobs.logprob_token_ids, np.array([[222]], dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        logprobs.logprobs, np.array([[-0.9]], dtype=np.float32)
+    )
     worker.close()
 
 

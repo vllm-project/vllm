@@ -70,9 +70,6 @@ class _WorkerRequestState:
     logprob_rows: dict[int, LogprobRows] = field(default_factory=dict)
     logprob_cursor: int | None = None
     pending_publish_logprobs: set[int] = field(default_factory=set)
-    published_artifact_positions: dict[str, frozenset[int]] = field(
-        default_factory=dict
-    )
     prompt_len: int = 0
 
 
@@ -210,27 +207,43 @@ class AuxOutputWorkerConnector:
                 max_bytes = (
                     kv_cache_config.num_blocks * scheduler_block_size * bytes_per_token
                 )
-            self._store = BackgroundBlockObjectStore(
+            store = BackgroundBlockObjectStore(
                 BlockObjectStore(max_bytes=max_bytes, object_nbytes=block_nbytes),
                 max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
             )
-            self._buffer = AuxOutputBuffer(
-                dtype,
-                shape_per_token,
-                hash_block_size,
-                vllm_config.scheduler_config.max_num_seqs,
-                max_num_batched_tokens,
-                vllm_config.max_concurrent_batches,
-            )
+            try:
+                self._buffer = AuxOutputBuffer(
+                    dtype,
+                    shape_per_token,
+                    hash_block_size,
+                    vllm_config.scheduler_config.max_num_seqs,
+                    max_num_batched_tokens,
+                    vllm_config.max_concurrent_batches,
+                )
+            except BaseException:
+                try:
+                    store.close()
+                except Exception:
+                    logger.warning(
+                        "Failed to close the auxiliary-output store after "
+                        "initialization failed",
+                        exc_info=True,
+                    )
+                raise
+            self._store = store
         if self._enable_logprobs:
             logprob_max_bytes = vllm_config.aux_output_config.max_bytes
             if logprob_max_bytes is None:
                 max_logprobs = max(vllm_config.model_config.max_logprobs, 0)
                 bytes_per_row = max(16, (max_logprobs + 1) * 8 + 4)
-                logprob_max_bytes = (
+                num_hash_blocks = max(
                     kv_cache_config.num_blocks
                     * scheduler_block_size
-                    * (self._logprob_block_size * bytes_per_row + 4096)
+                    // self._logprob_block_size,
+                    1,
+                )
+                logprob_max_bytes = num_hash_blocks * (
+                    self._logprob_block_size * bytes_per_row + 4096
                 )
             self._logprob_store = BackgroundBlockObjectStore(
                 VariableBlockObjectStore(max_bytes=logprob_max_bytes),
@@ -256,9 +269,9 @@ class AuxOutputWorkerConnector:
         )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
-        """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
+        """Snapshot one step's capture tensors for asynchronous CPU transfer."""
         if (
-            self._buffer is None and getattr(self, "_logprob_store", None) is None
+            self._buffer is None and self._logprob_store is None
         ) or self._step_metadata is None:
             return None
         if self._buffer is None and not self._step_metadata.logprobs:
@@ -334,7 +347,7 @@ class AuxOutputWorkerConnector:
             if teardown:
                 if self._buffer is not None:
                     self._publish_blocks([], release_keys=release_keys)
-                logprob_store = getattr(self, "_logprob_store", None)
+                logprob_store = self._logprob_store
                 if logprob_store is not None:
                     logprob_store.put([], release_keys=release_logprob_keys)
                 self._teardown(teardown)
@@ -343,7 +356,7 @@ class AuxOutputWorkerConnector:
     def _commit_output(self, pending: PendingAuxOutput) -> dict[str, AuxRequestOutput]:
         buffer = self._buffer
         store = self._store
-        assert store is not None or getattr(self, "_logprob_store", None) is not None
+        assert store is not None or self._logprob_store is not None
         block_size = (
             buffer.block_size if buffer is not None else self._logprob_block_size
         )
@@ -378,15 +391,15 @@ class AuxOutputWorkerConnector:
 
         if pending.logprobs_tensors is not None:
             values = pending.logprobs_tensors.tolists()
+            cu = values.cu_num_generated_tokens
             for index, request_id in enumerate(pending.request_ids):
                 count = int(num_sampled[index])
                 if not count or request_id not in pending.aux_logprobs:
                     continue
-                offset = (
-                    values.cu_num_generated_tokens[index]
-                    if values.cu_num_generated_tokens is not None
-                    else index
-                )
+                # logprobs_tensors covers the whole sampler batch, while
+                # request_ids may be a filtered subset of it.
+                batch_index = int(pending.batch_indices[index])
+                offset = cu[batch_index] if cu is not None else batch_index
                 pending.logprobs[request_id] = type(values)(
                     values.logprob_token_ids[offset : offset + count],
                     values.logprobs[offset : offset + count],
@@ -499,7 +512,8 @@ class AuxOutputWorkerConnector:
                     materialize_outputs.append((request_id, emit_start, token_end))
 
         # A consumer may reuse a block produced earlier in the same batch.
-        self._publish_blocks(block_batches)
+        if buffer is not None:
+            self._publish_blocks(block_batches)
 
         for request_id, emit_start, token_end in materialize_outputs:
             state = self._requests[request_id]
@@ -566,7 +580,7 @@ class AuxOutputWorkerConnector:
         return outputs
 
     def _read_logprob_rows(self, keys: Sequence[str]) -> LogprobRows:
-        store = getattr(self, "_logprob_store", None)
+        store = self._logprob_store
         if store is None:
             raise RuntimeError("logprob replay store is disabled")
         chunks = [decode_rows(store.get_concatenated([key])) for key in keys]
@@ -619,20 +633,27 @@ class AuxOutputWorkerConnector:
             (int(position) - 1) // block_size * block_size for position in positions
         }
 
-    def _publish_logprob_blocks(
-        self, request_ids: Iterable[str], *, discard_rows: bool = True
-    ) -> dict[str, list[tuple[int, int]]]:
-        store = getattr(self, "_logprob_store", None)
+    def _publish_logprob_blocks(self, request_ids: Iterable[str]) -> None:
+        store = self._logprob_store
         if store is None:
-            return {}
-        discard_spans: dict[str, list[tuple[int, int]]] = {}
+            return
         block_size = self._logprob_block_size
         for request_id in request_ids:
             state = self._requests[request_id]
-            for start in list(state.pending_publish_logprobs):
-                block_index = start // block_size
-                if block_index >= len(state.logprob_keys):
-                    continue
+            starts = sorted(
+                start
+                for start in state.pending_publish_logprobs
+                if start // block_size < len(state.logprob_keys)
+            )
+            if not starts:
+                continue
+            # One queue barrier per step instead of one per artifact.
+            existing = store.get_optional_many(
+                [state.logprob_keys[start // block_size] for start in starts]
+            )
+            completed = []
+            for start in starts:
+                key = state.logprob_keys[start // block_size]
                 end = start + block_size
                 rows = concat_rows(
                     [
@@ -650,23 +671,17 @@ class AuxOutputWorkerConnector:
                     rows.values[mask],
                     rows.ranks[mask],
                 )
-                key = state.logprob_keys[block_index]
-                existing = store.get_optional(key)
-                if existing is not None:
-                    merged = concat_rows([decode_rows(existing), artifact])
+                payload = existing.get(key)
+                if payload is not None:
+                    merged = concat_rows([decode_rows(payload), artifact])
                     assert merged is not None
                     artifact = merged
                 store.put([BlockObject(key, encode_rows(artifact))])
-                state.published_artifact_positions[key] = frozenset(
-                    int(position) for position in artifact.positions
-                )
                 state.pending_publish_logprobs.discard(start)
                 if max(artifact.positions) >= end:
-                    discard_spans.setdefault(request_id, []).append((start, end))
-            if discard_rows:
-                for start, end in discard_spans.get(request_id, ()):
-                    self._discard_logprob_rows(state.logprob_rows, start, end)
-        return discard_spans
+                    completed.append((start, end))
+            for start, end in completed:
+                self._discard_logprob_rows(state.logprob_rows, start, end)
 
     @staticmethod
     def _discard_logprob_rows(
@@ -692,7 +707,7 @@ class AuxOutputWorkerConnector:
     def _bind_pending_logprob_blocks(
         self, state: _WorkerRequestState, rows: LogprobRows
     ) -> None:
-        store = getattr(self, "_logprob_store", None)
+        store = self._logprob_store
         if store is None or not state.pending_logprob_blocks:
             return
         retained = []
@@ -775,9 +790,7 @@ class AuxOutputWorkerConnector:
         deferred to that step's process_output.
         """
         self._step_metadata = metadata
-        if (
-            self._buffer is None and getattr(self, "_logprob_store", None) is None
-        ) or metadata is None:
+        if (self._buffer is None and self._logprob_store is None) or metadata is None:
             return
         assert not metadata.requests.keys() & metadata.finished_requests, (
             "auxiliary output request cannot run and finish in one step"
@@ -809,7 +822,7 @@ class AuxOutputWorkerConnector:
                 ]
                 if self._buffer is not None:
                     self._buffer.reset()
-                logprob_store = getattr(self, "_logprob_store", None)
+                logprob_store = self._logprob_store
                 if logprob_store is not None and release_logprob_keys:
                     logprob_store.put([], release_keys=release_logprob_keys)
                 self._requests.clear()
@@ -819,9 +832,10 @@ class AuxOutputWorkerConnector:
                     request_id, _WorkerRequestState(emit_cursor=emit_start)
                 )
                 state.prompt_len = metadata.prompt_lens.get(request_id, 0)
-                if state.pending_outputs == 0:
+                if state.pending_outputs == 0 and self._buffer is not None:
                     # In-flight steps leave the worker cursor behind the
                     # scheduler's optimistic view; only check settled requests.
+                    # Logprobs-only steps have no emit cursor to compare against.
                     assert emit_start <= state.emit_cursor, (
                         "auxiliary output Scheduler emit cursor moved ahead"
                     )
@@ -862,14 +876,14 @@ class AuxOutputWorkerConnector:
                     continue
                 finished_now.append(request_id)
                 release_keys.extend(reversed(state.aux_output_keys))
-                logprob_store = getattr(self, "_logprob_store", None)
+                logprob_store = self._logprob_store
                 if logprob_store is not None:
                     logprob_store.put(
                         [], release_keys=list(reversed(state.logprob_keys))
                     )
             if self._buffer is not None:
                 self._publish_blocks(block_batches, retained_keys, release_keys)
-            logprob_store = getattr(self, "_logprob_store", None)
+            logprob_store = self._logprob_store
             if logprob_store is not None:
                 logprob_store.put([], retain_keys=retained_logprob_keys)
             self._teardown(finished_now)
@@ -883,10 +897,8 @@ class AuxOutputWorkerConnector:
                     store.close()
             finally:
                 self._buffer = None
-                logprob_store, self._logprob_store = (
-                    getattr(self, "_logprob_store", None),
-                    None,
-                )
+                logprob_store = self._logprob_store
+                self._logprob_store = None
                 if logprob_store is not None:
                     logprob_store.close()
                 self._requests.clear()
