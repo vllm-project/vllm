@@ -7,11 +7,15 @@ import regex as re
 
 from vllm.config import ModelConfig
 from vllm.models.minimax_m3.amd.model import _should_skip_index_topk
+from vllm.models.minimax_m3.nvidia.model import (
+    _should_skip_index_topk as _should_skip_index_topk_nv,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.minimax_m3 import MiniMaxM3Config
 
 pytestmark = pytest.mark.skipif(
-    not current_platform.is_rocm(), reason="MiniMax-M3 AMD model"
+    not (current_platform.is_rocm() or current_platform.is_cuda()),
+    reason="MiniMax-M3 AMD/NVIDIA models",
 )
 
 
@@ -61,7 +65,10 @@ def test_text_config_overrides_take_effect(checkpoint):
         hf_overrides={"text_config": {"use_index_cache": True, "index_topk_freq": 4}},
     ).hf_text_config
 
-    # Sparse layers 3..59; every 4th one recomputes the top-k.
-    assert [i for i in range(60) if _should_skip_index_topk(text_config, i)] == sorted(
-        set(range(3, 60)) - set(range(3, 60, 4))
-    )
+    # Sparse layers 3..59; every 4th one recomputes the top-k. The AMD and
+    # NVIDIA models must pick the same compute layers.
+    expected = sorted(set(range(3, 60)) - set(range(3, 60, 4)))
+    assert [i for i in range(60) if _should_skip_index_topk(text_config, i)] == expected
+    assert [
+        i for i in range(60) if _should_skip_index_topk_nv(text_config, i)
+    ] == expected
