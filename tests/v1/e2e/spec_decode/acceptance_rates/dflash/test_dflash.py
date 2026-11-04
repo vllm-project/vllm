@@ -49,6 +49,18 @@ QWEN3_8_DFLASH2_NVFP4 = DFlashCorrectnessConfig(
     chat_template_kwargs={"enable_thinking": False},
 )
 
+QWEN3_5_4B_DFLASH2 = DFlashCorrectnessConfig(
+    model="Qwen/Qwen3.5-4B",
+    draft_model="nchapman/Qwen3.5-4B-DFlash2",
+    expected_accuracy=0.8,
+    expected_acceptance_len=4.55 * 0.9,
+    num_speculative_tokens=15,
+    max_num_seqs=32,
+    use_chat_completions=True,
+    language_model_only=True,
+    chat_template_kwargs={"enable_thinking": False},
+)
+
 LAGUNA_DFLASH_NVFP4 = DFlashCorrectnessConfig(
     model="poolside/Laguna-XS-2.1-NVFP4",
     draft_model="poolside/Laguna-XS-2.1-DFlash-NVFP4",
@@ -122,6 +134,11 @@ def test_dflash_reference_acceptance_lengths(
             QWEN3_8_DFLASH2_NVFP4,
             True,
             id="qwen3.8-dflash2-nvfp4-mrv2",
+        ),
+        pytest.param(
+            QWEN3_5_4B_DFLASH2,
+            True,
+            id="qwen3.5-4b-dflash2-mrv2",
         ),
     ],
 )

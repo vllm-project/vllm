@@ -273,11 +273,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_speculative_steps: int,
     ) -> None:
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            for groups in self.attn_groups:
-                for group in groups:
-                    group.map_to_kernel_block_table(
-                        self.block_tables.input_block_tables[group.kv_cache_group_id]
-                    )
+            self._map_kernel_block_tables()
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(batch_desc)
             return
