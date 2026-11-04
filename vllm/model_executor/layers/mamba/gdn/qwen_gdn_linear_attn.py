@@ -1986,24 +1986,48 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 for _pi in range(num_non_spec_seqs):
                     _ps = cu_list[_pi]
                     _pe = cu_list[_pi + 1]
-                    _chunk_T = mixed_qkv_non_spec_T[:, _ps:_pe]
+                    _seg_len = _pe - _ps
                     _has_init = (
                         has_initial_state[_pi : _pi + 1]
                         if has_initial_state is not None
                         else None
                     )
                     _cache_idx = non_spec_state_indices_tensor[_pi : _pi + 1]
-                    _cu = torch.tensor([0, _pe - _ps], dtype=torch.int32, device=device)
-                    _conv_out = causal_conv1d_fn(
-                        _chunk_T,
-                        conv_weights,
-                        self.conv1d.bias,
-                        activation=self.activation,
-                        conv_states=conv_state,
-                        has_initial_state=_has_init,
-                        cache_indices=_cache_idx,
-                        query_start_loc=_cu,
-                    ).transpose(0, 1)
+                    if _seg_len == 1 and _has_init is not None and bool(_has_init[0]):
+                        # A single new token continuing existing state is a
+                        # decode step, even when it shares this engine step
+                        # with another request's fresh prefill. Route it
+                        # through the same causal_conv1d_update kernel a
+                        # pure-decode step would use: causal_conv1d_fn and
+                        # causal_conv1d_update are not numerically identical
+                        # for this case, so using causal_conv1d_fn here would
+                        # make a request's conv output depend on whether a
+                        # neighbor happened to start prefilling in the same
+                        # step.
+                        _conv_out = causal_conv1d_update(
+                            mixed_qkv_non_spec_T[:, _ps:_pe].transpose(0, 1),
+                            conv_state,
+                            conv_weights,
+                            self.conv1d.bias,
+                            self.activation,
+                            conv_state_indices=_cache_idx,
+                            validate_data=False,
+                        )
+                    else:
+                        _chunk_T = mixed_qkv_non_spec_T[:, _ps:_pe]
+                        _cu = torch.tensor(
+                            [0, _seg_len], dtype=torch.int32, device=device
+                        )
+                        _conv_out = causal_conv1d_fn(
+                            _chunk_T,
+                            conv_weights,
+                            self.conv1d.bias,
+                            activation=self.activation,
+                            conv_states=conv_state,
+                            has_initial_state=_has_init,
+                            cache_indices=_cache_idx,
+                            query_start_loc=_cu,
+                        ).transpose(0, 1)
                     chunks.append(_conv_out)
                 _pad_start = cu_list[-1]
                 _total_rows = mixed_qkv_non_spec_T.size(1)
