@@ -746,10 +746,21 @@ class DenseGdnTest(unittest.TestCase):
                 self.assertEqual(bad, [])
 
 
-def _stock_gdn_spec(K, geo, w, h, residual, conv, ssm, idx, n_acc):
+def _fused_mtp():
+    try:
+        from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (  # noqa: E501
+            fused_gdn_decode_post_conv_mtp_triton,
+        )
+    except ImportError:
+        return None
+    return fused_gdn_decode_post_conv_mtp_triton
+
+
+def _stock_gdn_spec(K, geo, w, h, residual, conv, ssm, idx, n_acc, fused=False):
     """The stock spec-decode GDN step (vLLM's MTP verify path): in_proj, the conv
     update with the accepted-token offsets, the sigmoid-gated delta rule with a
-    state slot a token, RMSNormGated. Updates ``conv`` / ``ssm``."""
+    state slot a token, RMSNormGated; with ``fused`` the last two as the fused
+    MTP decode kernel. Updates ``conv`` / ``ssm``."""
     from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
     from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
         fused_sigmoid_gating_delta_rule_update,
@@ -775,6 +786,26 @@ def _stock_gdn_spec(K, geo, w, h, residual, conv, ssm, idx, n_acc):
         max_query_len=nq,
         validate_data=False,
     )
+    if fused:
+        core = torch.empty(s, geo.nv, K.HD, dtype=BF, device="cuda")
+        _fused_mtp()(
+            mixed_qkv=mixed,
+            a=a,
+            b=b,
+            A_log=w["a_log"],
+            dt_bias=w["dt_bias"],
+            state_indices=idx,
+            cu_seqlens=qsl,
+            num_accepted_tokens=n_acc,
+            state=ssm,
+            output_gate=z.unflatten(1, (geo.nv, K.HD)),
+            norm_weight=w["norm_w"],
+            out=core,
+            scale=K.HD**-0.5,
+            norm_eps=EPS,
+            output_gate_activation="silu",
+        )
+        return core.view(s, geo.val), res
     mq, mk, mv = mixed.split([geo.key, geo.key, geo.val], dim=-1)
     o, _ = fused_sigmoid_gating_delta_rule_update(
         A_log=w["a_log"],
@@ -800,11 +831,19 @@ class DenseGdnSpecTest(unittest.TestCase):
     """K1 on MTP verify steps (``K1Build.spec``): 1 + 3 draft tokens a request,
     bit-exact with the stock spec-decode path: res_out, core, the widened conv
     state, every state slot, and a padded request (vLLM's null block) left
-    alone with zero core rows."""
+    alone with zero core rows. ``test_verify_steps_fused``: against the fused
+    MTP decode kernel (``K1Build.spec_fused``), where vLLM has it."""
 
     NQ = 4
 
     def test_verify_steps(self):
+        self._verify_steps(fused=False)
+
+    @unittest.skipIf(_fused_mtp() is None, "needs the fused MTP decode kernel")
+    def test_verify_steps_fused(self):
+        self._verify_steps(fused=True)
+
+    def _verify_steps(self, fused):
         from vllm.models.qwen3_5.amd.mono import dense_ffn as D
         from vllm.models.qwen3_5.amd.mono import dense_gdn as K
 
@@ -820,7 +859,7 @@ class DenseGdnSpecTest(unittest.TestCase):
                 norm_eps=EPS,
                 grid=_grid(),
                 spec=nq,
-                **K.stock_fields(s, 1, False, _cus()),
+                **K.stock_fields(s, 1, False, _cus(), nq, fused),
             )
             core = torch.empty(s, geo.val, dtype=BF, device="cuda")
             res_out = torch.empty(s, K.HIDDEN, dtype=BF, device="cuda")
@@ -845,7 +884,7 @@ class DenseGdnSpecTest(unittest.TestCase):
                 )
                 conv_ref, ssm_ref = conv.clone(), ssm.clone()
                 core_ref, res_ref = _stock_gdn_spec(
-                    K, geo, w, h, residual, conv_ref, ssm_ref, idx, n_acc
+                    K, geo, w, h, residual, conv_ref, ssm_ref, idx, n_acc, fused
                 )
                 core.fill_(7.0)
                 epoch.add_(1)

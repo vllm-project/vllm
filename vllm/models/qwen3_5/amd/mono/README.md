@@ -28,9 +28,12 @@ With speculative decoding (MTP) at TP1, mono runs the verify steps: K1
 takes each request's 1 + k tokens in order through the conv and the
 recurrence, from the state after the request's last accepted token, writes
 every token's state to its own slot and rewrites the widened conv state, as
-vLLM's spec-decode kernels do (``K1Build.spec``); K2 takes the rows. Steps
-that are not whole verify steps (no drafts, fewer drafts, warm-up batches)
-run stock. With K1 switched off, the compiled stock GDN layer runs up to
+vLLM's spec-decode kernels do (``K1Build.spec``); K2 takes the rows. Where
+vLLM serves verify steps with the fused MTP decode kernel
+(``fused_gdn_decode_post_conv_mtp``), K1 takes that kernel's numerics
+(``K1Build.spec_fused``: its q / k l2-norm and gated-norm reduction orders).
+Steps that are not whole verify steps (no drafts, fewer drafts, warm-up
+batches) run stock. With K1 switched off, the compiled stock GDN layer runs up to
 out_proj's input and K2 still takes the rows.
 
 ## Grid width
@@ -222,8 +225,9 @@ SiLU-mul, including the TP2 down partial before the all-reduce.
 `DenseGdnTest` checks K1 against the stock conv update, gated delta rule,
 and RMSNormGated, including pad rows and the TP2 `out_proj` partial.
 `DenseGdnSpecTest` checks K1 on MTP verify steps against the stock
-spec-decode conv and recurrence, bit-exact (res_out, core, the conv state
-and every state slot).
+spec-decode conv and recurrence, and where vLLM has it against the fused MTP
+decode kernel, bit-exact (res_out, core, the conv state and every state
+slot).
 `RowCapsTest`, `StockAccumulationTest`, `StockSplitTest`, and
 `StockChainTest` check the row caps and that K2 follows the stock GEMM's
 split-K order. The Buildkite job `qwen38-27b-dense-mono-numerics-amd`

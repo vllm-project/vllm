@@ -349,6 +349,60 @@ def _k1_f32(attn, geo, x, conv, ssm, idx):
     return core, out
 
 
+def _stock_spec_core(attn, fused, mixed, a, b, z, ssm, idx, n_acc, qsl):
+    """The stock spec-decode recurrence + gated norm after the conv: the fused
+    MTP decode kernel (``fused``) or the sigmoid-gated delta rule and
+    RMSNormGated. Updates ``ssm``; returns core [S, value]."""
+    s, vd = mixed.size(0), attn.head_v_dim
+    if fused:
+        from vllm.third_party.flash_linear_attention.ops.fused_gdn_decode_post_conv_mtp import (  # noqa: E501
+            fused_gdn_decode_post_conv_mtp_triton,
+        )
+
+        core = torch.empty(s, z.size(1) // vd, vd, dtype=z.dtype, device=z.device)
+        fused_gdn_decode_post_conv_mtp_triton(
+            mixed_qkv=mixed,
+            a=a,
+            b=b,
+            A_log=attn.A_log,
+            dt_bias=attn.dt_bias,
+            state_indices=idx,
+            cu_seqlens=qsl,
+            num_accepted_tokens=n_acc,
+            state=ssm,
+            output_gate=z.unflatten(1, (-1, vd)),
+            norm_weight=attn.norm.weight,
+            out=core,
+            scale=attn.head_k_dim**-0.5,
+            norm_eps=attn.norm.eps,
+            output_gate_activation=attn.norm.activation,
+        )
+        return core.view(s, -1)
+    from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+        fused_sigmoid_gating_delta_rule_update,
+    )
+
+    kd = attn.head_k_dim
+    kdim = attn.key_dim // attn.tp_size
+    mq, mk, mv = mixed.split([kdim, kdim, mixed.size(1) - 2 * kdim], dim=-1)
+    o, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=attn.A_log,
+        a=a.contiguous(),
+        b=b.contiguous(),
+        dt_bias=attn.dt_bias,
+        q=mq.reshape(1, s, -1, kd),
+        k=mk.reshape(1, s, -1, kd),
+        v=mv.reshape(1, s, -1, vd),
+        initial_state=ssm,
+        inplace_final_state=True,
+        cu_seqlens=qsl,
+        ssm_state_indices=idx,
+        num_accepted_tokens=n_acc,
+        use_qk_l2norm_in_kernel=True,
+    )
+    return attn.norm(o.reshape(-1, vd), z.reshape(-1, vd)).view(s, -1)
+
+
 def _k1_spec_f32(attn, geo, x, conv, ssm, idx, n_acc):
     """The stock spec-decode GDN step in fp32 torch: a request's tokens in order
     from the state after its last accepted token (``idx[r, n_acc[r] - 1]``),
@@ -754,6 +808,13 @@ class DenseMono:
             (layer.linear_attn.num_spec for layer in model.layers if _is_gdn(layer)),
             default=0,
         )
+        # vLLM runs verify steps on the fused MTP decode kernel: K1 takes its
+        # numerics (K1Build.spec_fused)
+        self.spec_fused = self.spec and any(
+            getattr(layer.linear_attn, "enable_fused_gdn_spec_decode", False)
+            for layer in model.layers
+            if _is_gdn(layer)
+        )
         self.k1 = k1_flag and (self.oproj or not self.whole_step)
         # GDN layers up to out_proj's input, for the TP1 graph with K1 off
         self.gdn_core: dict[int, nn.Module] = {}
@@ -792,6 +853,7 @@ class DenseMono:
             self.k2_rows,
             self.grid,
             f"; speculative decoding: verify steps of {self.spec_q} tokens a request"
+            + (" (K1 as the fused MTP decode kernel)" if self.spec_fused else "")
             if self.spec
             else "",
         )
@@ -807,12 +869,17 @@ class DenseMono:
             DenseMonoGraph(self, vllm_config=vllm_config) if self.tp in (1, 2) else None
         )
 
+    def _spec_fields(self) -> tuple[int, bool]:
+        return (self.spec_q, self.spec_fused) if self.spec else (0, False)
+
     def _k1_key(self, dense_gdn, s: int, *, first: bool, eps=1e-6, norm_eps=1e-6):
         from vllm.models.qwen3_5.amd.mono.tiling import _resident_cus
 
         # the stock gated norm's layout (the GPU's CUs) and out_proj's AITER K
         # splits, probed once per width (from _allocate, before any capture)
-        stock = dense_gdn.stock_fields(s, self.tp, self.k1_oproj, _resident_cus())
+        stock = dense_gdn.stock_fields(
+            s, self.tp, self.k1_oproj, _resident_cus(), *self._spec_fields()
+        )
         if self.whole_step:
             return dense_gdn.K1Build(
                 tokens=s,
@@ -956,7 +1023,9 @@ class DenseMono:
 
             try:
                 for s in self._k1_widths():
-                    dense_gdn.stock_fields(s, self.tp, self.k1_oproj, _resident_cus())
+                    dense_gdn.stock_fields(
+                        s, self.tp, self.k1_oproj, _resident_cus(), *self._spec_fields()
+                    )
             except ValueError as exc:
                 return f"K1: {exc}"
         if self.whole_step and self.oproj and not self.k1:
@@ -1320,9 +1389,6 @@ class DenseMono:
             causal_conv1d_update,
         )
         from vllm.models.qwen3_5.amd.mono import dense_gdn as K
-        from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
-            fused_sigmoid_gating_delta_rule_update,
-        )
 
         geo = K.Geo(self.tp)
         q = self.spec_q
@@ -1333,7 +1399,6 @@ class DenseMono:
         dev = self.epoch.device
         g = torch.Generator(device=dev).manual_seed(2)
         eps = layer.input_layernorm.variance_epsilon
-        kd, vd = attn.head_k_dim, attn.head_v_dim
         for s in self._k1_widths():
             n = s // q
             first = s == q
@@ -1389,24 +1454,9 @@ class DenseMono:
                 max_query_len=q,
                 validate_data=False,
             )
-            kdim = attn.key_dim // attn.tp_size
-            mq, mk, mv = mixed.split([kdim, kdim, mixed.size(1) - 2 * kdim], dim=-1)
-            o, _ = fused_sigmoid_gating_delta_rule_update(
-                A_log=attn.A_log,
-                a=a.contiguous(),
-                b=b.contiguous(),
-                dt_bias=attn.dt_bias,
-                q=mq.reshape(1, s, -1, kd),
-                k=mk.reshape(1, s, -1, kd),
-                v=mv.reshape(1, s, -1, vd),
-                initial_state=ssm_ref,
-                inplace_final_state=True,
-                cu_seqlens=qsl,
-                ssm_state_indices=idx,
-                num_accepted_tokens=n_acc,
-                use_qk_l2norm_in_kernel=True,
+            core_ref = _stock_spec_core(
+                attn, self.spec_fused, mixed, a, b, z, ssm_ref, idx, n_acc, qsl
             )
-            core_ref = attn.norm(o.reshape(-1, vd), z.reshape(-1, vd)).view(s, -1)
             self.epoch.add_(1)
             core, res, _ = self._k1(index, layer, conv, ssm, (idx, n_acc), h, residual)
             why = _k1_verdict(

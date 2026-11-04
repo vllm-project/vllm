@@ -60,6 +60,12 @@ after its last accepted token, as vLLM's spec-decode kernels
 ``fused_sigmoid_gating_delta_rule_update``), bit-exact: the same conv
 window and state rewrite, the slots written, and the spec kernel's q / k
 l2-norm layout (its 4 warps; the state reductions match the decode kernel's).
+With ``K1Build.spec_fused`` the step follows the fused MTP decode kernel
+(``fused_gdn_decode_post_conv_mtp``, vLLM's verify path on ROCm where it
+exists) instead. Launched, it holds the state as the decode kernel does, so
+the recurrence is unchanged; its q / k l2 norm sums each of two warps with
+the first DPP step contracted (``scan_dot``), and its gated norm sums squares
+in tiles of 32 rows.
 
 Weights: in_proj_qkvz [q | k | v | z] and in_proj_ba [b | a] (the rank's) as
 MXFP4 in the (16, 16)-shuffled order (``dense_ffn.shuffle_w``), e8m0 scales [N, K / 32].
@@ -161,14 +167,32 @@ def o_splits(s: int) -> int:
     return O_SPLITS if s <= 8 else 1
 
 
+def fused_mtp_tile(requests: int, nv: int, cus: int) -> int:
+    """State rows a program of the fused MTP decode kernel's launch."""
+    heads = requests * nv
+    return 32 if heads < cus else 64 if heads <= 4 * cus else HD
+
+
 @functools.cache
-def stock_fields(s: int, tp: int, oproj: bool, cus: int) -> dict:
+def stock_fields(
+    s: int, tp: int, oproj: bool, cus: int, spec: int = 0, fused: bool = False
+) -> dict:
     """``K1Build`` fields that follow the stock path on this GPU at S rows: the
     gated norm's rows a program (``tiling.gated_norm_rows``, from the compute
     units) and, with ``oproj``, the installed AITER's K splits of out_proj (0
-    where they equal ``o_splits``). Probed once per argument set."""
+    where they equal ``o_splits``). With ``spec`` and ``fused`` (vLLM runs verify
+    steps on the fused MTP decode kernel) its tiles, of which K1 reproduces 32
+    rows. Probed once per argument set."""
     geo = Geo(tp)
     out = {"norm_rows": gated_norm_rows(geo.nv * s, cus)}
+    if spec and fused:
+        bv = fused_mtp_tile(s // spec, geo.nv, cus)
+        if bv != 32:
+            raise ValueError(
+                f"the fused MTP decode kernel tiles {bv} state rows at {s} rows; "
+                "K1 reproduces 32 only"
+            )
+        out["spec_fused"] = True
     if oproj:
         n = D.stock_splits(s, HIDDEN, geo.val)
         if n not in D.SPLIT_COUNTS:
@@ -214,6 +238,10 @@ class K1Build:
     # draft tokens); its rows are ``tokens / spec`` requests of ``spec`` tokens.
     # 0: one token a request.
     spec: int = 0
+    # ``spec``: the numerics of the fused MTP decode kernel
+    # (``fused_gdn_decode_post_conv_mtp``) in place of
+    # ``fused_sigmoid_gating_delta_rule_update`` + RMSNormGated
+    spec_fused: bool = False
 
 
 ABI = KernelAbi(
@@ -615,6 +643,18 @@ def _live(pred, ok):
     return pred if ok is None else pred & ok
 
 
+def scan_dot(lane, x, y):
+    """Sum over the wave of x y as the fused MTP kernel's l2 norm reads it at
+    lane 63 on gfx950: DPP row_shr 8 .. 1, row_bcast 15 / 31, the first step
+    contracted to fma(x, y, x' y' rounded) by the upper lane of each row's
+    pair. Here a butterfly whose first level every lane contracts with its
+    own product, so the lanes 8 .. 15 of a row hold the sum; returned to every
+    lane."""
+    v = fx.Float32(fmath.fma(x, y, xshfl(x * y, 8)))
+    v = butterfly(v, (4, 2, 1, 16, 32))
+    return (lane % 16 >= 8).select(v, xshfl(v, 8))
+
+
 def recur_task(c, m):
     """Task pair m of the pass: waves 0 .. 3 take the pass's task 2 m, waves 4 ..
     7 task 2 m + 1 (clamped) and whether it exists. Wave w % 4 holds rows 2 (w %
@@ -650,11 +690,11 @@ def gdn_loads(c):
                 [uniform(_ld_i32(a["st_idx"], t * nq + j)) for j in range(nq)]
             )
         sbase = a["rstate"] + fx.Int64(fx.max(slot, 0)) * fx.Int64(a["rs_seq"]) * 4
-        row = ch * VCH + 2 * (c["wave"] % 4) + c["lane"] // 32
-        soff = (h * HD + row) * HD + 4 * (c["lane"] % 32)
         g["valid"].append(valid)
         g["live"].append(valid & ((slot >= 0) if nq == 1 else (slot > 0)))
         g["sbase"].append(sbase)
+        row = ch * VCH + 2 * (c["wave"] % 4) + c["lane"] // 32
+        soff = (h * HD + row) * HD + 4 * (c["lane"] % 32)
         g["soff"].append(soff)
         g["st"].append(
             fx.Vector(bo.buffer_load(rsrc(sbase), soff, vec_width=4, dtype=T.f32))
@@ -859,6 +899,14 @@ def gdn_gates(c):
         if const_expr(nq == 1):
             nrm = D.tl_sqrt(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
             y0, y1 = x0 / nrm, x1 / nrm
+        elif const_expr(c["spec_fused"]):
+            # the fused MTP kernel: an element a lane of two warps, each warp's
+            # sum read at lane 63, the two added
+            ya = fx.ptr_load(base + lane)
+            yb = fx.ptr_load(base + (64 + lane))
+            ss = scan_dot(lane, ya, ya) + scan_dot(lane, yb, yb)
+            rn = hw_rsq(ss + fx.Float32(1e-6))
+            y0, y1 = x0 * rn, x1 * rn
         else:
             # the spec kernel's layout: an element a lane over two waves, each
             # wave reduced as here, then the two added
@@ -966,7 +1014,17 @@ def gdn_norm(c, g):
             ]
         )
         x = [f32_of(got[0][j]) for j in range(2)]
-        if const_expr(c["norm_rows"] == 1):
+        if const_expr(c["spec_fused"]):
+            # The fused MTP kernel: a sum of squares a tile of 32 rows (the
+            # rows 16 apart contracted by the lower, then xor 8, 4, 2, 1), the
+            # four added (t0 + t2) + (t1 + t3). Lanes 16 i .. 16 i + 7 hold
+            # tile i's rows m, m + 16 for their two rows m < 16.
+            f = [fx.Float32(fmath.fma(v, v, xshfl(v * v, 8))) for v in x]
+            for off in (4, 2, 1):
+                f = [v + xshfl(v, off) for v in f]
+            ss = butterfly(f[0] + f[1], (32, 16))
+            ss = (lane % 16 < 8).select(ss, xshfl(ss, 8))
+        elif const_expr(c["norm_rows"] == 1):
             ss = butterfly(x[0] * x[0] + x[1] * x[1], VEC_ORDER)
         else:
             # Two rows a program: a stock thread holds 4 columns (lanes 2 m,
@@ -1082,6 +1140,7 @@ def build(key: K1Build):
     assert key.norm_rows in (1, 2), key
     nq = key.spec or 1
     assert not key.spec or (key.tp == 1 and not key.oproj and s % nq == 0), key
+    assert key.spec or not key.spec_fused, key
     units = s // nq
     # the LDS of the widest GDN pass (every pass on 256 CTAs: one)
     nt = max(n for _, n in gdn_passes(geo, units))
@@ -1140,6 +1199,8 @@ def build(key: K1Build):
         name += f"_q{key.o_split}"
     if key.spec:
         name += f"_v{key.spec}"
+    if key.spec_fused:
+        name += "_m"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -1192,6 +1253,7 @@ def build(key: K1Build):
             "eps": key.eps,
             "norm_eps": key.norm_eps,
             "norm_rows": key.norm_rows,
+            "spec_fused": key.spec_fused,
             "o_n": o_n,
             "stamps": scratch + fx.Int64(lay["stamps"][0]) if key.stamps else None,
             "put": mb.put,
