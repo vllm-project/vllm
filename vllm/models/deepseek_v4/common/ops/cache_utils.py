@@ -806,17 +806,6 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
-def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
-
-
 class CombineTopkSwaIndicesKernel(
     VllmTritonJitKernel["CombineTopkSwaIndicesKernel.CompileKey"]
 ):
@@ -960,12 +949,9 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
         hf_config = vllm_config.model_config.hf_config
-        index_topk = int(getattr(hf_config, "index_topk", 0) or 0)
+        window_size = hf_config.sliding_window
+        index_topk = hf_config.index_topk
         compress_ratios = tuple(
             sorted({max(1, int(ratio)) for ratio in get_compress_ratios(hf_config)})
         )
@@ -982,8 +968,8 @@ class CombineTopkSwaIndicesKernel(
             ),
         )
         image_width = (
-            _hf_config_int(vllm_config, "vision_max_n_token", 0)
-            if _hf_config_int(vllm_config, "vision_n_layers", 0) > 0
+            getattr(hf_config, "vision_max_n_token", 0)
+            if getattr(hf_config, "vision_n_layers", 0) > 0
             else 0
         )
         # Warm both the plain-window variant (batches without image spans)
@@ -1241,7 +1227,7 @@ def build_flashinfer_mixed_sparse_indices(
 
 
 @triton.jit
-def _remap_flashinfer_index(values, block_size, block_span):
+def remap_flashinfer_index(values, block_size, block_span):
     # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
     # packed pages (#44577) need block*block_size+off -> block*block_span+off.
     # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
@@ -1380,7 +1366,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
                     mask=src_mask,
                     other=-1,
                 )
-                values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+                values = remap_flashinfer_index(values, swa_block_size, swa_block_span)
                 tl.store(
                     sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                     values,
@@ -1416,7 +1402,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
                     compressed_len += tl.sum(
                         (is_valid & token_valid).to(tl.int32), axis=0
                     )
-                values = _remap_flashinfer_index(
+                values = remap_flashinfer_index(
                     values, compressed_block_size, compressed_block_span
                 )
                 tl.store(
@@ -1493,7 +1479,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             block_offsets = pos_offset % swa_block_size
             slot_ids = block_numbers * swa_block_size + block_offsets
             slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-            slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
+            slot_ids = remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 slot_ids,
@@ -1520,7 +1506,7 @@ class BuildFlashinferMixedSparseIndicesKernel(
             block_offsets = local_idx % compressed_block_size
             slot_ids = block_numbers * compressed_block_size + block_offsets
             slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-            slot_ids = _remap_flashinfer_index(
+            slot_ids = remap_flashinfer_index(
                 slot_ids, compressed_block_size, compressed_block_span
             )
             tl.store(
