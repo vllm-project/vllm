@@ -283,7 +283,7 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
         self._wo_a_packed: torch.Tensor | None = None
         self._wrap_wo_a_process_weights_after_loading()
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Cache fp32-contiguous copies of tensors CPU kernels want that way
         but that arrive bf16 (rotary cos/sin table, compressor RMSNorm
         weights) -- cast once here instead of per forward call.

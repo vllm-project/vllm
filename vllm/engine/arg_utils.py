@@ -459,7 +459,7 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 
 
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
 )
 
@@ -621,6 +621,7 @@ class EngineArgs:
     )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
+    max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -871,7 +872,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -1771,6 +1772,10 @@ class EngineArgs:
             **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
+            "--max-num-inflight-kv-loads",
+            **scheduler_kwargs["max_num_inflight_kv_loads"],
+        )
+        scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
         )
         scheduler_group.add_argument(
@@ -1956,7 +1961,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"],
             default=None,
             help="Select GDN prefill backend.",
         )
@@ -2672,6 +2677,7 @@ class EngineArgs:
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,
+            max_num_inflight_kv_loads=self.max_num_inflight_kv_loads,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,

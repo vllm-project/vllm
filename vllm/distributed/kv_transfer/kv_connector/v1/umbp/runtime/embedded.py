@@ -11,7 +11,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from concurrent.futures import Executor, Future, ThreadPoolExecutor, TimeoutError
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -320,19 +320,18 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         timeout_s: float,
         layout: KVLayoutDescriptor | None = None,
         lookup_instance: str = "",
+        serve_lookups: bool = True,
     ) -> None:
         self.client = client
         self._namespace = namespace
         self._topology = topology
         self._lookup_dir = lookup_dir
         self._lookup_instance = lookup_instance
+        self._serve_lookups = serve_lookups
         self._lookup_server: _MoriLookupServer | None = None
         self._registered_storages: set[int] = set()
         self._gpu_devices: set[int] = set()
-        self._executor = ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="umbp-embedded-transfer",
-        )
+        self._executor = self._create_executor(max_workers)
         self._job_lock = threading.Lock()
         self._futures: dict[int, Future[TransferJobState]] = {}
         self._store_deadlines: dict[int, float] = {}
@@ -340,6 +339,12 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
         self._timeout_s = timeout_s
         self._layout = layout
         self._load_layouts: dict[int, _BlockLoadLayout] = {}
+
+    def _create_executor(self, max_workers: int) -> Executor:
+        return ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="umbp-embedded-transfer",
+        )
 
     def register_buffers(self, kv_caches: dict[str, torch.Tensor]) -> None:
         try:
@@ -369,7 +374,7 @@ class _MoriWorkerHandle(UMBPWorkerHandle):
                 self._gpu_devices.add(device)
 
         self._register_load_layouts(kv_caches)
-        if self._lookup_server is None:
+        if self._serve_lookups and self._lookup_server is None:
             self._lookup_server = _MoriLookupServer(
                 _lookup_socket_path(
                     self._namespace,

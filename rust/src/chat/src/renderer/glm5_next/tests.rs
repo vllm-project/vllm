@@ -289,6 +289,33 @@ fn continue_final_message_matches_existing_hf_renderer() {
     }
 }
 
+/// History tool-call `arguments` that are not a JSON object render as `{}`,
+/// as on the HF renderer, instead of failing the request.
+#[test]
+fn non_object_tool_call_arguments_match_existing_hf_renderer() {
+    let arguments = [r#"{"cmd": "mkdir -p"#, "42", "[]", "null", ""];
+    let native = Glm5NextChatRenderer::default();
+    for (name, template) in CHECKPOINT_TEMPLATES {
+        let hf = hf_renderer(template);
+        for arguments in arguments {
+            let mut request = tool_request(1);
+            request.messages[2] =
+                ChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call_0".into(),
+                        name: "lookup".into(),
+                        arguments: arguments.into(),
+                    },
+                )]);
+            assert_eq!(
+                native.render(&request).unwrap().prompt,
+                hf.render(&request).unwrap().prompt,
+                "{name}: {arguments:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn media_parts_render_reminders_without_multimodal_inputs() {
     let request = ChatRequest {

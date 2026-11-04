@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -56,7 +57,6 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
-    align_extensible_kv_cache_capacity,
     finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
@@ -379,14 +379,6 @@ class EngineCore:
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
         extensible = vllm_config.cache_config.enable_extensible_kv_cache
-        # A KV connector may register each committed segment for RDMA, which
-        # cannot span physical chunks: keep segment bounds granule-aligned.
-        commit_granule: int | None = None
-        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
-            commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
-            align_extensible_kv_cache_capacity(
-                vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule
-            )
         if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
@@ -418,7 +410,6 @@ class EngineCore:
                 kv_cache_configs,
                 scheduler_kv_cache_config,
                 compilation_times,
-                commit_granule,
             )
             self.model_executor.extend_kv_cache(num_blocks)
         # Under the extensible KV cache, workers create the connector in
@@ -1178,6 +1169,14 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def is_inference_ready(self) -> bool:
+        """Whether the engine can accept and process new requests: it is not
+        paused (including for a checkpoint) or asleep, and no weight update has
+        left the weights incomplete."""
+        return not self.is_sleeping() and not any(
+            self.collective_rpc("has_incomplete_weight_update")
+        )
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
@@ -1235,6 +1234,21 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
+
+        watermark_config = self.vllm_config.watermark_config
+        params = request.sampling_params
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
+                warn_watermarking_override()
+            params.watermarking = True
 
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(

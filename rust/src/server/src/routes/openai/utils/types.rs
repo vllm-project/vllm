@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use vllm_chat::ChatTool;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -337,7 +338,7 @@ fn default_function_tool_type() -> String {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
@@ -348,6 +349,25 @@ pub struct Function {
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
     /// mirroring the OpenAI Responses and Anthropic Messages field).
     pub defer_loading: Option<bool>,
+}
+
+impl From<Function> for ChatTool {
+    fn from(function: Function) -> Self {
+        let Function {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        } = function;
+        Self {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -383,7 +403,7 @@ pub struct FunctionCallDelta {
 }
 
 /// Tool choice value for simple string options.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoiceValue {
     Auto,
@@ -416,13 +436,13 @@ impl Default for ToolChoice {
 }
 
 /// Function choice specification for `ToolChoice::Function`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
 /// Tool reference for `ToolChoice::AllowedTools`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolReference {
@@ -617,13 +637,17 @@ pub enum MessageContent {
 
 /// Mirrors the Python vLLM `UsageInfo` class.
 ///
-/// Do not skip serializing `None` fields here: non-streaming response types
-/// should serialize `None` as explicit `null`.
+/// Do not skip serializing `None` fields here, except where Python omits them
+/// (`prompt_tokens_details`): non-streaming response types should serialize
+/// `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
+    /// Omitted rather than `null` when not reported, like Python: the OpenAI
+    /// spec types it as an object, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
     /// Reasoning-token breakdown. `None` when the frontend cannot count
     /// reasoning tokens: on chat without a reasoning parser, and always on
@@ -705,7 +729,8 @@ mod usage_tests {
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
-        assert!(usage.prompt_tokens_details.is_none());
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(json.get("prompt_tokens_details").is_none(), "{json}");
     }
 
     #[test]

@@ -423,13 +423,9 @@ pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, A
             if tool.tool_type != "function" {
                 bail_invalid_request!("Only function tools are supported.");
             }
-            Ok(ChatTool {
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: tool.function.parameters,
-                strict: tool.function.strict,
-                defer_loading: tool.function.defer_loading.or(tool.defer_loading),
-            })
+            let mut function = tool.function;
+            function.defer_loading = function.defer_loading.or(tool.defer_loading);
+            Ok(ChatTool::from(function))
         })
         .collect()
 }

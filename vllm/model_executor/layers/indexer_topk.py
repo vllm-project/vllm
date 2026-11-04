@@ -159,6 +159,7 @@ class SparseIndexerTopk(torch.nn.Module):
         self._has_flashinfer_topk = has_flashinfer()
         self._cooperative_capable = self._is_cuda and (
             current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(110)
             and not current_platform.is_device_capability_family(120)
         )
         self._is_rocm = current_platform.is_rocm()
@@ -293,7 +294,9 @@ class SparseIndexerTopk(torch.nn.Module):
                 f"logits.stride(0) must be divisible by 4, got {logits.stride(0)}"
             )
         if self._is_cuda and not self._cooperative_capable:
-            failures.append("requires SM90+ and is not supported on the SM12x family")
+            failures.append(
+                "requires SM90+ and is not supported on the SM11x/SM12x families"
+            )
         return failures
 
     @staticmethod
