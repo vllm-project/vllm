@@ -227,7 +227,10 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
         mxfp8_e4m3_quantize,
     )
-    from vllm.models.minimax_m3.nvidia.model import fused_moe_finalize_max_tokens
+    from vllm.models.minimax_m3.nvidia.model import (
+        FUSED_MOE_FINALIZE_MAX_TOKENS,
+        fused_moe_finalize_one_shot_max_tokens,
+    )
     from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
         FinalizeAllReduceGemmaRMSNormMxfp8,
     )
@@ -239,13 +242,15 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        cap = fused_moe_finalize_max_tokens(tp_size)
+        cap = FUSED_MOE_FINALIZE_MAX_TOKENS
+        one_shot = fused_moe_finalize_one_shot_max_tokens(tp_size)
         op = FinalizeAllReduceGemmaRMSNormMxfp8(
             hidden_size=hidden,
             max_num_tokens=cap,
             top_k=top_k,
             fp32_weights=False,
             device=device,
+            one_shot_max_tokens=one_shot,
         )
 
         def run(n):
@@ -335,9 +340,10 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
             graph.replay()
             check(captured)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox, up
-        # to the model's cap.
-        for n in (1, 6, 3, 17, cap // 2, 2, cap, cap - 1, 1):
+        # Changing shapes cover shrinking and growing batches, switching between
+        # the one-shot and two-shot mailboxes, up to the model's cap.
+        sizes = (1, 6, one_shot, 3, one_shot + 1, 17, 2, cap // 4, 100, cap // 2)
+        for n in (*sizes, 1, cap - 1, cap, 40, 1):
             run(n)
         with pytest.raises(ValueError, match="outside"):
             run(cap + 1)

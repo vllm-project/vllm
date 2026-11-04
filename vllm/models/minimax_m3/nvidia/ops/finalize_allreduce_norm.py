@@ -13,6 +13,14 @@ rank's fragment lands, reduces them, adds the residual and applies the Gemma
 RMSNorm. Instead of a BF16 row, the consumer writes the normalized row as MXFP8
 (E4M3 values and UE8M0 scales of 32-element blocks in the 128x4 swizzled
 layout), so the MXFP8 linear that follows skips its own input quantization.
+
+Larger batches use DSV4.1's two-shot (BT) protocol, in three PDL-chained
+kernels: the finalize publish stores each token's partial row only into its
+owner rank's mailbox, the owner-reduce kernel sums the rows, adds the residual
+and multicasts the BF16 sum, and the consumer norms every token from that
+reduced mailbox. A kernel spins only on stores of kernels that run before it,
+never on another CTA of its own grid, so neither protocol depends on the grid
+size, block dispatch order or occupancy to finish.
 """
 
 import math
@@ -60,6 +68,7 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
     to_cute_dynamic,
 )
 from vllm.models.deepseek_v41.nvidia.ops.cute_dsl.all_reduce_mhc import (
+    _OwnerReduceMulticastDeviceKernel,
     _QuadFinalizePublishDeviceKernel,
 )
 from vllm.platforms import current_platform
@@ -211,6 +220,10 @@ class _LamportGemmaRMSNormMxfp8Kernel:
     A 32-element scale block is four consecutive fragments, which adjacent lanes
     hold, so two shuffles reduce its amax. The scales of the padding rows below
     the next multiple of 128 are zeroed, as FlashInfer's quantization does.
+
+    With ``reduced_input`` (two-shot, ``tp=1``), the mailbox holds each token's
+    finished sum, residual included, ``[generation][token]``, from
+    ``_OwnerReduceMulticastDeviceKernel``, which also advanced the generation.
     """
 
     def __init__(
@@ -222,9 +235,13 @@ class _LamportGemmaRMSNormMxfp8Kernel:
         cluster_size: int,
         threads: int,
         enable_pdl: bool,
+        reduced_input: bool = False,
     ) -> None:
         if hidden <= 0 or hidden % (MXFP8_BLOCK * _SCALE_COL_TILE):
             raise ValueError("hidden must be a positive multiple of 128")
+        if reduced_input and tp != 1:
+            raise ValueError("a reduced mailbox has one source: tp must be 1")
+        self.reduced_input = reduced_input
         if threads <= 0 or threads % WARP_SIZE:
             raise ValueError("threads must be a positive multiple of the warp size")
         self.hidden = hidden
@@ -322,16 +339,19 @@ class _LamportGemmaRMSNormMxfp8Kernel:
                 gamma_fragments[trip, None].store(
                     packed_u32x4_to_bf16x8(load_global_u32x4(gamma_pointer))
                 )
-                residual_element = Int64(token) * self.hidden + gamma_element
-                residual_pointer = cute.make_ptr(
-                    BFloat16,
-                    (residual_source.iterator + residual_element).llvm_ptr,
-                    cute.AddressSpace.gmem,
-                    assumed_align=16,
-                )
-                residual_fragments[trip, None].store(
-                    packed_u32x4_to_bf16x8(load_global_u32x4(residual_pointer))
-                )
+                # A reduced sum already holds the residual; adding the zeros
+                # left here keeps it exact.
+                if cutlass.const_expr(not self.reduced_input):
+                    residual_element = Int64(token) * self.hidden + gamma_element
+                    residual_pointer = cute.make_ptr(
+                        BFloat16,
+                        (residual_source.iterator + residual_element).llvm_ptr,
+                        cute.AddressSpace.gmem,
+                        assumed_align=16,
+                    )
+                    residual_fragments[trip, None].store(
+                        packed_u32x4_to_bf16x8(load_global_u32x4(residual_pointer))
+                    )
 
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_wait()
@@ -383,11 +403,12 @@ class _LamportGemmaRMSNormMxfp8Kernel:
                     bf16x8_to_packed_u32x4(prenorm_bf16),
                 )
 
-        if token == 0 and cluster_rank == 0 and tidx == 0:
-            store_global_u32(
-                (stage_state.iterator + NEXT_STAGE).toint(),
-                (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
-            )
+        if cutlass.const_expr(not self.reduced_input):  # noqa: SIM102
+            if token == 0 and cluster_rank == 0 and tidx == 0:
+                store_global_u32(
+                    (stage_state.iterator + NEXT_STAGE).toint(),
+                    (active_stage + Uint32(1)) % Uint32(LAMPORT_GENERATIONS),
+                )
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_launch_dependents()
 
@@ -528,12 +549,19 @@ def mxfp8_scale_numel(num_tokens: int, hidden_size: int) -> int:
 
 class FinalizeAllReduceGemmaRMSNormMxfp8:
     """MoE top-k finalize, TP all-reduce, residual add, Gemma RMSNorm and MXFP8
-    quantization in two PDL-chained launches.
+    quantization in PDL-chained launches.
 
     ``__call__`` takes an unfinalized MoE output plus its TP-partial shared-expert
-    output and returns the MXFP8 normalized rows with the new residual. Each
-    instance owns a Lamport mailbox for ``max_num_tokens`` rows that all layers
-    share; construction is collective over the TP group.
+    output and returns the MXFP8 normalized rows with the new residual. Batches
+    up to ``one_shot_max_tokens`` use a one-shot all-reduce in two launches:
+    every rank multicasts its rows and reduces all of them. Larger batches, up
+    to ``max_num_tokens``, use DSV4.1's two-shot (BT) all-reduce in three
+    launches, whose NVLink traffic per rank is about half: each token's rows go
+    to one owner rank, which reduces them, adds the residual and multicasts the
+    BF16 sum; every rank then norms and quantizes every token. Both sum the
+    ranks in FP32 in rank order and add the residual before rounding, so their
+    outputs are identical. All layers share the Lamport mailboxes; construction
+    is collective over the TP group.
     """
 
     def __init__(
@@ -544,103 +572,189 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
         top_k: int,
         fp32_weights: bool,
         device: torch.device,
+        one_shot_max_tokens: int | None = None,
     ) -> None:
+        """``one_shot_max_tokens`` defaults to ``max_num_tokens`` (one-shot
+        only); 0 makes every batch two-shot."""
+        if max_num_tokens <= 0:
+            raise ValueError("max_num_tokens must be positive")
+        if one_shot_max_tokens is None:
+            one_shot_max_tokens = max_num_tokens
+        elif one_shot_max_tokens < 0:
+            raise ValueError("one_shot_max_tokens must not be negative")
         group = get_tp_group().device_group
         self.hidden_size = hidden = hidden_size
-        self.capacity = capacity = max_num_tokens
+        self.max_num_tokens = max_num_tokens
+        self.capacity = capacity = min(max_num_tokens, one_shot_max_tokens)
         self.top_k = top_k
         self.fp32_weights = fp32_weights
-        tp = dist.get_world_size(group)
-        rank = dist.get_rank(group)
+        self.tp = tp = dist.get_world_size(group)
+        self.rank = dist.get_rank(group)
         device = torch.device(device)
+        # The rendezvous handles, which keep the peer mappings alive.
+        self._handles: list[object] = []
 
-        # A cluster of 128-thread CTAs covers a token's fragments in one trip
-        # (six for hidden 6144); the finalize stages all top_k routes at once.
-        cluster_size = math.ceil(hidden // VEC_BF16 / 128)
         with torch.accelerator.device_index(device.index):
-            self._publish = cute.compile(
-                _QuadFinalizePublishDeviceKernel(
-                    hidden=hidden,
-                    top_k=top_k,
-                    tp=tp,
-                    rank=rank,
-                    capacity_m=capacity,
-                    threads=128,
-                    # The routing weights already carry routed_scaling_factor.
-                    routed_scaling_factor=1.0,
-                    include_shared_expert=True,
-                    load_shared_expert_before_pdl=False,
-                    enable_pdl=True,
-                    prefetch_group=top_k,
-                    fp32_weights=fp32_weights,
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Float32 if fp32_weights else BFloat16,
-                    alignment=4 if fp32_weights else 2,
-                    divisibility=top_k,
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Int32, alignment=4, divisibility=top_k
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_compact_tensor(Int32, (2,), assumed_align=4),
-                Int64(0),
-                Int32(capacity),
-                current_cu_stream(),
-            )
-            self._collective = cute.compile(
-                _LamportGemmaRMSNormMxfp8Kernel(
-                    hidden=hidden,
-                    tp=tp,
-                    capacity_m=capacity,
-                    cluster_size=cluster_size,
-                    threads=128,
-                    enable_pdl=True,
-                ),
-                make_fake_compact_tensor(
-                    BFloat16,
-                    (LAMPORT_GENERATIONS * tp * capacity * hidden,),
-                    assumed_align=16,
-                ),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_compact_tensor(BFloat16, (hidden,), assumed_align=16),
-                make_fake_dynamic_compact_tensor(
-                    BFloat16, alignment=16, divisibility=hidden
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Uint8, alignment=16, divisibility=hidden
-                ),
-                make_fake_dynamic_compact_tensor(
-                    Uint8, alignment=16, divisibility=_SCALE_ROW_TILE
-                ),
-                make_fake_compact_tensor(Int32, (2,), assumed_align=4),
-                Float32(0.0),
-                Int32(capacity),
-                current_cu_stream(),
-            )
-
-            self._mailbox = symm_mem.empty(
-                (LAMPORT_GENERATIONS, tp, capacity, hidden),
-                dtype=torch.bfloat16,
-                device=device,
-            )
-            self._mailbox_handle = symm_mem.rendezvous(self._mailbox, group)
-            multicast = int(self._mailbox_handle.multicast_ptr or 0)
-            if not multicast or multicast % 16:
-                raise RuntimeError("NVLink multicast mapping is unavailable")
-            self._multicast = multicast
-            # Every slot starts as the Lamport sentinel, BF16 negative zero.
-            self._mailbox.view(torch.int16).fill_(-32768)
-            self._stage_state = torch.zeros(2, dtype=torch.int32, device=device)
+            if capacity:
+                shape = (LAMPORT_GENERATIONS, tp, capacity, hidden)
+                self._publish = self._compile_publish(capacity)
+                self._collective = self._compile_collective(capacity, tp, shape)
+                self._mailbox, handle = self._lamport_buffer(shape, device, group)
+                self._multicast = self._multicast_address(handle)
+                self._stage_state = torch.zeros(2, dtype=torch.int32, device=device)
+            if max_num_tokens > capacity:
+                self._init_two_shot(max_num_tokens, device, group)
             torch.accelerator.synchronize()
         dist.barrier(group=group)
+
+    def _init_two_shot(
+        self, max_num_tokens: int, device: torch.device, group: dist.ProcessGroup
+    ) -> None:
+        """Compile the two-shot kernels and allocate their mailboxes, laid out
+        as ``AllReduceMHC``'s BT ones: each owner's contributions
+        [generation][source rank][owned token] and every rank's sums
+        [generation][token]. Token t belongs to rank t % tp."""
+        hidden, tp = self.hidden_size, self.tp
+        owner_capacity = math.ceil(max_num_tokens / tp)
+        owner_shape = (LAMPORT_GENERATIONS, tp, owner_capacity, hidden)
+        reduced_shape = (LAMPORT_GENERATIONS, max_num_tokens, hidden)
+        self._publish_two_shot = self._compile_publish(
+            max_num_tokens, owner_capacity=owner_capacity
+        )
+        self._reduce_two_shot = cute.compile(
+            _OwnerReduceMulticastDeviceKernel(
+                hidden=hidden,
+                tp=tp,
+                rank=self.rank,
+                capacity_m=max_num_tokens,
+                owner_capacity=owner_capacity,
+                threads=128,
+                enable_pdl=True,
+            ),
+            make_fake_compact_tensor(
+                BFloat16, (math.prod(owner_shape),), assumed_align=16
+            ),
+            make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+            Int64(0),
+            Int32(max_num_tokens),
+            current_cu_stream(),
+            make_fake_dynamic_compact_tensor(
+                BFloat16, alignment=16, divisibility=hidden
+            ),
+        )
+        self._collective_two_shot = self._compile_collective(
+            max_num_tokens, 1, reduced_shape, reduced_input=True
+        )
+        self._owner_mailbox, owner_handle = self._lamport_buffer(
+            owner_shape, device, group
+        )
+        # The publish stores into the owner's mailbox through this table of
+        # the ranks' mailbox addresses. get_remote_tensor keeps the rendezvous
+        # offset of a pooled buffer.
+        self._owner_mailboxes = torch.tensor(
+            [
+                owner_handle.get_remote_tensor(
+                    peer, owner_shape, torch.bfloat16
+                ).data_ptr()
+                for peer in range(tp)
+            ],
+            dtype=torch.int64,
+            device=device,
+        )
+        self._reduced_mailbox, reduced_handle = self._lamport_buffer(
+            reduced_shape, device, group
+        )
+        self._reduced_multicast = self._multicast_address(reduced_handle)
+        self._stage_state_two_shot = torch.zeros(2, dtype=torch.int32, device=device)
+
+    def _lamport_buffer(self, shape, device, group):
+        """A symmetric BF16 buffer filled with the Lamport sentinel (BF16
+        negative zero) and its rendezvous handle, which is kept alive."""
+        buffer = symm_mem.empty(shape, dtype=torch.bfloat16, device=device)
+        handle = symm_mem.rendezvous(buffer, group)
+        self._handles.append(handle)
+        buffer.view(torch.int16).fill_(-32768)
+        return buffer, handle
+
+    @staticmethod
+    def _multicast_address(handle) -> int:
+        multicast = int(handle.multicast_ptr or 0)
+        if not multicast or multicast % 16:
+            raise RuntimeError("NVLink multicast mapping is unavailable")
+        return multicast
+
+    def _compile_publish(self, capacity: int, *, owner_capacity: int | None = None):
+        hidden, top_k, fp32_weights = self.hidden_size, self.top_k, self.fp32_weights
+        return cute.compile(
+            _QuadFinalizePublishDeviceKernel(
+                hidden=hidden,
+                top_k=top_k,
+                tp=self.tp,
+                rank=self.rank,
+                capacity_m=capacity,
+                threads=128,
+                # The routing weights already carry routed_scaling_factor.
+                routed_scaling_factor=1.0,
+                include_shared_expert=True,
+                load_shared_expert_before_pdl=False,
+                enable_pdl=True,
+                prefetch_group=top_k,
+                fp32_weights=fp32_weights,
+                owner_capacity=owner_capacity,
+            ),
+            make_fake_dynamic_compact_tensor(
+                BFloat16, alignment=16, divisibility=hidden
+            ),
+            make_fake_dynamic_compact_tensor(
+                Float32 if fp32_weights else BFloat16,
+                alignment=4 if fp32_weights else 2,
+                divisibility=top_k,
+            ),
+            make_fake_dynamic_compact_tensor(Int32, alignment=4, divisibility=top_k),
+            make_fake_dynamic_compact_tensor(
+                BFloat16, alignment=16, divisibility=hidden
+            ),
+            make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+            Int64(0),
+            Int32(capacity),
+            current_cu_stream(),
+        )
+
+    def _compile_collective(
+        self, capacity: int, rows: int, mailbox_shape, *, reduced_input: bool = False
+    ):
+        hidden = self.hidden_size
+        return cute.compile(
+            _LamportGemmaRMSNormMxfp8Kernel(
+                hidden=hidden,
+                tp=rows,
+                capacity_m=capacity,
+                # A cluster of 128-thread CTAs covers a token's fragments in one
+                # trip (six for hidden 6144).
+                cluster_size=math.ceil(hidden // VEC_BF16 / 128),
+                threads=128,
+                enable_pdl=True,
+                reduced_input=reduced_input,
+            ),
+            make_fake_compact_tensor(
+                BFloat16, (math.prod(mailbox_shape),), assumed_align=16
+            ),
+            make_fake_dynamic_compact_tensor(
+                BFloat16, alignment=16, divisibility=hidden
+            ),
+            make_fake_compact_tensor(BFloat16, (hidden,), assumed_align=16),
+            make_fake_dynamic_compact_tensor(
+                BFloat16, alignment=16, divisibility=hidden
+            ),
+            make_fake_dynamic_compact_tensor(Uint8, alignment=16, divisibility=hidden),
+            make_fake_dynamic_compact_tensor(
+                Uint8, alignment=16, divisibility=_SCALE_ROW_TILE
+            ),
+            make_fake_compact_tensor(Int32, (2,), assumed_align=4),
+            Float32(0.0),
+            Int32(capacity),
+            current_cu_stream(),
+        )
 
     def __call__(
         self,
@@ -666,8 +780,8 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
         assert moe_output.routed_scaling_factor == 1.0
         hidden, top_k = self.hidden_size, self.top_k
         m = residual.shape[0]
-        if not 1 <= m <= self.capacity:
-            raise ValueError(f"M={m} is outside [1, {self.capacity}]")
+        if not 1 <= m <= self.max_num_tokens:
+            raise ValueError(f"M={m} is outside [1, {self.max_num_tokens}]")
         if residual.shape != (m, hidden) or shared_output.shape != (m, hidden):
             raise ValueError("residual and shared_output must be [M, hidden]")
         weights_dtype = torch.float32 if self.fp32_weights else torch.bfloat16
@@ -676,7 +790,19 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
             or routed.expert_weights.numel() != m * top_k
         ):
             raise ValueError(f"expert_weights must be {weights_dtype} [M, top_k]")
-        self._publish(
+        two_shot = m > self.capacity
+        if two_shot:
+            publish, collective = self._publish_two_shot, self._collective_two_shot
+            stage_state = to_cute(self._stage_state_two_shot, 4)
+            mailbox_address = self._owner_mailboxes.data_ptr()
+            mailbox = self._reduced_mailbox
+        else:
+            publish, collective = self._publish, self._collective
+            stage_state = to_cute(self._stage_state, 4)
+            mailbox_address = self._multicast
+            mailbox = self._mailbox
+        residual_source = to_cute_dynamic(residual.flatten(), 16, divisibility=hidden)
+        publish(
             to_cute_dynamic(routed.gemm2_permuted.flatten(), 16, divisibility=hidden),
             to_cute_dynamic(
                 routed.expert_weights.flatten(),
@@ -687,11 +813,20 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
                 routed.expanded_idx_to_permuted_idx.flatten(), 4, divisibility=top_k
             ),
             to_cute_dynamic(shared_output.flatten(), 16, divisibility=hidden),
-            to_cute(self._stage_state, 4),
-            Int64(self._multicast),
+            stage_state,
+            Int64(mailbox_address),
             Int32(m),
             current_cu_stream(),
         )
+        if two_shot:
+            self._reduce_two_shot(
+                to_cute(self._owner_mailbox.flatten(), 16),
+                stage_state,
+                Int64(self._reduced_multicast),
+                Int32(m),
+                current_cu_stream(),
+                residual_source,
+            )
         residual_output = torch.empty_like(residual)
         quantized = torch.empty(
             (m, hidden), dtype=torch.float8_e4m3fn, device=residual.device
@@ -699,16 +834,16 @@ class FinalizeAllReduceGemmaRMSNormMxfp8:
         scales = torch.empty(
             mxfp8_scale_numel(m, hidden), dtype=torch.uint8, device=residual.device
         )
-        self._collective(
-            to_cute(self._mailbox.flatten(), 16),
-            to_cute_dynamic(residual.flatten(), 16, divisibility=hidden),
+        collective(
+            to_cute(mailbox.flatten(), 16),
+            residual_source,
             to_cute(norm_weight, 16),
             to_cute_dynamic(residual_output.flatten(), 16, divisibility=hidden),
             to_cute_dynamic(
                 quantized.view(torch.uint8).flatten(), 16, divisibility=hidden
             ),
             to_cute_dynamic(scales, 16, divisibility=_SCALE_ROW_TILE),
-            to_cute(self._stage_state, 4),
+            stage_state,
             Float32(norm_eps),
             Int32(m),
             current_cu_stream(),
@@ -754,7 +889,12 @@ def supports_fused_moe_finalize(vllm_config: VllmConfig) -> bool:
 
 
 def init_fused_moe_finalize(
-    *, hidden_size: int, max_num_tokens: int, top_k: int, fp32_weights: bool
+    *,
+    hidden_size: int,
+    max_num_tokens: int,
+    top_k: int,
+    fp32_weights: bool,
+    one_shot_max_tokens: int | None = None,
 ) -> None:
     """Build the kernel every deferred MoE output is finalized with.
 
@@ -770,6 +910,7 @@ def init_fused_moe_finalize(
         device=torch.device(
             current_platform.device_type, torch.accelerator.current_device_index()
         ),
+        one_shot_max_tokens=one_shot_max_tokens,
     )
 
 
