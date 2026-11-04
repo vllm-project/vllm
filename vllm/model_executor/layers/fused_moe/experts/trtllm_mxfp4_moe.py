@@ -37,6 +37,8 @@ from vllm.utils.flashinfer import has_flashinfer
 class TrtLlmMxfp4ExpertsBase:
     """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
+    kept_constants: tuple[str, ...] = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -121,6 +123,9 @@ class TrtLlmMxfp4ExpertsBase:
     def _supports_current_device() -> bool:
         p = current_platform
         return p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer()
+
+    def output_hidden_dim(self, hidden_dim: int) -> int:
+        return self.hidden_dim_unpadded
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

@@ -183,7 +183,7 @@ python benchmark.py \
 --device DEVICE                     # Device (default: cuda:0)
 --warmup-ms N                       # Warmup window in ms for triton do_bench
 --profile-memory                    # Profile memory usage
---kv-cache-dtype DTYPE              # auto (default), fp8, int8_per_token_head
+--kv-cache-dtype DTYPE              # Any CacheDType (default: auto), e.g. fp8, int8_per_token_head
 
 # Parameter sweeps
 --sweep-param PARAM                 # Parameter name to sweep (e.g., num_kv_splits,
