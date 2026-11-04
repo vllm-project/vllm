@@ -112,6 +112,7 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
 
 @pytest.mark.parametrize(
     (
+        "gfx11",
         "kv_cache_dtype",
         "head_size",
         "num_prefills",
@@ -121,18 +122,20 @@ def test_rocm_sparse_mla_supports_glm_packed_layout():
         "expected",
     ),
     [
-        ("auto", 512, 1, 0, 0, 32, True),
-        ("auto", 512, 1, 2, 2, 32, True),
-        ("auto", 512, 0, 2, 2, 1, True),
-        ("fp8", 512, 1, 0, 0, 32, False),
-        ("auto", 576, 1, 0, 0, 32, False),
-        ("auto", 512, 0, 2, 4, 2, True),
-        ("auto", 512, 0, 2, 12, 6, True),
-        ("auto", 512, 0, 0, 0, 0, False),
+        (False, "auto", 512, 1, 0, 0, 32, True),
+        (False, "auto", 512, 1, 2, 2, 32, True),
+        (False, "auto", 512, 0, 2, 2, 1, True),
+        (False, "fp8", 512, 1, 0, 0, 32, False),
+        (False, "auto", 576, 1, 0, 0, 32, False),
+        (True, "auto", 576, 1, 0, 0, 32, True),  # gfx11 has no AITER sparse MLA
+        (False, "auto", 512, 0, 2, 4, 2, True),
+        (False, "auto", 512, 0, 2, 12, 6, True),
+        (False, "auto", 512, 0, 0, 0, 0, False),
     ],
 )
 def test_rocm_sparse_triton_route(
     monkeypatch,
+    gfx11,
     kv_cache_dtype,
     head_size,
     num_prefills,
@@ -142,8 +145,7 @@ def test_rocm_sparse_triton_route(
     expected,
 ):
     """Validate Triton routing for prefill, decode, and MTP verification."""
-    # The 576 case above is the non-gfx11 behaviour, so pin the arch.
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: False)
+    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: gfx11)
     assert (
         _use_rocm_sparse_triton(
             kv_cache_dtype=kv_cache_dtype,
@@ -155,24 +157,6 @@ def test_rocm_sparse_triton_route(
             max_query_len=max_query_len,
         )
         is expected
-    )
-
-
-@pytest.mark.parametrize("on_gfx11", [True, False])
-def test_rocm_sparse_triton_route_rope_layout_on_gfx11(monkeypatch, on_gfx11):
-    """The RoPE layout (576 = 512 + 64) uses Triton only on gfx11."""
-    monkeypatch.setattr("vllm.platforms.rocm.on_gfx11", lambda: on_gfx11)
-    assert (
-        _use_rocm_sparse_triton(
-            kv_cache_dtype="auto",
-            head_size=576,
-            kv_lora_rank=512,
-            num_prefills=1,
-            num_decodes=0,
-            num_decode_tokens=0,
-            max_query_len=32,
-        )
-        is on_gfx11
     )
 
 
