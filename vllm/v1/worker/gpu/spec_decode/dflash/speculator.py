@@ -614,6 +614,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+        else:
+            self._map_kernel_block_tables()
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
