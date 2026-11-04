@@ -73,3 +73,38 @@ def test_chat_template_kwargs_default_is_noop(tmp_path: Path) -> None:
     get_samples(_args(str(jsonl), None), tok)
 
     assert tok.captured_kwargs == {}
+
+
+def _backend_args(dataset_path: str, backend: str | None) -> argparse.Namespace:
+    args = _args(dataset_path, None)
+    if backend is not None:
+        args.backend = backend
+    return args
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("backend", ["openai-chat", "openai-responses", "vllm-chat"])
+def test_chat_backends_skip_client_side_template(tmp_path: Path, backend: str) -> None:
+    """Chat backends apply the template themselves; rendering it client-side
+    too would send the model a doubly templated prompt."""
+    jsonl = tmp_path / "data.jsonl"
+    _write_one(jsonl)
+
+    tok = _RecordingTokenizer()
+    get_samples(_backend_args(str(jsonl), backend), tok)
+
+    assert tok.captured_kwargs is None
+
+
+@pytest.mark.benchmark
+@pytest.mark.parametrize("backend", ["openai", "vllm"])
+def test_completion_backends_keep_client_side_template(
+    tmp_path: Path, backend: str
+) -> None:
+    jsonl = tmp_path / "data.jsonl"
+    _write_one(jsonl)
+
+    tok = _RecordingTokenizer()
+    get_samples(_backend_args(str(jsonl), backend), tok)
+
+    assert tok.captured_kwargs == {}
