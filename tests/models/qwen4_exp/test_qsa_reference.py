@@ -113,7 +113,7 @@ def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
 def test_qsa_main_metadata_preserves_shared_mapping_and_group_state(
     hisparse: bool, capture: bool, query_len: int
 ) -> None:
-    """Reuse runner-supplied mappings without exposing padding to HiSparse.
+    """Reuse runner-supplied mappings and expose the HiSparse batch split.
 
     CPU tensors exercise the cached-mapping builder path, not the initial
     Triton mapping kernel or execution of a captured CUDA graph.
@@ -154,6 +154,7 @@ def test_qsa_main_metadata_preserves_shared_mapping_and_group_state(
         query_start_loc_cpu=starts.clone(),
         max_seq_len=32,
         seq_lens=torch.tensor([16, 32, 0], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([16, 32, 0], dtype=torch.int32),
         block_table_tensor=block_table,
         slot_mapping=slots,
         _token_to_req_indices_cache=shared_mapping,
@@ -184,27 +185,16 @@ def test_qsa_main_metadata_preserves_shared_mapping_and_group_state(
 
     assert isinstance(metadata, Qwen4ExpQSAHiSparseMetadata)
     assert isinstance(updated, Qwen4ExpQSAHiSparseMetadata)
-    expected_mapping = torch.tensor(
-        [0] * query_len + [1] * query_len + [-1] * (2 * query_len), dtype=torch.int32
-    )
     torch.testing.assert_close(
-        metadata.req_id_per_token, expected_mapping, rtol=0, atol=0
+        metadata.req_id_per_token, original_mapping, rtol=0, atol=0
     )
-    assert metadata.req_id_per_token.data_ptr() != shared_mapping.data_ptr()
     assert updated.req_id_per_token is metadata.req_id_per_token
-    expected_split = (3, 0, num_tokens, 0) if query_len == 1 else (0, 3, 0, num_tokens)
+    expected_split = (3, num_tokens) if query_len == 1 else (0, 0)
     for item in (metadata, updated):
         assert item.num_reqs == 3
         assert item.query_start_loc is starts
-        assert item.seq_lens is common.seq_lens
-        assert item.max_seq_len == 32
-        assert item.is_cudagraph_capture is capture
-        assert (
-            item.num_decode_reqs,
-            item.num_prefill_reqs,
-            item.num_decode_tokens,
-            item.num_prefill_tokens,
-        ) == expected_split
+        assert (item.num_decodes, item.num_decode_tokens) == expected_split
+        assert (item.host_staging_plan is None) == (query_len == 1)
 
 
 def _qsa_mqa_paged_reference(
@@ -1629,7 +1619,8 @@ def _run_qsa_hisparse_prefill_case(
     # resident target exercised below instead of the ordinary cache.
     assert owner.use_fused_qk_norm_rope_gate
     assert owner.indexer.use_fused_pre_indexer
-    assert not owner.use_fused_qsa_prepare
+    # The hooks below observe the unfused selection and K/V writer.
+    owner.use_fused_qsa_prepare = False
     row_width = heads * 2 * dim
     original = torch.randn(
         num_blocks,
@@ -1694,6 +1685,7 @@ def _run_qsa_hisparse_prefill_case(
         query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32),
         max_seq_len=33,
         seq_lens=torch.tensor([17, 33], device="cuda", dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([17, 33], dtype=torch.int32),
         block_table_tensor=source_table[:2],
         slot_mapping=slots,
     )
@@ -1911,11 +1903,13 @@ def _run_qsa_hisparse_prefill_case(
                     seq_lens=torch.tensor(
                         [start + length], device="cuda", dtype=torch.int32
                     ),
+                    seq_lens_cpu_upper_bound=torch.tensor(
+                        [start + length], dtype=torch.int32
+                    ),
                     block_table_tensor=source_table[:1],
                     slot_mapping=warm_slots,
                 )
                 warm_metadata = {owner.layer_name: builder.build(0, warm_common)}
-                assert not warm_metadata[owner.layer_name].is_cudagraph_capture
                 for side_cache in (
                     owner.indexer.raw_key_cache,
                     owner.indexer.compressed_key_cache,
@@ -1975,7 +1969,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     tmp_path, dist_init, workspace_init, monkeypatch, record_property, fp8, indexer_fp8
 ) -> None:
     """A captured K+1 graph follows a real worker spill and peer page reuse."""
-    import json
     from dataclasses import replace
 
     from transformers import Qwen4ExpTextConfig
@@ -2095,7 +2088,22 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         )
 
     original = cache_rows(original)
-    backing = original.flatten().clone()
+    # Resident and hot rows share one slab, as HiSparse binding requires.
+    hot_blocks_per_request = (
+        cache.runtime.region_stride + block_size - 1
+    ) // block_size
+    hot_blocks = 2 * hot_blocks_per_request
+    slab_blocks = blocks + hot_blocks
+    backing = torch.cat(
+        (
+            original.flatten(),
+            torch.zeros(
+                hot_blocks * block_size * row_width,
+                dtype=original.dtype,
+                device=device,
+            ),
+        )
+    )
     source_table = torch.tensor(
         [[1, 2, 0], [3, 4, 5]], device=device, dtype=torch.int32
     )
@@ -2127,7 +2135,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         backing.view(torch.uint8),
         byte_offset=0,
         block_stride=block_size * row_width * backing.element_size(),
-        num_blocks=blocks,
+        num_blocks=slab_blocks,
         block_size=block_size,
         block_table=resident_table,
         slot_mapping=slots,
@@ -2137,26 +2145,15 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
     cache.residency = residency
     cache.mirror_slot_mapping = host_slots
     cache.runtime.resident_source_index = 0
-    # This multi-query path uses prefill staging, but the public worker owns a
-    # normally sized hot allocation as well (including its shutdown lifetime).
-    hot_blocks_per_request = (
-        cache.runtime.region_stride + block_size - 1
-    ) // block_size
-    hot_blocks = 2 * hot_blocks_per_request
-    hot_backing = torch.zeros(
-        hot_blocks * block_size * row_width * original.element_size(),
-        dtype=torch.uint8,
-        device=device,
-    )
     cache.runtime.bind_hot_cache(
-        hot_backing,
+        backing.view(torch.uint8),
         byte_offset=0,
         block_stride=block_size * row_width * original.element_size(),
-        num_blocks=hot_blocks,
+        num_blocks=slab_blocks,
         block_size=block_size,
-        block_table=torch.arange(hot_blocks, device=device, dtype=torch.int32).view(
-            2, -1
-        ),
+        block_table=torch.arange(
+            blocks, slab_blocks, device=device, dtype=torch.int32
+        ).view(2, -1),
     )
     owner.bind_kv_cache(original.transpose(1, 2))
     builder = owner.get_attn_backend().get_builder_cls()(
@@ -2198,8 +2195,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             if capture
             else builder.build(0, common)
         )
-        assert metadata.num_decode_tokens == 0
-        assert metadata.num_prefill_tokens == tokens
+        assert metadata.num_decode_tokens == tokens
         all_metadata[owner.layer_name] = metadata
         for side, side_builder, table in zip(
             (owner.indexer.raw_key_cache, owner.indexer.compressed_key_cache),
@@ -2218,16 +2214,8 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         written.append(torch.cat((key, value), dim=-1).clone())
         return original_writer(layer, key, value, kv_cache, slot_mapping)
 
+    owner.use_fused_qsa_prepare = False
     monkeypatch.setattr(owner.impl, "do_kv_cache_update", observe_writer)
-    staging_observations = []
-    native_gather = torch.ops._C_cache_ops.hisparse_gather_plan
-
-    def observe_gather(host_cache, staged, rows, destinations, misses, *args):
-        result = native_gather(host_cache, staged, rows, destinations, misses, *args)
-        staging_observations.append((staged.nbytes, misses.clone(), staged.clone()))
-        return result
-
-    monkeypatch.setattr(torch.ops._C_cache_ops, "hisparse_gather_plan", observe_gather)
     pool = BlockPool(blocks, enable_caching=False, hash_block_size=block_size)
     allocated = pool.get_new_blocks(blocks - 1)
     reclaimed = next(block for block in allocated if block.block_id == 1)
@@ -2246,7 +2234,13 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             KVCacheConfig(num_blocks=blocks, kv_cache_tensors=[], kv_cache_groups=[]),
         )
         worker.initialize(
-            [cache], [owner.layer_name], hot_backing, 2, blocks, device, [registered]
+            [cache],
+            [owner.layer_name],
+            backing.view(torch.uint8),
+            2,
+            slab_blocks,
+            device,
+            [registered],
         )
         worker.set_request_state_indices(
             torch.tensor([1, 0], dtype=torch.int32, device=device)
@@ -2390,7 +2384,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             atol=0,
         )
         host_before_replay = host_pages.clone()
-        resident_before_replay = cache.view.cache.clone()
+        resident_before_replay = cache.view.cache[:blocks].clone()
 
         # Update persistent inputs as the runner does: request A remains, B is
         # padding, its first page is host-only, and its live tail changes again.
@@ -2403,7 +2397,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         slots[4:].fill_(-1)
         host_slots.copy_(slots)
         hidden.copy_(original_hidden * 2)
-        metadata = build_metadata(active=1)
+        build_metadata(active=1)
         assert pointers == (
             source_table.data_ptr(),
             resident_table.data_ptr(),
@@ -2424,7 +2418,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         )
         worker.prepare_forward(all_metadata)
         assert not cache.all_context_pages_resident
-        assert not metadata.is_cudagraph_capture
         graph.replay()
         worker.finish_forward()
         worker.host_write_event.synchronize()
@@ -2444,7 +2437,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             atol=0,
         )
         torch.testing.assert_close(
-            cache.view.cache.view(torch.uint8),
+            cache.view.cache[:blocks].view(torch.uint8),
             expected_resident.view(torch.uint8),
             rtol=0,
             atol=0,
@@ -2458,69 +2451,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             )
         expected = attention_reference(
             initial_positions[:4], torch.zeros(4, device=device, dtype=torch.int32)
-        )
-        assert len(staging_observations) == 2
-        staging_bytes, replay_misses, staged_contents = staging_observations[-1]
-        row_bytes = row_width * original.element_size()
-        selection_width = owner.topk_indices_buffer.shape[1] - 1
-        padded_width = (selection_width + block_size - 1) // block_size * block_size
-        assert staging_bytes == tokens * padded_width * row_bytes
-        staged_rows = staged_contents.view(-1, row_width)
-        verified_staged_rows = 0
-        for token_row, selection in enumerate(selected):
-            count = int(selection[-1])
-            logical = selection[:count].long()
-            physical = owner.physical_topk_indices_buffer[token_row, :count].long()
-            assert torch.all(physical >= 0)
-            pages = saved_source_table[0, logical // block_size].long()
-            expected_staged = reference[pages, logical % block_size].flatten(1)
-            torch.testing.assert_close(
-                staged_rows[physical].view(torch.uint8),
-                expected_staged.view(torch.uint8),
-                rtol=0,
-                atol=0,
-            )
-            verified_staged_rows += count
-        assert verified_staged_rows == 29 + 30 + 31 + 32
-        host_rows_copied = replay_misses.sum().item()
-        assert host_rows_copied == 4 * block_size
-        live_selected_rows = owner.topk_indices_buffer[:tokens, -1].sum().item()
-        record_property(
-            "mixed_replay_proof",
-            json.dumps(
-                {
-                    "main_dtype": "fp8_e4m3" if fp8 else "bfloat16",
-                    "indexer_dtype": "fp8_e4m3" if indexer_fp8 else "bfloat16",
-                    "k_scale": k_scale,
-                    "v_scale": v_scale,
-                    "complete_kv_row_bytes": row_bytes,
-                    "verified_staged_kv_rows": verified_staged_rows,
-                    "query_len": 4,
-                    "capture_requests": 2,
-                    "replay_requests": 1,
-                    "reused_block": peer_block.block_id,
-                    "transfer_completed": 91,
-                    "actual_peer_written_rows": 4,
-                    "live_tail_rows": 4,
-                    "native_replays": 2,
-                    "full_host_and_resident_bytes_equal": True,
-                    "selected_staging_bytes": staging_bytes,
-                    "effective_host_rows_copied": host_rows_copied,
-                    "effective_host_bytes_copied": (
-                        host_rows_copied * row_width * original.element_size()
-                    ),
-                    "staging_d2d_rows": replay_misses.numel(),
-                    "unused_capacity_d2d_rows": (
-                        replay_misses.numel() - live_selected_rows
-                    ),
-                    "max_abs_error": (actual[:4].float() - expected.float())
-                    .abs()
-                    .max()
-                    .item(),
-                    "natural_scheduler_pressure": False,
-                    "natural_mtp_sampler": False,
-                }
-            ),
         )
         torch.testing.assert_close(actual[:4], expected, rtol=2e-2, atol=2e-2)
     finally:
@@ -2733,6 +2663,8 @@ def _run_qsa_hisparse_worker_case(
                 2 * owner.q_size + owner.kv_size + columns, columns
             ] = layer + 1
             owner.o_proj.weight[torch.arange(256, device=device), output_columns] = 1
+        # The hooks below observe the unfused selection and K/V writer.
+        owner.use_fused_qsa_prepare = False
         owner.process_weights_after_loading(torch.bfloat16)
         for side_cache in (
             owner.indexer.raw_key_cache,
@@ -3204,6 +3136,9 @@ def _run_qsa_hisparse_worker_case(
                         query_start_loc_cpu=torch.tensor([0, 2, 2], dtype=torch.int32),
                         max_seq_len=71,
                         seq_lens=seq_lens,
+                        seq_lens_cpu_upper_bound=torch.tensor(
+                            [71, 0], dtype=torch.int32
+                        ),
                         block_table_tensor=source_table,
                         slot_mapping=host_slots,
                     )

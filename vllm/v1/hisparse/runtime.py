@@ -874,95 +874,6 @@ class HiSparseRuntime:
         )
         return staged
 
-    def gather_selected_cache(
-        self,
-        resident: HiSparseCacheHandle,
-        token_to_req: torch.Tensor,
-        logical_indices: torch.Tensor,
-        valid_counts: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Stage independent query rows without mutating shared hot-cache state."""
-        assert resident.view is not None and resident.block_table is not None
-        assert resident.source_block_table is not None
-        block_size = resident.view.block_size
-        num_tokens, width = logical_indices.shape
-        padded_width = (width + block_size - 1) // block_size * block_size
-        if padded_width != width:
-            logical_indices = torch.cat(
-                (
-                    logical_indices,
-                    torch.full(
-                        (num_tokens, padded_width - width),
-                        -1,
-                        dtype=logical_indices.dtype,
-                        device=logical_indices.device,
-                    ),
-                ),
-                dim=1,
-            )
-        columns = torch.arange(padded_width, device=logical_indices.device)
-        requests = token_to_req.to(torch.long)
-        source_table = resident.source_block_table
-        resident_table = resident.block_table
-        state_indices = self.request_state_indices
-        assert state_indices is not None
-        num_requests = min(source_table.shape[0], state_indices.shape[0])
-        valid = (columns[None, :] < valid_counts[:, None]) & (logical_indices >= 0)
-        valid &= (requests[:, None] >= 0) & (requests[:, None] < num_requests)
-        safe_requests = requests.clamp(min=0, max=num_requests - 1)
-        # Host pages use batch rows; resident pages use persistent state rows.
-        state_rows = state_indices[safe_requests].to(torch.long)
-        valid &= (state_rows[:, None] >= 0) & (
-            state_rows[:, None] < resident_table.shape[0]
-        )
-        safe_state_rows = state_rows.clamp(min=0, max=resident_table.shape[0] - 1)
-        logical_blocks = logical_indices.clamp_min(0).to(torch.long) // block_size
-        source_blocks = source_table[
-            safe_requests[:, None], logical_blocks.clamp(max=source_table.shape[1] - 1)
-        ]
-        resident_blocks = resident_table[
-            safe_state_rows[:, None],
-            logical_blocks.clamp(max=resident_table.shape[1] - 1),
-        ]
-        offsets = logical_indices.remainder(block_size).to(torch.long)
-        source_rows = source_blocks.to(torch.long) * block_size + offsets
-        source_valid = (
-            valid
-            & (logical_blocks < source_table.shape[1])
-            & (source_blocks > 0)
-            & (source_rows < self.host_cache.shape[0])
-        )
-        resident_valid = (
-            valid
-            & (logical_blocks < resident_table.shape[1])
-            & (resident_blocks > 0)
-            & (resident_blocks < resident.view.cache.shape[0])
-        )
-        # The indexed result is the staging allocation itself. This handles
-        # strided resident pages without another full-size KV temporary.
-        staged = resident.view.cache[
-            torch.where(resident_valid, resident_blocks, 0).to(torch.long), offsets
-        ].view(-1, block_size, self.row_width)
-        destinations = torch.arange(
-            num_tokens * padded_width,
-            dtype=torch.int32,
-            device=logical_indices.device,
-        ).view(num_tokens, padded_width)
-        self.cache_ops.hisparse_gather_plan(
-            self.host_cache,
-            staged,
-            torch.where(source_valid, source_rows, -1).to(torch.int32),
-            destinations,
-            (source_valid & ~resident_valid).to(torch.int32),
-            None,
-            None,
-            0,
-        )
-        physical_indices = destinations[:, :width].masked_fill(
-            ~(source_valid | resident_valid)[:, :width], -1
-        )
-        return staged, physical_indices
-
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
         group = self.index_group
@@ -1364,6 +1275,25 @@ class HiSparseCacheHandle:
         )
         self.block_table = block_table
         self.slot_mapping = slot_mapping
+
+    def stage_prefill_rows(
+        self,
+        source_cache: torch.Tensor,
+        plan: HiSparsePrefillStagingPlan,
+        num_decodes: int,
+    ) -> torch.Tensor:
+        """Stage prefill context rows for attention through ``plan.block_table``."""
+        resident_cache = None
+        if self.view is not None and self.block_table is not None:
+            state_indices = self.runtime.request_state_indices
+            assert state_indices is not None
+            plan.ensure_gpu_sources(
+                self.block_table, state_indices[num_decodes:], self.view.block_size
+            )
+            resident_cache = self.view.cache
+        return self.runtime.gather_prefill_cache(
+            source_cache, plan, resident_cache=resident_cache
+        )
 
     def swap_in(
         self,

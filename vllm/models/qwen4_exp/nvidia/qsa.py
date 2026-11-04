@@ -51,6 +51,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.hisparse.runtime import (
+    HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_cache_handle,
 )
@@ -73,14 +74,11 @@ from .qsa_indexer import QSAIndexer
 @dataclass(kw_only=True)
 class Qwen4ExpQSAHiSparseMetadata(Qwen4ExpQSAMetadata):
     num_reqs: int
+    num_decodes: int
+    num_decode_tokens: int
     req_id_per_token: torch.Tensor
     query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
-    max_seq_len: int
-    num_decode_reqs: int
-    num_prefill_reqs: int
-    num_decode_tokens: int
-    num_prefill_tokens: int
+    host_staging_plan: HiSparsePrefillStagingPlan | None
     is_cudagraph_capture: bool = False
 
 
@@ -151,7 +149,7 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
 
 
 class Qwen4ExpQSAMetadataBuilder(BaseQSAMetadataBuilder):
-    """Add HiSparse request mapping to the platform-independent QSA metadata."""
+    """Add HiSparse batch fields to the platform-independent QSA metadata."""
 
     def __init__(
         self,
@@ -163,17 +161,11 @@ class Qwen4ExpQSAMetadataBuilder(BaseQSAMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.hisparse_enabled = vllm_config.attention_config.hisparse_config is not None
         if self.hisparse_enabled:
-            self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
             self.token_to_req_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 dtype=torch.int32,
                 device=device,
-            )
-            self._hisparse_token_to_req_buffer = torch.empty_like(
-                self.token_to_req_buffer
-            )
-            self._hisparse_token_offsets = torch.arange(
-                self.token_to_req_buffer.numel(), dtype=torch.int32, device=device
             )
 
     def build(
@@ -185,36 +177,32 @@ class Qwen4ExpQSAMetadataBuilder(BaseQSAMetadataBuilder):
         metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
         if not self.hisparse_enabled:
             return metadata
-        (
-            num_decode_reqs,
-            num_prefill_reqs,
-            num_decode_tokens,
-            num_prefill_tokens,
-        ) = split_decodes_and_prefills(common_attn_metadata)
-        token_to_req = common_attn_metadata.token_to_req_indices(
-            self.token_to_req_buffer
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata, decode_threshold=self.reorder_batch_threshold or 1
         )
-        num_tokens = token_to_req.shape[0]
-        hisparse_token_to_req = self._hisparse_token_to_req_buffer[:num_tokens]
-        # MTP reuse can retain selections in FULL padding rows. Keep those rows
-        # out of residency state without changing other groups' shared mapping.
-        hisparse_token_to_req.copy_(token_to_req)
-        hisparse_token_to_req.masked_fill_(
-            self._hisparse_token_offsets[:num_tokens]
-            >= common_attn_metadata.query_start_loc[-1],
-            -1,
-        )
+        staging_plan = None
+        if num_prefills:
+            block_size = self.kv_cache_spec.block_size
+            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            assert seq_lens_cpu is not None
+            staging_plan = build_hisparse_prefill_staging_plan(
+                common_attn_metadata.block_table_tensor[num_decodes:],
+                common_attn_metadata.seq_lens[num_decodes:],
+                block_size,
+                int(
+                    ((seq_lens_cpu[num_decodes:] + block_size - 1) // block_size).sum()
+                ),
+            )
         return Qwen4ExpQSAHiSparseMetadata(
             **vars(metadata),
             num_reqs=common_attn_metadata.num_reqs,
-            req_id_per_token=hisparse_token_to_req,
-            query_start_loc=common_attn_metadata.query_start_loc,
-            seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=common_attn_metadata.max_seq_len,
-            num_decode_reqs=num_decode_reqs,
-            num_prefill_reqs=num_prefill_reqs,
+            num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_prefill_tokens=num_prefill_tokens,
+            req_id_per_token=common_attn_metadata.token_to_req_indices(
+                self.token_to_req_buffer
+            ),
+            query_start_loc=common_attn_metadata.query_start_loc,
+            host_staging_plan=staging_plan,
         )
 
     def build_for_cudagraph_capture(
@@ -579,12 +567,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             row_width=self.num_kv_heads * 2 * self.head_dim,
             kv_dtype=self.kv_cache_torch_dtype,
         )
-        # Fused prepare writes directly to the ordinary main cache; HiSparse
-        # must select its resident write target before updating KV.
-        # Its FP8 pointer also requires sm_89 or newer.
+        # The fused writer receives an fp8 pointer, which Triton cannot lower
+        # below sm_89.
         self.use_fused_qsa_prepare = (
-            self.hisparse_cache is None
-            and self.use_fused_qk_norm_rope_gate
+            self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
             and (
                 self.kv_cache_torch_dtype != torch.uint8
@@ -646,42 +632,22 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
     def _forward_hisparse(
         self,
         query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
         output: torch.Tensor,
         output_gate: torch.Tensor,
         metadata: Qwen4ExpQSAHiSparseMetadata,
     ) -> None:
         cache = self.hisparse_cache
         assert cache is not None and cache.view is not None
-        assert cache.block_table is not None and cache.slot_mapping is not None
-        cache.prepare_group_for_batch(metadata)
-        impl = self.impl
-        resident, slots, num_rows = cache.write_target(
-            key.shape[0], metadata.slot_mapping.shape[0]
-        )
-        impl.do_kv_cache_update(
-            self,
-            key[:num_rows],
-            value[:num_rows],
-            self._hisparse_kv_view(resident),
-            slots,
-        )
-        # FULL warmup and capture both run with runtime mode NONE, without a
-        # connector mirror phase. Replay mirrors real rows at worker finish.
-        if not metadata.is_cudagraph_capture:
-            cache.finish_kv_update()
-
+        assert cache.block_table is not None and cache.source_block_table is not None
         output.zero_()
         num_decode = metadata.num_decode_tokens
         num_tokens = metadata.num_actual_tokens
         if num_decode:
-            assert cache.source_block_table is not None
             logical = self.topk_indices_buffer[:num_decode]
             physical = self.physical_topk_indices_buffer[:num_decode]
             physical[:, -1].copy_(logical[:, -1])
             resolved = cache.swap_in(
-                metadata.req_id_per_token[:num_decode],
+                metadata.req_id_per_token,
                 cache.source_block_table,
                 logical[:, :-1],
                 block_size=cache.view.block_size,
@@ -689,7 +655,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
             assert isinstance(resolved, torch.Tensor)
             physical[:, :-1].copy_(resolved)
-            impl.forward(
+            self.impl.forward(
                 self,
                 query[:num_decode],
                 self._hisparse_kv_view(cache.runtime.hot.attention_cache),
@@ -701,83 +667,42 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
                 topk_indices=physical,
                 physical_indices=True,
             )
-        if num_decode < num_tokens:
-            if (
-                metadata.is_cudagraph_capture
-                and 1 < metadata.max_query_len <= self._max_decode_query_len
-            ):
-                logical = self.topk_indices_buffer[num_decode:num_tokens]
-                prefill_requests = metadata.req_id_per_token[num_decode:num_tokens]
-                staged, resolved = cache.runtime.gather_selected_cache(
-                    cache, prefill_requests, logical[:, :-1], logical[:, -1]
-                )
-                physical = self.physical_topk_indices_buffer[num_decode:num_tokens]
-                physical[:, :-1].copy_(resolved)
-                physical[:, -1].copy_(logical[:, -1])
-                impl.forward(
-                    self,
-                    query[num_decode:num_tokens],
-                    self._hisparse_kv_view(staged),
-                    replace(metadata, num_actual_tokens=num_tokens - num_decode),
-                    output[num_decode:num_tokens],
-                    token_to_req=prefill_requests,
-                    use_prefill_config=True,
-                    output_gate=output_gate[num_decode:num_tokens],
-                    topk_indices=physical,
-                    physical_indices=True,
-                )
-                return
-            prefill_cache = resident
-            prefill_requests = metadata.req_id_per_token[num_decode:num_tokens]
-            if not cache.all_context_pages_resident:
-                assert cache.source_block_table is not None
-                block_size = cache.view.block_size
-                first_prefill = metadata.num_decode_reqs
-                capacity = metadata.num_prefill_reqs * (
-                    (metadata.max_seq_len + block_size - 1) // block_size
-                )
-                plan = build_hisparse_prefill_staging_plan(
-                    cache.source_block_table[first_prefill : metadata.num_reqs],
-                    metadata.seq_lens[first_prefill : metadata.num_reqs],
-                    block_size,
-                    capacity,
-                )
-                state_indices = cache.runtime.request_state_indices
-                assert state_indices is not None
-                plan.ensure_gpu_sources(
-                    cache.block_table,
-                    state_indices[first_prefill : metadata.num_reqs],
-                    block_size,
-                )
-                prefill_cache = cache.runtime.gather_prefill_cache(
-                    cache.runtime.host_cache.view(
-                        -1, block_size, cache.runtime.row_width
-                    ),
-                    plan,
-                    resident_cache=resident,
-                )
-                prefill_table = plan.block_table
-                prefill_requests = prefill_requests - first_prefill
-            else:
-                prefill_table = cache.block_table
-                state_indices = cache.runtime.request_state_indices
-                assert state_indices is not None
-                prefill_requests = state_indices[prefill_requests].clamp(min=0)
-            impl.forward(
-                self,
-                query[num_decode:num_tokens],
-                self._hisparse_kv_view(prefill_cache),
-                replace(
-                    metadata,
-                    num_actual_tokens=num_tokens - num_decode,
-                    block_table=prefill_table,
+        if num_decode == num_tokens:
+            return
+        req_ids = metadata.req_id_per_token[num_decode:num_tokens]
+        if cache.all_context_pages_resident:
+            state_indices = cache.runtime.request_state_indices
+            assert state_indices is not None
+            prefill_cache = cache.view.cache
+            block_table = cache.block_table
+            req_ids = state_indices[req_ids].clamp(min=0)
+        else:
+            plan = metadata.host_staging_plan
+            assert plan is not None
+            prefill_cache = cache.stage_prefill_rows(
+                cache.runtime.host_cache.view(
+                    -1, cache.view.block_size, cache.runtime.row_width
                 ),
-                output[num_decode:num_tokens],
-                token_to_req=prefill_requests,
-                use_prefill_config=True,
-                output_gate=output_gate[num_decode:num_tokens],
-                topk_indices=self.topk_indices_buffer[num_decode:num_tokens],
+                plan,
+                metadata.num_decodes,
             )
+            block_table = plan.block_table
+            req_ids = req_ids - metadata.num_decodes
+        self.impl.forward(
+            self,
+            query[num_decode:num_tokens],
+            self._hisparse_kv_view(prefill_cache),
+            replace(
+                metadata,
+                num_actual_tokens=num_tokens - num_decode,
+                block_table=block_table,
+            ),
+            output[num_decode:num_tokens],
+            token_to_req=req_ids,
+            use_prefill_config=True,
+            output_gate=output_gate[num_decode:num_tokens],
+            topk_indices=self.topk_indices_buffer[num_decode:num_tokens],
+        )
 
     @eager_break_during_capture
     def _run_qsa(
@@ -832,39 +757,48 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             QSAIndexerMetadata,
             metadata[self.indexer.raw_key_cache.prefix],
         )
+        main_kv_cache = self.kv_cache
+        slot_mapping = main_metadata.slot_mapping
+        cache = self.hisparse_cache
+        if cache is not None:
+            cache.prepare_group_for_batch(main_metadata)
+            resident, slot_mapping, _ = cache.write_target(
+                num_tokens, slot_mapping.shape[0]
+            )
+            main_kv_cache = self._hisparse_kv_view(resident)
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,
             self.topk_indices_buffer[:num_tokens],
             attn=self,
             qkv=qkv,
-            slot_mapping=main_metadata.slot_mapping,
+            slot_mapping=slot_mapping,
+            main_kv_cache=main_kv_cache,
         )
         if selected.shape != (num_tokens, self.indexer.packed_output_width):
             raise RuntimeError("QSA indexer returned an invalid selection shape")
-        if self.hisparse_cache is not None:
-            assert query is not None and output_gate is not None
-            assert key is not None and value is not None
-            self._forward_hisparse(
-                query,
-                key,
-                value,
-                output,
-                output_gate,
-                cast(Qwen4ExpQSAHiSparseMetadata, main_metadata),
-            )
-            return
         if main_outputs is None:
             assert key is not None and value is not None
+            num_rows = slot_mapping.shape[0]
             self.impl.do_kv_cache_update(
-                self,
-                key,
-                value,
-                self.kv_cache,
-                main_metadata.slot_mapping,
+                self, key[:num_rows], value[:num_rows], main_kv_cache, slot_mapping
             )
         else:
             query, output_gate = main_outputs
+        if cache is not None:
+            hisparse_metadata = cast(Qwen4ExpQSAHiSparseMetadata, main_metadata)
+            # FULL warmup and capture run in mode NONE without a connector
+            # step; replay mirrors real rows when the worker finishes.
+            if not hisparse_metadata.is_cudagraph_capture:
+                cache.finish_kv_update()
+            assert query is not None and output_gate is not None
+            self._forward_hisparse(
+                query,
+                output,
+                output_gate,
+                hisparse_metadata,
+            )
+            return
         assert query is not None and output_gate is not None
         self.impl.forward(
             self,

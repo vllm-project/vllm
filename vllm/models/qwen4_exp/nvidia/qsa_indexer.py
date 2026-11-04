@@ -218,6 +218,7 @@ class QSAIndexer(nn.Module):
         attn: "Qwen4ExpQSAAttention",
         qkv: torch.Tensor | None = None,
         slot_mapping: torch.Tensor | None = None,
+        main_kv_cache: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         """Update indexer caches and select token indices from pre-projected Q/K.
 
@@ -228,9 +229,10 @@ class QSAIndexer(nn.Module):
         index).
 
         With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``attn.kv_cache`` at ``slot_mapping`` and prepares
-        its Q and gate from ``qkv``, returned as the second element (None
-        otherwise). ``qkv`` and ``slot_mapping`` are only read in that mode.
+        ``attn``'s K/V into ``main_kv_cache`` (default ``attn.kv_cache``) at
+        ``slot_mapping`` and prepares its Q and gate from ``qkv``, returned as
+        the second element (None otherwise). ``qkv``, ``slot_mapping`` and
+        ``main_kv_cache`` are only read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -282,7 +284,9 @@ class QSAIndexer(nn.Module):
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
-            main_kv_cache = attn.kv_cache.transpose(1, 2)
+            if main_kv_cache is None:
+                main_kv_cache = attn.kv_cache
+            main_kv_cache = main_kv_cache.transpose(1, 2)
             if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
             main_outputs = qsa_prepare(

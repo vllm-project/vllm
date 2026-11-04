@@ -56,7 +56,7 @@ def resolve_hisparse_specs(
         if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
     }
     if not sparse_specs:
-        return kv_cache_spec
+        raise ValueError("HiSparse requires a model with sparse attention layers.")
     block_sizes = {spec.block_size for spec in sparse_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")

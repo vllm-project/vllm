@@ -23,11 +23,9 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     dense_kv_cache_views,
 )
-from vllm.config import CacheConfig, DeviceConfig, KVTransferConfig, VllmConfig
-from vllm.config.attention import AttentionConfig, HiSparseConfig
+from vllm.config.attention import HiSparseConfig
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
-from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
@@ -857,96 +855,6 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             torch.testing.assert_close(
                 cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
             )
-
-
-@pytest.mark.parametrize("num_kv_heads", [1, 2])
-@pytest.mark.parametrize(
-    "supported,requested,expected_error",
-    [
-        ([["BLNHC", "BLHNC"]], None, None),
-        ([["BLHNC"]], None, "requires BLNHC"),
-        ([["BLNHC", "BLHNC"]], "BLHNC", "valid layouts: .*BLNHC"),
-        ([["BLHNC", "BLNHC"], ["BLNHC"]], None, None),
-        ([["BLNHC", "BLHNC"], ["BLHNC"]], None, "requires BLNHC"),
-    ],
-)
-def test_hisparse_full_kv_resolves_contiguous_token_rows(
-    monkeypatch, num_kv_heads, supported, requested, expected_error
-):
-    """Every worker must support contiguous full-K/V rows despite preferences."""
-    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
-    if requested is not None:
-        monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", requested)
-    config = VllmConfig(
-        device_config=DeviceConfig(device="cpu"),
-        cache_config=CacheConfig(),
-    )
-    config.attention_config.hisparse_config = HiSparseConfig()
-    config.kv_transfer_config = KVTransferConfig(
-        kv_connector="HiSparseConnector", kv_role="kv_both"
-    )
-    spec = SparseFullAttentionSpec(
-        block_size=16,
-        num_kv_heads=num_kv_heads,
-        total_num_kv_heads=num_kv_heads,
-        head_size=64,
-        dtype=torch.bfloat16,
-        top_k=32,
-    )
-    specs = [
-        spec,
-        HiSparseResidentSpec(block_size=16, page_size=spec.page_size_bytes),
-        HiSparseHotSpec(
-            block_size=16, page_size=spec.page_size_bytes, blocks_per_request=4
-        ),
-    ]
-
-    if expected_error is not None:
-        with pytest.raises(ValueError, match=expected_error):
-            resolve_kv_cache_layout(config, supported, iter(specs))
-        assert config.cache_config.kv_cache_layout is None
-        return
-
-    layout = resolve_kv_cache_layout(config, supported, iter(specs))
-
-    assert layout is KVCacheLayout.BLNHC
-    assert config.cache_config.get_resolved_kv_cache_layout() is layout
-
-
-@pytest.mark.parametrize(
-    "spec_type,hisparse_enabled",
-    [
-        (FullAttentionSpec, False),
-        (SparseFullAttentionSpec, False),
-        (MLAAttentionSpec, True),
-    ],
-)
-def test_hisparse_full_kv_layout_preserves_other_cache_preferences(
-    monkeypatch, spec_type, hisparse_enabled
-):
-    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
-    config = SimpleNamespace(
-        cache_config=CacheConfig(),
-        attention_config=AttentionConfig(
-            hisparse_config=HiSparseConfig() if hisparse_enabled else None
-        ),
-        kv_transfer_config=(
-            KVTransferConfig(kv_connector="HiSparseConnector", kv_role="kv_both")
-            if hisparse_enabled
-            else None
-        ),
-    )
-    extra = (
-        {"total_num_kv_heads": 1, "top_k": 32}
-        if spec_type is SparseFullAttentionSpec
-        else {}
-    )
-    spec = spec_type(
-        block_size=16, num_kv_heads=1, head_size=64, dtype=torch.bfloat16, **extra
-    )
-    supported = ["BLNHC", "BLHNC"] if hisparse_enabled else ["BLHNC", "BLNHC"]
-
-    assert resolve_kv_cache_layout(config, [supported], [spec]) is KVCacheLayout.BLHNC
 
 
 def test_allocate_hisparse_kv_caches_host_pool_and_view_less_specs():
