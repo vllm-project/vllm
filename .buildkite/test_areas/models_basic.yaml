@@ -606,6 +606,7 @@ steps:
   - vllm/models/deepseek_v41/nvidia/
   - vllm/models/deepseek_v41/attention.py
   - vllm/models/deepseek_v41/common/
+  - vllm/distributed/engram_share/vmm/
   - vllm/v1/worker/gpu/model_states/
   - vllm/model_executor/layers/fused_moe/config.py
   - vllm/model_executor/warmup/
@@ -615,6 +616,7 @@ steps:
   - tests/models/deepseek_v41/nvidia/specialized_decode/test_layers.py
   - tests/distributed/test_custom_all_reduce.py
   - tests/kernels/test_engram.py
+  - tests/models/test_deepseek_v41_shared_engram.py
   commands:
   # Swap-AB decode: the kernel tests need SM10x and a CuTe DSL built with
   # CUDA 13.2+; the dispatch and warmup-key tests run on the CPU.
@@ -624,6 +626,7 @@ steps:
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_numerics.py
   - pytest -v -s models/deepseek_v41/nvidia/specialized_decode/test_layers.py
+  - pytest -v -s models/test_deepseek_v41_shared_engram.py
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd

@@ -1748,7 +1748,16 @@ class DeepseekV41LLMForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if self.model.vllm_config.engram_config and (
+            self.model.vllm_config.engram_config.shared_host_endpoint
+        ):
+            loaded_params.update(
+                name
+                for name, param in self.named_parameters()
+                if getattr(param, "engram_external", False)
+            )
+        return loaded_params
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
@@ -1766,6 +1775,19 @@ class DeepseekV41LLMForCausalLM(
             ):
                 if layer.engram is not None:
                     layer.engram.embed_tokens.collapse_huge_pages()
+
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Exclude only owner-supplied table tensors before safetensors reads."""
+        engram = self.model.vllm_config.engram_config
+        if engram is None or not engram.shared_host_endpoint:
+            return False
+        layout = self.model.engram_layout
+        assert layout is not None
+        return any(
+            name == f"layers.{layer}.engram.embed.{suffix}"
+            for layer in layout.layer_ids
+            for suffix in ("weight", "scale")
+        )
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

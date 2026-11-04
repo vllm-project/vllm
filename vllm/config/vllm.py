@@ -1240,6 +1240,10 @@ class VllmConfig:
         # loaders into every process that builds a config
         if envs.VLLM_RELOAD_MODE != "direct":
             return
+        if self.engram_config is not None and self.engram_config.shared_host_endpoint:
+            raise ValueError(
+                "Direct reload does not support immutable external Engram tables."
+            )
         from vllm.model_executor.layers.quantization.online.base import (
             OnlineQuantizationConfig,
         )
@@ -1516,9 +1520,14 @@ class VllmConfig:
             if not model_has_engram_layers(model_config):
                 return
             self.engram_config = EngramConfig()
+        if self.engram_config.shared_host_endpoint and self.weight_transfer_config:
+            raise ValueError(
+                "External Engram tables do not support in-place weight transfer."
+            )
         self.engram_config.verify_model_config(model_config)
         self.engram_config.resolve_dp_shared_memory(self.parallel_config)
         self.engram_config.verify_parallel_config(self.parallel_config)
+        self.engram_config.verify_load_config(self.load_config)
         logger.info_once("Resolved Engram configuration: %s", str(self.engram_config))
 
     def _reject_mismatched_float_kv_cache(self) -> None:
