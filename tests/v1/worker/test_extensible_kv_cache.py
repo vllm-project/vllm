@@ -2,16 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.utils.extensible_tensor import (
-    granule_aligned_blocks,
-    granule_block_alignment,
-)
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
@@ -25,6 +22,7 @@ from vllm.v1.worker import extensible_kv_cache
 from vllm.v1.worker.extensible_kv_cache import (
     ExtensibleKVCache,
     measure_kv_cache_bytes,
+    pad_kv_cache_segments,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
@@ -69,7 +67,7 @@ def test_segments_follow_layout(vmm, layout, expected_segments):
     """Layer-outermost layouts commit one prefix per layer; block-outermost
     layouts commit a single prefix of the whole allocation."""
     config, spec = _make_config(layout)
-    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
     try:
         assert kv_cache.buffer.num_segments == expected_segments
         assert kv_cache.bytes_per_block == NUM_LAYERS * spec.page_size_bytes
@@ -86,7 +84,7 @@ def test_views_stay_valid_across_commits(vmm, layout):
     committed blocks read as zero."""
     config, spec = _make_config(layout)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, layout)
     try:
         kv_caches = allocate_kv_cache(
             config, device, layout, allocate=kv_cache.allocate
@@ -191,7 +189,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
         reserved_headroom_bytes=gib,
         physical_bytes=gib,
         bytes_per_block=gib,
-        blocks_within=lambda num_bytes, aligned: num_bytes // gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
         physical_bytes_for=lambda num_blocks: num_blocks * gib,
         set_torch_memory_limit=limits.append,
     )
@@ -229,6 +227,69 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
     assert limits == [2 * gib + left_free]
 
 
+def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
+    """On UMA parts the page cache (e.g. prefetched weights) is reclaimable
+    but cudaMemGetInfo reports it as used; sizing from the raw figure left
+    a 120 GiB DGX Spark with zero KV cache blocks (vllm-project/vllm#65378)."""
+    gib = 1 << 30
+    kv_cache = SimpleNamespace(
+        reserved_headroom_bytes=7 * gib,
+        physical_bytes=gib,
+        bytes_per_block=gib,
+        blocks_within=lambda num_bytes: num_bytes // gib,
+        physical_bytes_for=lambda num_blocks: num_blocks * gib,
+        set_torch_memory_limit=lambda limit: None,
+    )
+    accelerator = extensible_kv_cache.torch.accelerator
+    monkeypatch.setattr(accelerator, "synchronize", lambda *args: None)
+    monkeypatch.setattr(accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(accelerator, "memory_reserved", lambda *args: 20 * gib)
+    # cudaMemGetInfo: 10 GiB free of 120; the OS has 100 GiB available.
+    monkeypatch.setattr(
+        accelerator, "get_memory_info", lambda *args: (10 * gib, 120 * gib)
+    )
+    from vllm.utils import mem_utils
+
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: True
+    )
+    monkeypatch.setattr(
+        mem_utils.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=100 * gib),
+    )
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "reserve_mm_ipc_gpu_memory",
+        lambda available, *args: available,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None),
+        parallel_config=SimpleNamespace(),
+        kv_transfer_config=None,
+    )
+    measure = functools.partial(
+        extensible_kv_cache.measure_kv_cache_blocks,
+        kv_cache,  # type: ignore[arg-type]
+        vllm_config,  # type: ignore[arg-type]
+        torch.device("cuda", 0),
+        init_free_memory=110 * gib,
+        requested_memory=96 * gib,
+    )
+
+    num_blocks = measure()
+
+    # headroom 101 GiB, margin 0.75 * 7, non-KV use 110 - 100 - 1 = 9 GiB:
+    # min(96 - 9, 101 - 5.25) - 7 = 80 GiB.
+    assert num_blocks == 80
+
+    # The raw figure would have sized it to nothing.
+    monkeypatch.setattr(
+        mem_utils.current_platform, "is_integrated_gpu", lambda *args: False
+    )
+    assert measure() == 0
+
+
 def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     """The process may start another engine, which must not inherit the cap."""
     fractions: list[float] = []
@@ -247,22 +308,6 @@ def test_freeing_the_cache_lifts_the_torch_memory_cap(monkeypatch):
     kv_cache.free()
     assert fractions == [0.25, 1.0]
     assert kv_cache.torch_memory_limit is None
-
-
-def test_granule_aligned_blocks():
-    """Blocks per stride must span whole granules; with several strides the
-    count is a multiple of every stride's requirement."""
-    granule = 2 << 20
-    # 64 KiB blocks: 32 per granule.
-    assert granule_block_alignment([64 << 10], granule) == 32
-    assert granule_aligned_blocks(1000, [64 << 10], granule) == 992
-    # 96 KiB blocks: 3 blocks cover 288 KiB; the granule is reached at 64.
-    assert granule_block_alignment([96 << 10], granule) == 64
-    # Mixed strides: lcm(32, 64).
-    assert granule_aligned_blocks(1000, [64 << 10, 96 << 10], granule) == 960
-    # A stride that is a granule multiple needs no alignment.
-    assert granule_aligned_blocks(1000, [4 << 20], granule) == 1000
-    assert granule_aligned_blocks(31, [64 << 10], granule) == 0
 
 
 def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
@@ -290,13 +335,46 @@ def _make_mixed_config(num_blocks: int = NUM_BLOCKS):
     return config, specs
 
 
+def test_pad_kv_cache_segments():
+    """Layer-outermost regions are placed on granules: offsets, layer strides
+    and the size round up while block count and strides stay. Block-outermost
+    layouts have one segment at offset 0 and are left as they are."""
+    granule = 2 << 20
+    page = _make_config(KVCacheLayout.LBNHC)[1].page_size_bytes
+    # One block past a granule per layer.
+    num_blocks = granule // page + 1
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=num_blocks)
+    padded = pad_kv_cache_segments(config, KVCacheLayout.LBNHC, granule)
+    assert padded.num_blocks == num_blocks
+    (tensor,) = padded.kv_cache_tensors
+    assert tensor.block_stride == page
+    assert tensor.layer_stride == 2 * granule
+    assert tensor.offset == 0
+    assert tensor.size == NUM_LAYERS * 2 * granule
+    assert config.kv_cache_tensors[0].layer_stride == num_blocks * page
+
+    # Layers 0 and 2 share a stride, so one tensor places both ahead of layer 1.
+    config, _ = _make_mixed_config()
+    padded = pad_kv_cache_segments(config, KVCacheLayout.LBNHC, granule)
+    assert [t.layers for t in padded.kv_cache_tensors] == [
+        ["layer.0", "layer.2"],
+        ["layer.1"],
+    ]
+    assert [t.offset for t in padded.kv_cache_tensors] == [0, 2 * granule]
+    assert all(t.layer_stride == granule for t in padded.kv_cache_tensors)
+    assert {t.size for t in padded.kv_cache_tensors} == {NUM_LAYERS * granule}
+
+    config, _ = _make_config(KVCacheLayout.BLNHC)
+    assert pad_kv_cache_segments(config, KVCacheLayout.BLNHC, granule) is config
+
+
 @requires_cuda
 def test_mixed_block_strides_commit_per_layer(vmm):
     """Layers with different page sizes get segments of their own stride; a
     commit backs the same block count in each and the views stay valid."""
     config, specs = _make_mixed_config()
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.LBNHC)
     try:
         assert len(kv_cache.segment_strides) == NUM_LAYERS
         assert sorted(kv_cache.segment_strides) == sorted(
@@ -331,7 +409,7 @@ def test_release_and_recommit_for_sleep(vmm):
     count under the same addresses, so existing views keep working."""
     config, _ = _make_config(KVCacheLayout.LBNHC)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, KVCacheLayout.LBNHC)
     try:
         views = list(
             allocate_kv_cache(
@@ -362,7 +440,7 @@ def test_shrinking_commit_remaps_to_the_smaller_prefix(vmm, layout):
     smaller cache."""
     config, _ = _make_config(layout)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, layout)
     try:
         capacity_views = allocate_kv_cache(
             config, device, layout, allocate=kv_cache.allocate
@@ -404,7 +482,7 @@ def test_committed_views_cover_exactly_the_committed_bytes(vmm, layout):
     views, so connectors deriving extents from storage size see backed memory."""
     config, spec = _make_config(layout)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, layout)
     try:
         capacity_views = allocate_kv_cache(
             config, device, layout, allocate=kv_cache.allocate
@@ -442,7 +520,7 @@ def _segments_backed_by_one_chunk(kv_cache: ExtensibleKVCache) -> list[bool]:
 
 
 def _granule(layout: KVCacheLayout) -> int:
-    probe = ExtensibleKVCache(_make_config(layout)[0], torch.device("cuda"))
+    probe = ExtensibleKVCache(_make_config(layout)[0], torch.device("cuda"), layout)
     try:
         return probe.buffer.granularity
     finally:
@@ -450,74 +528,80 @@ def _granule(layout: KVCacheLayout) -> int:
 
 
 @requires_cuda
-def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm):
-    """Incremental commits map one driver allocation each; a defragmenting
-    commit of a granule-aligned count remaps every segment as a single
-    allocation (RDMA cannot span several) and still ends up zero-filled."""
-    granule = _granule(KVCacheLayout.LBNHC)
-    stride = _make_config(KVCacheLayout.LBNHC)[1].page_size_bytes
-    alignment = granule_block_alignment([stride], granule)
-    # An unaligned capacity puts segment offsets inside granules.
-    capacity = 2 * alignment + alignment // 2
-    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=capacity)
-    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+@pytest.mark.parametrize("padded", [False, True])
+def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm, padded):
+    """Incremental commits map one driver allocation each. Unpadded, segments
+    after the first start mid-granule and share allocations even after a
+    defragmenting commit; padded, a defragmenting commit of any block count
+    remaps each segment as one allocation (RDMA cannot span several)."""
+    layout = KVCacheLayout.LBNHC
+    granule = _granule(layout)
+    page = _make_config(layout)[1].page_size_bytes
+    blocks_per_granule = granule // page
+    capacity = 2 * blocks_per_granule + blocks_per_granule // 2
+    config, _ = _make_config(layout, num_blocks=capacity)
+    if padded:
+        config = pad_kv_cache_segments(config, layout, granule)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
     try:
-        assert kv_cache.block_alignment == alignment
         kv_cache.commit(1)
-        kv_cache.commit(alignment + 1)
-        num_segments = kv_cache.buffer.num_segments
-        assert kv_cache.buffer.num_physical_chunks == 2 * num_segments
-
-        kv_cache.commit(capacity, defragment=True)
-        assert kv_cache.num_committed_blocks == capacity
-        assert torch.count_nonzero(kv_cache.buffer.full_view()) == 0
-        # Segments after the first start mid-granule and share chunks.
-        assert not all(_segments_backed_by_one_chunk(kv_cache))
-    finally:
-        kv_cache.free()
-
-    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=2 * alignment)
-    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
-    try:
-        kv_cache.commit(alignment + 1)
-        kv_cache.commit(
-            kv_cache.blocks_within(kv_cache.size, aligned=True), defragment=True
-        )
-        assert kv_cache.num_committed_blocks == 2 * alignment
+        kv_cache.commit(blocks_per_granule + 1)
         buffer = kv_cache.buffer
-        assert buffer.num_physical_chunks == buffer.num_segments
-        assert all(_segments_backed_by_one_chunk(kv_cache))
+        assert buffer.num_segments == NUM_LAYERS
+        assert buffer.num_physical_chunks == 2 * NUM_LAYERS
+
+        kv_cache.commit(capacity - 3, defragment=True)
+        assert kv_cache.num_committed_blocks == capacity - 3
+        for segment in range(buffer.num_segments):
+            assert torch.count_nonzero(buffer.segment_view(segment)) == 0
+        assert all(_segments_backed_by_one_chunk(kv_cache)) == padded
+        if padded:
+            assert buffer.num_physical_chunks == NUM_LAYERS
     finally:
         kv_cache.free()
 
 
 @requires_cuda
-@pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLNHC])
-def test_aligned_capacity_config_allocates_and_defragments(vmm, layout):
-    """The engine-side alignment yields a config the cache can be built from,
-    with views over it, and whose full defragmenting commit backs each segment
-    with one allocation."""
-    from vllm.v1.core.kv_cache_planning import align_extensible_kv_cache_capacity
-    from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
-
+@pytest.mark.parametrize("case", ["LBNHC", "BLNHC", "mixed"])
+def test_padded_config_allocates_and_defragments(vmm, case):
+    """A padded config yields a cache with views over its reservation; a
+    defragmenting commit of an arbitrary count backs each segment with one
+    allocation, and the committed views and connector placements address the
+    same bytes as the capacity views."""
+    layout = KVCacheLayout.LBNHC if case == "mixed" else KVCacheLayout[case]
     granule = _granule(layout)
-    config, spec = _make_config(layout, num_blocks=1000)
-    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
-    vllm_config.cache_config.kv_cache_layout = layout.name
-    scheduler_config = generate_scheduler_kv_cache_config([config])
-    align_extensible_kv_cache_capacity(vllm_config, [config], scheduler_config, granule)
-    assert config.num_blocks < 1000
+    capacity = 1000
+    if case == "mixed":
+        config, _ = _make_mixed_config(num_blocks=capacity)
+    else:
+        config, _ = _make_config(layout, num_blocks=capacity)
+    config = pad_kv_cache_segments(config, layout, granule)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, layout)
     try:
+        assert all(offset % granule == 0 for offset in kv_cache.segment_offsets)
         views = allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
-        assert all(v.shape[0] == config.num_blocks for v in views.values())
+        assert all(v.shape[0] == capacity for v in views.values())
         kv_cache.commit(3)
-        kv_cache.commit(config.num_blocks, defragment=True)
+        num_blocks = capacity - 3
+        kv_cache.commit(num_blocks, defragment=True)
         assert all(_segments_backed_by_one_chunk(kv_cache))
-        for view in views.values():
-            view.fill_(1.0)
+        for i, view in enumerate(views.values()):
+            view[:num_blocks].fill_(float(i + 1))
         torch.accelerator.synchronize()
+
+        final = copy.copy(config)
+        final.num_blocks = num_blocks
+        committed = kv_cache.committed_views(final, layout)
+        assert committed is not None
+        for i, (name, view) in enumerate(views.items()):
+            assert committed[name].data_ptr() == view.data_ptr()
+            assert torch.all(committed[name] == float(i + 1))
+        for tensor in kv_cache.committed_kv_cache_tensors(final, layout, num_blocks):
+            for layer_idx, name in enumerate(tensor.layers):
+                storage = committed[name].untyped_storage()
+                layer_start = tensor.offset + layer_idx * tensor.layer_stride
+                assert storage.data_ptr() + layer_start == committed[name].data_ptr()
     finally:
         kv_cache.free()
 
@@ -525,24 +609,21 @@ def test_aligned_capacity_config_allocates_and_defragments(vmm, layout):
 @requires_cuda
 def test_blocks_within_accounts_for_granule_rounding(vmm):
     """The count that fits a byte budget is the most whose rounded-up
-    per-segment footprint fits, not the budget over the nominal block size;
-    aligned, it is the largest aligned count under the nominal footprint."""
+    per-segment footprint fits, not the budget over the nominal block size."""
     config, spec = _make_config(KVCacheLayout.LBNHC, num_blocks=4096)
-    kv_cache = ExtensibleKVCache(config, torch.device("cuda"))
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), KVCacheLayout.LBNHC)
     try:
         granule = kv_cache.buffer.granularity
-        alignment = kv_cache.block_alignment
+        blocks_per_granule = granule // spec.page_size_bytes
         num_segments = kv_cache.buffer.num_segments
-        # One granule per segment holds `alignment` blocks exactly; one more
-        # block per segment needs a whole extra granule each.
+        # One granule per segment holds `blocks_per_granule` blocks exactly;
+        # one more block per segment needs a whole extra granule each.
         budget = num_segments * granule
-        assert kv_cache.blocks_within(budget) == alignment
-        assert kv_cache.blocks_within(budget + 1) == alignment
-        assert kv_cache.physical_bytes_for(alignment + 1) == 2 * budget
-        assert kv_cache.blocks_within(2 * budget - 1) == alignment
-        assert kv_cache.blocks_within(2 * budget) == 2 * alignment
-        nominal = (2 * alignment + 5) * kv_cache.bytes_per_block
-        assert kv_cache.blocks_within(nominal, aligned=True) == 2 * alignment
+        assert kv_cache.blocks_within(budget) == blocks_per_granule
+        assert kv_cache.blocks_within(budget + 1) == blocks_per_granule
+        assert kv_cache.physical_bytes_for(blocks_per_granule + 1) == 2 * budget
+        assert kv_cache.blocks_within(2 * budget - 1) == blocks_per_granule
+        assert kv_cache.blocks_within(2 * budget) == 2 * blocks_per_granule
         assert kv_cache.blocks_within(kv_cache.size * 2) == config.num_blocks
     finally:
         kv_cache.free()
@@ -555,7 +636,7 @@ def test_committed_kv_cache_tensors_match_views(vmm, layout):
     the same bytes as the committed views, within storages of their size."""
     config, _ = _make_config(layout)
     device = torch.device("cuda")
-    kv_cache = ExtensibleKVCache(config, device)
+    kv_cache = ExtensibleKVCache(config, device, layout)
     try:
         allocate_kv_cache(config, device, layout, allocate=kv_cache.allocate)
         committed = 5
