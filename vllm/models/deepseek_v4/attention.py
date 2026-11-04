@@ -771,13 +771,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         out: "torch.Tensor | QuantizedActivation",
     ) -> None:
         if self.hisparse_cache is not None:
-            attn_metadata = get_forward_context().attn_metadata
-            self.hisparse_cache.prepare_group_for_batch(
-                attn_metadata.get(self.prefix)
-                if isinstance(attn_metadata, dict)
-                else None
-            )
             self.hisparse_cache.finish_kv_update()
+            self.hisparse_cache.runtime.begin_forward()
         if self.indexer is not None and index_q is not None:
             assert index_weights is not None
             q_quant = (index_q, index_q_scale) if index_q_scale is not None else index_q
