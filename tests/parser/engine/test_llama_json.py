@@ -325,11 +325,15 @@ def test_arg_converter_accepts_arguments_and_parameters():
     )
 
 
+_PARALLEL_SEPARATORS = ["; ", pytest.param("", id="llama4_concatenated")]
+
+
+@pytest.mark.parametrize("separator", _PARALLEL_SEPARATORS)
 @pytest.mark.parametrize("with_marker", [False, True])
-def test_non_streaming_parallel_calls(parser, mock_request, with_marker):
+def test_non_streaming_parallel_calls(parser, mock_request, with_marker, separator):
     prefix = TOOL_START if with_marker else ""
     text = (
-        f'{prefix}{{"name":"a","arguments":{{"x":1}}}}; '
+        f'{prefix}{{"name":"a","arguments":{{"x":1}}}}{separator}'
         '{"name":"b","parameters":{"y":2}}'
     )
     _, content, tools = parser.parse(text, mock_request)
@@ -372,6 +376,7 @@ def test_tool_choice_none_streaming_preserves_bare_json(
     assert all(not delta.tool_calls for delta in results if delta)
 
 
+@pytest.mark.parametrize("separator", _PARALLEL_SEPARATORS)
 @pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 11])
 @pytest.mark.parametrize("with_marker", [False, True])
 def test_streaming_parallel_calls_are_chunk_invariant(
@@ -379,10 +384,11 @@ def test_streaming_parallel_calls_are_chunk_invariant(
     mock_request,
     chunk_size,
     with_marker,
+    separator,
 ):
     prefix = TOOL_START if with_marker else ""
     text = (
-        f'{prefix}{{"name":"a","arguments":{{"text":"hello; world"}}}}; '
+        f'{prefix}{{"name":"a","arguments":{{"text":"hello; world"}}}}{separator}'
         '{"name":"b","arguments":{"items":[1,2]}}'
     )
     results = _stream(parser, mock_request, text, chunk_size)
