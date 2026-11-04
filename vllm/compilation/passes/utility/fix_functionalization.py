@@ -166,6 +166,23 @@ class FixFunctionalizationPass(VllmInductorPass):
                         "input_global_scale",
                     ),
                 )
+            elif (
+                hasattr(torch.ops._C, "gelu_nvfp4_quant")
+                and at_target == torch.ops._C.gelu_nvfp4_quant.default
+            ):
+                mutated_args = {1: "result", 2: "result_block_scale"}
+                self.defunctionalize(
+                    graph,
+                    node,
+                    mutated_args,
+                    args=(
+                        "result",
+                        "result_block_scale",
+                        "input",
+                        "input_global_scale",
+                        "bias",
+                    ),
+                )
             # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
             elif at_target == torch.ops._C.fused_qk_norm_rope.default:
                 mutated_args = {1: "qkv"}

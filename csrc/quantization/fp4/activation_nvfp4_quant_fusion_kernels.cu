@@ -34,16 +34,41 @@
 
 namespace vllm {
 
+// The activations fused in front of NVFP4 quantization. A gated activation
+// reads the halves x, y of a [m, 2 * n] input; BiasGelu reads a [m, n] input x
+// and an optional [n] bias y.
+struct SiluAndMul {
+  static constexpr bool kGated = true;
+
+  template <class Type>
+  static __device__ __forceinline__ PackedVec<Type, CVT_FP4_PACK16> apply(
+      const PackedVec<Type, CVT_FP4_PACK16>& x,
+      const PackedVec<Type, CVT_FP4_PACK16>& y) {
+    return compute_silu_mul<Type>(x, y);
+  }
+};
+
+struct BiasGelu {
+  static constexpr bool kGated = false;
+
+  template <class Type>
+  static __device__ __forceinline__ PackedVec<Type, CVT_FP4_PACK16> apply(
+      const PackedVec<Type, CVT_FP4_PACK16>& x,
+      const PackedVec<Type, CVT_FP4_PACK16>& y) {
+    return compute_bias_gelu<Type>(x, y);
+  }
+};
+
 // Use UE4M3 by default.
-template <class Type, bool UE8M0_SF = false>
+template <class Type, class Act, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
-    silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
-                             int32_t outputCols, int32_t num_packed_cols,
-                             int32_t num_padded_cols,
-                             Type const* __restrict__ in,
-                             float const* __restrict__ SFScale,
-                             uint32_t* __restrict__ out,
-                             uint32_t* __restrict__ SFout) {
+    act_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, int32_t outputCols,
+                        int32_t num_packed_cols, int32_t num_padded_cols,
+                        Type const* __restrict__ in,
+                        Type const* __restrict__ bias,
+                        float const* __restrict__ SFScale,
+                        uint32_t* __restrict__ out,
+                        uint32_t* __restrict__ SFout) {
   using PackedVec = vllm::PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -73,32 +98,34 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
     if (colIdx < num_padded_cols) {
       PackedVec in_vec;
+      // The second half of a gated input, else the bias (zeros without one).
       PackedVec in_vec2;
-      int64_t inOffset =
-          rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-      int64_t inOffset2 = rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) +
-                          numCols / CVT_FP4_ELTS_PER_THREAD + colIdx;
+      int64_t const inCols = Act::kGated ? numCols * 2 : numCols;
+      int64_t inOffset = rowIdx * (inCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+      int64_t inOffset2 =
+          Act::kGated ? inOffset + numCols / CVT_FP4_ELTS_PER_THREAD : colIdx;
+      Type const* in2 = (Act::kGated || bias == nullptr) ? in : bias;
 
       // If we are outside valid rows/columns, feed zeros
       bool valid = (rowIdx < numRows) && (colIdx < num_packed_cols);
+      bool valid2 = valid && (Act::kGated || bias != nullptr);
       if constexpr (CVT_FP4_PACK16) {
         ld256_cg_or_zero(reinterpret_cast<u32x8_t&>(in_vec),
                          &reinterpret_cast<const uint32_t*>(in)[inOffset * 8],
                          valid);
         ld256_cg_or_zero(reinterpret_cast<u32x8_t&>(in_vec2),
-                         &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 8],
-                         valid);
+                         &reinterpret_cast<const uint32_t*>(in2)[inOffset2 * 8],
+                         valid2);
       } else {
         ld128_cg_or_zero(reinterpret_cast<uint4&>(in_vec),
                          &reinterpret_cast<const uint32_t*>(in)[inOffset * 4],
                          valid);
         ld128_cg_or_zero(reinterpret_cast<uint4&>(in_vec2),
-                         &reinterpret_cast<const uint32_t*>(in)[inOffset2 * 4],
-                         valid);
+                         &reinterpret_cast<const uint32_t*>(in2)[inOffset2 * 4],
+                         valid2);
       }
 
-      // Compute silu and mul
-      PackedVec out_silu_mul = compute_silu_mul<Type>(in_vec, in_vec2);
+      PackedVec out_act = Act::template apply<Type>(in_vec, in_vec2);
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
@@ -109,7 +136,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       if (valid) {
         out_val =
             cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-                out_silu_mul, SFScaleVal, sf_out);
+                out_act, SFScaleVal, sf_out);
       } else if (sf_out != nullptr) {
         // The swizzled scale tensor may be allocated with torch.empty.
         // Explicitly initialize padded rows and columns in this kernel so
@@ -137,13 +164,13 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
 }  // namespace vllm
 
-void silu_and_mul_nvfp4_quant_sm1xxa(
-    torch::stable::Tensor& output,  // [..., d]
-    torch::stable::Tensor& output_sf,
-    torch::stable::Tensor& input,  // [..., 2 * d]
-    torch::stable::Tensor& input_sf) {
+template <class Act>
+static void act_and_nvfp4_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_sf,
+    torch::stable::Tensor const& input, torch::stable::Tensor const& input_sf,
+    std::optional<torch::stable::Tensor> const& bias) {
   int32_t m = input.size(0);
-  int32_t n = input.size(1) / 2;
+  int32_t n = Act::kGated ? input.size(1) / 2 : input.size(1);
   int32_t output_n = output.size(1) * 2;
 
   STD_TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
@@ -154,6 +181,13 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
       input.scalar_type() == torch::headeronly::ScalarType::Half ||
           input.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "Unsupported input data type for quantize_to_fp4.");
+  if (bias.has_value()) {
+    STD_TORCH_CHECK(bias->scalar_type() == input.scalar_type() &&
+                        bias->dim() == 1 && bias->size(0) == n &&
+                        bias->is_contiguous(),
+                    "The bias must be a contiguous [N] tensor of the input "
+                    "data type.");
+  }
 
   int multiProcessorCount =
       get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
@@ -188,9 +222,12 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
       int64_t(m) * num_packed_cols <= int64_t(multiProcessorCount) * 4096;
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
-      input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
+      input.scalar_type(), "act_and_nvfp4_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+        auto bias_ptr = bias.has_value()
+                            ? static_cast<cuda_type const*>(bias->data_ptr())
+                            : nullptr;
         cudaLaunchConfig_t config = {};
         config.gridDim = grid;
         config.blockDim = block;
@@ -201,10 +238,29 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
         attrs[0].val.programmaticStreamSerializationAllowed = 1;
         config.numAttrs = use_pdl ? 1 : 0;
         config.attrs = attrs;
-        cudaLaunchKernelEx(&config, vllm::silu_mul_cvt_fp16_to_fp4<cuda_type>,
+        cudaLaunchKernelEx(&config, vllm::act_cvt_fp16_to_fp4<cuda_type, Act>,
                            m, n, output_n, num_packed_cols, num_padded_cols,
-                           input_ptr, input_sf_ptr,
+                           input_ptr, bias_ptr, input_sf_ptr,
                            reinterpret_cast<uint32_t*>(output_ptr),
                            reinterpret_cast<uint32_t*>(sf_out));
       });
+}
+
+void silu_and_mul_nvfp4_quant_sm1xxa(
+    torch::stable::Tensor& output,  // [..., d]
+    torch::stable::Tensor& output_sf,
+    torch::stable::Tensor& input,  // [..., 2 * d]
+    torch::stable::Tensor& input_sf) {
+  act_and_nvfp4_quant<vllm::SiluAndMul>(output, output_sf, input, input_sf,
+                                        std::nullopt);
+}
+
+void gelu_nvfp4_quant_sm1xxa(
+    torch::stable::Tensor& output,  // [..., d]
+    torch::stable::Tensor& output_sf,
+    torch::stable::Tensor& input,  // [..., d]
+    torch::stable::Tensor& input_sf,
+    std::optional<torch::stable::Tensor> const& bias) {  // [d]
+  STD_TORCH_CHECK(input.is_contiguous(), "The input must be contiguous.");
+  act_and_nvfp4_quant<vllm::BiasGelu>(output, output_sf, input, input_sf, bias);
 }
