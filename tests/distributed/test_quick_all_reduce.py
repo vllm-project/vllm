@@ -553,6 +553,9 @@ def graph_quickreduce(
                             dist.all_reduce(inp2, group=group)
                 graph.replay()
                 tol = _quickreduce_tolerance(fa.qr_quant_level)
+                # Every extra round feeds the previous (tp_size x larger) sum
+                # back in, so the codec's absolute error grows with it.
+                tol["atol"] *= tp_size ** (num_communication - 1)
                 torch.testing.assert_close(out1, inp1, **tol)
                 torch.testing.assert_close(out2, inp2, **tol)
 
