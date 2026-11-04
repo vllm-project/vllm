@@ -176,7 +176,7 @@ def test_normal_hlm_path_batches_equal_position_requests(
 def _check_hlm_batch(model, *, exact: bool) -> None:
     store = model.request_states
     for req_id in ("first", "second", "ref-first", "ref-second"):
-        store.add_request(req_id)
+        store.add_request(req_id, computed_tokens=0)
     torch.manual_seed(42)
     chunks = torch.randn(
         2, model.backend_config.hidden_size, device="cuda", dtype=torch.bfloat16
