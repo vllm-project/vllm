@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import subprocess
+import sys
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
@@ -31,6 +33,33 @@ from vllm.engine.arg_utils import (
     parse_type,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+
+def test_nixl_selector_allows_cli_defaults(monkeypatch):
+    """Parse real DCP arguments with NIXL enabled before defaults are cached."""
+    monkeypatch.setenv("VLLM_USE_NIXL_DCP_A2A", "1")
+    monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import json\n"
+            "from vllm.engine.arg_utils import EngineArgs\n"
+            "from vllm.utils.argparse_utils import FlexibleArgumentParser\n"
+            "parser = EngineArgs.add_cli_args(FlexibleArgumentParser())\n"
+            "args = EngineArgs.from_cli_args(parser.parse_args([\n"
+            "    '--tensor-parallel-size', '2',\n"
+            "    '--decode-context-parallel-size', '2',\n"
+            "    '--dcp-comm-backend', 'a2a']))\n"
+            "print(json.dumps([args.tensor_parallel_size,\n"
+            "    args.decode_context_parallel_size, args.dcp_comm_backend]))\n",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == [2, 2, "a2a"]
 
 
 @pytest.mark.parametrize(

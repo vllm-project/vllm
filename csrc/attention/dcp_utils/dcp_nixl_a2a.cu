@@ -63,10 +63,10 @@ __device__ void complete(nixl_status_t status, nixlGpuXferStatusH& request,
   }
 }
 
-// Setup-only inspection of the pinned UCX device ABI. No remote GPU mapping
-// is required. The data and counters use one memory element for each peer.
-__global__ void peer_info_kernel(nixlMemViewH remote, int64_t* info, int peers,
-                                 int channels) {
+// Cache optional peer mappings during the existing setup probe. The receive
+// payload and its counters belong to the same registered memory element.
+__global__ void peer_info_kernel(nixlMemViewH remote, int64_t* info,
+                                 int64_t* peer_ptrs, int peers, int channels) {
   int item = blockIdx.x * blockDim.x + threadIdx.x;
   if (item >= peers * channels) {
     return;
@@ -77,8 +77,14 @@ __global__ void peer_info_kernel(nixlMemViewH remote, int64_t* info, int peers,
   auto* result = info + item * 4;
   result[0] = -1;
   result[1] = result[2] = result[3] = 0;
+  if (channel == 0) {
+    peer_ptrs[peer] = 0;
+  }
   if (ucp_device_check_params(view, peer) != UCS_OK || view->num_lanes == 0) {
     return;
+  }
+  if (channel == 0) {
+    peer_ptrs[peer] = reinterpret_cast<int64_t>(nixlGetPtr(remote, peer));
   }
   unsigned lane = channel % view->num_lanes;
   unsigned cid = channel / view->num_lanes;
@@ -148,13 +154,18 @@ __global__ void nixl_pack_put_signal_kernel(
     const int32_t* query_start, int num_seqs, int64_t output_token_stride,
     int64_t output_head_stride, int64_t output_dim_stride,
     int64_t lse_token_stride, int64_t lse_head_stride, char* send,
-    char* receive, const uint64_t* state, nixlMemViewH local,
-    nixlMemViewH remote, int world_size, int rank, int ubatch, int num_tokens,
-    int heads, int head_dim, int tile_tokens, int tile_stride,
-    size_t peer_bytes, size_t receive_ubatch_bytes, int active_channels,
-    bool vectorized) {
+    char* receive, const uint64_t* state, const int64_t* peer_ptrs,
+    nixlMemViewH local, nixlMemViewH remote, int world_size, int rank,
+    int ubatch, int num_tokens, int heads, int head_dim, int tile_tokens,
+    int tile_stride, size_t peer_bytes, size_t receive_ubatch_bytes,
+    int active_channels, bool vectorized) {
   const int peer = blockIdx.y;
   const int channel = blockIdx.x;
+  // Remote-view indices omit our own rank. A null mapping uses NIXL puts;
+  // otherwise every packing thread writes directly to the peer allocation.
+  char* peer_receive =
+      peer == rank ? receive
+                   : reinterpret_cast<char*>(peer_ptrs[peer - (peer > rank)]);
   const int tiles = (num_tokens + tile_tokens - 1) / tile_tokens;
   const size_t slot = (state[0] & 1) * world_size * peer_bytes;
   const size_t rx_base = ubatch * receive_ubatch_bytes;
@@ -171,8 +182,8 @@ __global__ void nixl_pack_put_signal_kernel(
     const int rows = min(tile_tokens, num_tokens - first);
     const size_t offset = static_cast<size_t>(tile) * tile_stride;
     const size_t dst_offset = rx_base + slot + rank * peer_bytes + offset;
-    char* packed =
-        peer == rank ? receive + dst_offset : send + tx_base + offset;
+    char* packed = peer_receive != nullptr ? peer_receive + dst_offset
+                                           : send + tx_base + offset;
     const size_t output_bytes =
         static_cast<size_t>(rows) * heads * head_dim * 2;
     const size_t lse_offset = align_bytes(output_bytes, 16);
@@ -219,14 +230,14 @@ __global__ void nixl_pack_put_signal_kernel(
               : to_float(lse[(first + row) * lse_token_stride +
                              (peer * heads + head) * lse_head_stride]);
     }
-    // Every producer publishes its portion before the posting warp exposes it
-    // to the NIC. Distinct tiles stay live until their batch completes.
+    // Publish every producer's stores before either the NIC reads staging or
+    // the CTA leader signals a directly mapped receiver.
     __threadfence_system();
     __syncthreads();
     ++batch_count;
     const bool batch_end =
         batch_count == kBatchPuts || tile + active_channels >= tiles;
-    if (peer != rank && threadIdx.x < 32) {
+    if (peer_receive == nullptr && threadIdx.x < 32) {
       auto status = nixlPut<nixl_gpu_level_t::WARP>(
           {local, 0, tx_base + offset},
           {remote, static_cast<size_t>(peer - (peer > rank)), dst_offset},
@@ -249,8 +260,9 @@ __global__ void nixl_pack_put_signal_kernel(
     }
   }
   if (threadIdx.x == 0) {
-    if (peer == rank) {
-      auto* counter = reinterpret_cast<uint64_t*>(receive + counter_offset);
+    if (peer_receive != nullptr) {
+      auto* counter =
+          reinterpret_cast<uint64_t*>(peer_receive + counter_offset);
       cuda::atomic_ref<uint64_t, cuda::thread_scope_system>(*counter).store(
           state[channel + 1], cuda::memory_order_release);
     } else {
@@ -273,17 +285,21 @@ void check_workspace_tensor(const Tensor& tensor, const Tensor& reference,
                   "NIXL DCP workspace must be contiguous on the input GPU");
 }
 
-void nixl_dcp_peer_info(int64_t remote_view, Tensor& info) {
+void nixl_dcp_peer_info(int64_t remote_view, Tensor& info, Tensor& peer_ptrs) {
   check_workspace_tensor(info, info, ScalarType::Long);
+  check_workspace_tensor(peer_ptrs, info, ScalarType::Long);
   STD_TORCH_CHECK(remote_view != 0 && info.dim() == 3 && info.size(0) > 0 &&
                       info.size(0) < 8 && info.size(1) > 0 &&
                       info.size(1) <= 8 && info.size(2) == 4,
                   "invalid NIXL DCP peer-info dimensions");
+  STD_TORCH_CHECK(peer_ptrs.dim() == 1 && peer_ptrs.size(0) == info.size(0),
+                  "invalid NIXL DCP peer-pointer dimensions");
   const torch::stable::accelerator::DeviceGuard guard(info.get_device_index());
   int items = info.size(0) * info.size(1);
   peer_info_kernel<<<(items + 31) / 32, 32, 0, get_current_cuda_stream()>>>(
       reinterpret_cast<nixlMemViewH>(remote_view),
-      info.mutable_data_ptr<int64_t>(), info.size(0), info.size(1));
+      info.mutable_data_ptr<int64_t>(), peer_ptrs.mutable_data_ptr<int64_t>(),
+      info.size(0), info.size(1));
   check_cuda_launch("NIXL DCP peer info");
 }
 
@@ -291,8 +307,9 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
                            const std::optional<Tensor>& seq_lens,
                            const std::optional<Tensor>& query_start_loc,
                            Tensor& send, Tensor& receive, Tensor& state,
-                           int64_t local_view, int64_t remote_view,
-                           int64_t rank, int64_t ubatch, int64_t tile_tokens) {
+                           const Tensor& peer_ptrs, int64_t local_view,
+                           int64_t remote_view, int64_t rank, int64_t ubatch,
+                           int64_t tile_tokens) {
   STD_TORCH_CHECK(output.is_cuda() && lse.is_cuda() && output.dim() == 3 &&
                       lse.dim() == 2 &&
                       output.get_device_index() == lse.get_device_index(),
@@ -308,6 +325,7 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
   check_workspace_tensor(send, output, ScalarType::Byte);
   check_workspace_tensor(receive, output, ScalarType::Byte);
   check_workspace_tensor(state, output, ScalarType::Long);
+  check_workspace_tensor(peer_ptrs, output, ScalarType::Long);
   STD_TORCH_CHECK(send.dim() == 3 && receive.dim() == 2 && state.dim() == 2,
                   "invalid NIXL DCP workspace dimensions");
   int world = send.size(1);
@@ -320,6 +338,7 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
           tile_tokens >= 1 && tile_tokens <= 16384 && tokens > 0 && dim > 0 &&
           output.size(1) > 0 && output.size(1) % world == 0 &&
           lse.size(0) == tokens && lse.size(1) == output.size(1) &&
+          peer_ptrs.dim() == 1 && peer_ptrs.size(0) == world - 1 &&
           local_view != 0 && remote_view != 0,
       "invalid NIXL DCP geometry or views");
   int heads = output.size(1) / world;
@@ -368,6 +387,7 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
             output.stride(0), output.stride(1), output.stride(2), lse.stride(0),
             lse.stride(1), static_cast<char*>(send.mutable_data_ptr()),
             static_cast<char*>(receive.mutable_data_ptr()), state_ptr,
+            peer_ptrs.const_data_ptr<int64_t>(),
             reinterpret_cast<nixlMemViewH>(local_view),
             reinterpret_cast<nixlMemViewH>(remote_view), world, rank, ubatch,
             tokens, heads, dim, tile_tokens, tile_stride, peer_bytes,
@@ -386,12 +406,15 @@ void nixl_dcp_a2a_dispatch(const Tensor& output, const Tensor& lse,
 }  // namespace
 
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, nixl_dcp_ops) {
-  nixl_dcp_ops.def("nixl_dcp_peer_info(int remote_view, Tensor! info) -> ()");
+  nixl_dcp_ops.def(
+      "nixl_dcp_peer_info(int remote_view, Tensor! info, Tensor! peer_ptrs) -> "
+      "()");
   nixl_dcp_ops.def(
       "nixl_dcp_a2a_dispatch(Tensor partial_output, Tensor partial_lse, "
       "Tensor? seq_lens, Tensor? query_start_loc, Tensor! send, Tensor! "
       "receive, "
-      "Tensor! state, int local_view, int remote_view, int rank, int ubatch, "
+      "Tensor! state, Tensor peer_ptrs, int local_view, int remote_view, "
+      "int rank, int ubatch, "
       "int tile_tokens) -> ()");
 }
 
