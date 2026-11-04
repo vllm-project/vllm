@@ -4,14 +4,14 @@
 
 """Compare MXFP4 MoE backends at GLM-5.3-shaped sizes.
 
-Every backend is built from the same MXFP4 checkpoint weights through the MXFP4
-oracle (``convert_weight_to_mxfp4_moe_kernel_format``, ``make_mxfp4_moe_kernel``),
-so each row times the kernel vLLM serves with. The timed region is FP32 router
-logits to MoE output with GLM-5.3 routing (sigmoid, correction bias, grouped
-top-k, routed scaling): monolithic backends route inside the kernel as
-``DeepSeekV3``, modular backends call ``grouped_topk`` first, as ``FusedMoE``
-does. Before timing, each backend's output is compared with an FP32 MoE on the
-dequantized weights.
+Every MXFP4 backend is built from the same MXFP4 checkpoint weights through the
+MXFP4 oracle (``convert_weight_to_mxfp4_moe_kernel_format``,
+``make_mxfp4_moe_kernel``), so each row times the kernel vLLM serves with. The
+timed region is FP32 router logits to MoE output with GLM-5.3 routing (sigmoid,
+correction bias, grouped top-k, routed scaling): monolithic backends route inside
+the kernel as ``DeepSeekV3``, modular backends call ``grouped_topk`` first, as
+``FusedMoE`` does. Before timing, each MXFP4 backend's output is compared with an
+FP32 MoE on the dequantized weights.
 
 Backends: ``CUTLASS_MXFP4_MXFP4`` (W4A4), ``FLASHINFER_TRTLLM_MXFP4_MXFP8`` and
 ``FLASHINFER_TRTLLM_MXFP4_BF16``, plus NVFP4 ``FLASHINFER_TRTLLM`` built the way
@@ -400,6 +400,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rep", type=int, default=100, help="ms of replay per case")
     parser.add_argument("--skip-check", action="store_true")
     args = parser.parse_args()
+    if args.rep < 1:
+        parser.error("--rep must be positive")
+    if args.tp_size < 1:
+        parser.error("--tp-size must be positive")
     if args.moe_intermediate_size % args.tp_size != 0:
         parser.error("--moe-intermediate-size must be divisible by --tp-size")
     if (args.moe_intermediate_size // args.tp_size) % MXFP4_BLOCK != 0:
@@ -418,7 +422,7 @@ def parse_args() -> argparse.Namespace:
 @torch.inference_mode()
 def main() -> None:
     args = parse_args()
-    device = torch.device("cuda", torch.cuda.current_device())
+    device = torch.device("cuda", torch.accelerator.current_device_index())
     major, minor = torch.cuda.get_device_capability()
     n = args.moe_intermediate_size // args.tp_size
     torch.manual_seed(0)
