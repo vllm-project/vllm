@@ -1210,6 +1210,19 @@ class FlexAttentionImpl(AttentionImpl):
         # Optional post-attention epilogue transform
         self.out_transform = kwargs.get("out_transform")
 
+        # Cache of the derived K/V cache views, keyed on the kv_cache tensor
+        # identity. See _get_kv_views and issue #64572 / #59534.
+        self._kv_view_cache: (
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ]
+            | None
+        ) = None
+
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
         """View a 3d tensor as 4D."""
@@ -1217,6 +1230,32 @@ class FlexAttentionImpl(AttentionImpl):
             return tensor
         assert tensor.ndim == 3
         return tensor[None, :, :, :]
+
+    def _get_kv_views(
+        self, kv_cache: torch.Tensor, flatten: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The K/V cache views depend only on kv_cache's storage, shape and
+        # strides, all fixed once the cache is allocated. Deriving them on every
+        # attention call (the transpose/split, plus the forward-path flatten) is
+        # pure host overhead on the eager critical path. Cache the views per
+        # kv_cache tensor identity and reuse them while the same tensor is passed
+        # in (issue #64572, mirrors the FlashAttention fix #64571).
+        #
+        # The identity check is required: profiling first binds a minimal KV
+        # cache, runs attention on it, frees it, then allocates the real one.
+        # Keying on identity rebuilds the views when the tensor is replaced, so
+        # the cache never points at freed memory.
+        cache = self._kv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+            k_split, v_split = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+            # Flatten (num_blocks, block_size) into a single token dim.
+            k_flat = k_split.view(-1, self.num_kv_heads, self.head_size)
+            v_flat = v_split.view(-1, self.num_kv_heads, self.head_size)
+            cache = self._kv_view_cache = (kv_cache, k_split, v_split, k_flat, v_flat)
+        if flatten:
+            return cache[3], cache[4]
+        return cache[1], cache[2]
 
     def do_kv_cache_update(
         self,
@@ -1229,8 +1268,7 @@ class FlexAttentionImpl(AttentionImpl):
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache, value_cache = self._get_kv_views(kv_cache, flatten=False)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
@@ -1343,13 +1381,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         else:
             assert self.attn_type == AttentionType.DECODER
-            kv_cache = kv_cache.transpose(1, 2)
-            hs = self.head_size
-            key_cache, value_cache = kv_cache.split(hs, dim=-1)
-
-            # Flatten (num_blocks, block_size) into a single token dim.
-            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
+            key_cache, value_cache = self._get_kv_views(kv_cache, flatten=True)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
