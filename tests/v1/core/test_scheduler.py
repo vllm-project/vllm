@@ -881,6 +881,71 @@ def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     assert cached.all_token_ids == {}
 
 
+@pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
+@pytest.mark.parametrize("cached_first_image", [False, True])
+def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
+    long_prefill_token_threshold,
+    cached_first_image,
+):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=False,
+        async_scheduling=True,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+    )
+    mm_positions = [[PlaceholderRange(offset=100, length=600)] for _ in range(2)]
+    mm_hashes = [["busy"], ["new"]]
+    cache = scheduler.encoder_cache_manager
+    if cached_first_image:
+        cached_position = PlaceholderRange(offset=0, length=100)
+        (primer,) = create_requests(
+            num_requests=1,
+            num_tokens=800,
+            req_ids=["cache-primer"],
+            mm_positions=[[cached_position]],
+            mm_hashes_list=[["cached"]],
+        )
+        cache.allocate(primer, 0)
+        cache.free(primer)
+        mm_positions[1].insert(0, cached_position)
+        mm_hashes[1].insert(0, "cached")
+        assert cache.freeable["cached"] == 100
+
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=800,
+        max_tokens=1,
+        mm_positions=mm_positions,
+        mm_hashes_list=mm_hashes,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first, second = requests
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {first.request_id: 800}
+
+    # The first image is still in flight and occupies the encoder cache.
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert second.status == RequestStatus.WAITING
+    assert second.num_computed_tokens == 0
+    assert not cache.get_cached_input_ids(second)
+    if cached_first_image:
+        assert cache.cached["cached"] == set()
+        assert cache.freeable["cached"] == 100
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            req_id_to_index={first.request_id: 0},
+            sampled_token_ids=[[EOS_TOKEN_ID]],
+        ),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
