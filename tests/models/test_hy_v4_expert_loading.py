@@ -17,7 +17,9 @@ from tests.kernels.moe.utils import (
     routed_expert_checkpoint,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.models.hy_v4.amd.model import HYV4Model as HYV4ModelROCm
+from vllm.models.hy_v4.nvidia import mtp as hy_v4_mtp
 from vllm.models.hy_v4.nvidia.model import HYV4Model
 from vllm.models.hy_v4.nvidia.mtp import HYV4MTP
 
@@ -161,11 +163,48 @@ def test_unquantized_mtp_skips_expert_scales():
         + [
             (f"{prefix}.mlp.experts.0.gate_proj.weight_scale_inv", torch.ones(1, 1)),
             (f"{prefix}.mlp.experts.gate_up_proj_scale_inv", torch.ones(E, 2, 1)),
+            (f"{prefix}.mlp.experts.1.down_proj.scale", torch.ones(1, 1)),
         ]
     )
     assert loaded == dict(model.named_parameters()).keys()
     reference = _reference()
     assert torch.equal(_experts(model).w13_weight, reference.w13_weight)
+
+
+def test_quantized_mtp_expert_scale_names(monkeypatch):
+    """Block-FP8 draft: `.scale` becomes `.weight_scale_inv` (UE8M0 bytes viewed
+    as float8_e8m0fnu), and a fused scale named with a dot is folded into the
+    v5 fused form before the helper maps it."""
+    seen: list[tuple[str, torch.dtype]] = []
+
+    def record(model, name, tensor):
+        seen.append((name, tensor.dtype))
+        return set()
+
+    monkeypatch.setattr(hy_v4_mtp, "load_routed_experts_weight", record)
+    model = _HYV4MTP(fake_moe_layer(E, H, INTER))
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic",
+        weight_block_size=[128, 128],
+    )
+    quant_config.is_scale_e8m0 = True  # type: ignore[attr-defined]
+    model.quant_config = quant_config
+    scale = torch.zeros(1, 1, dtype=torch.uint8)
+    prefix = model.prefixes[0]
+    model.load_weights(
+        [
+            (f"{prefix}.mlp.experts.0.gate_proj.scale", scale),
+            (f"{prefix}.mlp.experts.gate_up_proj.scale", scale),
+            (f"{prefix}.mlp.experts.down_proj.weight_scale_inv", scale),
+        ]
+    )
+    experts = f"{model.prefixes[1]}.mlp.experts"
+    assert seen == [
+        (f"{experts}.0.gate_proj.weight_scale_inv", torch.float8_e8m0fnu),
+        (f"{experts}.gate_up_proj_scale_inv", torch.float8_e8m0fnu),
+        (f"{experts}.down_proj_scale_inv", torch.uint8),
+    ]
 
 
 @pytest.mark.parametrize("model_cls", [_HYV4, _HYV4ROCm])

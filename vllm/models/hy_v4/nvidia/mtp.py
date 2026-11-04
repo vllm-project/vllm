@@ -5,6 +5,7 @@
 import copy
 from collections.abc import Iterable
 
+import regex as re
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
@@ -104,6 +105,14 @@ def _prepare_mtp_fp8_expert_scale(
             # the bits instead of numerically converting them.
             loaded_weight = loaded_weight.view(torch.float8_e8m0fnu)
     return name, loaded_weight
+
+
+# A fused expert scale named after the projection with a dot
+# (``experts.gate_up_proj.weight_scale_inv``) is folded into the v5 fused form
+# (``experts.gate_up_proj_scale_inv``) that ``load_routed_experts_weight`` maps.
+_DOTTED_FUSED_EXPERT_SCALE = re.compile(
+    r"(\.experts\.(?:gate_up|down)_proj)\.(?:weight_)?(?=scale)"
+)
 
 
 def _create_mtp_quant_config(
@@ -695,10 +704,9 @@ class HYV4MTP(nn.Module):
 
             # Routed experts, per expert or fused. An unquantized draft has no
             # expert scale parameters, so it skips the checkpoint's scales.
-            if ".experts." in name and _should_skip_missing_mtp_scale_param(
-                self.quant_config, name
-            ):
+            if self.quant_config is None and ".experts." in name and "scale" in name:
                 continue
+            name = _DOTTED_FUSED_EXPERT_SCALE.sub(r"\1_", name)
             expert_params = load_routed_experts_weight(self, name, loaded_weight)
             if expert_params is not None:
                 loaded_params.update(expert_params)
