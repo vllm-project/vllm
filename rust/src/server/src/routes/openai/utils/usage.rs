@@ -70,3 +70,17 @@ impl ContinuousUsage {
         Usage::from_token_usage(usage, false, self.reasoning_tokens)
     }
 }
+
+impl Usage {
+    /// Add another choice's usage; the prompt counts once, like Python.
+    pub(crate) fn add_choice(&mut self, choice: &Usage) {
+        let completion_tokens = choice.completion_tokens.unwrap_or(0);
+        self.completion_tokens = Some(self.completion_tokens.unwrap_or(0) + completion_tokens);
+        self.total_tokens += completion_tokens;
+        if let Some(details) = &mut self.completion_tokens_details
+            && let Some(choice_details) = &choice.completion_tokens_details
+        {
+            details.reasoning_tokens += choice_details.reasoning_tokens;
+        }
+    }
+}
