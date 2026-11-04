@@ -644,6 +644,27 @@ class TestTieringOffloadingManager:
         # Lookup should find all chunks in primary
         assert count_hits(self.manager, chunks) == 3
 
+    def test_promotion_batch_larger_than_primary_capacity(self, manager_setup):
+        """A promotion batch larger than the primary capacity is denied
+        eventually.
+        """
+        keys = to_keys(range(15))
+        for key in keys:
+            self.secondary_tier1.chunks[key] = True
+
+        self._start_request()
+        # Attempt promotion atmost 3 times to see if the mechanics
+        # abandons it eventually.
+        max_attempts = 3
+        success = False
+        for attempt in range(max_attempts):
+            if all(self.manager.lookup(key, _CTX) is LookupResult.MISS for key in keys):
+                success = True
+                break
+            self._simulate_on_schedule_end()
+
+        assert success, "Expected all keys to be missed"
+
     @pytest.mark.parametrize(
         "source",
         [CacheHitSource.EXTERNAL_UNSPECIFIED, CacheHitSource.DISK, CacheHitSource.P2P],
