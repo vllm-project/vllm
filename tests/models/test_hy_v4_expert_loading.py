@@ -18,8 +18,8 @@ from tests.kernels.moe.utils import (
 )
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.hy_v4.amd.model import HYV4Model as HYV4ModelROCm
-from vllm.models.hy_v4.nvidia import mtp as hy_v4_mtp
 from vllm.models.hy_v4.nvidia.model import HYV4Model
 from vllm.models.hy_v4.nvidia.mtp import HYV4MTP
 
@@ -171,18 +171,17 @@ def test_unquantized_mtp_skips_expert_scales():
     assert torch.equal(_experts(model).w13_weight, reference.w13_weight)
 
 
-def test_quantized_mtp_expert_scale_names(monkeypatch):
-    """Block-FP8 draft: `.scale` becomes `.weight_scale_inv` (UE8M0 bytes viewed
-    as float8_e8m0fnu), and a fused scale named with a dot is folded into the
-    v5 fused form before the helper maps it."""
-    seen: list[tuple[str, torch.dtype]] = []
-
-    def record(model, name, tensor):
-        seen.append((name, tensor.dtype))
-        return set()
-
-    monkeypatch.setattr(hy_v4_mtp, "load_routed_experts_weight", record)
+def _block_fp8_mtp() -> nn.Module:
+    """An `_HYV4MTP` with a block-FP8, UE8M0 quant config whose experts have
+    BLOCK `w13/w2_weight_scale_inv` params (one block per expert matrix)."""
     model = _HYV4MTP(fake_moe_layer(E, H, INTER))
+    experts = _experts(model)
+    for name, rows in (("w13_weight_scale_inv", 2), ("w2_weight_scale_inv", 1)):
+        param = nn.Parameter(torch.full((E, rows, 1), -7.0), requires_grad=False)
+        set_weight_attrs(
+            param, {"weight_loader": experts.weight_loader, "quant_method": "block"}
+        )
+        experts.register_parameter(name, param)
     quant_config = Fp8Config(
         is_checkpoint_fp8_serialized=True,
         activation_scheme="dynamic",
@@ -190,21 +189,46 @@ def test_quantized_mtp_expert_scale_names(monkeypatch):
     )
     quant_config.is_scale_e8m0 = True  # type: ignore[attr-defined]
     model.quant_config = quant_config
-    scale = torch.zeros(1, 1, dtype=torch.uint8)
-    prefix = model.prefixes[0]
-    model.load_weights(
+    return model
+
+
+@pytest.mark.parametrize(
+    "gate_up,down",
+    [
+        ("gate_up_proj.scale", "down_proj.scale"),
+        ("gate_up_proj.weight_scale_inv", "down_proj.weight_scale_inv"),
+        ("gate_up_proj_scale_inv", "down_proj_scale_inv"),
+    ],
+)
+def test_block_fp8_mtp_fused_scales(gate_up, down):
+    """Fused UE8M0 expert scales, raw `.scale` bytes or float, with or without
+    the dot, load what the per-expert `.scale` tensors load."""
+    generator = torch.Generator().manual_seed(3)
+    scales = [
+        torch.randint(100, 140, (E, 1, 1), generator=generator, dtype=torch.uint8)
+        for _ in range(3)
+    ]
+    prefix = f"{_HYV4MTP.prefixes[0]}.mlp.experts"
+    per_expert = _block_fp8_mtp()
+    per_expert.load_weights(
         [
-            (f"{prefix}.mlp.experts.0.gate_proj.scale", scale),
-            (f"{prefix}.mlp.experts.gate_up_proj.scale", scale),
-            (f"{prefix}.mlp.experts.down_proj.weight_scale_inv", scale),
+            (f"{prefix}.{e}.{proj}_proj.scale", scale[e])
+            for e in range(E)
+            for proj, scale in zip(("gate", "up", "down"), scales)
         ]
     )
-    experts = f"{model.prefixes[1]}.mlp.experts"
-    assert seen == [
-        (f"{experts}.0.gate_proj.weight_scale_inv", torch.float8_e8m0fnu),
-        (f"{experts}.gate_up_proj_scale_inv", torch.float8_e8m0fnu),
-        (f"{experts}.down_proj_scale_inv", torch.uint8),
-    ]
+    fused_scales = [torch.cat(scales[:2], dim=1), scales[2]]
+    if not gate_up.endswith(".scale"):  # only `.scale` names get the UE8M0 view
+        fused_scales = [s.view(torch.float8_e8m0fnu).float() for s in fused_scales]
+    fused = _block_fp8_mtp()
+    fused.load_weights(
+        [(f"{prefix}.{name}", s) for name, s in zip((gate_up, down), fused_scales)]
+    )
+    a, b = _experts(per_expert), _experts(fused)
+    assert torch.all(a.w13_weight_scale_inv != -7.0)
+    assert torch.all(a.w2_weight_scale_inv != -7.0)
+    assert torch.equal(a.w13_weight_scale_inv, b.w13_weight_scale_inv)
+    assert torch.equal(a.w2_weight_scale_inv, b.w2_weight_scale_inv)
 
 
 @pytest.mark.parametrize("model_cls", [_HYV4, _HYV4ROCm])

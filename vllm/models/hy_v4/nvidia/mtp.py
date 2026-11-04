@@ -702,8 +702,9 @@ class HYV4MTP(nn.Module):
             if is_loaded:
                 continue
 
-            # Routed experts, per expert or fused. An unquantized draft has no
-            # expert scale parameters, so it skips the checkpoint's scales.
+            # Routed experts, per expert or fused (dotted fused scale names are
+            # folded into the v5 form). An unquantized draft has no expert
+            # scale parameters, so it skips the checkpoint's scales.
             if self.quant_config is None and ".experts." in name and "scale" in name:
                 continue
             name = _DOTTED_FUSED_EXPERT_SCALE.sub(r"\1_", name)
