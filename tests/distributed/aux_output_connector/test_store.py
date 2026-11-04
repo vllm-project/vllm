@@ -725,6 +725,68 @@ def test_logprob_publication_normalizes_per_request_width(sampler_widths):
 
 
 @pytest.mark.parametrize(
+    (
+        "first_prompt_len",
+        "first_token_start",
+        "first_count",
+        "next_prompt_len",
+        "next_token_start",
+    ),
+    [
+        (4, 3, 1, 14, 13),
+        (4, 3, 3, 4, 4),
+    ],
+    ids=["streaming-prompt-extension", "speculative-stop-trim"],
+)
+def test_logprob_rows_follow_absolute_sample_positions(
+    first_prompt_len, first_token_start, first_count, next_prompt_len, next_token_start
+):
+    worker = _make_worker(1, logprobs_only=True)
+
+    def run_step(prompt_len, token_start, count, token_id):
+        metadata = AuxOutputConnectorMetadata(
+            generation=0,
+            requests={"aux": 1},
+            block_hashes={},
+            finished_requests=(),
+            logprobs={"aux": "fingerprint"},
+            prompt_lens={"aux": prompt_len},
+            logprob_widths={"aux": 1},
+        )
+        worker.begin_step(metadata)
+        pending = worker.prepare_output(
+            _input_batch(
+                ["aux"],
+                np.array([token_start]),
+                np.array([0, count]),
+                num_scheduled_tokens=[count],
+            )
+        )
+        assert pending is not None
+        pending.enqueue_cpu_copy(
+            np.array([count], dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+            logprobs=LogprobsTensors(
+                torch.full((count, 1), token_id, dtype=torch.int32),
+                torch.full((count, 1), -0.5, dtype=torch.float32),
+                torch.zeros(count, dtype=torch.int32),
+            ),
+        )
+        pending.process_output()
+
+    run_step(first_prompt_len, first_token_start, first_count, 10)
+    run_step(next_prompt_len, next_token_start, 1, 20)
+
+    rows = concat_rows(list(worker._requests["aux"].logprob_rows.values()))
+    assert rows is not None
+    expected_start = max(next_prompt_len, next_token_start + 1)
+    assert expected_start in rows.positions
+    row = np.flatnonzero(rows.positions == expected_start)[0]
+    assert rows.token_ids[row, 0] == 20
+    worker.close()
+
+
+@pytest.mark.parametrize(
     "routing",
     [
         np.zeros((1, _SHAPE[0], _SHAPE[1] + 1), dtype=_DTYPE),

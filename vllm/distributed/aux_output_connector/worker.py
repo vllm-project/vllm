@@ -450,9 +450,9 @@ class AuxOutputWorkerConnector:
 
             if request_id in pending.logprobs:
                 proposed_start = max(state.prompt_len, int(token_start) + 1)
-                sample_start = state.logprob_cursor
-                if sample_start is None:
-                    sample_start = proposed_start
+                # The batch token position is authoritative across streaming
+                # prompt extensions and speculative stop rollbacks.
+                sample_start = proposed_start
                 rows_logprobs = rows_from_lists(
                     pending.logprobs[request_id], sample_start
                 )
