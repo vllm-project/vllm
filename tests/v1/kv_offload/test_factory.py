@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    StoreTrigger,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
@@ -342,6 +343,24 @@ def test_tiering_spec_aligns_row_size():
     assert spec.cpu_page_size_per_worker == 32
     assert spec.kv_bytes_per_chunk == alignment
     assert spec.num_chunks == 3
+
+
+def test_cpu_spec_gives_the_store_mode_to_the_manager():
+    spec = _create_spec(extra_config={"store_mode": "lazy"})
+    assert spec.get_manager().store_triggers == (StoreTrigger.ON_OVERWRITE,)
+
+
+def test_cpu_spec_rejects_an_unknown_store_mode():
+    with pytest.raises(ValueError, match="store_mode must be one of"):
+        _create_spec(extra_config={"store_mode": "fast"})
+
+
+def test_tiering_spec_rejects_lazy_store_mode():
+    spec = _create_spec(
+        spec_name="TieringOffloadingSpec", extra_config={"store_mode": "lazy"}
+    )
+    with pytest.raises(ValueError, match="store_mode lazy"):
+        spec.get_manager()
 
 
 @pytest.mark.parametrize("world_size", [2, 4, 8])

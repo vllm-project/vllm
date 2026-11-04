@@ -55,6 +55,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
+    StoreMode,
     StoreTrigger,
     TransferResult,
     make_offload_key,
@@ -164,11 +165,14 @@ class MockOffloadingSpec(OffloadingSpec):
             return result
 
         _cm.resolve_device_pointers = _tracking_resolve
-        # A manager gives the store triggers of its mode. The store_triggers
-        # key sets the triggers directly.
+        # Like the CPU manager: the store mode selects the trigger, and the
+        # store_triggers key sets the triggers directly.
+        default_trigger = (
+            "ON_OVERWRITE" if self.store_mode is StoreMode.LAZY else "ON_COMPUTE"
+        )
         self.manager.store_triggers = tuple(
             StoreTrigger[name]
-            for name in self.extra_config.get("store_triggers", ["ON_COMPUTE"])
+            for name in self.extra_config.get("store_triggers", [default_trigger])
         )
 
     def get_manager(self) -> OffloadingManager:
