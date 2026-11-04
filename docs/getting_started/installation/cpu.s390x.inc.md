@@ -11,7 +11,7 @@ Currently, the CPU implementation for s390x architecture supports FP32, BF16 and
 - OS: `Linux`
 - SDK: `gcc/g++ >= 14.0.0` or later with Command Line Tools
 - Instruction Set Architecture (ISA): VXE support is required. Works with Z15 and above.
-- Build from source python packages (no pre-built s390x wheels): `torchvision`, `llvmlite`, `numba`, `opencv-python-headless`, `hf-xet`
+- Build from source python packages (no pre-built s390x wheels): `torchvision`, `llvmlite`, `numba`, `opencv-python-headless`, `hf-xet`, `torchcodec`
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
@@ -55,7 +55,8 @@ curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 Execute the following commands to build and install vLLM from source.
 
 !!! tip
-    Pre-built wheels are not available for s390x for the following packages. Build them from source before building vLLM: `torchvision`, `llvmlite`, `numba`, `opencv-python-headless`, `hf-xet`.
+    Pre-built wheels are not available for s390x for the following packages. Build them from source before building vLLM: `torchvision`, `llvmlite`, `numba`, `opencv-python-headless`, `hf-xet`, `torchcodec`.
+    `torchcodec` also needs a shared FFmpeg (built in `Dockerfile.s390x`). Video decoding only; there is no s390x NVDEC path.
     See `docker/Dockerfile.s390x` for exact versions and build commands used in each multi-stage build.
 
 !!! note "LLVM 20 required for llvmlite"
@@ -94,6 +95,7 @@ uv pip install -v \
     /path/to/numba.whl \
     /path/to/opencv_python_headless.whl \
     /path/to/hf_xet.whl \
+    /path/to/torchcodec.whl \
     -r requirements/build/cpu.txt \
     -r requirements/cpu.txt \
     --torch-backend cpu \
@@ -111,6 +113,7 @@ VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
         /path/to/numba.whl \
         /path/to/opencv_python_headless.whl \
         /path/to/hf_xet.whl \
+        /path/to/torchcodec.whl \
         -r requirements/build/cpu.txt \
         -r requirements/cpu.txt && \
     VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \

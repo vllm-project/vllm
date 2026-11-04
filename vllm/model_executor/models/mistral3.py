@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal, TypeAlias, cast
 
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -47,7 +48,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
+from .pixtral import (
+    PixtralEncoderCudaGraphMixin,
+    PixtralHFEncoderInfo,
+    PixtralHFVisionModel,
+    _merge_patches_by_index,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -73,6 +79,19 @@ class Mistral3ImagePixelInputs(TensorSchema):
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"}),
     ]
+
+
+class Mistral3ImageEmbeddingInputs(TensorSchema):
+    """Projected features with shape (num_images, feature_size, hidden_size)."""
+
+    type: Literal["image_embeds"] = "image_embeds"
+    data: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("bn", "ifs", "hs", dynamic_dims={"ifs"}),
+    ]
+
+
+Mistral3ImageInputs: TypeAlias = Mistral3ImagePixelInputs | Mistral3ImageEmbeddingInputs
 
 
 class Mistral3PatchMerger(nn.Module):
@@ -122,6 +141,15 @@ class Mistral3PatchMerger(nn.Module):
         image_features = self.merging_layer(image_features)
         return image_features
 
+    def forward_packed(
+        self, image_features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Same as `forward`, gathering blocks with `_make_merge_indices`
+        (None when spatial_merge_size is 1)."""
+        if merge_indices is not None:
+            image_features = _merge_patches_by_index(image_features, merge_indices)
+        return self.merging_layer(image_features)
+
 
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(
@@ -165,6 +193,16 @@ class Mistral3MultiModalProjector(nn.Module):
     ) -> torch.Tensor:
         image_features = self.norm(image_features)
         image_features = self.patch_merger(image_features, image_sizes)
+        return self._project(image_features)
+
+    def forward_packed(
+        self, image_features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        image_features = self.norm(image_features)
+        image_features = self.patch_merger.forward_packed(image_features, merge_indices)
+        return self._project(image_features)
+
+    def _project(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states, _ = self.linear_2(hidden_states)
@@ -212,14 +250,20 @@ class Mistral3ProcessingInfo(BaseProcessingInfo):
     ) -> PixtralHFEncoderInfo:
         processor = self.get_hf_processor()
         size = processor.image_processor.size
-        merged_kwargs = self.ctx.get_merged_mm_kwargs(mm_processor_kwargs or {})
-        if override_size := merged_kwargs.get("size"):
+        merged_mm_kwargs = self._merge_and_resolve_mm_processor_kwargs(
+            mm_processor_kwargs or {}
+        )
+        image_mm_kwargs = cast(
+            Mapping[str, Any],
+            merged_mm_kwargs.get("images_kwargs", {}),
+        )
+        if override_size := image_mm_kwargs.get("size"):
             size = size | override_size
 
         image_size = size["longest_edge"]
         return Mistral3HFEncoderInfo(self.get_hf_config(), image_size)
 
-    def get_hf_processor(self, **kwargs: object):
+    def get_hf_processor(self, **kwargs: object) -> PixtralProcessor:
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -271,9 +315,6 @@ class Mistral3DummyInputsBuilder(BaseDummyInputsBuilder):
 
 
 class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo]):
-    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
-        return self.dummy_inputs.get_dummy_text(mm_counts)
-
     def _postprocess_hf_mm_data(
         self,
         mm_data: Mapping[str, object],
@@ -372,6 +413,7 @@ def init_vision_tower_for_mistral3(
     hf_config: Mistral3Config,
     quant_config: QuantizationConfig | None,
     *,
+    input_norm: nn.Module | None = None,
     require_post_norm: bool | None = None,
     prefix: str = "",
 ) -> PixtralHFVisionModel:
@@ -385,6 +427,7 @@ def init_vision_tower_for_mistral3(
     return PixtralHFVisionModel(
         vision_config,
         quant_config=quant_config,
+        input_norm=input_norm,
         num_hidden_layers_override=num_hidden_layers,
         require_post_norm=require_post_norm,
         prefix=prefix,
@@ -403,7 +446,10 @@ class Mistral3ForConditionalGeneration(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    PixtralEncoderCudaGraphMixin,
 ):
+    supports_mm_device_do_normalize = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -458,6 +504,7 @@ class Mistral3ForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_mistral3(
                 config,
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(vllm_config.model_config),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -485,7 +532,7 @@ class Mistral3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Mistral3ImagePixelInputs | None:
+    ) -> Mistral3ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -499,8 +546,8 @@ class Mistral3ForConditionalGeneration(
 
     def _process_image_input(
         self,
-        image_input: Mistral3ImagePixelInputs,
-    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
+        image_input: Mistral3ImageInputs,
+    ) -> MultiModalEmbeddings:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -535,6 +582,23 @@ class Mistral3ForConditionalGeneration(
         vision_embeddings = self._process_image_input(image_input)
 
         return vision_embeddings
+
+    # -- SupportsEncoderCudaGraph --
+
+    encoder_cudagraph_pixel_key = "pixel_values"
+
+    @property
+    def encoder_cudagraph_vision_tower(self) -> PixtralHFVisionModel:
+        return self.vision_tower
+
+    @property
+    def encoder_cudagraph_spatial_merge_size(self) -> int:
+        return self.config.spatial_merge_size
+
+    def project_packed_image_features(
+        self, features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        return self.multi_modal_projector.forward_packed(features, merge_indices)
 
     def forward(
         self,

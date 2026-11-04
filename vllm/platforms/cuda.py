@@ -21,12 +21,10 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
-
-with contextlib.suppress(ImportError):
-    import vllm._qutlass_C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
+from vllm.utils.platform_utils import cuda_get_device_properties
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -90,7 +88,7 @@ def _get_backend_priorities(
     use_mm_prefix: bool = False,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.utils.torch_utils import is_quantized_kv_cache
+    from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
     if use_mla:
         if device_capability.major == 10:
@@ -105,9 +103,10 @@ def _get_backend_priorities(
                 ]
             else:
                 # BF16 KV Cache
-                # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+                # Prefer FA4, then FlashInfer at low head counts (FlashMLA uses padding)
                 if num_heads is not None and num_heads <= 16:
                     sparse_backends = [
+                        AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE_FA4,
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                         AttentionBackendEnum.FLASHMLA_SPARSE,
                     ]
@@ -234,8 +233,12 @@ class CudaPlatformBase(Platform):
     ]
 
     @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        return "vllm.v1.hisparse.backend.CUDAHiSparseBackend"
+
+    @classmethod
     def import_kernels(cls) -> None:
-        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        """Import CUDA kernel extensions (_C_stable_libtorch)."""
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
@@ -244,8 +247,6 @@ class CudaPlatformBase(Platform):
             )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        with contextlib.suppress(ImportError):
-            import vllm._qutlass_C  # noqa: F401
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
@@ -413,26 +414,6 @@ class CudaPlatformBase(Platform):
                 )
 
         return valid_backends_priorities, invalid_reasons
-
-    @classmethod
-    def _get_indexer_block_alignment(cls, vllm_config: VllmConfig) -> int | None:
-        index_kpool = getattr(
-            vllm_config.model_config.hf_text_config, "index_kpool", None
-        )
-        if not index_kpool or index_kpool <= 1:
-            return None
-        from vllm.utils.deep_gemm import PAGED_MQA_PAGE_SIZES
-
-        # kpool paged-MQA indexer: the storage block (block_size /
-        # index_kpool) is virtually split into pool pages, so block_size
-        # must be a multiple of index_kpool times a legal pool page.
-        page = min(PAGED_MQA_PAGE_SIZES)
-        if cls.is_device_capability_family(120):
-            # On sm120 the DeepGEMM paged-MQA kernel only accepts block_kv
-            # 64 for the fp8 indexer cache, so align to the largest pool
-            # page here to make the page split land on 64 not the min 32.
-            page = max(PAGED_MQA_PAGE_SIZES)
-        return index_kpool * page
 
     @classmethod
     def get_attn_backend_cls(
@@ -715,7 +696,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod
@@ -752,6 +733,7 @@ class CudaPlatformBase(Platform):
         )
 
     @classmethod
+    @cache
     def is_arch_support_pdl(cls) -> bool:
         try:
             device = torch.cuda.current_device()
@@ -821,7 +803,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        try:
+            return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
+        except pynvml.NVMLError:
+            # Integrated parts (e.g. GB10 / DGX Spark) do not implement the
+            # device-level NVML memory query - nvidia-smi reports [N/A] for
+            # memory.total there. Fall back to the same source
+            # NonNvmlCudaPlatform reads.
+            return int(cuda_get_device_properties(device_id, ("total_memory",))[0])
 
     @classmethod
     @with_nvml_context

@@ -14,7 +14,8 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (9, 0):
+device_capability = current_platform.get_device_capability()
+if device_capability is None or device_capability < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()

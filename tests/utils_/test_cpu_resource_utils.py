@@ -4,11 +4,14 @@
 
 import sys
 from io import StringIO
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
+from vllm.platforms import CpuArchEnum
 from vllm.utils import cpu_resource_utils as cru
+from vllm.utils import ompmultiprocessing as omp
 from vllm.utils.mem_constants import GiB_bytes
 
 _V2_LIMIT_PATH = "/sys/fs/cgroup/memory.max"
@@ -187,3 +190,80 @@ def test_check_cgroup_memory_available_skips_without_snapshot(
 
     log_debug.assert_not_called()
     log_warning.assert_not_called()
+
+
+@pytest.fixture
+def six_numa_nodes(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1, 2, 3, 4, 5])
+    monkeypatch.delenv(cru.DEVICE_CONTROL_ENV_VAR, raising=False)
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+
+
+def test_visible_memory_node_uses_env_var(six_numa_nodes, monkeypatch):
+    monkeypatch.setenv(cru.DEVICE_CONTROL_ENV_VAR, "5,3")
+    assert cru.get_visible_memory_node() == [5, 3]
+
+
+def test_visible_memory_node_assigned_ids_select_dp_rank_nodes(six_numa_nodes):
+    """Each DP rank sees only the nodes assigned to it."""
+    assert cru.get_visible_memory_node([0, 1]) == [0, 1]
+    assert cru.get_visible_memory_node([2, 3]) == [2, 3]
+
+
+def test_visible_memory_node_assigned_ids_override_env_var(six_numa_nodes, monkeypatch):
+    monkeypatch.setenv(cru.DEVICE_CONTROL_ENV_VAR, "5,3")
+    assert cru.get_visible_memory_node([2]) == [2]
+
+
+def test_visible_memory_node_assigned_ids_are_limited_to_allowed_nodes(
+    six_numa_nodes, monkeypatch
+):
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    assert cru.get_visible_memory_node([1, 4]) == [1]
+
+
+def test_visible_memory_node_sim_multi_numa_ignores_assigned_ids(
+    six_numa_nodes, monkeypatch
+):
+    monkeypatch.setenv("VLLM_CPU_SIM_MULTI_NUMA", "1")
+    assert cru.get_visible_memory_node([2]) == [0, 1, 2, 3, 4, 5]
+
+
+def test_omp_manager_binds_each_dp_rank_to_its_assigned_node(monkeypatch):
+    """DP ranks with different assigned NUMA nodes get disjoint cores (#47328)."""
+    # 2 nodes x 4 physical cores x 2 logical CPUs
+    cpus = [
+        cru.LogicalCPUInfo(id=i, physical_core=i // 2, numa_node=i // 8)
+        for i in range(16)
+    ]
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(cru, "get_allowed_cpu_list", lambda: cpus)
+    monkeypatch.setattr(cru, "get_memory_affinity", lambda: [0, 1])
+    monkeypatch.setattr(
+        omp,
+        "current_platform",
+        SimpleNamespace(
+            is_cpu=lambda: True, get_cpu_architecture=lambda: CpuArchEnum.X86
+        ),
+    )
+    monkeypatch.setenv("VLLM_CPU_OMP_THREADS_BIND", "auto")
+    monkeypatch.delenv("VLLM_CPU_SIM_MULTI_NUMA", raising=False)
+    monkeypatch.delenv(cru.DEVICE_CONTROL_ENV_VAR, raising=False)
+
+    def cpu_ids(dp_rank: int) -> set[int]:
+        parallel_config = SimpleNamespace(
+            local_world_size=1,
+            data_parallel_rank_local=dp_rank,
+            _api_process_count=2,
+            assigned_physical_gpu_ids=[dp_rank],
+        )
+        manager = omp.OMPProcessManager(
+            SimpleNamespace(parallel_config=parallel_config, kv_transfer_config=None)
+        )
+        return set(manager.cpu_lists[0])
+
+    rank0, rank1 = cpu_ids(0), cpu_ids(1)
+    assert rank0 and rank1
+    assert rank0 <= set(range(8))
+    assert rank1 <= set(range(8, 16))

@@ -123,6 +123,7 @@ def _build_layer(
     layer.kv_cache = (conv_state, ssm_state)
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+    layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
@@ -176,7 +177,7 @@ def test_forward_core_split_matches_unified(
     builder = GDNAttentionMetadataBuilder(
         # GDNAttentionMetadataBuilder declares kv_cache_spec as AttentionSpec but
         # asserts isinstance(kv_cache_spec, MambaSpec). MambaSpec is correct here.
-        kv_cache_spec=MambaSpec(  # type: ignore[arg-type]
+        kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE, shapes=((16, 64),), dtypes=(torch.float16,)
         ),
         layer_names=[PREFIX],
