@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
@@ -40,7 +41,13 @@ def test_mixed_warmup_disables_watermarking():
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
                 SimpleNamespace(
-                    kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False)
+                    kv_cache_spec=SimpleNamespace(
+                        block_size=16,
+                        dcp_sharded=False,
+                        max_num_blocks_per_req=lambda vllm_config, max_len: cdiv(
+                            max_len, 16
+                        ),
+                    )
                 )
             ],
             num_blocks=128,
