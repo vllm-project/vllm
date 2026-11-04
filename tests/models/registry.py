@@ -706,6 +706,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     "ColUltraVBertForRetrieval": _HfExamplesInfo("vllm-project/ColUltraVBERT"),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ModernVBertModel": _HfExamplesInfo("ModernVBERT/colmodernvbert-merged"),
+    "UltraVBertModel": _HfExamplesInfo("vllm-project/ColUltraVBERT"),
     "ColQwen3": _HfExamplesInfo(
         "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
     ),
