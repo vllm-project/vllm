@@ -757,6 +757,17 @@ def test_readable_reports_pending_message_without_consuming():
         reader.shutdown()
 
 
+def test_readable_sleeps_on_remote_socket():
+    reader = mock.Mock(
+        shutting_down=False, _is_local_reader=False, _is_remote_reader=True
+    )
+    reader.remote_socket.poll.return_value = 0
+    assert MessageQueue.readable(reader) is False
+    reader.remote_socket.poll.assert_called_once_with(
+        timeout=shm_broadcast.REMOTE_READABLE_WAIT_MS
+    )
+
+
 def test_reader_in_reference_cycle_is_collected_without_blocking():
     writer = MessageQueue(
         n_reader=1,

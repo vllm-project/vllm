@@ -100,8 +100,8 @@ class FutureWrapper(Future):
         self.futures_queue = futures_queue
         self.get_response = get_response
         self.aggregate = aggregate
-        # Non-blocking check for whether get_response() can return without
-        # waiting. If None, poll() treats the response as ready (and blocks).
+        # Check, waiting at most briefly, for whether get_response() can return
+        # without waiting. If None, poll() treats the response as ready (and blocks).
         self.response_ready = response_ready
         super().__init__()
         self.futures_queue.appendleft(self)

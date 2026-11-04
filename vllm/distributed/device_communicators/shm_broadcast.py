@@ -56,6 +56,7 @@ if envs.VLLM_USE_SPINLOOP_EXT:
             "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
         )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
+REMOTE_READABLE_WAIT_MS = 1
 
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
@@ -883,7 +884,9 @@ class MessageQueue:
         return bool(written_flag) and not read_flag
 
     def readable(self) -> bool:
-        """Non-blocking check for whether a message is ready to be dequeued.
+        """Check whether a message is ready to be dequeued, without consuming it.
+        A local reader doesn't wait; a remote reader waits up to
+        REMOTE_READABLE_WAIT_MS for a message to arrive.
         Raises RuntimeError if the queue has been shut down."""
         if self.shutting_down:
             raise RuntimeError("cancelled")
@@ -891,7 +894,7 @@ class MessageQueue:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 return self._is_readable(metadata_buffer)
         if self._is_remote_reader:
-            return bool(self.remote_socket.poll(timeout=0))
+            return bool(self.remote_socket.poll(timeout=REMOTE_READABLE_WAIT_MS))
         raise RuntimeError("Only readers can check readability")
 
     @contextmanager
