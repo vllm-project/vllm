@@ -542,6 +542,7 @@ _MULTIMODAL_MODELS = {
     ),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
+    "MonkeyOCRv2ForCausalLM": ("monkeyocr_v2", "MonkeyOCRv2ForCausalLM"),
     "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
     "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),

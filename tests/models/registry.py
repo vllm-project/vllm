@@ -1214,6 +1214,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
     ),
+    "MonkeyOCRv2ForCausalLM": _HfExamplesInfo(
+        "zenosai/MonkeyOCRv2-B-Parsing", trust_remote_code=True
+    ),
     "MuseGlimmerForConditionalGeneration": _HfExamplesInfo(
         "meta-models/Muse-Glimmer-30B",
     ),
