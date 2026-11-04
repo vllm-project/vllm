@@ -7,6 +7,7 @@ from typing import Any, ClassVar, cast
 import torch
 from torch import nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -77,6 +78,54 @@ class CompressorBackend(AttentionBackend):
     def get_builder_cls() -> type["CompressorMetadataBuilder"]:
         return CompressorMetadataBuilder
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        if not current_platform.is_cuda():
+            return False
+        # FP8 cache conversion uses tl.float8e4nv, which Triton enables on SM89+.
+        # A100 (SM80) needs a compatible FP8 conversion to use this path.
+        # This SM90+ gate is conservative and also excludes SM89.
+        capability = current_platform.get_device_capability()
+        return capability is not None and capability.major >= 9
+
+    @classmethod
+    def validate_config(
+        cls,
+        vllm_config: VllmConfig,
+        *,
+        head_dim: int,
+        use_fp4_cache: bool,
+    ) -> None:
+        if (
+            not cls.supports_batch_invariance()
+            or (use_fp4_cache and head_dim != 128)
+            or vllm_config.model_config.hf_config.qk_rope_head_dim != 64
+            or (
+                head_dim == 512 and vllm_config.cache_config.cache_dtype != "fp8_ds_mla"
+            )
+        ):
+            raise NotImplementedError(
+                "Batch-invariant compression requires CUDA SM90+, RoPE dimension "
+                "64, fp8_ds_mla cache for head_dim=512 and FP8 or MXFP4 cache "
+                "for head_dim=128."
+            )
+
+    @staticmethod
+    def validate_cache(
+        kv_cache: torch.Tensor, *, head_dim: int, use_fp4_cache: bool = False
+    ) -> None:
+        # 512-dim KV: 448 FP8 bytes + 64 * 2 BF16 RoPE bytes + 8 scale bytes
+        # (7 UE8M0 scales + 1 padding byte) = 584 bytes per entry.
+        # 128-dim indexer K: 128 FP8 bytes + 4 scale bytes = 132 bytes.
+        # MXFP4 indexer K: 64 packed bytes + 4 UE8M0 scale bytes = 68 bytes.
+        expected_width = 584 if head_dim == 512 else (68 if use_fp4_cache else 132)
+        cache_format = "MXFP4" if use_fp4_cache else "FP8"
+        if kv_cache.dtype != torch.uint8 or kv_cache.shape[-1] != expected_width:
+            raise NotImplementedError(
+                "Batch-invariant compression requires the selected packed "
+                f"{cache_format} cache layout ({expected_width} bytes per entry)."
+            )
+
 
 @dataclass
 class CompressorMetadata:
@@ -143,11 +192,13 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         dtype: torch.dtype,
         compress_ratio: int,
         prefix: str,
+        batch_invariant: bool = False,
     ):
         super().__init__()
         self.state_dim = state_dim
         self.dtype = dtype
         self.prefix = prefix
+        self.batch_invariant = batch_invariant
         self.kv_cache = torch.tensor([])
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -235,6 +286,12 @@ class DeepseekCompressor(nn.Module):
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
+        if envs.VLLM_BATCH_INVARIANT:
+            CompressorBackend.validate_config(
+                vllm_config,
+                head_dim=head_dim,
+                use_fp4_cache=use_fp4_cache,
+            )
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
@@ -284,6 +341,7 @@ class DeepseekCompressor(nn.Module):
             dtype=state_dtype,
             compress_ratio=compress_ratio,
             prefix=f"{prefix}.state_cache",
+            batch_invariant=envs.VLLM_BATCH_INVARIANT,
         )
 
         # Save reference to static_forward_context for forward-time KV cache lookup.
@@ -318,7 +376,13 @@ class DeepseekCompressor(nn.Module):
                 head_dim=self.head_dim,
                 compress_ratio=self.compress_ratio,
             )
-            if current_platform.is_cuda() and self.head_dim == 512:
+            # The head_dim=512 BI Triton kernel has no warmup registration yet;
+            # it compiles on first invocation.
+            if (
+                current_platform.is_cuda()
+                and self.head_dim == 512
+                and not self.state_cache.batch_invariant
+            ):
                 from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (  # noqa: E501
                     _SPARSE_ATTN_COMPRESS_C128_BLOCK8_KERNEL,
                     _SPARSE_ATTN_COMPRESS_NORM_ROPE_STORE_C4_KERNEL,
@@ -344,7 +408,7 @@ class DeepseekCompressor(nn.Module):
                             k_cache_prefix=self.k_cache_prefix,
                             compress_ratio=self.compress_ratio,
                         )
-            else:
+            elif not (self.head_dim == 512 and self.state_cache.batch_invariant):
                 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (  # noqa: E501
                     _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL,
                 )
@@ -455,6 +519,10 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        if self.state_cache.batch_invariant:
+            CompressorBackend.validate_cache(
+                kv_cache, head_dim=self.head_dim, use_fp4_cache=self.use_fp4_cache
+            )
 
         # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
         # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
@@ -469,12 +537,16 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        if (
+            current_platform.is_cuda()
+            and self.head_dim == 512
+            and not self.state_cache.batch_invariant
+        ):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL,
             )
 
-            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
+            # Non-BI head=512 on CUDA uses cutedsl, for both the fp8_ds_mla
             # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
             compress_norm_rope_store_fn = _SPARSE_ATTN_COMPRESSOR_CUTEDSL_KERNEL

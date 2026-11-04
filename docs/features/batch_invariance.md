@@ -165,6 +165,20 @@ When batch invariance is enabled, vLLM:
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+### Fused compressor on CUDA
+
+With `VLLM_BATCH_INVARIANT=1`, the shared DeepSeek V4 compressor uses the existing
+single-stage Triton implementation and batch-invariant FP32-output KV/gate
+projections, and its state cache declares BI support. This requires CUDA SM90 or
+newer and RoPE dimension 64. The 512-dimensional main KV path requires
+`fp8_ds_mla`; the 128-dimensional indexer supports FP8 or MXFP4 caches.
+MXFP4 retains the indexer's existing hardware requirements (SM100-family CUDA
+GPUs, not SM120). Compression ratios remain 4 or 128. Main KV FP4 and incompatible
+configurations fail explicitly.
+
+Non-BI paths are unchanged. This is compressor-only support; main attention,
+SWA, indexer scoring and mHC retain their independent BI capability checks.
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:

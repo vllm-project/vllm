@@ -696,6 +696,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             compressor = self.compressor
 
             def compressor_kv_score() -> torch.Tensor:
+                if envs.VLLM_BATCH_INVARIANT:
+                    from vllm.model_executor.determinism.batch_invariant import (
+                        matmul_persistent,
+                    )
+
+                    return matmul_persistent(
+                        hidden_states,
+                        compressor.fused_wkv_wgate.weight.T,
+                        out_dtype=torch.float32,
+                    )
                 return torch.mm(
                     hidden_states,
                     compressor.fused_wkv_wgate.weight.T,
@@ -713,6 +723,16 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 return weights
 
             def indexer_compressor_kv_score() -> torch.Tensor:
+                if envs.VLLM_BATCH_INVARIANT:
+                    from vllm.model_executor.determinism.batch_invariant import (
+                        matmul_persistent,
+                    )
+
+                    return matmul_persistent(
+                        hidden_states,
+                        indexer.compressor.fused_wkv_wgate.weight.T,
+                        out_dtype=torch.float32,
+                    )
                 return torch.mm(
                     hidden_states,
                     indexer.compressor.fused_wkv_wgate.weight.T,

@@ -25,6 +25,21 @@ DEVICE_TYPE = current_platform.device_type
 
 
 @skip_unsupported
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_matmul_persistent_preserves_fp32_output(dtype):
+    """FP32 output must retain terms lost when first stored at input precision."""
+    a = torch.full((5, 128), 1 / 512, dtype=dtype, device=DEVICE_TYPE)
+    a[:, 0] = 8
+    b = torch.ones((128, 129), dtype=dtype, device=DEVICE_TYPE)
+    out = bi.matmul_persistent(a, b, out_dtype=torch.float32)
+    assert out.dtype == torch.float32
+    assert torch.equal(out, torch.full_like(out, 8 + 127 / 512))
+    default = bi.matmul_persistent(a, b)
+    assert torch.equal(out.to(dtype), default)
+    assert (out != default.float()).all()
+
+
+@skip_unsupported
 @pytest.mark.parametrize(
     "a_shape,b_shape",
     [
