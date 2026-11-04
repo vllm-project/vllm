@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -14,9 +13,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
@@ -258,16 +255,6 @@ class DeepseekV32Model(torch.nn.Module):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
-            num_experts=self.config.n_routed_experts
-            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
-            num_redundant_experts=self.num_redundant_experts,
-        )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
@@ -320,13 +307,11 @@ class DeepseekV32Model(torch.nn.Module):
                 param.weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
-
                 # When AITER fusion_shared_experts is enabled the checkpoint
                 # provides a single widened shared_experts tensor per layer with
                 # no expert index. Split it evenly and route the slices into the
                 # expert slots appended after the routed experts.
-                num_chunks = 1
+                chunks = [(name, loaded_weight)]
                 if is_fusion_moe_shared_experts_layer:
                     num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
                     # gate/up are ColumnParallel (dim 0), down is RowParallel (dim 1).
@@ -341,63 +326,33 @@ class DeepseekV32Model(torch.nn.Module):
                         f"not divisible by num_chunks {num_chunks}"
                     )
                     chunk_size = total // num_chunks
-
-                for j in range(num_chunks):
-                    chunk_name = name
-                    weight_to_load = loaded_weight
-
-                    if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
-                        if loaded_weight.ndim == 1:
-                            weight_to_load = loaded_weight[chunk_slice]
-                        elif split_dim == 0:
-                            weight_to_load = loaded_weight[chunk_slice, :]
-                        else:
-                            weight_to_load = loaded_weight[:, chunk_slice]
-                        chunk_name = name.replace(
-                            "mlp.shared_experts",
-                            f"mlp.experts.{self.config.n_routed_experts + j}",
+                    chunks = [
+                        (
+                            name.replace(
+                                "mlp.shared_experts",
+                                f"mlp.experts.{self.config.n_routed_experts + j}",
+                            ),
+                            loaded_weight.narrow(split_dim, j * chunk_size, chunk_size),
                         )
-
-                    for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
-                        if weight_name not in chunk_name:
-                            continue
-                        is_expert_weight = True
-                        name_mapped = chunk_name.replace(weight_name, param_name)
-                        if is_pp_missing_parameter(name_mapped, self):
-                            continue
-                        param = params_dict[name_mapped]
-                        weight_loader = typing.cast(
-                            Callable[..., bool], param.weight_loader
-                        )
-                        success = weight_loader(
-                            param,
-                            weight_to_load,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                        if success:
-                            if not is_fusion_moe_shared_experts_layer:
-                                name = name_mapped
-                            else:
-                                loaded_params.add(name_mapped)
-                            break
-                    else:
-                        if is_expert_weight:
-                            continue
-                        if name.endswith(".bias") and name not in params_dict:
-                            continue
-                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
-                        if name is None:
-                            continue
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        loader = getattr(param, "weight_loader", default_weight_loader)
-                        loader(param, loaded_weight)
+                        for j in range(num_chunks)
+                    ]
+                expert_params = [
+                    load_routed_experts_weight(self, chunk_name, chunk)
+                    for chunk_name, chunk in chunks
+                ]
+                if all(params is not None for params in expert_params):
+                    loaded_params.update(*filter(None, expert_params))
+                    continue
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                if name is None:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                loader = getattr(param, "weight_loader", default_weight_loader)
+                loader(param, loaded_weight)
             if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
         return loaded_params

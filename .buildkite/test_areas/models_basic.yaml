@@ -89,6 +89,7 @@ steps:
   - tests/models/test_bailing_moe_expert_loading.py
   - tests/models/test_glm5next_expert_loading.py
   - tests/models/test_hy_v4_expert_loading.py
+  - tests/models/test_deepseek_v32_expert_loading.py
   commands:
     - >-
       pytest -v -s
@@ -113,6 +114,7 @@ steps:
       models/test_bailing_moe_expert_loading.py
       models/test_glm5next_expert_loading.py
       models/test_hy_v4_expert_loading.py
+      models/test_deepseek_v32_expert_loading.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
