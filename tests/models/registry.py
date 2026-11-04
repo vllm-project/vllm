@@ -537,6 +537,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
     ),
+    "RicursiveForCausalLM": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview",
+        extras={"nvfp4": "ricursiveAI/Ripple-65B-Preview-NVFP4"},
+    ),
     "Rnj1ForCausalLM": _HfExamplesInfo(
         "EssentialAI/rnj-1-instruct",
         is_available_online=False,

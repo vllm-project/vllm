@@ -467,6 +467,7 @@ th {
 | `Qwen3ForCausalLM` | Qwen3 | `Qwen/Qwen3-8B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
+| `RicursiveForCausalLM` | Ripple | `ricursiveAI/Ripple-65B-Preview`, `ricursiveAI/Ripple-65B-Preview-NVFP4`, etc. | | ✅︎ |
 | `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
@@ -508,6 +509,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
+
+!!! note
+    Ripple (`RicursiveForCausalLM`) pairs with `--reasoning-parser ripple` and
+    `--enable-auto-tool-choice --tool-call-parser ripple`. Its DFlash2 draft,
+    `ricursiveAI/Ripple-65B-Preview-DFlash2`, runs with
+    `--speculative-config '{"method": "dflash", "model": "ricursiveAI/Ripple-65B-Preview-DFlash2", "num_speculative_tokens": 15}'`
+    and needs `VLLM_USE_V2_MODEL_RUNNER=1`, since the draft mixes sliding-window and full-attention layers.
 
 ## List of Multimodal Language Models
 
