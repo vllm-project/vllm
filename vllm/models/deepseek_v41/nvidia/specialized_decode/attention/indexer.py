@@ -333,7 +333,9 @@ def _decode_rows(
         q = q.view(torch.int8)
     if q_scale is not None:
         q_scale = q_scale[start:end].unsqueeze(1)
-    q_scale, decode_weights = mqa_logits_mx_inputs(q, q_scale, weights[start:end])
+    q_scale, decode_weights = mqa_logits_mx_inputs(
+        q, q_scale, weights[start:end], op.logits_dtype
+    )
     row_ends = seq_lens.view(-1)
     raw = fp8_fp4_paged_mqa_logits(
         (q, q_scale),
@@ -343,6 +345,7 @@ def _decode_rows(
         decode.block_table[start:end],
         plan.schedule,
         max_model_len=op.max_model_len,
+        logits_dtype=op.logits_dtype,
         indices=indices,
     )
     topk_rows = op.topk_indices_buffer[start:end, : op.topk_tokens]
