@@ -39,6 +39,65 @@ function (run_python OUT EXPR ERR_MSG)
   set(${OUT} ${PYTHON_OUT} PARENT_SCOPE)
 endfunction()
 
+#
+# Generate sources by running `COMMAND`, unless `STAMP` already holds the key
+# for `INPUTS` (files hashed) and `KEY` (extra string) and every `OUTPUTS` glob
+# matches something. The stamp is kept next to the generated sources so it is
+# shared across build directories, and removed before regenerating so an
+# interrupted run is redone. Editing `INPUTS`, or another build directory
+# regenerating (rewriting `STAMP`), reruns configure.
+#
+# run_source_generator(<name> LOG <file> STAMP <file> OUTPUTS <globs...>
+#                      INPUTS <files...> [KEY <string>] COMMAND <cmd...>)
+#
+function (run_source_generator NAME)
+  cmake_parse_arguments(PARSE_ARGV 1 _GEN
+    "" "LOG;STAMP;KEY" "OUTPUTS;INPUTS;COMMAND")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${_GEN_INPUTS} ${_GEN_STAMP})
+
+  set(_HASHES "")
+  foreach (_INPUT IN LISTS _GEN_INPUTS)
+    file(MD5 "${_INPUT}" _HASH)
+    string(APPEND _HASHES "${_HASH}")
+  endforeach()
+  string(MD5 _KEY "${_HASHES}")
+  string(APPEND _KEY "${_GEN_KEY}")
+
+  set(_LAST_KEY "")
+  if (EXISTS "${_GEN_STAMP}")
+    file(READ "${_GEN_STAMP}" _LAST_KEY)
+  endif()
+  set(_OUTPUTS_FOUND TRUE)
+  foreach (_GLOB IN LISTS _GEN_OUTPUTS)
+    file(GLOB _MATCHES "${_GLOB}")
+    if (NOT _MATCHES)
+      set(_OUTPUTS_FOUND FALSE)
+    endif()
+  endforeach()
+  message(STATUS "${NAME} generation key: ${_KEY}")
+  message(STATUS "Last run ${NAME} generation key: ${_LAST_KEY}")
+  if ("${_LAST_KEY}" STREQUAL "${_KEY}" AND _OUTPUTS_FOUND)
+    message(STATUS "${NAME} generation inputs have not changed, skipping generation.")
+    return()
+  endif()
+
+  file(REMOVE "${_GEN_STAMP}")
+  set(_LOG "${CMAKE_CURRENT_BINARY_DIR}/${_GEN_LOG}")
+  execute_process(
+    COMMAND ${_GEN_COMMAND}
+    RESULT_VARIABLE _RESULT
+    OUTPUT_FILE "${_LOG}"
+    ERROR_FILE "${_LOG}")
+  if (NOT _RESULT EQUAL 0)
+    message(FATAL_ERROR "${NAME} generation failed."
+                        " Result: \"${_RESULT}\""
+                        "\nCheck the log for details: ${_LOG}")
+  endif()
+  file(WRITE "${_GEN_STAMP}" "${_KEY}")
+  message(STATUS "${NAME} generation completed successfully.")
+endfunction()
+
 # Run `EXPR` in python after importing `PKG`. Use the result of this to extend
 # `CMAKE_PREFIX_PATH` so the torch cmake configuration can be imported.
 macro (append_cmake_prefix_path PKG EXPR)
