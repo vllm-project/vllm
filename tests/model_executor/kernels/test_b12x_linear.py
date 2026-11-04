@@ -1358,6 +1358,17 @@ def test_b12x_nvfp4_quantized_decode_cutoff_at_capacity(
         (max_decode_tokens - 58, 0, "a16"),
     ]
 
+    # The warmup prepares the A16 prefill plan as well, though every planned
+    # row count is a decode call.
+    calls.clear()
+    layer.b12x_warmup_provider.get_b12x_warmup_unit(
+        layer, (1, 64), torch.bfloat16
+    ).compile()
+    assert {(handle, mode) for _, handle, mode, _ in calls} == {
+        (0, "a16"),
+        (1, "quantized"),
+    }
+
 
 @torch.inference_mode()
 def test_b12x_nvfp4_scale_skips_padding_rows(monkeypatch, default_vllm_config):
@@ -1632,7 +1643,7 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
         (
             torch.randn(40, k, device="cuda", dtype=torch.bfloat16),
             None,
-            layer.phase_split_layer_name,
+            layer.phase_split_key,
             256,
         ),
         test_utils="test_faketensor",

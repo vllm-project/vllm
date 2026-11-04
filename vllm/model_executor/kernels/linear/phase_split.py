@@ -12,6 +12,7 @@ size.
 
 from __future__ import annotations
 
+import itertools
 import weakref
 from collections.abc import Iterable
 from typing import TypeVar
@@ -34,25 +35,28 @@ ActivationMode = QuantKey | None
 
 _KernelT = TypeVar("_KernelT")
 
-# Phase-split layers by name, for vllm::phase_split_linear. Unlike the forward
-# context, this also resolves layers in compiled graphs that run outside a
-# forward pass, such as multimodal encoders.
-_LAYERS: weakref.WeakValueDictionary[str, torch.nn.Module] = (
+# Phase-split layers by index, for vllm::phase_split_linear. Each layer holds
+# its index in a one-element CPU buffer, ``phase_split_key``, that reaches the
+# op as a graph input like the layer's weights: a compiled region that vLLM
+# reuses for several layers (e.g. multimodal encoder blocks) then resolves each
+# one, and the graph gets no per-layer constant or opaque input. Reading a CPU
+# value needs no device sync. Unlike the forward context, the registry also
+# covers graphs that run outside a forward pass.
+_LAYERS: weakref.WeakValueDictionary[int, torch.nn.Module] = (
     weakref.WeakValueDictionary()
 )
+_NEXT_INDEX = itertools.count()
 
 
-def _register_layer(layer: torch.nn.Module) -> str:
-    """Name ``layer`` uniquely among live phase-split layers: its prefix, or
-    its class name without one, plus the first free ``#n`` suffix when another
-    live layer holds that name."""
-    base = getattr(layer, "prefix", "") or type(layer).__name__
-    name, n = base, 0
-    while _LAYERS.get(name, layer) is not layer:
-        n += 1
-        name = f"{base}#{n}"
-    _LAYERS[name] = layer
-    return name
+def _register_layer(layer: torch.nn.Module) -> torch.Tensor:
+    """Register ``layer`` under the index in its ``phase_split_key`` buffer,
+    which is created once and kept across weight reloads."""
+    key = getattr(layer, "phase_split_key", None)
+    if key is None:
+        key = torch.tensor([next(_NEXT_INDEX)], dtype=torch.int64, device="cpu")
+        layer.register_buffer("phase_split_key", key, persistent=False)
+    _LAYERS[int(key[0])] = layer
+    return key
 
 
 def has_phase_split_layers() -> bool:
@@ -165,7 +169,7 @@ class PhaseSplitLinearKernel:
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         self.kernel.process_weights_after_loading(layer)  # type: ignore[attr-defined]
         layer.phase_split_kernel = self
-        layer.phase_split_layer_name = _register_layer(layer)
+        _register_layer(layer)
 
     def apply_weights(
         self,
@@ -179,10 +183,7 @@ class PhaseSplitLinearKernel:
             output = torch.ops.vllm.phase_split_linear(
                 x_2d,
                 bias,
-                # A plain name, not a LayerName: a hoisted LayerName adds a
-                # graph input per layer, which slows every forward that runs
-                # outside CUDA graphs.
-                layer.phase_split_layer_name,
+                layer.phase_split_key,
                 out_features,
             )
         else:
@@ -236,10 +237,10 @@ def maybe_phase_split(
 def _phase_split_linear(
     x: torch.Tensor,
     bias: torch.Tensor | None,
-    layer_name: str,
+    key: torch.Tensor,
     out_features: int,
 ) -> torch.Tensor:
-    layer = _LAYERS[layer_name]
+    layer = _LAYERS[int(key[0])]
     output = layer.phase_split_kernel.forward(layer, x, bias)
     assert output.shape == (x.shape[0], out_features), output.shape
     return output
@@ -248,7 +249,7 @@ def _phase_split_linear(
 def _phase_split_linear_fake(
     x: torch.Tensor,
     bias: torch.Tensor | None,
-    layer_name: str,
+    key: torch.Tensor,
     out_features: int,
 ) -> torch.Tensor:
     return x.new_empty((x.shape[0], out_features))

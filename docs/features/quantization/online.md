@@ -140,7 +140,9 @@ no linear does, for example in an unquantized model. Other linears keep their
 own activations: unquantized linears and `draft_lm_head_quantization` lm_head
 copies use the model dtype. `phase` cannot be combined with `activation`,
 `moe.phase` is not supported, and online-quantized linears reject it unless
-their weights are MXFP8 (`--quantization mxfp8`).
+their weights are MXFP8 (`--quantization mxfp8`). For an MXFP8 checkpoint, pass
+the phase with `--quantization-config` alone: adding `--quantization mxfp8`
+also quantizes the linears the checkpoint keeps in the model dtype.
 
 `dynamic_tensor` shares one NVFP4 scale, computed from the absolute maximum,
 across every request in a call, so outputs depend on batch composition. NVFP4

@@ -217,6 +217,7 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel, DualActivationKernel):
         plans = layer.b12x_nvfp4_plans
         mode = kNvfp4DynamicTensor if any(plans.quantized) else None
         planned = {m for plan in plans.plans for m in plan.token_counts}
+        prefill_counts = set(plans.plan.token_counts)
 
         def compile() -> None:
             for tokens in sorted(set(token_counts) | planned):
@@ -226,6 +227,10 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel, DualActivationKernel):
                     device=layer.weight.device,
                 )
                 self.apply_weights(layer, source, mode=mode)
+                if plans.decode_plan is not None and tokens in prefill_counts:
+                    # A cutoff at or above every planned row count leaves
+                    # the A16 prefill plan to calls above it only.
+                    self.apply_weights(layer, source, mode=None)
 
         return B12xWarmupUnit(
             name="NVFP4 W4A16",
