@@ -530,6 +530,13 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return tuple(keys)
 
     @classmethod
+    @override
+    def registers_kv_cache_across_nodes(cls, extra_config: dict[str, Any]) -> bool:
+        """With secondary tiers, workers off the head node register their GPU
+        KV cache with NIXL to mirror their CPU region slots (create_worker)."""
+        return bool(extra_config.get("secondary_tiers"))
+
+    @classmethod
     def _get_secondary_tiers(
         cls, extra_config: dict[str, Any]
     ) -> list[tuple[dict[str, Any], type[SecondaryTierManager]]]:

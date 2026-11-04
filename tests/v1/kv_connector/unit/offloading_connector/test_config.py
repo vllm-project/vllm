@@ -1528,6 +1528,35 @@ def test_offloading_mirror_registers_kv_cache_memory(
     assert transfer.registers_kv_cache_memory(parallel_config) is registers
 
 
+class _TieringSpecSubclass(TieringOffloadingSpec):
+    """An out-of-tree spec that inherits the tiering worker, mirror included."""
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "spec_config",
+    [
+        {"spec_name": "TieringAlias"},
+        {"spec_name": "_TieringSpecSubclass", "spec_module_path": __name__},
+    ],
+)
+def test_mirror_registration_follows_the_resolved_spec(
+    monkeypatch, spec_config: dict[str, Any]
+) -> None:
+    """A registered alias of TieringOffloadingSpec, or a subclass loaded through
+    spec_module_path, starts the same mirror, so it registers the KV cache."""
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+
+    monkeypatch.setitem(
+        OffloadingSpecFactory._registry, "TieringAlias", lambda: TieringOffloadingSpec
+    )
+    transfer = _offloading_transfer_config(
+        {**spec_config, "secondary_tiers": [{"type": "example"}]}
+    )
+    parallel_config = _parallel_config(**_TWO_NODES, distributed_executor_backend="mp")
+    assert transfer.registers_kv_cache_memory(parallel_config)
+
+
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("rocm", [False, True])
 @pytest.mark.parametrize("requested", [None, True])

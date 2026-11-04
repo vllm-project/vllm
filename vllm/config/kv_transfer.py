@@ -65,23 +65,24 @@ _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
 def _offloading_mirrors_kv_cache(
     extra_config: dict[str, Any], parallel_config: "ParallelConfig"
 ) -> bool:
-    """Whether OffloadingConnector registers the device KV cache with NIXL: with
-    secondary tiers, workers off the head node mirror their CPU region slots
-    into the head node's region, when the engine's workers span nodes."""
+    """Whether OffloadingConnector registers the device KV cache for RDMA: its
+    spec, resolved as the connector resolves it, says so when the engine's
+    workers span nodes (the tiering spec mirrors CPU region slots onto the head
+    node's region), and they may."""
     from vllm.v1.kv_offload.config import (
         places_workers_by_nnodes,
         workers_may_span_nodes,
     )
+    from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-    return (
-        extra_config.get("spec_name") == "TieringOffloadingSpec"
-        and bool(extra_config.get("secondary_tiers"))
-        and workers_may_span_nodes(
-            parallel_config.world_size,
-            parallel_config.local_world_size,
-            places_workers_by_nnodes(parallel_config.distributed_executor_backend),
-        )
-    )
+    if not workers_may_span_nodes(
+        parallel_config.world_size,
+        parallel_config.local_world_size,
+        places_workers_by_nnodes(parallel_config.distributed_executor_backend),
+    ):
+        return False
+    spec_cls = OffloadingSpecFactory.get_spec_cls(extra_config)
+    return spec_cls.registers_kv_cache_across_nodes(extra_config)
 
 
 def kv_buffer_device_default_factory() -> str:
