@@ -52,7 +52,7 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import copy_weight_, set_weight_attrs
 from vllm.models.deepseek_v41.common.ops.query_quant import (
     can_fuse_query_quant,
     mxfp8_scale_bytes,
@@ -523,7 +523,7 @@ def _engram_head_shard_weight_loader(
             part = slice(first, first + rows)
             param.data[part].copy_(shard[part])
     else:
-        param.data.copy_(shard)
+        copy_weight_(param.data, shard)
 
 
 # Branching on SORTED at runtime intermittently crashes Triton 3.8's
