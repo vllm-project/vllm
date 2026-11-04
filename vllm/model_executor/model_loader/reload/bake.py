@@ -23,6 +23,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.logger import init_logger
 
 from .direct import loadable_tensors
+from .stacked_experts import split_stacked_experts
 from .trace import TraceTensor
 
 if TYPE_CHECKING:
@@ -309,7 +310,9 @@ def _bake(
         with torch.no_grad(), _TargetGuard(sink):
             while start < len(names):
                 try:
-                    model.load_weights(weights(names[start:]))
+                    model.load_weights(
+                        split_stacked_experts(model, weights(names[start:]))
+                    )
                     break
                 except _BakeStopped as stop:
                     # Resume after the name that stopped (not after the last

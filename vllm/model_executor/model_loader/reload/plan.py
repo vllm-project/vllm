@@ -15,7 +15,9 @@ The plan holds for every later update of the same model.
 
 ``load_planned`` loads full checkpoint tensors through ``get_dest``; the NCCL
 engine uses it. ``get_boxes`` (with ``get_dest``) is for engines that send or
-read only the slices a rank needs (sharded RDT, NCCL M2N follow-ups).
+read only the slices a rank needs (sharded RDT, NCCL M2N follow-ups); one that
+loads fallbacks itself passes them through ``split_stacked_experts``, as the
+bake and ``load_planned`` do.
 """
 
 import heapq
@@ -42,6 +44,7 @@ from .geometry import (
     byte_runs,
     merge_writes,
 )
+from .stacked_experts import split_stacked_experts
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta
@@ -80,7 +83,8 @@ class LoadPlan:
         """(part of a box, live tensor) pairs: copying each part, reshaped to
         its tensor's shape, into that tensor is exactly what the loader would
         have written. ``None``: fallback, send the full tensor through
-        ``load_weights``. Write only between ``start_reload`` and
+        ``load_weights``, wrapped in ``split_stacked_experts`` (as
+        ``load_planned`` does). Write only between ``start_reload`` and
         ``finish_reload``; never read.
 
         ``load_planned`` copies full tensors through it; an engine that sends
@@ -164,7 +168,8 @@ def load_planned(
             part = full[tuple(slice(start, stop) for start, stop in box)]
             tensor.copy_(part.reshape(tensor.shape))
     if fallbacks:
-        model.load_weights(fallbacks)
+        # as at bake time: stacked routed experts as per-expert views
+        model.load_weights(split_stacked_experts(model, fallbacks))
 
 
 def check_plannable(model: torch.nn.Module) -> None:
