@@ -87,6 +87,9 @@ SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
 # /ci rocm cache or /ci rocm nocache carries this marker.
 ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
 ROCM_CACHE_MARKER = "<!-- vllm-ci-rocm-base-image -->"
+ROCM_CACHE_DONE = (
+    f"Re-run the failed `pre-commit` check to unblock this PR.\n\n{ROCM_CACHE_MARKER}"
+)
 # build.sh promote copies only images built with main's versions of these.
 ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
 # build.sh base mode records the stack images it built under these keys.
@@ -363,19 +366,6 @@ class GitHubClient:
             if error.status == 404:
                 return "none"
             raise
-
-    def rerun_failed_pre_commit(self, sha: str) -> None:
-        """The bot's replies start no workflow: re-run the gate in pre-commit.yml."""
-        sha = urllib.parse.quote(sha, safe="")
-        runs = self._request(
-            self._repo_path(f"/actions/workflows/pre-commit.yml/runs?head_sha={sha}")
-        )["workflow_runs"]
-        latest = max(runs, key=lambda run: run["created_at"], default=None)
-        if latest and latest.get("conclusion") == "failure":
-            self._request(
-                self._repo_path(f"/actions/runs/{latest['id']}/rerun-failed-jobs"),
-                method="POST",
-            )
 
 
 class BuildkiteClient:
@@ -1240,7 +1230,7 @@ def handle_rocm_cache(
     if command == COMMAND_ROCM_NOCACHE:
         return (
             f"@{actor} chose not to cache the ROCm base image. Main will build it "
-            f"after the merge.\n\n{ROCM_CACHE_MARKER}"
+            f"after the merge. {ROCM_CACHE_DONE}"
         )
     sha = pr["head"]["sha"]
     if any(
@@ -1284,7 +1274,7 @@ def handle_rocm_cache(
     return (
         f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
         f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
-        f"built.\n\n{ROCM_CACHE_MARKER}"
+        f"built. {ROCM_CACHE_DONE}"
     )
 
 
@@ -1414,8 +1404,6 @@ def run(
             raise ValueError(f"Unsupported CI command: {command}")
         add_reaction_safely(github, comment_id, "rocket")
         github.add_comment(issue_number, f"✅ {message}")
-        if ROCM_CACHE_MARKER in message:
-            github.rerun_failed_pre_commit(pr["head"]["sha"])
     except CiPreparationError as error:
         add_reaction_safely(github, comment_id, "-1")
         github.add_comment(

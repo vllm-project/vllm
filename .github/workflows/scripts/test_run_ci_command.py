@@ -99,7 +99,6 @@ class FakeGitHub:
         self.files = files or []
         # (path, ref) -> blob; main and the PR head share every blob by default.
         self.file_shas: dict[tuple[str, str], str] = {}
-        self.reran: list[str] = []
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -156,9 +155,6 @@ class FakeGitHub:
 
     def get_file_sha(self, path: str, ref: str) -> str:
         return self.file_shas.get((path, ref), "blob")
-
-    def rerun_failed_pre_commit(self, sha: str) -> None:
-        self.reran.append(sha)
 
 
 class FakeBranchUpdater:
@@ -1692,8 +1688,6 @@ class RocmCacheTest(unittest.TestCase):
         )
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("ci/builds/2", github.comments[0])
-        # The bot's reply starts no pre-commit run, so it re-runs the gate.
-        self.assertEqual(github.reran, ["0123456789abcdef"])
 
     def test_nocache_records_the_decision_without_a_build(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
@@ -1703,7 +1697,6 @@ class RocmCacheTest(unittest.TestCase):
         self.assertEqual(amd.created_builds, [])
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("@reviewer chose not to cache", github.comments[0])
-        self.assertEqual(github.reran, ["0123456789abcdef"])
 
     def test_refusals_leave_the_gate_failing(self) -> None:
         other_recipe = FakeGitHub(files=STACK_PR_FILES)
@@ -1727,7 +1720,6 @@ class RocmCacheTest(unittest.TestCase):
                 self.assertEqual(amd.created_builds, [])
                 self.assertIn(text, github.comments[0])
                 self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
-                self.assertEqual(github.reran, [])
 
     def test_prs_that_keep_the_base_image_have_nothing_to_do(self) -> None:
         github = FakeGitHub(files=["vllm/foo.py"])
