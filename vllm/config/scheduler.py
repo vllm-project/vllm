@@ -77,14 +77,15 @@ class SchedulerConfig:
     """
 
     max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
-    """Maximum number of requests holding KV cache blocks for an async KV
-    connector load (e.g. a NIXL pull) before they run: loads in progress, or
-    finished and waiting to be scheduled. A request past it waits without
-    allocating until one of them runs or ends.
+    """Maximum number of requests holding KV blocks for an async KV connector
+    load (e.g. a P/D NIXL pull) before they run: loads in progress, or finished
+    and waiting for a running slot.
 
-    Such requests do not count toward ``max_num_seqs``, so without a limit a
-    burst of slow loads can hold blocks that running requests need for their
-    next steps. ``None`` (default) keeps current behavior.
+    Setting it also lets requests the connector may load asynchronously
+    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    requests) start their loads while the running batch is full, so they are
+    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    and loads start only when a running slot is free.
     """
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)

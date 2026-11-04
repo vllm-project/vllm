@@ -39,7 +39,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -136,7 +136,9 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
-        return frozenset({"DeepseekV41ForCausalLM"})
+        # HYV4 also runs without torch.compile, preserving runtime-shape
+        # kernel selection during graph capture.
+        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
     if current_platform.is_cuda():
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
@@ -1960,23 +1962,6 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
                 )
-            if self.kv_transfer_config is not None and (
-                self.kv_transfer_config.kv_connector
-                not in (
-                    None,
-                    "NixlConnector",
-                    "MooncakeStoreConnector",
-                    "MultiConnector",
-                )
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (GPU-staged host imports) and "
-                    "MooncakeStoreConnector (shared-store offload) are the "
-                    "validated paths; other connectors are treated as "
-                    "debug/fallback paths.",
-                    self.kv_transfer_config.kv_connector,
-                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
@@ -2272,6 +2257,15 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        if (
+            self.attention_config.hisparse_config is not None
+            and hisparse_host_pool_gib(self.kv_transfer_config) is None
+        ):
+            raise ValueError(
+                "HiSparse requires a KV transfer config with HiSparseConnector "
+                "and host_pool_gib; to combine it with another connector, nest "
+                "both in MultiConnector instead of using --kv-offloading-size."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
