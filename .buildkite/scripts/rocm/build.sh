@@ -21,7 +21,8 @@
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
+#                                          except the stack a merged PR built: adopt_merged_pr_stack)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
@@ -342,6 +343,28 @@ wait_for_trusted() {
   return 1
 }
 
+# adopt_merged_pr_stack — main's base build, when rocm/vllm-ci lacks the stack key: the PR that
+# last changed the stack inputs (the "(#N)" of its squash merge) has usually built these keys in
+# CI already, as rocm/vllm-dev:pr<N>-<tag>. Merging it endorses those images, so copy them here
+# instead of rebuilding the stack for hours; the runtime images only with the stack they were
+# built on, and any the PR lacks are built as usual. A stopgap while PR agents can push
+# rocm/vllm-ci anyway: once only main's agents can, this must go.
+adopt_merged_pr_stack() {
+  local pr tag d dev=rocm/vllm-dev
+  digest "$TRUSTED:stack-$STACK-$Ks" >/dev/null && return 0
+  [[ $(git rev-parse --is-shallow-repository) == false ]] \
+    || git fetch -q --deepen=500 --filter=blob:none origin || true
+  pr=$(git log -1 --format=%s -- "$SDF" ${_trw:+"$_trw"} | sed -n 's/.*(#\([0-9][0-9]*\))$/\1/p')
+  [[ -n $pr ]] || return 0
+  # -wheels first: ensure takes the stack tag as the pair being complete.
+  for tag in "stack-$STACK-$Ks-wheels" "stack-$STACK-$Ks" "runtime-$STACK-$Kr" "test-deps-$STACK-$Kr"; do
+    d=$(digest "$dev:pr$pr-$tag") || return 0
+    digest "$TRUSTED:$tag" >/dev/null && continue
+    echo "--- :docker: Adopting #$pr's $dev:pr$pr-$tag as $TRUSTED:$tag" >&2
+    docker buildx imagetools create -t "$TRUSTED:$tag" "$dev:pr$pr-$tag@$d" || exit 75
+  done
+}
+
 # load — read stack/runtime refs from Buildkite metadata (written by base mode).
 load() {
   STACK_IMAGE=$(meta get "rocm-$STACK-stack")
@@ -371,6 +394,7 @@ case $MODE in
     # Ensure the stack and runtime images exist; record their digests in metadata
     # so the ci mode can pull them without re-resolving.
     # The "base" bake group builds the stack and its -wheels sibling together.
+    [[ $REPO != "$TRUSTED" ]] || adopt_merged_pr_stack
     STACK_IMAGE=$(ensure base "stack-$STACK-$Ks" -wheels)
     STACK_WHEELS=${STACK_IMAGE#* } STACK_IMAGE=${STACK_IMAGE%% *}
     export STACK_IMAGE

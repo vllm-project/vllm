@@ -4,6 +4,7 @@
 build-context file the keyed Dockerfile parts read, or editing that file would
 ship a stale image."""
 
+import hashlib
 import os
 import subprocess
 import time
@@ -81,7 +82,7 @@ def run_build(
 case $1 in
   describe) echo v0.0.0-0-g0 ;;
   rev-parse) [[ $2 == HEAD ]] && echo "${HEAD_REV:-c1}" || echo "${2%%^*}" ;;
-  log) echo 0 ;;
+  log) echo "${GIT_SUBJECT:-0}" ;;
   archive) tar -ch docker ;;
   fetch) [[ $FAILURE == fetch-main && " $* " == *" main "* ]] && exit 1 ;;
   merge-base) [[ $FAILURE == merge-base ]] && exit 1; echo mb ;;
@@ -127,6 +128,7 @@ case $2 in
       echo "Digest: sha256:$(printf '0%.0s' {1..64})"
     else
       echo "create ${@: -1}" >> "$CALLS"
+      echo "$5" >> "$REGISTRY"
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
@@ -519,3 +521,62 @@ def test_the_heartbeat_does_not_hold_up_the_build(tmp_path):
     )
     assert status == 0, stderr
     assert time.monotonic() - start < 15
+
+
+# The fake git lists no files: Ks hashes only the layer format, and Kr adds the
+# keyed top of Dockerfile.rocm, as keys_at does.
+KS = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]
+_KEYED = (ROOT / "docker/Dockerfile.rocm").read_text().split(MARKER)[0] + MARKER + "\n"
+KR = hashlib.sha256(f"{KS}\n{_KEYED}".encode()).hexdigest()[:16]
+PR_STACK = [
+    f"rocm/vllm-dev:pr7-stack-rocm-{KS}-wheels",
+    f"rocm/vllm-dev:pr7-stack-rocm-{KS}",
+]
+PR_RUNTIME = [
+    f"rocm/vllm-dev:pr7-runtime-rocm-{KR}",
+    f"rocm/vllm-dev:pr7-test-deps-rocm-{KR}",
+]
+
+
+def adopted(calls: list[str]) -> list[str]:
+    return [
+        c.removeprefix("create ").split("@")[0]
+        for c in calls
+        if c.startswith("create ")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("existing", "subject", "expected", "built"),
+    [
+        # The merged PR built every key: main copies them all, builds nothing.
+        (PR_STACK + PR_RUNTIME, "[ROCm] Bump AITER (#7)", PR_STACK + PR_RUNTIME, []),
+        # Only the stack: the runtime images are built on it as usual.
+        (PR_STACK, "[ROCm] Bump AITER (#7)", PR_STACK, ["runtime", "test-deps"]),
+        # No PR number in the last stack change, or a runtime without its stack.
+        (PR_STACK + PR_RUNTIME, "Direct push", [], ["base", "runtime", "test-deps"]),
+        (PR_RUNTIME, "[ROCm] Bump AITER (#7)", [], ["base", "runtime", "test-deps"]),
+    ],
+)
+def test_main_adopts_the_stack_the_merged_pr_built(
+    tmp_path, existing, subject, expected, built
+):
+    status, stderr, calls = run_build(
+        tmp_path, "base", existing=tuple(existing), GIT_SUBJECT=subject
+    )
+    assert status == 0, stderr
+    assert adopted(calls) == expected
+    assert [c.split()[-1] for c in calls if c.startswith("bake ")] == built
+
+
+def test_untrusted_builds_never_adopt_pr_images(tmp_path):
+    status, stderr, calls = run_build(
+        tmp_path,
+        "base",
+        ROCM_CI_REPO="rocm/vllm-dev",
+        BUILDKITE_PULL_REQUEST="8",
+        existing=tuple(PR_STACK + PR_RUNTIME),
+        GIT_SUBJECT="[ROCm] Bump AITER (#7)",
+    )
+    assert status == 0, stderr
+    assert not adopted(calls)
