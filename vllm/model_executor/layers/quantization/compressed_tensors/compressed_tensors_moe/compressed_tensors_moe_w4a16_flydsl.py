@@ -170,14 +170,14 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_scale)
-        set_weight_attrs(w13_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w13_scale, extra_weight_attrs)
 
         w2_scale = torch.nn.Parameter(
             torch.ones(num_experts, num_groups_w2, hidden_size, dtype=params_dtype),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_scale)
-        set_weight_attrs(w2_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w2_scale, extra_weight_attrs)
 
         w2_weight_shape = torch.nn.Parameter(
             torch.empty(num_experts, 2), requires_grad=False

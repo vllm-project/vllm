@@ -796,12 +796,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
             )
-            set_weight_attrs(
-                w13_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
-            set_weight_attrs(
-                w2_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         elif self.weight_qscheme == "per_block":
             # One scale per (block_n, block_k) tile of each expert's weight.
             w13_weight_scale = torch.nn.Parameter(
@@ -829,12 +825,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
             )
-            set_weight_attrs(
-                w13_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
-            set_weight_attrs(
-                w2_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.static_input_scales:
@@ -1149,12 +1141,8 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
             )
-            set_weight_attrs(
-                w13_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
-            set_weight_attrs(
-                w2_weight_scale, {**extra_weight_attrs, "padding_value": 1}
-            )
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         else:
             # per-tensor: one scalar per expert (two for the fused w1/w3)
             w13_weight_scale = torch.nn.Parameter(
@@ -1499,8 +1487,8 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
         )
-        set_weight_attrs(w13_weight_scale_2, {**extra_weight_attrs, "padding_value": 1})
-        set_weight_attrs(w2_weight_scale_2, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w13_weight_scale_2, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale_2, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
