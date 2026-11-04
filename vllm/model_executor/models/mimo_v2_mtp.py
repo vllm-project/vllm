@@ -115,10 +115,6 @@ class MiMoV2MTPLayer(nn.Module):
         # a fused fp8 qkv_proj checkpoint loads as rows and row scales
         if _fused_qkv_chunks(config, quant_config):
             _use_row_scales(self.self_attn.qkv_proj)
-        # load_weights cuts a fused qkv_proj checkpoint to this rank's rows
-        if getattr(config, "attention_projection_layout", None) == "fused_qkv":
-            for param in self.self_attn.qkv_proj.parameters():
-                param.weight_loader = default_weight_loader
         self.pre_mlp_layernorm = RMSNorm(
             config.hidden_size, eps=config.layernorm_epsilon
         )
@@ -325,7 +321,7 @@ class MiMoV2MTP(nn.Module):
                     # Non-fp8 fused checkpoint: unchanged behaviour.
                     param = params_dict[name]
                     loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    param.weight_loader(param, loaded_weight)
+                    default_weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 continue
 

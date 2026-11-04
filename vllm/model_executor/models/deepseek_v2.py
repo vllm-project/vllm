@@ -73,10 +73,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8_dequant import (
-    Fp8DequantConfig,
-    load_unneeded_scale,
-)
+from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -1649,7 +1646,6 @@ class DeepseekV2Model(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False

@@ -516,38 +516,6 @@ def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypat
     assert _relative_l2(got, expected) <= TOL
 
 
-def test_mtp_bf16_fused_qkv_proj_loads_through_weight_loader(monkeypatch):
-    """The MTP's non-fp8 fused ``qkv_proj`` goes through the parameter's
-    ``weight_loader`` (which a layerwise reload wraps) with this rank's rows."""
-    from vllm.model_executor.models import mimo_v2_mtp
-
-    monkeypatch.setattr(mimo_v2_mtp, "get_tensor_model_parallel_rank", lambda: 1)
-    monkeypatch.setattr(mimo_v2_mtp, "get_tensor_model_parallel_world_size", lambda: 2)
-    model = mimo_v2_mtp.MiMoV2MTP.__new__(mimo_v2_mtp.MiMoV2MTP)
-    torch.nn.Module.__init__(model)
-    qkv_proj = torch.nn.Module()
-    qkv_proj.weight = torch.nn.Parameter(torch.zeros(4, COLS), requires_grad=False)
-    calls = []
-
-    def weight_loader(param: torch.Tensor, weight: torch.Tensor) -> None:
-        calls.append(param)
-        param.copy_(weight)
-
-    qkv_proj.weight.weight_loader = weight_loader
-    model.model = torch.nn.Module()
-    model.model.mtp = torch.nn.Module()
-    model.model.mtp.qkv_proj = qkv_proj
-
-    checkpoint = torch.randn(8, COLS)
-    loaded = mimo_v2_mtp.MiMoV2MTP.load_weights(
-        model, [("model.mtp.qkv_proj.weight", checkpoint)]
-    )
-
-    assert loaded == {"model.mtp.qkv_proj.weight"}
-    assert calls == [qkv_proj.weight]
-    torch.testing.assert_close(qkv_proj.weight.data, checkpoint[4:])
-
-
 @pytest.mark.parametrize("loaded", ["weight", "nothing"])
 def test_missing_scale_is_rejected(loaded):
     """An fp8 weight loaded without its scale is not processed with whatever
@@ -744,11 +712,10 @@ def test_weight_and_scale_load_on_their_own(
 
 @requires_gpu
 @pytest.mark.parametrize("geometry,tp_size", [("ga", 2), ("ga", 8)])
-@pytest.mark.parametrize("mode", ["direct", "layerwise"])
-def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size, mode):
-    """A reload with weight and scale in separate calls ends with the bytes a
-    cold start on the new checkpoint gives, at the same addresses."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+def test_reload_equals_cold_start(monkeypatch, model_config, geometry, tp_size):
+    """A direct reload with weight and scale in separate calls ends with the
+    bytes a cold start on the new checkpoint gives, at the same addresses."""
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     tp_rank = tp_size - 1
     model = _cold_start(
         geometry, tp_rank, tp_size, _fused_qkv_checkpoint(geometry, 1), model_config

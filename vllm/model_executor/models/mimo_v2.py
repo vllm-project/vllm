@@ -841,7 +841,7 @@ def _use_row_scales(layer: LinearBase) -> None:
         return
     scale = layer.weight_scale_inv
     # Fp8LinearMethod's block scale carries only its dims and loader, set here
-    # (`_load_fused_fp8_qkv` hands both tensors over in this rank's layout)
+    # (`_load_fused_fp8_qkv` hands it over in this rank's layout)
     row_scales = BlockQuantScaleParameter(
         data=scale.new_empty(layer.weight.shape[0], scale.shape[1]),
         input_dim=1,
@@ -849,7 +849,6 @@ def _use_row_scales(layer: LinearBase) -> None:
         weight_loader=default_weight_loader,
     )
     layer.register_parameter("weight_scale_inv", row_scales)
-    layer.weight.weight_loader = default_weight_loader
     layer.quant_method = _Fp8RowScalesLinearMethod.adopt(method)
 
 
@@ -880,15 +879,14 @@ def _load_fused_fp8_qkv(
                 "of [Q | K | V] rows."
             )
         tensor = _gather_rows(tensor, rows)
-        # loader state for PWAL (RFC #64418 sec. 5 rule 3 exception): load, never copy
+        # loader state read by post-load processing
         layer.fp8_weight_loaded = True
     else:
-        # loader state for PWAL, as above
+        # loader state read by post-load processing
         tensor, layer.requantize_rows = _fused_qkv_row_scales(
             tensor, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
         )
-    param = getattr(layer, kind)
-    getattr(param, "weight_loader", default_weight_loader)(param, tensor)
+    default_weight_loader(getattr(layer, kind), tensor)
 
 
 @support_torch_compile

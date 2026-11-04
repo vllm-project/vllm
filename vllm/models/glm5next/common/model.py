@@ -48,7 +48,6 @@ from vllm.model_executor.layers.mhc import (
     hc_expand,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -972,7 +971,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False
@@ -1027,7 +1025,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight, **kwargs)
-                    load_unneeded_scale(name, param, loaded_weight, loaded_params)
             loaded_params.add(name)
         return loaded_params
 

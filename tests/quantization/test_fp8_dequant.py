@@ -4,37 +4,30 @@
 
 The weight and its scale load independently (any order, any call, no pairing in
 the model's loader); BF16 rows load as is; post-load processing dequantizes in
-the weight's own storage, so cold start, direct reload and layerwise reload all
-end with the same bytes at the startup address."""
+the weight's own storage, so cold start and direct reload end with the same
+bytes at the startup address."""
 
 import pytest
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import LoadConfig, ModelConfig
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization.fp8_dequant import (
-    Fp8DequantConfig,
-    load_unneeded_scale,
-)
+from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
 )
-from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
-    record_metadata_for_reloading,
-)
+from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
+from vllm.model_executor.model_loader.reload import record_metadata_for_reloading
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
 )
-from vllm.model_executor.model_loader.reload.layerwise import get_layerwise_info
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
@@ -93,9 +86,6 @@ class _Model(torch.nn.Module):
                 param, tensor, *(() if shard_id is None else (shard_id,))
             )
             loaded.add(f"{layer}.{param_name}")
-            load_unneeded_scale(
-                f"{layer}.{param_name}", param, tensor, loaded, shard_id
-            )
         return loaded
 
 
@@ -188,11 +178,12 @@ def test_missing_scale_is_rejected(model_config):
 
 
 def test_bf16_checkpoint(model_config):
-    """A BF16 checkpoint needs no scales: every parameter counts as loaded."""
+    """A BF16 checkpoint needs no scales, also for the strict loaded-weights
+    check on a quantized model."""
     bf16 = _bf16(_checkpoint(3))
     model = _Model()
     loaded = model.load_weights(bf16.items())
-    assert loaded == {n for n, _ in model.named_parameters()}
+    DefaultModelLoader(LoadConfig()).track_weights_loading(model, loaded, True)
     process_weights_after_loading(model, model_config, _DEVICE)
     _assert_runtime(model, _expected(bf16))
 
@@ -265,40 +256,6 @@ def test_direct_reload_equals_cold_start(monkeypatch, model_config, update):
     assert _ptrs(model) == ptrs
 
 
-def test_direct_reload_rejects_fp8_rows_without_scale(monkeypatch, model_config):
-    """FP8 rows a reload sends without their scale are not dequantized with
-    the previous load's scale."""
-    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-    model = _cold_start(_checkpoint(7), model_config)
-    new = _checkpoint(8)
-    del new["qkv_a.1.weight_scale_inv"]
-    begin_direct_reload(model)
-    model.load_weights(new.items())
-    with pytest.raises(ValueError, match="without their weight_scale_inv"):
-        finish_direct_reload(model, model_config, _DEVICE)
-
-
-@pytest.mark.parametrize("update", ["fp8", "mixed", "bf16"])
-def test_layerwise_reload_equals_cold_start(model_config, update):
-    """Every element is loaded, BF16 rows' scales included, so each layer is
-    processed as its last tensor arrives rather than held for finalize."""
-    model = _cold_start(_checkpoint(9), model_config)
-    ptrs = _ptrs(model)
-    new = {
-        "fp8": _checkpoint(10),
-        "mixed": _checkpoint(10, bf16_shard=0),
-        "bf16": _bf16(_checkpoint(10)),
-    }[update]
-    initialize_layerwise_reload(model)
-    for item in new.items():
-        model.load_weights([item])
-    for layer in (model.qkv_a, model.o):
-        assert get_layerwise_info(layer).load_numel_total is None  # processed
-    finalize_layerwise_reload(model, model_config)
-    _assert_runtime(model, _expected(new))
-    assert _ptrs(model) == ptrs
-
-
 @pytest.mark.parametrize("bf16", [False, True])
 def test_replicated_layer(model_config, bf16):
     """A ReplicatedLinear (GLM5-next kv_a_proj_with_mqa without q_lora_rank)
@@ -315,7 +272,6 @@ def test_replicated_layer(model_config, bf16):
     expected = _dequant(weight, scale)
     if bf16:
         layer.weight.weight_loader(layer.weight, expected)
-        load_unneeded_scale("weight", layer.weight, expected, set())
     else:
         layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scale)
         layer.weight.weight_loader(layer.weight, weight)
@@ -341,13 +297,9 @@ def test_column_parallel_tp_slice(model_config, tp_rank, bf16):
     weight, scale = _block_fp8(512, 256, 3)
     full = _dequant(weight, scale)
     ckpt = {"weight": full} if bf16 else {"weight_scale_inv": scale, "weight": weight}
-    loaded: set[str] = set()
     for name, tensor in ckpt.items():
         param = getattr(layer, name)
         param.weight_loader(param, tensor)
-        loaded.add(name)
-        load_unneeded_scale(name, param, tensor, loaded)
-    assert loaded == {"weight", "weight_scale_inv"}
     process_weights_after_loading(layer, model_config, _DEVICE)
     rows = slice(256 * tp_rank, 256 * (tp_rank + 1))
     torch.testing.assert_close(layer.weight, full[rows], rtol=0, atol=0)
@@ -387,7 +339,6 @@ class _IndexerModel(torch.nn.Module):
             param = params[name]
             param.weight_loader(param, tensor, shard)
             loaded.add(name)
-            load_unneeded_scale(name, param, tensor, loaded, shard)
         return loaded
 
 
@@ -460,19 +411,6 @@ def test_indexer_fp8_weights_proj(model_config):
     torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
 
 
-def test_indexer_bf16_rows_of_odd_width(model_config):
-    """BF16 rows load ones into their scale rows for any width."""
-    model = _IndexerModel(hidden=200)
-    rows = torch.randn(_WK + _WP, 200).to(torch.bfloat16).to(_DEVICE)
-    loaded = model.load_weights(
-        [("wk.weight", rows[:_WK]), ("weights_proj.weight", rows[_WK:])]
-    )
-    assert loaded == {n for n, _ in model.named_parameters()}
-    assert torch.all(model.wk_weights_proj.weight_scale_inv == 1)
-    process_weights_after_loading(model, model_config, _DEVICE)
-    torch.testing.assert_close(model.wk_weights_proj.weight, rows, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("update", ["fp8", "bf16", "left_out"])
 def test_indexer_direct_reload_equals_cold_start(monkeypatch, model_config, update):
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
@@ -495,15 +433,62 @@ def test_indexer_direct_reload_equals_cold_start(monkeypatch, model_config, upda
     assert _ptrs(model) == ptrs
 
 
-@pytest.mark.parametrize("layout", ["block", "mx"])
-def test_indexer_layerwise_reload_equals_cold_start(model_config, layout):
-    """The BF16 weights_proj rows load ones into their scale rows, so an FP8
-    update completes the layer while loading."""
-    model = _indexer_cold_start(_indexer_checkpoint(26, layout)[0], model_config)
-    new, expected = _indexer_checkpoint(27, layout)
-    initialize_layerwise_reload(model)
-    for item in new.items():
-        model.load_weights([item])
-    assert get_layerwise_info(model.wk_weights_proj).load_numel_total is None
-    finalize_layerwise_reload(model, model_config)
-    torch.testing.assert_close(model.wk_weights_proj.weight, expected, rtol=0, atol=0)
+def _glm5_mla_params() -> dict:
+    """Params of a GLM5-next MLA layer whose projections load a block-FP8
+    checkpoint (see `Fp8DequantConfig`): only the scales matter here."""
+    prefix = "layers.3.self_attn"
+    params = {}
+    for target in ("fused_qkv_a_proj", "q_b_proj", "o_proj"):
+        scale = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+        scale.weight_block_size = [128, 128]
+        params[f"{prefix}.{target}.weight_scale_inv"] = scale
+    return params
+
+
+def test_glm5next_attn_loader_accepts_quark_weight_scale():
+    # Quark names the block scale ``weight_scale``; the projection's scale
+    # parameter is ``weight_scale_inv``.
+    from transformers import Glm5NextTextConfig
+
+    from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
+
+    config = Glm5NextTextConfig(kv_lora_rank=512)
+    scale = torch.rand(4, 2)
+    name, tensor = _mla_proj_checkpoint_tensor(
+        "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale",
+        scale,
+        _glm5_mla_params(),
+        config,
+        0,
+    )
+    assert name == "layers.3.self_attn.kv_a_proj_with_mqa.weight_scale_inv"
+    assert tensor is scale
+    # a projection the model does not load from block-FP8 keeps its name
+    name, _ = _mla_proj_checkpoint_tensor(
+        "layers.0.self_attn.o_proj.weight_scale", scale, {}, config, 0
+    )
+    assert name == "layers.0.self_attn.o_proj.weight_scale"
+
+
+def test_glm5next_nope_kv_a_padding_block_scale():
+    # NoPE checkpoints omit kv_a's RoPE rows: the weight gets zero rows and the
+    # scale its extra blocks, each on its own (no weight/scale pairing).
+    from transformers import Glm5NextTextConfig
+
+    from vllm.models.glm5next.common.model import _mla_proj_checkpoint_tensor
+
+    config = Glm5NextTextConfig(kv_lora_rank=512)
+    prefix = "layers.3.self_attn.kv_a_proj_with_mqa"
+    weight = torch.randn(512, 256).to(torch.float8_e4m3fn)
+    _, padded = _mla_proj_checkpoint_tensor(
+        f"{prefix}.weight", weight, _glm5_mla_params(), config, 64
+    )
+    assert padded.shape == (576, 256) and padded.dtype == torch.float8_e4m3fn
+    assert torch.equal(padded[:512].view(torch.uint8), weight.view(torch.uint8))
+    assert not padded[512:].float().any()
+    scale = torch.rand(4, 2)
+    _, padded = _mla_proj_checkpoint_tensor(
+        f"{prefix}.weight_scale_inv", scale, _glm5_mla_params(), config, 64
+    )
+    assert padded.shape == (5, 2)  # ceil(576 / 128) blocks
+    assert torch.equal(padded[:4], scale)

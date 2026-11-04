@@ -19,7 +19,6 @@ per row and 32 columns, the finest of these layouts, and a coarser checkpoint
 scale is expanded to it when loaded.
 """
 
-import weakref
 from typing import Any
 
 import torch
@@ -50,7 +49,6 @@ from vllm.model_executor.utils import (
     retire_parameter,
     set_weight_attrs,
 )
-from vllm.utils.math_utils import cdiv
 
 # Rows dequantized at once; bounds the float32 temporaries of a large weight.
 _DEQUANT_ROWS = 1024
@@ -72,7 +70,6 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
     (dummy weights), hold runtime bytes."""
 
     fp8_rows: torch.Tensor
-    layer_ref: "weakref.ref[torch.nn.Module]"
 
     def fp8_view(self) -> torch.Tensor:
         """The weight's storage in the checkpoint's FP8 layout: row i in the
@@ -98,7 +95,7 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         if "shard_offset" in kwargs:
             start = kwargs["shard_offset"]
             rows = slice(start, start + kwargs["shard_size"])
-        # loader state for PWAL (RFC #64418 sec. 5 rule 3 exception): load, never copy
+        # loader state read by post-load processing
         self.fp8_rows[rows] = fp8
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -145,8 +142,6 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
     (per-tensor, per-channel, ``[n, k]`` blocks, MXFP8 E8M0), as one float32
     scale per row and ``_ANY_LAYOUT_BLOCK[1]`` columns."""
     group = _ANY_LAYOUT_BLOCK[1]
-    if scale.dtype == torch.float32 and tuple(scale.shape) == (rows, cdiv(cols, group)):
-        return scale  # in this layout already (e.g. `load_unneeded_scale`)
     if scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
         scale = scale.view(torch.float8_e8m0fnu)
     scale = scale.to(torch.float32)
@@ -188,39 +183,9 @@ def _load_replicated(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
         param._assert_and_load(loaded_weight)
 
 
-def load_unneeded_scale(
-    name: str,
-    param: torch.nn.Parameter,
-    tensor: torch.Tensor,
-    loaded: set[str],
-    shard_id: int | str | None = None,
-) -> None:
-    """Model loaders call this after loading ``tensor`` into ``param``
-    (``name``): a BF16 tensor loaded into a block-FP8 checkpoint weight needs no
-    scale, so ones are loaded into the scale rows it owns and every element of
-    the layer counts as loaded (layerwise reload processes a layer once all of
-    them have arrived, counting each loader call; hence a separate call, not
-    one nested in the weight's own)."""
-    if (
-        not isinstance(param, Fp8DequantWeightParameter)
-        or tensor.dtype == torch.float8_e4m3fn
-    ):
-        return
-    layer = param.layer_ref()
-    assert layer is not None
-    scale = layer.weight_scale_inv
-    block_n, block_k = scale.weight_block_size
-    shape = (cdiv(tensor.shape[0], block_n), cdiv(tensor.shape[1], block_k))
-    ones = tensor.new_ones(shape, dtype=torch.float32)
-    scale.weight_loader(scale, ones, *(() if shard_id is None else (shard_id,)))
-    loaded.add(name.removesuffix("weight") + "weight_scale_inv")
-
-
 @register_weight_loader_v2_supported_method
 class Fp8DequantLinearMethod(UnquantizedLinearMethod):
-    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16. Model
-    loaders call `load_unneeded_scale` after each tensor they load into such a
-    weight.
+    """Loads block-FP8 (or BF16) checkpoint weights; runs in BF16.
 
     ``weight_block_size`` None: the layer is replicated and accepts the scale
     in any checkpoint layout (see `_scale_groups`)."""
@@ -262,7 +227,6 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         )
         # host bookkeeping: also when the model is built on meta (weight cache)
         weight.fp8_rows = torch.zeros(rows, dtype=torch.bool, device="cpu")
-        weight.layer_ref = weakref.ref(layer)  # see `load_unneeded_scale`
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
@@ -289,9 +253,6 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
         # pre-processed weights (weight cache) are runtime BF16 already
         if not is_weights_pre_processed():
             layer.weight.dequantize(layer.weight_scale_inv, self.weight_block_size)
-            # in place, for the next direct reload: FP8 rows it sends without
-            # their scale are rejected, not dequantized with this one
-            layer.weight_scale_inv.data.fill_(FP8_SCALE_SENTINEL)
         retire_parameter(layer, "weight_scale_inv")
         super().process_weights_after_loading(layer)
 
