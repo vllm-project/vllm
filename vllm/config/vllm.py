@@ -96,6 +96,10 @@ _QWEN3_5_ARCHITECTURES = frozenset(
     }
 )
 
+# Default capture bound, in tokens, for speculative decoding with breakable CUDA
+# graphs on CDNA4 (gfx950).
+_ROCM_BREAKABLE_MAX_CAPTURE_TOKENS = 4096
+
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "AliceAIForCausalLM",
@@ -2621,6 +2625,30 @@ class VllmConfig:
             and compilation_config.max_decode_cudagraph_capture_tokens is None
         ):
             compilation_config.max_decode_cudagraph_capture_tokens = 8192
+        # Breakable CUDA graphs have no compiled fallback, so a batch wider than
+        # every graph runs eagerly. With speculative decoding on CDNA4 (gfx950),
+        # extend unset kinds to twice the widest decode batch, as the shared
+        # ceiling does below it.
+        extended_max_tokens = 0
+        if (
+            not legacy_sizes
+            and not wide_defaults
+            and current_platform.is_rocm()
+            and current_platform.is_device_capability(95)
+            and compilation_config.use_breakable_cudagraph
+            and self.uniform_decode_query_len > 1
+        ):
+            extended_max_tokens = min(
+                2 * max_num_seqs * self.uniform_decode_query_len,
+                _ROCM_BREAKABLE_MAX_CAPTURE_TOKENS,
+                max_num_tokens,
+            )
+        extend = extended_max_tokens > shared_max
+        if extend and compilation_config.max_decode_cudagraph_capture_tokens is None:
+            # One-token draft decodes keep their graphs up to max_num_seqs.
+            compilation_config.max_decode_cudagraph_capture_tokens = max(
+                extended_max_tokens, min(max_num_seqs, max_num_tokens)
+            )
 
         def explicit(
             sizes: list[int], limit: int, cap: int | None, name: str, cap_name: str
@@ -2653,6 +2681,17 @@ class VllmConfig:
                 ),
                 self.performance_mode == "interactivity",
             )
+        elif extend:
+            prefill_sizes = sorted(
+                {
+                    *shared_sizes,
+                    *(
+                        s
+                        for s in prefill_cudagraph_capture_grid(extended_max_tokens)
+                        if s > shared_max
+                    ),
+                }
+            )
         else:
             prefill_sizes = list(shared_sizes)
 
@@ -2681,6 +2720,12 @@ class VllmConfig:
                     if cdiv(s, q) * q <= shared_max
                 }
             )
+            if extend:
+                decode_sizes += [
+                    n
+                    for n in decode_cudagraph_capture_grid(max_num_seqs)
+                    if n > max(decode_sizes, default=0)
+                ]
         compilation_config.prefill_cudagraph_capture_token_sizes = prefill_sizes
         compilation_config.max_prefill_cudagraph_capture_tokens = max(
             prefill_sizes, default=0

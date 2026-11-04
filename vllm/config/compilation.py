@@ -770,9 +770,10 @@ class CompilationConfig:
     grid up to `max_prefill_cudagraph_capture_tokens`."""
     max_prefill_cudagraph_capture_tokens: int | None = Field(default=None, ge=0)
     """Largest token count of a prefill CUDA graph. None (default): 8192 on SM100
-    GPUs, otherwise the platform's default `max_cudagraph_capture_size`; at most
-    `max_num_batched_tokens`. More and wider graphs take memory from the KV
-    cache and lengthen startup."""
+    GPUs; with speculative decoding on breakable CUDA graphs on CDNA4 (gfx950),
+    twice the widest decode batch up to 4096; otherwise the platform's default
+    `max_cudagraph_capture_size`; at most `max_num_batched_tokens`. More and
+    wider graphs take memory from the KV cache and lengthen startup."""
     decode_cudagraph_capture_request_sizes: list[int] | None = None
     """Request counts of the FULL CUDA graphs for uniform decode batches, whose
     requests all have the same query length `q`: `1 + num_speculative_tokens`
@@ -793,7 +794,8 @@ class CompilationConfig:
     """Largest request count of a decode CUDA graph; with adaptive verification
     it also bounds the verify graphs' tokens (see
     `decode_cudagraph_capture_request_sizes`). None (default): `max_num_seqs` on
-    SM100 GPUs, otherwise the most requests that the platform's default
+    SM100 GPUs and with speculative decoding on breakable CUDA graphs on CDNA4
+    (gfx950), otherwise the most requests that the platform's default
     `max_cudagraph_capture_size` holds at the target model's query lengths.
     Graphs no wider than the widest prefill graph mostly reuse its memory in the
     shared graph pool. Wider graphs, and FULL graphs of
@@ -803,7 +805,9 @@ class CompilationConfig:
     """Token budget of a uniform decode CUDA graph: each runner captures `n`
     requests at query length `q` only while `n * q` fits, and wider decode
     batches take the prefill graphs. It also bounds adaptive verification's
-    token-keyed graphs. None (default): 8192 on SM100 GPUs, otherwise no budget.
+    token-keyed graphs. None (default): 8192 on SM100 GPUs; with speculative
+    decoding on breakable CUDA graphs on CDNA4 (gfx950), the prefill default
+    but at least `max_num_seqs`; otherwise no budget.
     Wider decode graphs take memory from the KV cache."""
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for

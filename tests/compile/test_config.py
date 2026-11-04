@@ -26,6 +26,7 @@ from vllm.config.compilation import (
     CompilationMode,
     PassConfig,
     decode_cudagraph_capture_grid,
+    decode_cudagraph_capture_max_tokens,
     decode_cudagraph_capture_shapes,
     prefill_cudagraph_capture_grid,
 )
@@ -960,6 +961,122 @@ def test_one_token_draft_decodes_cover_max_num_seqs(
     if widest_draft_decode:
         assert draft_sizes == decode_cudagraph_capture_grid(widest_draft_decode)
     assert compilation_config.max_cudagraph_capture_size == max_capture_size
+
+
+requires_rocm = pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="Only test ROCm"
+)
+
+
+def _rocm_breakable_config(
+    monkeypatch,
+    capability: int = 95,
+    breakable: bool = True,
+    num_speculative_tokens: int = 5,
+    max_num_seqs: int = 1024,
+    max_num_batched_tokens: int = 16384,
+    draft_model: bool = False,
+    **kwargs,
+) -> VllmConfig:
+    """Real config post-init on ROCm, with n-gram (or draft model) speculation;
+    `capability` stands in for the GPU's."""
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda cap, device_id=0: cap == capability,
+    )
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", str(int(breakable)))
+    model_config = ModelConfig(model="facebook/opt-125m")
+    speculative_config = None
+    if num_speculative_tokens:
+        draft = (
+            {"method": "draft_model", "model": "facebook/opt-125m"}
+            if draft_model
+            else {"method": "ngram", "prompt_lookup_min": 1, "prompt_lookup_max": 1}
+        )
+        speculative_config = SpeculativeConfig(
+            target_model_config=model_config,
+            target_parallel_config=ParallelConfig(),
+            num_speculative_tokens=num_speculative_tokens,
+            **draft,
+        )
+    return VllmConfig(
+        model_config=model_config,
+        speculative_config=speculative_config,
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_seqs=max_num_seqs, max_num_batched_tokens=max_num_batched_tokens
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE, **kwargs
+        ),
+    )
+
+
+@requires_rocm
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        # 682 requests of 1 + 5 tokens fit the 4096-token bound.
+        ({}, (4096, 682, 4096)),
+        # Twice the widest decode batch: 2 * 64 * 6 = 768 tokens.
+        ({"max_num_seqs": 64}, (768, 64, 768)),
+        ({"max_num_batched_tokens": 2048}, (2048, 341, 2048)),
+        ({"num_speculative_tokens": 0}, (512, 512, None)),
+        ({"breakable": False}, (512, 83, None)),
+        # CDNA3 (gfx942)
+        ({"capability": 94}, (512, 83, None)),
+        # A set kind keeps its setting; the deprecated fields keep both.
+        ({"max_decode_cudagraph_capture_requests": 64}, (4096, 64, 4096)),
+        ({"max_cudagraph_capture_size": 512}, (512, 83, None)),
+    ],
+)
+def test_rocm_breakable_speculative_defaults(monkeypatch, overrides, expected):
+    """Breakable CUDA graphs have no compiled fallback, so speculative decode
+    and mixed batches above the shared sizes would run eagerly. On CDNA4 unset
+    kinds extend to twice the widest decode batch, at most 4096 tokens: the
+    widest prefill graph, decode graph (requests) and decode token budget."""
+    config = _rocm_breakable_config(monkeypatch, **overrides)
+    compilation_config = config.compilation_config
+    widest_decode = _widest_covered_request_count(
+        compilation_config,
+        config.uniform_decode_query_len,
+        config.scheduler_config.max_num_seqs,
+    )
+    assert (
+        compilation_config.max_prefill_cudagraph_capture_tokens,
+        widest_decode,
+        compilation_config.max_decode_cudagraph_capture_tokens,
+    ) == expected
+
+
+@requires_rocm
+def test_rocm_breakable_speculative_defaults_keep_sizes_up_to_512(monkeypatch):
+    """CDNA4 only adds sizes past the shared ones."""
+    cdna4, cdna3 = (
+        _rocm_breakable_config(monkeypatch, capability).compilation_config
+        for capability in (95, 94)
+    )
+    prefill = cdna3.prefill_cudagraph_capture_token_sizes
+    decode = cdna3.decode_cudagraph_capture_request_sizes
+    assert cdna4.prefill_cudagraph_capture_token_sizes[: len(prefill)] == prefill
+    assert cdna4.decode_cudagraph_capture_request_sizes[: len(decode)] == decode
+
+
+@requires_rocm
+def test_rocm_breakable_speculative_defaults_keep_one_token_draft_decodes(
+    monkeypatch,
+):
+    """One-token draft decodes keep their graphs up to max_num_seqs, past the
+    4096-token bound."""
+    config = _rocm_breakable_config(
+        monkeypatch, num_speculative_tokens=2, max_num_seqs=8192, draft_model=True
+    )
+    shapes = decode_cudagraph_capture_shapes(
+        config.get_draft_decode_cudagraph_request_sizes(),
+        {1: 8192},
+        decode_cudagraph_capture_max_tokens(config.compilation_config),
+    )
+    assert max(n for n, _ in shapes) == 8192
 
 
 def test_default_grids_capture_fewer_graphs_than_main():
