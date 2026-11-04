@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2, round_up
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -307,15 +307,21 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
         """Per-token-head modes pack inline fp32 scales after each head's
-        data, so the content is (data + one scale) per K/V side."""
+        data, so the content is (data + one scale) per K/V side. INT8/FP8
+        pad each side to 16 bytes so Triton can vectorize the K/V loads."""
         mode = spec.kv_quant_mode
         if spec.state_content_bytes is not None or not mode.is_per_token_head:
             return spec
         hs_k, hs_v = spec.head_size, spec.head_size_v
+        align = 16
         if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
             hs_k, hs_v = hs_k // 2, hs_v // 2
+            align = 1
         scale_bytes = get_dtype_size(torch.float32)
-        content = (hs_k + hs_v) * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        dtype_size = get_dtype_size(spec.dtype)
+        content = sum(
+            round_up(hs * dtype_size + scale_bytes, align) for hs in (hs_k, hs_v)
+        )
         return replace(spec, state_content_bytes=content)
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [
@@ -415,10 +421,10 @@ class TritonAttentionImpl(AttentionImpl):
         """Extract per-head scale views from the padded content dimension.
 
         The KV cache is packed as logical shape
-        ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
-        ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
+        ``(num_blocks, nkv, block_size, 2 * (hs + pad))``, ``pad`` set by
+        ``customize_spec``.  The content dim holds
         ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
-        last ``pad`` elements of each half hold one float32 scale.  We create
+        first 4 bytes of each ``pad`` hold one float32 scale.  We create
         strided float32 views over those bytes.  ``kv_cache`` must be the
         packed logical tensor (call before any transpose), but may have HND or
         NHD physical strides.
@@ -427,13 +433,13 @@ class TritonAttentionImpl(AttentionImpl):
         """
         if self._k_scale_cache is not None:
             return
-        from vllm.utils.torch_utils import get_dtype_size
 
         num_blocks, nkv, block_size, content = kv_cache.shape
         dtype_sz = kv_cache.element_size()
-        scale_pad = get_dtype_size(torch.float32) // dtype_sz  # e.g. 4
         padded_hs = content // 2
-        hs = padded_hs - scale_pad
+        hs = self.head_size
+        if self._kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            hs //= 2
 
         raw = kv_cache.untyped_storage()
         base_f32 = torch.tensor([], dtype=torch.float32, device=kv_cache.device).set_(
