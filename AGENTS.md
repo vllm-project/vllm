@@ -91,8 +91,9 @@ When adding tests:
   the cheapest level that actually reproduces it? Fixes to user-visible
   behavior need a test through a real entry point (`LLM`, OpenAI server); see
   [`tests/AGENTS.md`](tests/AGENTS.md).
-- **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
-  helpers; add a new file only when no nearby suite fits.
+- **Reuse before create.** First try adding a case to an existing parametrized
+  test, then extending or refactoring existing tests, `conftest.py` fixtures, and
+  helpers; add a new test or file only when no nearby suite fits.
 - **Test behavior with intent.** Assert observable outcomes through public APIs;
   state why in the name or docstring. Skip trivial wiring; flaky tests are worse
   than no tests.
