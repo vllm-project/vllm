@@ -3,7 +3,9 @@
 
 from unittest.mock import MagicMock, patch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa: E501
+    ExampleConnector,
     ExampleConnectorMetadata,
 )
 from vllm.distributed.kv_transfer.kv_transfer_state import (
@@ -11,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_transfer_state import (
     ensure_kv_transfer_shutdown,
     get_kv_transfer_group,
 )
-from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 
@@ -76,3 +78,34 @@ def test_kv_connector_mixin_clears_metadata():
     finally:
         # Ensure we clean up the global connector between tests
         ensure_kv_transfer_shutdown()
+
+
+def test_example_connector_skips_partial_chunked_prefill(tmp_path):
+    vllm_config = create_vllm_config(
+        kv_connector="ExampleConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+    connector = ExampleConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+    )
+    new_request = NewRequestData(
+        req_id="request",
+        prompt_token_ids=list(range(8)),
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([0],),
+        num_computed_tokens=0,
+        lora_request=None,
+    )
+    scheduler_output = _make_empty_scheduler_output()
+    scheduler_output.scheduled_new_reqs = [new_request]
+    scheduler_output.num_scheduled_tokens = {"request": 4}
+
+    metadata = connector.build_connector_meta(scheduler_output)
+
+    assert metadata.requests == []
