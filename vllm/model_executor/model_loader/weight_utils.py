@@ -206,6 +206,7 @@ def get_quant_config(
     from vllm.config.quantization import (
         _ONLINE_SHORTHANDS,
         QuantizationConfigArgs,
+        QuantSpec,
         merge_quantization_config,
         resolve_quantization_config,
     )
@@ -327,6 +328,16 @@ def get_quant_config(
     # is not set yet.
     if quant_cls is OnlineQuantizationConfig and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
+        # Activation-only overrides apply to pre-quantized checkpoints; without
+        # a weight key, standalone online quantization would silently no-op.
+        specs = [(kind, getattr(online_args, kind)) for kind in ("linear", "moe")]
+        specs += [(f"targets[{p}]", t) for p, t in (online_args.targets or {}).items()]
+        for name, spec in specs:
+            if isinstance(spec, QuantSpec) and "weight" not in spec.fields_set:
+                raise ValueError(
+                    f"quantization_config.{name} = {spec} does not set a weight "
+                    "quantization key, which online quantization requires."
+                )
         return OnlineQuantizationConfig(args=online_args)
 
     model_name_or_path = (

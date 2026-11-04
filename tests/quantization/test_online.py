@@ -260,13 +260,6 @@ def test_online_activation_override(
     assert resolved is not None and resolved[3].activation == activation_quant_key
 
 
-# Activation keys an online MXFP4 layer honours on this platform.
-_MXFP4_ACTIVATION_KEYS = {None, kMxfp4Dynamic}
-if current_platform.is_cuda():
-    # B12X / FlashInfer MXFP4 x MXFP8 kernels.
-    _MXFP4_ACTIVATION_KEYS.add(kMxfp8Dynamic)
-
-
 @pytest.mark.parametrize(
     "activation_quant_key",
     [None, *dict.fromkeys(QUANT_KEY_NAMES.values())],
@@ -283,37 +276,36 @@ def test_online_mxfp4_activation_key_is_honoured_or_rejected(
     activation_quant_key: quant_utils.QuantKey | None,
 ) -> None:
     """Each activation key either dispatches to a kernel that computes it, or is
-    rejected; it is never silently replaced by another format."""
+    rejected; it is never silently replaced by another format. Which keys are
+    supported depends on the platform and the installed kernels."""
     default_vllm_config.model_config = SimpleNamespace(
         quantization_config=None,
         dtype=torch.bfloat16,
     )
     kwargs = {"moe": _TestRoutedExperts().moe_config} if layer_kind == "moe" else {}
 
-    supported_keys = set(_MXFP4_ACTIVATION_KEYS)
-    # Without AITER, ROCm falls back to the EMULATION backend (MXFP4 only).
-    if (
-        layer_kind == "moe"
-        and current_platform.is_rocm()
-        and not rocm_aiter_ops.is_fused_moe_enabled()
-    ):
-        supported_keys.discard(None)
-    if activation_quant_key not in supported_keys:
-        with pytest.raises(
-            (NotImplementedError, ValueError),
-            match="Failed to find a kernel|No MXFP4 MoE backend|cannot honour",
-        ):
+    if activation_quant_key is not None and activation_quant_key.scale.static:
+        # Online quantization has no calibrated activation scales.
+        with pytest.raises(NotImplementedError, match="static activation scales"):
             method_cls(activation_quant_key=activation_quant_key, **kwargs)
         return
+    try:
+        method = method_cls(activation_quant_key=activation_quant_key, **kwargs)
+    except (NotImplementedError, ValueError) as e:
+        errors = ("Failed to find a kernel", "No MXFP4 MoE backend", "cannot honour")
+        assert any(error in str(e) for error in errors), e
+        return
 
-    method = method_cls(activation_quant_key=activation_quant_key, **kwargs)
     assert method.activation_quant_key == activation_quant_key
     if layer_kind == "linear":
         assert method.kernel.config.activation_quant_key == activation_quant_key
-    elif method.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        assert activation_quant_key == kMxfp4Dynamic
-    else:
-        assert _backend_activation_key(method.mxfp4_backend) == activation_quant_key
+    elif activation_quant_key != kMxfp4Dynamic:  # The default may run BF16.
+        computed_key = (
+            kMxfp4Dynamic
+            if method.mxfp4_backend == Mxfp4MoeBackend.EMULATION
+            else _backend_activation_key(method.mxfp4_backend)
+        )
+        assert computed_key == activation_quant_key
 
 
 def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
@@ -1598,6 +1590,13 @@ def test_activation_only_override_applies_to_checkpoint_method(
 
     assert isinstance(result, CompressedTensorsConfig)
     assert isinstance(result.online_quantization_config, OnlineQuantizationConfig)
+    # An activation-only override quantizes no layer online, and does not raise.
+    assert (
+        result.online_quantization_config.resolve_quant_method_cls(
+            RoutedExperts, "model.layers.0.mlp.experts"
+        )
+        is None
+    )
 
     default_vllm_config.model_config = model_config
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (

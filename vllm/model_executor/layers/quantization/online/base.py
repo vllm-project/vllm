@@ -287,13 +287,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
             quantization.
 
         """
-        if spec is not None and spec.fields_set and "weight" not in spec.fields_set:
-            # Without a weight key, online quantization would silently no-op;
-            # an explicit `weight: null` leaves the layer unquantized.
-            raise ValueError(
-                f"{spec!r} does not set a weight quantization key, which online "
-                "quantization requires."
-            )
         if spec is None or spec.weight is None:
             return None
         # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.

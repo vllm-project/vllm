@@ -398,3 +398,15 @@ def merge_quantization_config(
         ignore=override.ignore or base.ignore,
         targets=override.targets or base.targets,
     )
+
+
+def user_activation_override(kind: str, config: Any) -> tuple[QuantKey | None, bool]:
+    """The user's `quantization_config.<kind>.activation` override in `config`
+    (a `VllmConfig` or None; `kind` is `linear` or `moe`), and whether it was
+    set (explicit `null` included)."""
+    model_config = config.model_config if config else None
+    args = model_config.quantization_config if model_config else None
+    spec = getattr(args, kind) if isinstance(args, QuantizationConfigArgs) else None
+    if spec is None:
+        return None, False
+    return spec.activation, "activation" in spec.fields_set

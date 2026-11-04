@@ -13,7 +13,7 @@ from vllm.config.kernel import (
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -503,22 +503,12 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
+    return user_activation_override("moe", get_current_vllm_config())[0]
 
 
 def _user_moe_activation_override_is_set() -> bool:
     """Whether the user set the MoE activation, explicit `null` included."""
-    config = get_current_vllm_config_or_none()
-    model_config = config.model_config if config else None
-    args = model_config.quantization_config if model_config else None
-    return (
-        isinstance(args, QuantizationConfigArgs)
-        and args.moe is not None
-        and "activation" in args.moe.fields_set
-    )
+    return user_activation_override("moe", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_activation_key(
