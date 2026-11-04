@@ -18,6 +18,7 @@ from vllm.config import set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import RoutedExperts
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.auto_gptq import (
     AutoGPTQConfig,
     AutoGPTQLinearMethod,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     is_layer_gptq_quantized,
     override_config,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
 from vllm.platforms import current_platform
 
 PROMPT = "On the surface of Mars, we found"
@@ -135,33 +137,33 @@ def test_auto_gptq_normalizes_channelwise_activation_order():
         )
 
 
-def test_auto_gptq_drops_redundant_qzeros_before_kernel_processing():
-    class Kernel:
-        config = SimpleNamespace(zero_points=False)
-        w_zp_name = "qzeros"
-        processed = False
+def test_auto_gptq_drops_redundant_qzeros_before_kernel_processing(
+    monkeypatch, dist_init, workspace_init
+):
+    """Symmetric GPTQ uses bias 8 regardless of checkpoint zero-point values."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    size_k, size_n = 256, 128
+    config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
+    with torch.device(current_platform.device_type):
+        layer = ReplicatedLinear(
+            size_k, size_n, bias=False, params_dtype=torch.float16, quant_config=config
+        )
+        weight = torch.full((size_k, size_n), 9, dtype=torch.int32)
+        x = torch.ones((1, size_k), dtype=torch.float16)
+    with torch.no_grad():
+        layer.qweight.copy_(gptq_pack(weight, 4, size_k, size_n))
+        layer.scales.fill_(0.125)
+        layer.qzeros.zero_()
 
-        def process_weights_after_loading(self, layer: torch.nn.Module):
-            assert not hasattr(layer, self.w_zp_name)
-            layer.register_parameter(
-                self.w_zp_name,
-                torch.nn.Parameter(torch.zeros(1), requires_grad=False),
-            )
-            self.processed = True
-
-    method = object.__new__(AutoGPTQLinearMethod)
-    kernel = Kernel()
-    method.kernel = kernel
-    layer = torch.nn.Module()
-    layer.register_parameter(
-        "qzeros", torch.nn.Parameter(torch.ones(1), requires_grad=False)
-    )
+    method = layer.quant_method
+    assert isinstance(method, AutoGPTQLinearMethod)
+    assert method.kernel is not None
+    assert not method.kernel.config.zero_points
 
     method.process_weights_after_loading(layer)
 
-    assert kernel.processed
-    assert kernel.w_zp_name == "qzeros"
-    torch.testing.assert_close(layer.qzeros, torch.zeros(1))
+    output, _ = layer(x)
+    torch.testing.assert_close(output, output.new_full((1, size_n), 32), rtol=0, atol=0)
 
 
 def test_auto_gptq_moe_creates_zero_initialized_expert_biases():
