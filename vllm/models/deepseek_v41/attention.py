@@ -1310,7 +1310,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                     if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
                     else page_alignment,
                 )
-                if self.sparse_logits and not self.rocm_mxfp4
+                if self.sparse_logits
+                and current_platform.is_cuda()
+                and current_platform.is_device_capability_family(100)
                 else None
             ),
         )
@@ -1437,6 +1439,10 @@ class DeepseekV4Indexer(nn.Module):
             vllm_config.attention_config.indexer_sparse_logits
             and candidate_block_buffer is not None
             and not candidate_write
+            and not (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(90)
+            )
         )
         self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:

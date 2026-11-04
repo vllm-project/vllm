@@ -506,11 +506,12 @@ def _candidate_token_mask(
     rows = candidates.shape[0]
     device = candidates.device
     # Sentinel block keeps -1 padding from scattering onto real columns.
-    width = max(total, (candidates.shape[1] + 1) * cbk)
+    sentinel_block = (total + cbk - 1) // cbk
+    width = (sentinel_block + 1) * cbk
     if ks is not None:
         width += int(ks.max()) + cbk
     in_cand = torch.zeros(rows, width, dtype=torch.bool, device=device)
-    block_id = torch.where(candidates >= 0, candidates.long(), candidates.shape[1])
+    block_id = torch.where(candidates >= 0, candidates.long(), sentinel_block)
     tok = block_id.unsqueeze(2) * cbk + torch.arange(cbk, device=device)
     if ks is not None:
         tok = tok + ks.unsqueeze(1).unsqueeze(2)
@@ -1029,6 +1030,140 @@ def test_sparse_mqa_logits_paged_matches_dense_masked(
         run_sparse(out, kernel_metadata)
 
     _assert_same_selection(dense_logits, out, expected)
+
+
+@pytest.mark.parametrize(
+    "batch,next_n,page_kv,page_pad",
+    [(1, 1, 32, 0), (3, 2, 64, 256), (2, 4, 32, 0), (4, 6, 64, 0), (16, 6, 64, 0)],
+)
+@pytest.mark.parametrize("topk_backend", ["auto", "persistent", "cooperative"])
+def test_sm90_sparse_decode_four_consumers(
+    workspace_init, batch, next_n, page_kv, page_pad, topk_backend
+):
+    """Four consumers reuse one plan; replay must refresh empty-to-live rows,
+    candidate subsets and page mappings without changing the selected scores.
+    """
+    from tests.kernels.attention.test_deepgemm_attention import kv_cache_cast_to_fp8
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        sparse_mqa_logits_paged_decode,
+    )
+    from vllm.utils.deep_gemm import (
+        _import_deep_gemm,
+        get_paged_mqa_logits_metadata,
+        is_sm90_paged_sparse_mqa_logits_supported,
+    )
+    from vllm.v1.worker import workspace
+
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("SM90 required")
+    if not is_sm90_paged_sparse_mqa_logits_supported(32, 128, page_kv, 8):
+        pytest.skip("DeepGEMM SM90 paged sparse support required")
+    rows, width, topk, candidates_per_row = batch * next_n, 32768, 512, 2048
+    if topk_backend == "cooperative" and rows > 64:
+        pytest.skip("cooperative top-k supports at most 64 rows")
+    dg = _import_deep_gemm()
+    torch.manual_seed(42)
+    pages = width // page_kv
+    packed = kv_cache_cast_to_fp8(torch.randn(pages, page_kv, 1, 128, device="cuda"))
+    stride = page_kv * 132 + page_pad
+    storage = torch.empty(pages * stride, dtype=torch.uint8, device="cuda")
+    cache = storage.as_strided(packed.shape, (stride, 132, 132, 1))
+    cache.copy_(packed)
+    tables = torch.stack(
+        [torch.randperm(pages, device="cuda", dtype=torch.int32) for _ in range(batch)]
+    )
+    table = tables.repeat_interleave(next_n, dim=0)
+    lens = (
+        width - next_n + 1 + torch.arange(next_n, device="cuda", dtype=torch.int32)
+    ).repeat(batch)
+    if rows > 1:
+        lens[0] = 0
+        lens[1] = 5
+    original = torch.stack(
+        [
+            torch.randperm(width // 8, device="cuda", dtype=torch.int32)[
+                :candidates_per_row
+            ]
+            for _ in range(rows)
+        ]
+    )
+    if rows > 1:
+        original[1].fill_(-1)
+        original[1, 0] = 0
+    if rows > 2:
+        original[2].fill_(-1)  # Empty candidates with a nonempty context.
+    candidates = original.clone()
+    q = torch.randn(4, rows, 1, 32, 128, device="cuda").to(torch.float8_e4m3fn)
+    weights = torch.randn(4, rows, 32, device="cuda")
+    out = torch.empty(4, rows, topk, dtype=torch.int32, device="cuda")
+    scratch = _sparse_scratch(rows, candidates_per_row, topk)
+    zeros = torch.zeros(rows, dtype=torch.int32, device="cuda")
+    indices = torch.arange(rows, dtype=torch.int32, device="cuda")
+
+    def run_consumers():
+        metadata = None
+        for consumer in range(4):
+            metadata = sparse_mqa_logits_paged_decode(
+                q[consumer],
+                None,
+                cache,
+                weights[consumer],
+                lens,
+                table,
+                indices,
+                candidates,
+                8,
+                8,
+                topk,
+                out[consumer],
+                row_ks=zeros,
+                kernel_metadata=metadata,
+                topk_backend=topk_backend,
+                **scratch,
+            )
+
+    run_consumers()
+    workspace.lock_workspace()
+    candidates.fill_(-1)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_consumers()
+    for step in range(3):
+        candidates.copy_(original)
+        if step == 1:
+            candidates[:, 64:].fill_(-1)
+        elif step == 2:
+            candidates.fill_(-1)
+        table.copy_(table.roll(1, dims=1))
+        graph.replay()
+        schedule = get_paged_mqa_logits_metadata(
+            lens[:, None], page_kv, dg.get_num_sms()
+        )
+        mask = _candidate_token_mask(candidates, 8, width)
+        mask &= torch.arange(width, device="cuda")[None, :] < lens[:, None]
+        for consumer in range(4):
+            dense = dg.fp8_fp4_paged_mqa_logits(
+                (q[consumer], None),
+                cache,
+                weights[consumer],
+                lens[:, None],
+                table,
+                schedule,
+                width,
+            )
+            expected = _reference_topk(dense.masked_fill(~mask, -float("inf")), topk)
+            for row in range(rows):
+                got, ref = out[consumer, row], expected[row]
+                got, ref = got[got >= 0].long(), ref[ref >= 0].long()
+                assert got.numel() == ref.numel()
+                assert mask[row, got].all()
+                assert got.unique().numel() == got.numel()
+                torch.testing.assert_close(
+                    dense[row, got].sort().values,
+                    dense[row, ref].sort().values,
+                    rtol=2e-5,
+                    atol=2e-5,
+                )
 
 
 @pytest.mark.parametrize("kv_dtype", ["mxfp4", "fp8"])

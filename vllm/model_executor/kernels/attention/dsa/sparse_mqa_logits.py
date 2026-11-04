@@ -6,11 +6,11 @@ The candidate-source indexer publishes the top candidate blocks (in units of
 ``candidate_block_size`` compressed positions). Instead of scoring every KV
 position and masking the dense logits down to those blocks, this path scores
 only the candidate tokens with DeepGEMM's sparse MQA logits kernels
-(``fp8_fp4_(paged_)sparse_mqa_logits``, DeepGEMM >= 2.8, SM100 only), runs
-DeepSelect's top-k directly on the bf16 logits they produce, and remaps the
-selected columns back to request-local positions.
+(``fp8_fp4_(paged_)sparse_mqa_logits``) and remaps top-k columns back to
+request-local positions. SM100 uses BF16 logits and DeepSelect. SM90 supports
+paged FP8 decode with FP32 weights/logits and the configured SM90 top-k.
 
-The kernels take UE8M0-packed (granularity-32) Q/KV scales, which both
+The SM100 kernels take UE8M0-packed (granularity-32) Q/KV scales, which both
 indexer caches provide on SM100: MXFP4 stores them natively, and the FP8 cache
 stores each token's power-of-two scale as four equal UE8M0 bytes (MXFP8 with
 one shared scale). FP8 Q carries its per-(token, head) scale in the weights,
@@ -29,6 +29,7 @@ import torch
 from vllm.model_executor.layers.indexer_topk import (
     deep_select_topk,
     get_deep_select_stride_requirement,
+    get_indexer_topk,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -266,6 +267,7 @@ def sparse_topk_remap(
     topk_indices: torch.Tensor,
     *,
     col_indices: torch.Tensor,
+    topk_backend: str = "auto",
 ) -> None:
     """Row top-k over sparse logits, remapped to request-local positions.
 
@@ -279,8 +281,7 @@ def sparse_topk_remap(
     count come back as -1.
 
     Args:
-        logits: [rows, width] bf16 sparse logits, as produced by the sparse
-            kernels.
+        logits: [rows, width] bf16 (SM100) or fp32 (SM90) sparse logits.
         sparse_indices: [rows, S] int32 sparse block ids backing ``logits``.
         end: [rows] int32 per-row count of valid logit columns.
         row_ks: [rows] int32 per-row K range start.
@@ -289,13 +290,19 @@ def sparse_topk_remap(
         topk_indices: [rows, topk_tokens] int32 output buffer.
         col_indices: [rows, topk_tokens] int32 scratch for the sparse-column
             top-k result (row stride 32B-aligned for DeepSelect).
+        topk_backend: Backend for FP32 logits; BF16 always uses DeepSelect.
 
     """
     rows, width = logits.shape
-    assert logits.dtype == torch.bfloat16 and width >= topk_tokens
+    assert logits.dtype in (torch.bfloat16, torch.float32) and width >= topk_tokens
     assert end.dtype == torch.int32 and end.shape == (rows,)
     cols = col_indices[:rows]
-    deep_select_topk(logits, topk_tokens, end=end, output_idx=cols)
+    if logits.dtype == torch.bfloat16:
+        deep_select_topk(logits, topk_tokens, end=end, output_idx=cols)
+    else:
+        get_indexer_topk(topk_backend)(
+            logits, end[:, None], 1, cols, topk_tokens, width
+        )
     _sparse_topk_remap_kernel[(rows,)](
         cols,
         cols.stride(0),
@@ -403,7 +410,7 @@ def sparse_mqa_logits_prefill_chunk(
 
 def sparse_mqa_logits_paged_decode(
     q: torch.Tensor,
-    q_scale: torch.Tensor,
+    q_scale: torch.Tensor | None,
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
     context_lens: torch.Tensor,
@@ -420,6 +427,7 @@ def sparse_mqa_logits_paged_decode(
     end: torch.Tensor,
     col_indices: torch.Tensor,
     kernel_metadata: torch.Tensor | None = None,
+    topk_backend: str = "auto",
 ) -> torch.Tensor:
     """Sparse-MQA logits + top-k for paged decode rows.
 
@@ -428,10 +436,11 @@ def sparse_mqa_logits_paged_decode(
 
     Args:
         q: [rows, 1, H, D] Q values (MXFP4 viewed as int8, or FP8 e4m3).
-        q_scale: [rows, 1, H] int32 packed UE8M0 Q scales.
+        q_scale: [rows, 1, H] int32 packed UE8M0 Q scales on SM100; None on
+            SM90, where the FP8 Q scale is folded into the weights.
         kv_cache: 4D [num_pages, page_kv, 1, head_bytes] uint8 fused cache
-            view; the page stride must be 256B-aligned.
-        weights: [rows, H] bf16 per-head weights.
+            view; page strides need 256B alignment on SM100, 4B on SM90.
+        weights: [rows, H] bf16 (SM100) or fp32 (SM90) per-head weights.
         context_lens: [rows] int32 per-row (compressed) context lengths.
         block_table: [rows, P] int32 per-row page table, ``stride(-1) == 1``.
         row_indices: [rows] int32 row -> request map (pairing only affects
@@ -446,6 +455,7 @@ def sparse_mqa_logits_paged_decode(
         end: Caller-owned scratch.
         col_indices: Caller-owned scratch.
         kernel_metadata: See `sparse_mqa_logits_prefill_chunk`.
+        topk_backend: Backend for SM90 FP32 logits.
 
     Returns:
         The DeepGEMM schedule metadata used, for reuse by later layers.
@@ -453,8 +463,9 @@ def sparse_mqa_logits_paged_decode(
     """
     rows = q.shape[0]
     page_kv = kv_cache.shape[1]
-    assert weights.dtype == torch.bfloat16, weights.dtype
-    assert kv_cache.stride(0) % 256 == 0, (
+    sm90 = q_scale is None
+    assert weights.dtype == (torch.float32 if sm90 else torch.bfloat16)
+    assert sm90 or kv_cache.stride(0) % 256 == 0, (
         "paged cache page stride must be 256B-aligned: "
         f"shape={tuple(kv_cache.shape)} stride={kv_cache.stride()}"
     )
@@ -479,6 +490,7 @@ def sparse_mqa_logits_paged_decode(
             sparse_indices,
             q.dtype,
             sparse_block_kv,
+            valid_sparse_tokens=end if sm90 else None,
         )
     logits = fp8_fp4_paged_sparse_mqa_logits(
         (q, q_scale),
@@ -497,5 +509,6 @@ def sparse_mqa_logits_paged_decode(
         topk_tokens,
         topk_indices,
         col_indices=col_indices,
+        topk_backend=topk_backend,
     )
     return kernel_metadata

@@ -168,6 +168,7 @@ steps:
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - vllm/models/deepseek_v4/nvidia/
@@ -179,6 +180,9 @@ steps:
   - tests/models/test_deepseek_v4_mega_moe.py
   - vllm/model_executor/kernels/attention/dsa/
   - vllm/model_executor/layers/sparse_mqa_indexer.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/sparse_indexer.py
+  - vllm/models/deepseek_v41/attention.py
   - tests/model_executor/layers/test_mla_short_prefill_indexer.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
@@ -639,6 +643,12 @@ steps:
   - tests/kernels/moe/test_deepgemm.py
   - tests/kernels/moe/test_batched_deepgemm.py
   - tests/kernels/attention/test_deepgemm_attention.py
+  - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+  - vllm/model_executor/kernels/attention/dsa/
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backends/mla/sparse_indexer.py
+  - tests/v1/attention/test_indexer_native_next_n.py
+  - vllm/models/deepseek_v41/attention.py
   - tests/quantization/test_cutlass_w4a16.py
   commands:
     - python3 ../tools/check_wheel_deepgemm.py
@@ -646,6 +656,8 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
+    - pytest -v -s model_executor/layers/test_mla_short_prefill_indexer.py -k sm90_sparse_decode
+    - pytest -v -s v1/attention/test_indexer_native_next_n.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
 - label: ":nvidia: (B200) MiniMax-M3 Attention Kernels"

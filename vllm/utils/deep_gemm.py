@@ -198,6 +198,7 @@ _fp8_fp4_sparse_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_fp4_paged_sparse_mqa_logits_impl: Callable[..., Any] | None = None
 _get_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_paged_sparse_mqa_logits_metadata_impl: Callable[..., Any] | None = None
+_is_sm90_paged_sparse_mqa_logits_supported_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _mega_mhc_impl: Callable[..., Any] | None = None
 _bf16_mega_gate_impl: Callable[..., Any] | None = None
@@ -276,6 +277,7 @@ def _lazy_init() -> None:
     global _fp8_fp4_sparse_mqa_logits_impl, _fp8_fp4_paged_sparse_mqa_logits_impl
     global _get_sparse_mqa_logits_metadata_impl
     global _get_paged_sparse_mqa_logits_metadata_impl
+    global _is_sm90_paged_sparse_mqa_logits_supported_impl
     global _tf32_hc_prenorm_gemm_impl, _mega_mhc_impl
     global _bf16_mega_gate_impl
     global _get_mn_major_tma_aligned_tensor_impl
@@ -341,7 +343,7 @@ def _lazy_init() -> None:
     _get_paged_mqa_logits_metadata_impl = getattr(
         _dg, "get_paged_mqa_logits_metadata", None
     )
-    # Sparse-indexer kernels (DeepGEMM >= 2.8, SM100 only).
+    # Sparse-indexer kernels; SM90 support has a separate capability query.
     _fp8_fp4_sparse_mqa_logits_impl = getattr(_dg, "fp8_fp4_sparse_mqa_logits", None)
     _fp8_fp4_paged_sparse_mqa_logits_impl = getattr(
         _dg, "fp8_fp4_paged_sparse_mqa_logits", None
@@ -351,6 +353,9 @@ def _lazy_init() -> None:
     )
     _get_paged_sparse_mqa_logits_metadata_impl = getattr(
         _dg, "get_paged_sparse_mqa_logits_metadata", None
+    )
+    _is_sm90_paged_sparse_mqa_logits_supported_impl = getattr(
+        _dg, "is_sm90_paged_sparse_mqa_logits_supported", None
     )
     _tf32_hc_prenorm_gemm_impl = getattr(_dg, "tf32_hc_prenorm_gemm", None)
     _mega_mhc_impl = getattr(_dg, "mega_mhc", None)
@@ -834,13 +839,31 @@ def fp8_fp4_paged_mqa_logits(
 
 def has_deep_gemm_sparse_mqa() -> bool:
     """Whether the installed DeepGEMM provides the sparse-indexer kernels
-    (``fp8_fp4_(paged_)sparse_mqa_logits``, added in DeepGEMM 2.8, SM100-only)."""
+    (``fp8_fp4_(paged_)sparse_mqa_logits``). SM90 needs its capability check too.
+    """
     _lazy_init()
     return (
         _fp8_fp4_sparse_mqa_logits_impl is not None
         and _fp8_fp4_paged_sparse_mqa_logits_impl is not None
         and _get_sparse_mqa_logits_metadata_impl is not None
         and _get_paged_sparse_mqa_logits_metadata_impl is not None
+    )
+
+
+def is_sm90_paged_sparse_mqa_logits_supported(
+    num_heads: int,
+    head_dim: int,
+    page_kv: int,
+    sparse_block_kv: int,
+    qk_dtype: torch.dtype = torch.float8_e4m3fn,
+) -> bool:
+    """Check the loaded DeepGEMM's SM90 paged sparse kernel capability."""
+    _lazy_init()
+    return (
+        _is_sm90_paged_sparse_mqa_logits_supported_impl is not None
+        and _is_sm90_paged_sparse_mqa_logits_supported_impl(
+            num_heads, head_dim, page_kv, sparse_block_kv, qk_dtype
+        )
     )
 
 
@@ -897,6 +920,7 @@ def get_paged_sparse_mqa_logits_metadata(
     sparse_kv_block_indices: torch.Tensor,
     qk_dtype: torch.dtype,
     sparse_block_kv: int,
+    valid_sparse_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for `fp8_fp4_paged_sparse_mqa_logits`.
 
@@ -911,11 +935,19 @@ def get_paged_sparse_mqa_logits_metadata(
             block ids, [num_q_tokens, num_max_sparse_blocks], int32.
         qk_dtype: dtype of the packed Q values.
         sparse_block_kv: Tokens per sparse block, 8 or 16.
+        valid_sparse_tokens: SM90 only: [num_q_tokens] int32 valid column
+            counts, distinguishing empty rows from repeated block-zero padding.
 
     """
     _lazy_init()
     if _get_paged_sparse_mqa_logits_metadata_impl is None:
         return _missing()
+    # Older SM100-only builds do not accept the optional SM90 argument.
+    metadata_kwargs = (
+        {"valid_sparse_tokens": valid_sparse_tokens}
+        if valid_sparse_tokens is not None
+        else {}
+    )
     return _get_paged_sparse_mqa_logits_metadata_impl(
         context_lens,
         block_table,
@@ -924,6 +956,7 @@ def get_paged_sparse_mqa_logits_metadata(
         sparse_kv_block_indices,
         qk_dtype,
         sparse_block_kv,
+        **metadata_kwargs,
     )
 
 
@@ -969,7 +1002,7 @@ def fp8_fp4_sparse_mqa_logits(
 
 
 def fp8_fp4_paged_sparse_mqa_logits(
-    q: tuple[torch.Tensor, torch.Tensor],
+    q: tuple[torch.Tensor, torch.Tensor | None],
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
     metadata: torch.Tensor,
@@ -981,14 +1014,15 @@ def fp8_fp4_paged_sparse_mqa_logits(
     Args:
         q: ``(q_values, q_scale)``; q_values is [num_q_tokens, 1, H, D].
         kv_cache: Fused paged cache [num_pages, page_kv, 1, D' + 4] uint8,
-            page stride 256B-aligned.
-        weights: [num_q_tokens, H] ``torch.bfloat16``.
+            page stride 256B-aligned on SM100 or 4B-aligned on SM90.
+        weights: [num_q_tokens, H] bf16 on SM100; fp32 on SM90, where the
+            FP8 Q scale is folded into the weights and q_scale must be None.
         metadata: From `get_paged_sparse_mqa_logits_metadata`.
         num_max_sparse_blocks: Candidate blocks per row.
         sparse_block_kv: Tokens per sparse block, 8 or 16.
 
     Returns:
-        bf16 logits of shape
+        bf16 (SM100) or fp32 (SM90) logits of shape
         [num_q_tokens, num_max_sparse_blocks * sparse_block_kv].
 
     """

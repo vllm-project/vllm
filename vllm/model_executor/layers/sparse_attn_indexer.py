@@ -38,6 +38,9 @@ from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
     get_fused_mqa_topk_workspaces,
     use_fused_mqa_topk,
 )
+from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+    sparse_mqa_logits_paged_decode,
+)
 from vllm.model_executor.layers.indexer_topk import (
     RADIX_TOPK_WORKSPACE_SIZE,
     deep_select_topk,
@@ -68,6 +71,9 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
     tp_prefill_row_sharding_supported,
+)
+from vllm.v1.attention.backends.mla.sparse_indexer import (
+    DeepseekV41SparseIndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
@@ -970,6 +976,51 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        if (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+            and isinstance(attn_metadata_narrowed, DeepseekV41SparseIndexerMetadata)
+            and candidate_blocks is not None
+            and not candidate_write
+        ):
+            sparse_decode = attn_metadata_narrowed.sparse_decode
+            assert sparse_decode is not None and padded_q_scale is None
+            assert sparse_decode.block_table is not None
+            assert sparse_decode.row_indices is not None
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            decode_weights = weights[:num_padded_tokens]
+            if needs_padded_path:
+                decode_weights = pack_seq_triton(
+                    weights[:num_decode_tokens], decode_lens, pad_value=0
+                ).view(num_padded_tokens, -1)
+            sparse_decode.kernel_metadata = sparse_mqa_logits_paged_decode(
+                padded_q_quant_cast.view(num_padded_tokens, 1, *q_quant.shape[1:]),
+                None,
+                kv_cache,
+                decode_weights,
+                sparse_decode.row_ke,
+                sparse_decode.block_table,
+                sparse_decode.row_indices,
+                candidate_blocks[:num_padded_tokens],
+                candidate_block_size,
+                attn_metadata_narrowed.sparse_block_kv,
+                topk_tokens,
+                topk_indices,
+                row_ks=sparse_decode.row_ks,
+                sparse_indices=sparse_decode.sparse_indices,
+                end=sparse_decode.end,
+                col_indices=sparse_decode.col_indices,
+                kernel_metadata=sparse_decode.kernel_metadata,
+                topk_backend=topk_backend,
+            )
+            if needs_padded_path:
+                topk_indices = unpack_seq_triton(
+                    topk_indices.view(batch_size, next_n, topk_tokens), decode_lens
+                )
+                topk_indices_buffer[: topk_indices.shape[0], :topk_tokens] = (
+                    topk_indices
+                )
+            return topk_indices_buffer
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")

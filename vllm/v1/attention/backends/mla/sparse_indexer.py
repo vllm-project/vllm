@@ -23,12 +23,17 @@ from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
     pick_sparse_block_kv,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+from vllm.utils.deep_gemm import (
+    has_deep_gemm_sparse_mqa,
+    is_sm90_paged_sparse_mqa_logits_supported,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
+    dsa_indexer_uses_fp4,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -106,11 +111,15 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
                 f"{prefix} requires a two-level (candidate block) indexer model "
                 "such as DeepSeek-V4.1."
             )
-        if not (
+        self.sm90_decode_only = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+        )
+        if not self.sm90_decode_only and not (
             current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)
         ):
-            raise ValueError(f"{prefix} requires an SM100-class GPU.")
+            raise ValueError(f"{prefix} requires an SM90- or SM100-class GPU.")
         if not has_deep_gemm_sparse_mqa():
             raise ValueError(
                 f"{prefix} requires DeepGEMM >= 2.8 "
@@ -119,24 +128,6 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         if self.dcp_world_size > 1 or self.use_pcp:
             raise NotImplementedError(
                 f"{prefix} is not supported with decode/prefill context parallel."
-            )
-        if not self.supports_varlen:
-            raise ValueError(
-                f"{prefix} requires the varlen paged MQA logits decode layout."
-            )
-        # The top-k runs on the kernels' bf16 logits with DeepSelect; there is
-        # no fp32 fallback, so the other top-k backends cannot be honored.
-        topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
-        if not has_deep_select():
-            raise ValueError(
-                f"{prefix} requires the DeepSelect top-k extension "
-                "(vllm._deepselect_C) for this GPU."
-            )
-        if topk_backend not in ("auto", "deep_select"):
-            raise ValueError(
-                f"{prefix} uses DeepSelect for the top-k; "
-                f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
-                "is not supported with it."
             )
         self.sparse_block_kv = pick_sparse_block_kv(candidate_block_size)
         if kv_cache_spec.block_size % self.sparse_block_kv != 0:
@@ -148,15 +139,19 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             candidate_block_size // self.sparse_block_kv
         )
         num_sparse_cols = self.num_sparse_blocks * self.sparse_block_kv
-        check_deep_select_layout(num_sparse_cols, topk_tokens)
-        # Sparse logits are bf16 [rows, num_sparse_cols]; make the prefill
-        # chunker (which budgets fp32 [rows, seq_len]) size chunks as if every
-        # row were this wide.
-        self.min_split_seq_len = (num_sparse_cols * 2 + 3) // 4
+        self._validate_kernel_config(
+            vllm_config, kv_cache_spec, num_sparse_cols, topk_tokens
+        )
+        if not self.sm90_decode_only:
+            # Budget the SM100 sparse prefill's BF16 logits in FP32 units.
+            self.min_split_seq_len = (num_sparse_cols * 2 + 3) // 4
 
-        # Rows are indexed by batch token (decode rows first, then prefill
-        # chunks by token range), like ``arange_buffer``.
-        max_rows = self.arange_buffer.shape[0]
+        # Rows are indexed by batch token; SM90 only needs decode capacity.
+        max_rows = (
+            self.expanded_block_table_buffer.shape[0]
+            if self.sm90_decode_only
+            else self.arange_buffer.shape[0]
+        )
         int32 = dict(dtype=torch.int32, device=device)
         self.sparse_indices_buffer = torch.zeros(
             (max_rows, self.num_sparse_blocks), **int32
@@ -166,23 +161,118 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
         self.zero_row_ks = torch.zeros(max_rows, **int32)
         logger.info_once(
             "DeepSeek V4.1 indexer: candidate consumers score only the candidate "
-            "blocks with DeepGEMM sparse MQA logits (%d sparse blocks of %d "
+            "blocks during %s with DeepGEMM sparse MQA logits (%d sparse blocks of %d "
             "tokens per row).",
+            "decode" if self.sm90_decode_only else "prefill/decode",
             self.num_sparse_blocks,
             self.sparse_block_kv,
         )
 
+    def _validate_kernel_config(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+        num_sparse_cols: int,
+        topk_tokens: int,
+    ) -> None:
+        prefix = "attention_config.indexer_sparse_logits"
+        topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+        if self.sm90_decode_only:
+            hf_config = vllm_config.model_config.hf_text_config
+            supports_fp8_sparse = not dsa_indexer_uses_fp4(
+                vllm_config
+            ) and is_sm90_paged_sparse_mqa_logits_supported(
+                hf_config.index_n_heads,
+                hf_config.index_head_dim,
+                kv_cache_spec.num_states,
+                self.sparse_block_kv,
+            )
+            if not supports_fp8_sparse:
+                raise ValueError(
+                    f"{prefix} on SM90 requires FP8 H=32, D=128, 32/64-token "
+                    "cache pages and DeepGEMM with SM90 paged sparse support."
+                )
+            if topk_backend not in ("auto", "persistent", "cooperative"):
+                raise ValueError(
+                    f"{prefix} on SM90 supports auto, persistent or cooperative "
+                    f"top-k, got {topk_backend!r}."
+                )
+            if (
+                not 0 < self.num_sparse_blocks <= 4096
+                or num_sparse_cols < topk_tokens
+                or topk_tokens not in (512, 1024, 2048)
+            ):
+                raise ValueError(f"{prefix}: unsupported SM90 candidate/top-k size.")
+            return
+
+        if not self.supports_varlen:
+            raise ValueError(
+                f"{prefix} requires the varlen paged MQA logits decode layout."
+            )
+        if not has_deep_select():
+            raise ValueError(
+                f"{prefix} requires the DeepSelect top-k extension "
+                "(vllm._deepselect_C) for this GPU."
+            )
+        if topk_backend not in ("auto", "deep_select"):
+            raise ValueError(
+                f"{prefix} uses DeepSelect for the top-k; "
+                f"kernel_config.sparse_indexer_topk_backend='{topk_backend}' "
+                "is not supported with it."
+            )
+        check_deep_select_layout(num_sparse_cols, topk_tokens)
+
     def _prefill_split_seq_lens(self, seq_lens_cpu: torch.Tensor) -> torch.Tensor:
+        if self.sm90_decode_only:
+            return seq_lens_cpu
         return seq_lens_cpu.clamp(min=self.min_split_seq_len)
 
-    def _rows(self, start: int, end: int, row_ks, row_ke, **kwargs):
+    def _rows(
+        self,
+        start: int,
+        end: int,
+        *,
+        row_ks: torch.Tensor,
+        row_ke: torch.Tensor,
+        block_table: torch.Tensor | None = None,
+        row_indices: torch.Tensor | None = None,
+    ) -> SparseMQARowsMetadata:
         return SparseMQARowsMetadata(
             row_ks=row_ks,
             row_ke=row_ke,
             sparse_indices=self.sparse_indices_buffer[start:end],
             end=self.end_buffer[start:end],
             col_indices=self.col_indices_buffer[start:end],
-            **kwargs,
+            block_table=block_table,
+            row_indices=row_indices,
+        )
+
+    def _decode_rows(
+        self, decode: DeepSeekV32IndexerDecodeMetadata
+    ) -> SparseMQARowsMetadata:
+        num_requests, next_n = decode.seq_lens.shape
+        num_rows = num_requests * next_n
+        block_table = decode.block_table
+        if self.sm90_decode_only and next_n > 1:
+            # Dense source layers keep their native [B, next_n] layout.
+            # Expand the page table once per step for all sparse consumers.
+            block_table = self.expanded_block_table_buffer[:num_rows]
+            block_table.view(num_requests, next_n, -1).copy_(
+                decode.block_table[:, None, :]
+            )
+        else:
+            assert next_n == 1 and not decode.requires_padding
+        assert block_table.shape[0] == num_rows
+        row_indices = decode.indices
+        if row_indices is None:
+            row_indices = self.arange_buffer[:num_rows]
+        return self._rows(
+            0,
+            num_rows,
+            row_ks=self.zero_row_ks[:num_rows],
+            row_ke=decode.seq_lens.view(-1),
+            block_table=block_table,
+            row_indices=row_indices,
         )
 
     def build(
@@ -197,25 +287,8 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             sparse_block_kv=self.sparse_block_kv,
         )
         if base.decode is not None:
-            decode = base.decode
-            rows = decode.seq_lens.shape[0]
-            # The varlen layout flattens every query to one row, so the base
-            # decode tensors are already per row.
-            assert decode.seq_lens.shape[1] == 1 and not decode.requires_padding
-            assert decode.block_table.shape[0] == rows
-            metadata.sparse_decode = self._rows(
-                0,
-                rows,
-                row_ks=self.zero_row_ks[:rows],
-                row_ke=decode.seq_lens.view(-1),
-                block_table=decode.block_table,
-                row_indices=(
-                    decode.indices
-                    if decode.indices is not None
-                    else self.arange_buffer[:rows]
-                ),
-            )
-        if base.prefill is not None:
+            metadata.sparse_decode = self._decode_rows(base.decode)
+        if base.prefill is not None and not self.sm90_decode_only:
             metadata.sparse_prefill = [
                 self._rows(
                     chunk.token_start,

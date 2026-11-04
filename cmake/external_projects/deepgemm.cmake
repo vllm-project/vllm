@@ -189,7 +189,9 @@ if(DEEPGEMM_ARCHS)
   # DeepGEMM's own CUDA headers
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/deep_gemm/include/"
     DESTINATION vllm/third_party/deep_gemm/include
-    COMPONENT _deep_gemm_C)
+    COMPONENT _deep_gemm_C
+    PATTERN "cute" EXCLUDE
+    PATTERN "cutlass" EXCLUDE)
 
   # CUTLASS and CuTe headers (vendored for JIT, separate from vLLM's CUTLASS)
   install(DIRECTORY "${deepgemm_SOURCE_DIR}/third-party/cutlass/include/"
