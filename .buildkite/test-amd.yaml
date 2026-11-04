@@ -126,6 +126,7 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - .buildkite/scripts/rocm/build.sh
+  - .buildkite/scripts/rocm/keys.sh
   - .buildkite/scripts/rocm/publish.sh
   - tools/vllm-rocm/therock_wheels.py
   - tests/tools/test_docker_build_metadata_args.py

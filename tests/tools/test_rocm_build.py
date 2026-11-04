@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ROCm image keys in .buildkite/scripts/rocm/build.sh must cover every
+"""The ROCm image keys in .buildkite/scripts/rocm/keys.sh must cover every
 build-context file the keyed Dockerfile parts read, or editing that file would
 ship a stale image."""
 
