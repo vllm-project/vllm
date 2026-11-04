@@ -158,3 +158,19 @@ The interface for the model/module may change during vLLM's development. If you 
     - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
     - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.
     - `prompt` in `Platform.validate_request` is deprecated. It has been removed in v0.18.0.
+
+
+## Reusing Worker orchestration
+
+Device plugins inheriting `vllm.v1.worker.gpu_worker.Worker` can override
+`_make_elastic_ep_executor` to avoid importing CUDA-only elastic EP dependencies.
+The returned executor must implement `execute` and `shutdown`; unsupported
+execution should raise explicitly.
+
+`_before_execute_model` runs before waiting for previous pipeline sends, including
+empty batches. `_get_pp_all_gather_group` selects the group used for both receive
+and send. `_after_pp_send` handles platform-specific connector output after sends
+are enqueued. The default implementations preserve GPU behavior, including V2
+pooling. These hooks let plugins retain the parent execution loop and decorators;
+they do not make device initialization, ModelRunner contracts or CUDA features
+portable automatically.

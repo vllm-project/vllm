@@ -536,3 +536,94 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+@pytest.mark.parametrize("forward", [False, True])
+def test_platform_worker_inherits_pp_orchestration(monkeypatch, forward):
+    """A platform selects transport and consumes connector output without copying
+    the Worker execute loop. The ordinary constructor still owns common state.
+    """
+    from vllm.config import DeviceConfig, VllmConfig
+    from vllm.sequence import IntermediateTensors
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    class Handle:
+        def __init__(self):
+            self.waited = False
+
+        def wait(self):
+            self.waited = True
+
+    class Transport:
+        is_first_rank = False
+        is_last_rank = False
+
+        def __init__(self):
+            self.received = False
+            self.sent = None
+            self.metadata = Handle()
+            self.device = Handle()
+
+        def irecv_tensor_dict(self, *, all_gather_group):
+            assert all_gather_group is self
+            self.received = True
+            return {"hidden": torch.ones(2)}, [], []
+
+        def isend_tensor_dict(self, tensors, *, all_gather_group):
+            assert all_gather_group is self
+            self.sent = tensors["hidden"].clone()
+            return [self.metadata, self.device]
+
+    class Runner(torch.nn.Module):
+        is_pooling_model = False
+
+        def execute_model(self, scheduler_output, intermediate_tensors):
+            hidden = (
+                intermediate_tensors.tensors["hidden"]
+                if intermediate_tensors is not None
+                else torch.zeros(2)
+            )
+            return IntermediateTensors({"hidden": hidden + 2})
+
+    class Executor:
+        def shutdown(self):
+            pass
+
+    class PlatformWorker(gpu_worker.Worker):
+        def _make_elastic_ep_executor(self):
+            return Executor()
+
+        def init_device(self):
+            self.model_runner = Runner()
+            self.iterations = 0
+            self.connector_outputs = 0
+
+        def _before_execute_model(self, scheduler_output):
+            self.iterations += 1
+
+        def _get_pp_all_gather_group(self):
+            return transport
+
+        def _after_pp_send(self, output):
+            self.connector_outputs += 1
+            return None
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    worker = PlatformWorker(config, 0, 0, "env://")
+    worker.init_device()
+    transport = Transport()
+    # The transport is an external distributed service; the worker and runner
+    # lifecycle above execute their real constructors.
+    monkeypatch.setattr(gpu_worker, "get_pp_group", lambda: transport)
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.total_num_scheduled_tokens = int(forward)
+    assert worker.execute_model(scheduler_output) is None
+    torch.testing.assert_close(
+        transport.sent, torch.full((2,), 3.0 if forward else 2.0)
+    )
+    assert transport.received is forward
+    assert worker.iterations == worker.connector_outputs == 1
+    worker.execute_model(scheduler_output)
+    assert transport.device.waited
+    assert not transport.metadata.waited
