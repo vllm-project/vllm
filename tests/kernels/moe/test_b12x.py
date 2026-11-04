@@ -616,6 +616,7 @@ def test_explicit_b12x_nvfp4_selection(
 def test_csf_scales_stay_resident_only_on_b12x_w4a4(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", True)
     config = make_dummy_moe_config(hidden_dim=2560, intermediate_size=640)
     with_csf = SimpleNamespace(Nvfp4CsfWeights=object)
     monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: with_csf)
@@ -627,6 +628,7 @@ def test_csf_scales_stay_resident_only_on_b12x_w4a4(
     monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", False)
     assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
     # A b12x without the CSF API decodes the scales at load.
+    monkeypatch.setattr(nvfp4_oracle.envs, "VLLM_B12X_MOE_CSF_RESIDENT_SCALES", True)
     monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: SimpleNamespace())
     assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
 
