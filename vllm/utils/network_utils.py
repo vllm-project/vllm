@@ -355,10 +355,14 @@ def make_zmq_socket(
     linger: int | None = None,
     router_handover: bool = False,
     listener: socket.socket | None = None,
+    heartbeat_ivl_ms: int | None = None,
+    heartbeat_timeout_ms: int | None = None,
 ) -> zmq.Socket | zmq.asyncio.Socket:  # type: ignore[name-defined]
     """Make a ZMQ socket with the proper bind/connect semantics.
 
     When supplied, ``listener`` is detached and its fd moves to libzmq.
+    Heartbeat options are set here, before connecting: a connection keeps the
+    options it started with.
     """
     socket = ctx.socket(socket_type)
     buf_size = _get_zmq_socket_buffer_size()
@@ -385,6 +389,12 @@ def make_zmq_socket(
 
     if linger is not None:
         socket.setsockopt(zmq.LINGER, linger)
+
+    if heartbeat_ivl_ms is not None:
+        socket.setsockopt(zmq.HEARTBEAT_IVL, heartbeat_ivl_ms)
+
+    if heartbeat_timeout_ms is not None:
+        socket.setsockopt(zmq.HEARTBEAT_TIMEOUT, heartbeat_timeout_ms)
 
     if socket_type == zmq.XPUB:
         socket.setsockopt(zmq.XPUB_VERBOSE, True)
