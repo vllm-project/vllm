@@ -1313,7 +1313,7 @@ class Gemma4ForConditionalGeneration(
         # [0, 1] floats. Patches are channel-last, so normalize per pixel.
         num_channels = getattr(self.vision_tower.config, "num_channels", 3)
         pixel_values = self.vision_input_norm(
-            pixel_values.reshape(-1, num_channels), torch.float32
+            pixel_values.reshape(-1, num_channels), self.model_dtype
         ).view(pixel_values.shape)
         return self.vision_tower.patch_embedder(
             pixel_values, pixel_position_ids, padding_positions
