@@ -114,6 +114,13 @@ class QuantSpec:
     activation: QuantKeyField = _UNSET
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
+    hadamard_size: int | None = None
+    """Block size (a power of two) of an orthonormal Hadamard rotation applied
+    along the input dimension of both the weight and the activation before
+    quantization (see `InputHadamardLinearMethod`). The GEMM result is
+    unchanged up to quantization error, which the rotation shrinks by spreading
+    outliers across each block. Linear layers only; validated with MXFP4."""
+
     fields_set: frozenset[str] = field(init=False, repr=False, compare=False)
     """Names explicitly provided when constructing this spec."""
 
@@ -124,6 +131,13 @@ class QuantSpec:
             return _WEIGHT_QUANT_KEY_NAMES[v]
         return v
 
+    @field_validator("hadamard_size")
+    @classmethod
+    def _check_hadamard_size(cls, size: int | None) -> int | None:
+        if size is not None and (size <= 0 or size & (size - 1)):
+            raise ValueError(f"hadamard_size must be a power of two, got {size}")
+        return size
+
     def __post_init__(self) -> None:
         """Record the explicitly set fields; unset ones become `None`."""
         fields_set = set()
@@ -132,18 +146,25 @@ class QuantSpec:
                 setattr(self, field_name, None)
             else:
                 fields_set.add(field_name)
+        # `None` means "no rotation", so a set size is always explicit.
+        if self.hadamard_size is not None:
+            fields_set.add("hadamard_size")
         self.fields_set = frozenset(fields_set)
 
     def __str__(self) -> str:
         """The spec as configured, e.g. `mxfp4` or
         `{"weight":"mxfp4","activation":null}`."""
         if "activation" not in self.fields_set:
-            return str(quant_key_name(self.weight))
-        spec = {
-            "weight": quant_key_name(self.weight),
-            "activation": quant_key_name(self.activation),
-        }
-        return json.dumps(spec, separators=(",", ":"))
+            name = str(quant_key_name(self.weight))
+        else:
+            spec = {
+                "weight": quant_key_name(self.weight),
+                "activation": quant_key_name(self.activation),
+            }
+            name = json.dumps(spec, separators=(",", ":"))
+        if self.hadamard_size is not None:
+            name = f"{name}_hadamard{self.hadamard_size}"
+        return name
 
 
 @config
@@ -265,6 +286,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "mxfp4": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
+    ),
+    # MXFP4 linear with a 32-wide Hadamard rotation of weights and activations;
+    # MoE stays unquantized (no `moe` field).
+    "mxfp4_hadamard32": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     # TODO: this is broken since at least #41566, as Int8OnlineMoEMethod

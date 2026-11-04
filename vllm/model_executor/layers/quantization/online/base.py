@@ -32,6 +32,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.quantization.input_hadamard import (
+    InputHadamardLinearMethod,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -96,6 +99,9 @@ _ONLINE_LINEAR_METHODS: dict[QuantKey, type] = {
     kMxfp4Static: Mxfp4OnlineLinearMethod,
 }
 
+# Online linear methods validated with `QuantSpec.hadamard_size`.
+_ONLINE_HADAMARD_LINEAR_METHODS: frozenset[type] = frozenset({Mxfp4OnlineLinearMethod})
+
 _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kFp8StaticTensorSym: Fp8PerTensorOnlineMoEMethod,
     kFp8Static128BlockSym: Fp8PerBlockOnlineMoEMethod,
@@ -127,10 +133,10 @@ ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
 def _resolved_target(target: str | QuantSpec) -> tuple:
     """Comparable identity of a `quantization_config.targets` value.
 
-    Returns one `(weight, activation, activation was explicit)` triple per layer
-    kind (linear, MoE), or `None` for a kind the target does not define: a
-    shorthand name and the equivalent `QuantSpec` therefore compare equal, while
-    an omitted activation still differs from an explicit `null`.
+    Returns one `(weight, activation, activation was explicit, hadamard_size)`
+    tuple per layer kind (linear, MoE), or `None` for a kind the target does not
+    define: a shorthand name and the equivalent `QuantSpec` therefore compare
+    equal, while an omitted activation still differs from an explicit `null`.
     """
     if isinstance(target, str):
         shorthand = _ONLINE_SHORTHANDS[target]
@@ -140,7 +146,12 @@ def _resolved_target(target: str | QuantSpec) -> tuple:
     return tuple(
         None
         if spec is None
-        else (spec.weight, spec.activation, "activation" in spec.fields_set)
+        else (
+            spec.weight,
+            spec.activation,
+            "activation" in spec.fields_set,
+            spec.hadamard_size,
+        )
         for spec in specs
     )
 
@@ -283,6 +294,17 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"weight={spec.weight} is not supported; supported weight "
                 f"keys: {sorted(str(k) for k in table)}"
             )
+        # TODO: InputHadamardLinearMethod is format-agnostic; allow the
+        # remaining linear methods and MoE once validated.
+        if (
+            spec.hadamard_size is not None
+            and cls not in _ONLINE_HADAMARD_LINEAR_METHODS
+        ):
+            raise NotImplementedError(
+                f"hadamard_size is not yet supported for online {cls.__name__}; "
+                "supported: "
+                f"{sorted(c.__name__ for c in _ONLINE_HADAMARD_LINEAR_METHODS)}"
+            )
         return cls
 
     def resolve_quant_method_cls(
@@ -352,6 +374,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 else quant_method_cls.default_activation_quant_key,
                 explicit=explicit,
             ),
+            # Carried so `get_quant_method` can wrap the method in
+            # `InputHadamardLinearMethod`.
+            hadamard_size=quant_spec.hadamard_size,
         )
 
         return (
@@ -470,7 +495,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 )
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            return quant_method_cls(activation_quant_key=quant_spec.activation)
+            quant_method = quant_method_cls(activation_quant_key=quant_spec.activation)
+            if quant_spec.hadamard_size is not None:
+                return InputHadamardLinearMethod(
+                    quant_method, quant_spec.hadamard_size, rotate_weight=True
+                )
+            return quant_method
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
