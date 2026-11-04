@@ -1001,7 +1001,9 @@ class HiSparseCoordinator:
                 else:
                     continue
                 dropped.append(page_idx)
-            manager.block_pool.unpin_blocks(released, self._on_block_reused)
+            if released:
+                assert self.gpu_pool is not None
+                self.gpu_pool.unpin_blocks(released, self._on_block_reused)
             manager.drop_resident_pages(request_id, dropped)
 
 

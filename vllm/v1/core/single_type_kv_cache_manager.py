@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -2616,9 +2616,11 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         return block
 
     def drop_resident_pages(
-        self, request_id: str, block_indices: Iterable[int]
+        self, request_id: str, block_indices: Sequence[int]
     ) -> None:
         """Stop reading resident pages from the GPU."""
+        if not block_indices:
+            return
         changes = self.residency_changes.setdefault(request_id, {})
         for block_idx in block_indices:
             changes[block_idx] = self._null_block

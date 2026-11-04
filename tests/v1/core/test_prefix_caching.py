@@ -1475,6 +1475,30 @@ def test_hisparse_clean_pages_unpin_in_write_completion_order():
     assert free_ids[-len(expected) :] == expected
 
 
+def test_hisparse_freed_request_spills_are_reused_newest_first():
+    """Acked spills of a freed request free their blocks as if one at a time."""
+    manager = make_hisparse_kv_cache_manager(
+        64, 32, enable_caching=True, num_resident_groups=2
+    )
+    coordinator = get_hisparse_coordinator(manager)
+    num_tokens = 4 * HISPARSE_BLOCK_SIZE
+    request = make_request("a", list(range(num_tokens)), HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_tokens) is not None
+    spills = coordinator.build_offload_command().page_transfers
+    assert len(spills) == 4
+    manager.free(request)
+
+    counts = {spill.transfer_id: 1 for spill in spills}
+    coordinator.update_spills(counts, counts)
+
+    spilled = [block_id for spill in spills for block_id in spill.resident_block_ids]
+    free_ids = [
+        block.block_id
+        for block in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ]
+    assert free_ids[: len(spilled)] == spilled[::-1]
+
+
 def test_hisparse_finished_request_leaves_free_copies():
     """Clean pages of a finished request are free-queue blocks, not pins."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
