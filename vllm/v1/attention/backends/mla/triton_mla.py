@@ -33,9 +33,6 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import get_cdna_version
-
 logger = init_logger(__name__)
 
 # num_kv_splits selection (shared by forward_mqa and the workspace reservation
@@ -74,6 +71,15 @@ def _reserve_attn_logits_workspace(
     )
 
 
+def _non_causal_multi_token_dcp_validated() -> bool:
+    """Non-causal multi-token DCP has only been validated on gfx942."""
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 3
+
+
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # forward_mqa flattens a uniform multi-token block to one decode row per
     # query token, so causal and non-causal blocks both take the decode path.
@@ -81,9 +87,9 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
     # Every row of a non-causal block has the same KV extent, so the
-    # rank-local seq_lens fully describe it under DCP. Only validated on gfx942.
+    # rank-local seq_lens fully describe it under DCP.
     supports_non_causal_multi_token_dcp: ClassVar[bool] = (
-        current_platform.is_rocm() and get_cdna_version() == 3
+        _non_causal_multi_token_dcp_validated()
     )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
