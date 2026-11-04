@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test MoonEP dispatch / prefetch / combine logic (BF16 PoC).
+"""Test MoonEP dispatch / prefetch / combine logic (BF16).
 
 Two paths, both compared against the pure-PyTorch reference MoE:
 - MoonEPPrepareAndFinalize + a reference segment-loop expert runner over
   MoonEP's expert-grouped ``[NvS, H]`` layout;
 - the full modular kernel, MoonEPPrepareAndFinalize + MoonEPExperts through
   FusedMoEKernel.
+Each rank owns only its ``epn = E / world_size`` experts, placed through
+``MoonEPExpertWeightPools`` exactly as the engine path does.
 Requires NVSwitch multicast capable GPUs.
 """
 
@@ -33,9 +35,9 @@ from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 if has_moonep():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.moonep import (
-        MoonEPExpertWeightLayout,
+        MoonEPExpertWeightPools,
+        MoonEPExpertWeights,
         MoonEPPrepareAndFinalize,
-        make_moonep_weight_layout,
     )
 
 requires_moonep = pytest.mark.skipif(
@@ -98,13 +100,13 @@ def reference_moonep_experts(
     hidden_nvsh: torch.Tensor,
     route_weights_nvs: torch.Tensor,
     cu_seqlens: torch.Tensor,
-    weight_layout: "MoonEPExpertWeightLayout",
+    weights: "MoonEPExpertWeights",
 ) -> torch.Tensor:
     """Segment loop over MoonEP's expert-grouped layout.
 
     ``prefetch_weight`` has already materialized redundant experts' weights
-    in rows ``[E, E+B)``, so every segment reads its own row. Route weights
-    are applied here; MoonEP's combine does the K-sum.
+    in rows ``[epn, 2 * epn)``, so every segment reads its own row. Route
+    weights are applied here; MoonEP's combine does the K-sum.
     """
     output = torch.empty_like(hidden_nvsh)
     prev = 0
@@ -112,9 +114,9 @@ def reference_moonep_experts(
         if cur == prev:
             continue
         x = hidden_nvsh[prev:cur]
-        gate = F.linear(x, weight_layout.full_gate_weight[row])
-        up = F.linear(x, weight_layout.full_up_weight[row])
-        y = F.linear(F.silu(gate) * up, weight_layout.full_down_weight[row])
+        gate = F.linear(x, weights.gate[row])
+        up = F.linear(x, weights.up[row])
+        y = F.linear(F.silu(gate) * up, weights.down[row])
         y = y * route_weights_nvs[prev:cur].to(dtype=y.dtype).unsqueeze(-1)
         output[prev:cur].copy_(y)
         prev = cur
@@ -130,8 +132,8 @@ def make_moonep_prepare_finalize(
     num_experts: int,
     topk: int,
     max_tokens_per_rank: int,
-    weight_layout: "MoonEPExpertWeightLayout",
-    pass_layout_to_pf: bool = True,
+    weights: "MoonEPExpertWeights",
+    pass_weights_to_pf: bool = True,
 ):
     from moonep._C import nvl_multicast_supported
 
@@ -148,7 +150,6 @@ def make_moonep_prepare_finalize(
             K=topk,
             E=num_experts,
             num_ep_ranks=pgi.world_size,
-            B=weight_layout.num_prefetch_slots,
             group=pg,
             explicitly_destroy=True,
         ),
@@ -159,8 +160,27 @@ def make_moonep_prepare_finalize(
         max_tokens_per_rank=max_tokens_per_rank,
         num_dispatchers=pgi.world_size,
         num_global_experts=num_experts,
-        weight_layout=weight_layout if pass_layout_to_pf else None,
+        expert_weights=weights if pass_weights_to_pf else None,
     )
+
+
+def place_local_experts(
+    pg: ProcessGroup,
+    pgi: ProcessGroupInfo,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple["MoonEPExpertWeightPools", "MoonEPExpertWeights"]:
+    """Place this rank's ``epn`` experts of the global ``w1``/``w2`` the way
+    the engine's weight conversion does."""
+    num_experts = w1.shape[0]
+    assert num_experts % pgi.world_size == 0
+    epn = num_experts // pgi.world_size
+    local = slice(pgi.rank * epn, (pgi.rank + 1) * epn)
+    pools = MoonEPExpertWeightPools(group=pg)
+    weights = pools.build_expert_weights(w1[local].contiguous(), w2[local].contiguous())
+    torch.testing.assert_close(weights.local_gate, w1[local, : w2.shape[2], :])
+    torch.testing.assert_close(weights.local_down, w2[local])
+    return pools, weights
 
 
 def moonep_moe_impl(
@@ -169,13 +189,12 @@ def moonep_moe_impl(
     test_tensors: TestTensors,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    num_prefetch_slots: int,
 ) -> torch.Tensor:
     config = test_tensors.config
     hidden_size = test_tensors.rank_tokens.shape[1]
     max_tokens_per_rank = 128 * ((config.m + 127) // 128)
 
-    weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
+    pools, weights = place_local_experts(pg, pgi, w1, w2)
     pool, pf = make_moonep_prepare_finalize(
         pg,
         pgi,
@@ -183,7 +202,7 @@ def moonep_moe_impl(
         config.num_experts,
         config.topk,
         max_tokens_per_rank,
-        weight_layout,
+        weights,
     )
     try:
         hidden_nvsh, _, _, _, route_weights_nvs = pf.prepare(
@@ -206,7 +225,7 @@ def moonep_moe_impl(
                 "no prefetch slot used despite heavy router skew"
             )
         expert_out = reference_moonep_experts(
-            hidden_nvsh, route_weights_nvs, pf.cu_seqlens, weight_layout
+            hidden_nvsh, route_weights_nvs, pf.cu_seqlens, weights
         )
         output = torch.empty_like(test_tensors.rank_tokens)
         pf.finalize(
@@ -221,6 +240,7 @@ def moonep_moe_impl(
         return output
     finally:
         pool.destroy()
+        pools.close()
 
 
 def _no_quant_config():
@@ -235,7 +255,6 @@ def moonep_modular_kernel_impl(
     test_tensors: TestTensors,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    num_prefetch_slots: int,
 ) -> torch.Tensor:
     """Full modular-kernel path: MoonEPPrepareAndFinalize + MoonEPExperts."""
     from tests.kernels.moe.utils import make_dummy_moe_config
@@ -248,9 +267,9 @@ def moonep_modular_kernel_impl(
     hidden_size = test_tensors.rank_tokens.shape[1]
     max_tokens_per_rank = 128 * ((config.m + 127) // 128)
 
-    weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
-    # weight_layout deliberately not passed to the P/F: the engine path
-    # resolves it through post_init_setup + the experts' weight hook.
+    pools, weights = place_local_experts(pg, pgi, w1, w2)
+    # weights deliberately not passed to the P/F: the engine path resolves
+    # them through post_init_setup + the experts' weight hook.
     pool, pf = make_moonep_prepare_finalize(
         pg,
         pgi,
@@ -258,8 +277,8 @@ def moonep_modular_kernel_impl(
         config.num_experts,
         config.topk,
         max_tokens_per_rank,
-        weight_layout,
-        pass_layout_to_pf=False,
+        weights,
+        pass_weights_to_pf=False,
     )
     try:
         moe_config = make_dummy_moe_config(
@@ -270,15 +289,15 @@ def moonep_modular_kernel_impl(
             max_num_tokens=max_tokens_per_rank,
         )
         experts = MoonEPExperts(moe_config=moe_config, quant_config=_no_quant_config())
-        # Stand-in for the layer carrying the layout, as
+        # Stand-in for the layer carrying the weights, as
         # convert_to_unquantized_kernel_format leaves it in the engine path.
-        fake_layer = types.SimpleNamespace(_moonep_weight_layout=weight_layout)
+        fake_layer = types.SimpleNamespace(_moonep_expert_weights=weights)
         experts.process_weights_after_loading(fake_layer)
         kernel = FusedMoEKernel(prepare_finalize=pf, fused_experts=experts)
         out = kernel.apply(
             hidden_states=test_tensors.rank_tokens,
-            w1=weight_layout.full_gate_weight,
-            w2=weight_layout.full_down_weight,
+            w1=weights.gate,
+            w2=weights.down,
             topk_weights=test_tensors.topk_weights,
             topk_ids=test_tensors.topk,
             activation=MoEActivation.SILU,
@@ -290,6 +309,7 @@ def moonep_modular_kernel_impl(
         return out
     finally:
         pool.destroy()
+        pools.close()
 
 
 def _moonep_moe(
@@ -297,7 +317,6 @@ def _moonep_moe(
     config: TestConfig,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    num_prefetch_slots: int,
     use_modular_kernel: bool,
 ):
     from vllm.v1.worker.workspace import init_workspace_manager
@@ -321,7 +340,7 @@ def _moonep_moe(
             apply_router_weights_on_input=config.apply_router_weight_on_input,
         )
         impl = moonep_modular_kernel_impl if use_modular_kernel else moonep_moe_impl
-        moonep_combined = impl(pg, pgi, test_tensors, w1, w2, num_prefetch_slots)
+        moonep_combined = impl(pg, pgi, test_tensors, w1, w2)
 
     torch.testing.assert_close(
         torch_combined,
@@ -329,6 +348,73 @@ def _moonep_moe(
         atol=6e-2,
         rtol=6e-2,
     )
+
+
+def _moonep_weight_pool_aliasing(pgi: ProcessGroupInfo, num_experts: int):
+    """Two same-shaped layers must own independent local weights but share
+    one physical prefetch pool, and the placed weights must outlive their
+    source tensors."""
+    device_idx = torch.accelerator.current_device_index()
+    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    epn = num_experts // pgi.world_size
+    n, k = 256, 512
+    pools = MoonEPExpertWeightPools(group=pg)
+    try:
+        layers = []
+        for seed in (1, 2):
+            set_random_seed(seed)
+            (_, w1, _, _), (_, w2, _, _) = make_test_weights(epn, n, k)
+            src1 = w1.to(device=device_idx)
+            src2 = w2.to(device=device_idx)
+            expected = (src1.clone(), src2.clone())
+            layers.append((pools.build_expert_weights(src1, src2), expected))
+            del src1, src2
+        torch.accelerator.empty_cache()
+        (a, exp_a), (b, exp_b) = layers
+
+        # One pool per projection, not per layer.
+        assert len(pools._pools) == 3
+        assert a.gate_prefetch_buffer is b.gate_prefetch_buffer
+
+        # Local rows survive the release of their source tensors and are
+        # independent between layers.
+        torch.testing.assert_close(a.local_gate, exp_a[0][:, :n, :])
+        torch.testing.assert_close(b.local_down, exp_b[1])
+        assert a.gate.data_ptr() != b.gate.data_ptr()
+        a.local_gate.fill_(3.0)
+        torch.testing.assert_close(b.local_gate, exp_b[0][:, :n, :])
+
+        # Prefetch rows are distinct virtual mappings of the same physical
+        # slots: a write through layer A is visible through layer B and
+        # through this rank's slice of the all-rank prefetch view.
+        for proj in ("gate", "up", "down"):
+            va, vb = getattr(a, proj), getattr(b, proj)
+            va[epn:].fill_(float(pgi.rank + 1))
+            torch.accelerator.synchronize()
+            assert torch.equal(vb[epn:], va[epn:])
+            assert torch.equal(
+                getattr(a, f"{proj}_prefetch_buffer")[pgi.rank], va[epn:]
+            )
+            assert va[epn:].data_ptr() != vb[epn:].data_ptr()
+        torch.distributed.barrier(group=pg)
+        # Every rank sees every other rank's slots through the all-rank view.
+        for r in range(pgi.world_size):
+            assert torch.all(a.gate_prefetch_buffer[r] == float(r + 1))
+        torch.distributed.barrier(group=pg)
+    finally:
+        pools.close()
+
+
+@pytest.mark.parametrize("num_experts", [32])
+@multi_gpu_test(num_gpus=2)
+@requires_moonep
+def test_moonep_weight_pool_aliasing(num_experts: int):
+    try:
+        parallel_launch(2, _moonep_weight_pool_aliasing, num_experts)
+    except Exception as exc:
+        if "MulticastNotAvailableError" in str(exc):
+            pytest.skip("NVSwitch multicast not available")
+        raise
 
 
 MNKs = [
@@ -343,7 +429,6 @@ MNKs = [
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("router_skew", [1.0, 8.0])
-@pytest.mark.parametrize("num_prefetch_slots", [4])
 @pytest.mark.parametrize("world_size", [2])
 @pytest.mark.parametrize("use_modular_kernel", [False, True])
 @multi_gpu_test(num_gpus=2)
@@ -355,7 +440,6 @@ def test_moonep_bf16_moe(
     num_experts: int,
     topk: int,
     router_skew: float,
-    num_prefetch_slots: int,
     world_size: int,
     use_modular_kernel: bool,
 ):
@@ -377,7 +461,6 @@ def test_moonep_bf16_moe(
             config,
             w1,
             w2,
-            num_prefetch_slots,
             use_modular_kernel,
         )
     except Exception as exc:
@@ -405,7 +488,7 @@ def test_moonep_input_weighted_moe(use_modular_kernel: bool):
         config.num_experts, config.n, config.k
     )
     try:
-        parallel_launch(2, _moonep_moe, config, w1, w2, 4, use_modular_kernel)
+        parallel_launch(2, _moonep_moe, config, w1, w2, use_modular_kernel)
     except Exception as exc:
         if "MulticastNotAvailableError" in str(exc):
             pytest.skip("NVSwitch multicast not available")
