@@ -144,6 +144,7 @@ Batch invariance has been tested and verified on the following models:
 - **Granite MoE SWA**: `ibm-granite/granite-swash-3b-a600m` (MoE + sliding-window attention; FLASH_ATTN and TRITON_ATTN backends; FLEX_ATTENTION and decode-vs-prefill test excluded due to per-layer SWA KV window differences)
 - **Granite SWA**: `ibm-granite/granite-swash-2b` (sliding-window attention; FLASH_ATTN and TRITON_ATTN backends)
 - **Qwen3-0.6B**: `Qwen/Qwen3-0.6B`
+- **LFM2 (MoE)**: `LiquidAI/LFM2-8B-A1B`
 
 Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
@@ -154,7 +155,7 @@ When batch invariance is enabled, vLLM:
 1. Uses deterministic kernel implementations for attention and other operations
 2. Ensures consistent numerical behavior across different batch sizes
 3. Disables certain optimizations that may introduce non-determinism
-4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (the 1-stage kernel is pinned, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
+4. Under tensor parallelism, keeps custom all-reduce on with a fixed reduction order (both custom kernels sum the ranks in the same order, and large inputs are reduced in fixed-size chunks), and disables FlashInfer, AITER and QuickReduce all-reduce
 5. On CUDA devices with tuned matmul table entries for the model's bf16 unquantized forward linear layers (Ada, Hopper, Blackwell),
    runs without `torch.compile` using breakable CUDA graphs so tile configs follow the runtime batch size; set `VLLM_USE_BREAKABLE_CUDAGRAPH=0` to opt out.
 6. Splits the LoRA shrink reduction into 8 fixed K chunks that are summed in a fixed order instead of with atomics
