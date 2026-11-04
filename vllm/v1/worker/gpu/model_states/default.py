@@ -229,6 +229,11 @@ class DefaultModelState(ModelState):
                 if self.mm_prefix_prompt_lens is not None
                 else None,
             )
+        dcp_local_seq_lens_cpu_upper_bound = None
+        if input_batch.pcp is not None:
+            dcp_local_seq_lens_cpu_upper_bound = (
+                input_batch.pcp.dcp_local_seq_lens_cpu_upper_bound
+            )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -243,7 +248,7 @@ class DefaultModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            dcp_local_seq_lens_cpu_upper_bound=input_batch.dcp_local_seq_lens_cpu_upper_bound,
+            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
             positions=input_batch.positions,
             is_prefilling=torch.from_numpy(input_batch.is_prefilling_np),
             mm_req_doc_ranges=req_doc_ranges,

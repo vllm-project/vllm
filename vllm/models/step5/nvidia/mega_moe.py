@@ -124,10 +124,6 @@ class Step5MegaMoEExperts(nn.Module):
         parallel = vllm_config.parallel_config
         if not parallel.enable_expert_parallel:
             raise ValueError("DeepGEMM MegaMoE requires expert parallelism")
-        if parallel.tensor_parallel_size > 1 and parallel.pipeline_parallel_size > 1:
-            raise ValueError(
-                "Step5 MegaMoE with TP requires sequence parallelism and PP=1"
-            )
         if parallel.enable_eplb or parallel.eplb_config.num_redundant_experts:
             raise ValueError("Step5 MegaMoE does not yet support EPLB")
         if parallel.enable_dbo or getattr(parallel, "ubatch_size", 1) > 1:

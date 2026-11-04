@@ -67,9 +67,11 @@ from vllm.renderers.online_derenderer import (
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.utils import random_uuid
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 def _merge_fake_deltas(
@@ -112,6 +114,15 @@ def _merge_fake_deltas(
     return accumulated
 
 
+class _FakeToolParser:
+    """Tool parser slot filler so `tool_choice="auto"` keeps tool calls."""
+
+    engine_based_streaming = True
+
+    def __init__(self, tokenizer, tools):
+        pass
+
+
 class _FakeParser(Parser):
     """Deterministic `Parser` stub for unit testing the replay/merge/pin
     mechanics of `OnlineDerenderer._derender_chat_stream_parsed` in
@@ -131,6 +142,8 @@ class _FakeParser(Parser):
       it happened.
     - Anything else emits nothing.
     """
+
+    tool_parser_cls = _FakeToolParser  # type: ignore[assignment]
 
     TOOL_START = 9
     TOOL_ARG = 10
@@ -306,6 +319,7 @@ def parsed_derenderer(tokenizer):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
+        enable_auto_tools=True,
     )
     dr.parser = _FakeParser
     return dr
@@ -326,6 +340,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
         [FunctionCall(name="tool", arguments="{}")],
     )
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
     generated_ids = tokenizer.encode("answer", add_special_tokens=False)
     response = GenerateTokensResponse(
         request_id="test",
@@ -341,9 +356,10 @@ def test_non_streaming_derender_initializes_parser_prefix(
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "question"}],
+        tools=_WEATHER_TOOLS,
     )
 
-    choices = derenderer._derender_chat(response, request)
+    choices, _ = derenderer._derender_chat(response, request)
 
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
@@ -407,7 +423,7 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
             response = GenerateTokensResponse(
                 request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
-            return derenderer._derender_chat(response, request)[0].message.content
+            return derenderer._derender_chat(response, request)[0][0].message.content
 
         # Same decode window and seeding; "length" never drops a token.
         expected = batch_content(
@@ -454,6 +470,7 @@ def test_derender_text_choices_builds_request_from_parse_context(
         ],
     )
     monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
     parse_context = ParseContext.model_validate(
         {
             "tools": _WEATHER_TOOLS,
@@ -475,6 +492,33 @@ def test_derender_text_choices_builds_request_from_parse_context(
     assert len(message.tool_calls) == 1
     # A forced named tool reports "stop", like coupled chat.
     assert finish_reason == ("stop" if isinstance(tool_choice, dict) else "tool_calls")
+
+
+@pytest.mark.parametrize("tool_choice", ["none", None])
+def test_derender_text_choices_drops_tool_calls_without_tool_choice(
+    derenderer, monkeypatch, tool_choice
+):
+    """Generate output_mode="derender" drops tool calls a parser returned
+    for tool_choice "none" (Harmony ignores it) or null, like coupled chat."""
+    parser = MagicMock()
+    parser.parse.return_value = (
+        None,
+        None,
+        [FunctionCall(name="get_weather", arguments="{}")],
+    )
+    monkeypatch.setattr(derenderer, "parser", MagicMock(return_value=parser))
+    monkeypatch.setattr(derenderer, "enable_auto_tools", True)
+    parse_context = ParseContext.model_validate(
+        {"tools": _WEATHER_TOOLS, "tool_choice": tool_choice}
+    )
+    output = MagicMock(text="raw", token_ids=[1, 2], finish_reason="stop")
+
+    ((message, finish_reason),) = derenderer._derender_text_choices(
+        [output], parse_context.to_chat_request(), 0, None
+    )
+
+    assert not message.tool_calls
+    assert finish_reason == "stop"
 
 
 class TestDetokenizeDelta:
@@ -527,7 +571,7 @@ class TestDetokenizeDelta:
             tokenizer, [], state, skip_special_tokens=True
         )
         assert text == ""
-        assert new_state.prev_tokens == state.prev_tokens
+        assert new_state.prev_token_ids == state.prev_token_ids
         assert new_state.prefix_offset == state.prefix_offset
         assert new_state.read_offset == state.read_offset
 
@@ -556,7 +600,7 @@ class TestDetokenizeDelta:
         assert state.prefix_offset == 0
 
     def test_state_window_stays_bounded(self, derenderer, tokenizer):
-        """prev_tokens must not grow with the number of chunks (bounded transport).
+        """prev_token_ids must not grow with the number of chunks (bounded transport).
 
         Guards that the carried decode window is a small constant
         tail, so cumulative `stream_state` transport is O(n) and not O(n^2).
@@ -571,7 +615,7 @@ class TestDetokenizeDelta:
         max_window = 0
         for tok in token_ids:
             _, state = derenderer._detokenize_delta(tokenizer, [tok], state)
-            max_window = max(max_window, len(state.prev_tokens))
+            max_window = max(max_window, len(state.prev_token_ids))
         # Bounded by a small constant independent of len(token_ids)
         assert max_window <= 32
 
@@ -629,6 +673,20 @@ class TestDetokenizeDelta:
     def test_decode_params_default_without_request(self, tokenizer):
         assert _decode_params(tokenizer, None) == (True, True)
 
+    @pytest.mark.parametrize(("skip", "expected"), [(None, True), (False, False)])
+    def test_decode_params_mistral_parser_follows_request(
+        self, tekken_tokenizer, skip, expected
+    ):
+        """MistralTokenizer keeps parser markers when skipping, so like serving,
+        the parser path keeps the request's skip_special_tokens."""
+        request = CompletionRequest(
+            model=MODEL_NAME, prompt="x", skip_special_tokens=skip
+        )
+        skip_special, _ = _decode_params(
+            tekken_tokenizer, request, preserve_special=True
+        )
+        assert skip_special is expected
+
     def test_n_independent_streams_same_result(self, derenderer, tokenizer):
         """N parallel streams with the same token sequence give the same text."""
         token_ids = tokenizer.encode("parallel streams")[:8]
@@ -668,6 +726,14 @@ def _decode_stream_expected(
 
 
 @pytest.fixture(scope="module")
+def tekken_tokenizer():
+    return with_retry(
+        lambda: MistralTokenizer.from_pretrained("mistralai/Pixtral-12B-2409"),
+        log_msg="Error loading Tekken tokenizer",
+    )
+
+
+@pytest.fixture(scope="module")
 def leading_space_ids(tokenizer):
     """(prompt_ids, output_ids, expected) where seeded and unseeded decode
     differ by the leading space."""
@@ -685,11 +751,40 @@ def leading_space_ids(tokenizer):
 class TestSeedStreamState:
     """`_seed_stream_state`: pure helper building the initial decode state."""
 
-    def test_seeds_prev_tokens_from_prompt_tail(self, tokenizer, leading_space_ids):
+    def test_seeds_prev_token_ids_from_prompt_tail(self, tokenizer, leading_space_ids):
         prompt_ids, _, _ = leading_space_ids
         state = _seed_stream_state(tokenizer, prompt_ids, skip_special_tokens=True)
-        assert state.prev_tokens
-        assert state.read_offset == len(state.prev_tokens)
+        assert state.prev_token_ids
+        assert state.read_offset == len(state.prev_token_ids)
+
+    def test_byte_fallback_survives_state_round_trip(
+        self, derenderer, tekken_tokenizer
+    ):
+        """Byte-fallback pieces in the window must survive the JSON transport,
+        whether they come from the prompt tail or from a previous chunk."""
+        token_ids = tekken_tokenizer.encode("서울은 맑습니다", add_special_tokens=False)
+        fallback_ends = [
+            i + 1
+            for i, token_id in enumerate(token_ids)
+            if "�" in tekken_tokenizer.tokenizer.id_to_piece(token_id)
+        ]
+        assert fallback_ends
+
+        bos_id = tekken_tokenizer.bos_token_id
+        for split in [0, fallback_ends[-1]]:
+            state = _seed_stream_state(
+                tekken_tokenizer,
+                [bos_id, *token_ids[:split]],
+                skip_special_tokens=True,
+            )
+            text = ""
+            for token_id in token_ids[split:]:
+                state = DerenderStreamState.model_validate_json(state.model_dump_json())
+                delta, state = derenderer._detokenize_delta(
+                    tekken_tokenizer, [token_id], state
+                )
+                text += delta
+            assert text == tekken_tokenizer.decode(token_ids[split:])
 
     def test_none_prompt_token_ids_returns_empty_state(self, tokenizer):
         assert (
@@ -713,7 +808,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -731,7 +826,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -750,7 +845,7 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -769,7 +864,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         _, output_ids, _ = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -1560,7 +1655,10 @@ class TestDerenderChatStreamParsed:
                     ids, logprobs=_generate_logprobs(ids)
                 ),
                 state=state,
-                chat_request=_chat_request(),
+                chat_request=_chat_request(
+                    tools=[{"type": "function", "function": {"name": "get_weather"}}],
+                    tool_choice="auto",
+                ),
                 prompt_token_ids=[1, 2],
             )
             choice = chunk.choices[0]
@@ -1857,7 +1955,7 @@ class TestDerenderChatStreamHarmony:
         reasoning = "".join(d.reasoning or "" for d in deltas)
         content = "".join(d.content or "" for d in deltas)
 
-        batch_choices = await harmony_derenderer.derender_chat(
+        batch_choices, _ = await harmony_derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[
@@ -1885,13 +1983,13 @@ class TestDerenderStreamStateValidation:
         with pytest.raises(ValidationError):
             DerenderStreamState(read_offset=-1)
 
-    def test_prev_tokens_over_cap_rejected(self):
+    def test_prev_token_ids_over_cap_rejected(self):
         with pytest.raises(ValidationError):
-            DerenderStreamState(prev_tokens=["a"] * 1025)
+            DerenderStreamState(prev_token_ids=[1] * 1025)
 
-    def test_prev_tokens_at_cap_accepted(self):
-        state = DerenderStreamState(prev_tokens=["a"] * 1024)
-        assert len(state.prev_tokens) == 1024
+    def test_prev_token_ids_at_cap_accepted(self):
+        state = DerenderStreamState(prev_token_ids=[1] * 1024)
+        assert len(state.prev_token_ids) == 1024
 
     def test_output_chunk_lens_mismatch_rejected(self):
         with pytest.raises(ValidationError):
