@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -54,6 +55,92 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
+@pytest.mark.parametrize("block_quant", [False, True])
+def test_humming_fp8_matches_checkpoint_forward(
+    tmp_path, dist_init, workspace_init, block_quant
+):
+    """FP8 preprocessing must keep weights consistent with gate/up scales."""
+    from transformers import LlamaConfig
+
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        convert_to_humming_moe_kernel_format,
+    )
+
+    LlamaConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        kernel_config=KernelConfig(moe_backend="humming"),
+    )
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic" if block_quant else "static",
+        weight_block_size=[128, 128] if block_quant else None,
+    )
+    with set_current_vllm_config(config), torch.device(DEVICE_TYPE):
+
+        def create(prefix):
+            return FusedMoEFactory(
+                num_experts=2,
+                top_k=1,
+                hidden_size=256,
+                intermediate_size=256,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+                prefix=prefix,
+            ).routed_experts
+
+        layer = create("humming.oracle")
+        reference = create("humming.checkpoint")
+        for name, parameter in layer.named_parameters():
+            parameter.data.fill_(1.0)
+        scale_name = "weight_scale_inv" if block_quant else "weight_scale"
+        scale = getattr(layer, f"w13_{scale_name}")
+        scale.data.copy_(
+            0.125 * 2 ** (torch.arange(scale.numel()).reshape(scale.shape) % 4)
+        )
+        reference.load_state_dict(layer.state_dict())
+        if block_quant:
+            schema: dict[str, Any] = {
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+        else:
+            schema = {
+                "quant_method": "compressed-tensors",
+                "format": "float-quantized",
+                "type": "float",
+                "num_bits": 8,
+                "symmetric": True,
+                "strategy": "tensor",
+            }
+        convert_to_humming_moe_kernel_format(reference, quant_config=schema)
+        reference.quant_method._init_moe_kernel(reference)
+        layer.quant_method.process_weights_after_loading(layer)
+        if block_quant:
+            assert layer.w13_weight_scale_inv is layer.w13_weight_scale
+            assert layer.w2_weight_scale_inv is layer.w2_weight_scale
+
+        inputs = torch.full((8, 256), 0.01, dtype=torch.bfloat16)
+        topk_weights = torch.ones((8, 1), dtype=torch.float32)
+        topk_ids = torch.arange(8, dtype=torch.int32).remainder(2).view(8, 1)
+        with set_forward_context(None, config, num_tokens=8):
+            actual = layer.forward_modular(inputs, topk_weights, topk_ids)
+            expected = reference.forward_modular(inputs, topk_weights, topk_ids)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
