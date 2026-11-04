@@ -73,6 +73,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
 
+def _hashes(*raw: bytes) -> list[BlockHash]:
+    return [BlockHash(value) for value in raw]
+
+
 @pytest.fixture(autouse=True)
 def _reset_conv_state_layout_cache():
     get_conv_state_layout.cache_clear()
@@ -340,7 +344,7 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
         tracker,
         block_size=8,
         hash_block_size=8,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
+        block_hashes=_hashes(b"h0", b"h1"),
     )
     assert first is None
     assert tracker.num_saved_tokens == 8
@@ -350,7 +354,7 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
         tracker,
         block_size=8,
         hash_block_size=8,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
+        block_hashes=_hashes(b"h0", b"h1"),
     )
     assert second is not None
     assert second.token_ids_start == 8
@@ -1060,12 +1064,7 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1091,12 +1090,7 @@ def test_store_sending_thread_delta_strides_with_local_phase():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1122,12 +1116,7 @@ def test_tp_sharded_group_saves_every_block_on_every_rank():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1153,7 +1142,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
             req_id="req-a",
             token_len_chunk=16,
             block_ids=([1],),
-            block_hashes=[BlockHash(b"a0")],
+            block_hashes=_hashes(b"a0"),
             can_save=True,
         ),
     )
@@ -1172,12 +1161,7 @@ def test_store_sending_thread_retries_skipped_range_after_pressure():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1245,7 +1229,7 @@ def _make_partial_tail_req(block_ids: list[int]) -> ReqMeta:
         req_id="req-a",
         token_len_chunk=0,
         block_ids=(block_ids, [1]),
-        block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+        block_hashes=_hashes(b"a0", b"a1", b"a2"),
         can_save=True,
         boundary_puts=[BoundaryPut(1, 7, 12)],
         num_prompt_tokens=13,
@@ -1434,7 +1418,7 @@ def test_store_sending_thread_skips_null_sparse_group_blocks():
             req_id="req-a",
             token_len_chunk=48,
             block_ids=([1, 2, 3], [NULL_BLOCK_ID, 4, NULL_BLOCK_ID]),
-            block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+            block_hashes=_hashes(b"a0", b"a1", b"a2"),
             can_save=True,
         ),
     )
@@ -1498,7 +1482,7 @@ def test_partial_tail_offload_skips_cap_omitted_mamba_group():
         req_id="req-a",
         token_len_chunk=0,
         block_ids=([1, 2, 3], [5], [9]),
-        block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+        block_hashes=_hashes(b"a0", b"a1", b"a2"),
         can_save=True,
         # The scheduler accepted group 1 and omitted group 2 at boundary 12.
         boundary_puts=[BoundaryPut(1, 7, 12)],
@@ -1633,12 +1617,7 @@ def test_normal_save_excludes_mamba_group_and_null_blocks():
             # FA has a null at chunk 1; the mamba table is align-mode shaped
             # (interior nulls + one state block) and must not be read at all.
             block_ids=([1, 0, 3, 4], [0, 0, 0, 9]),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1883,12 +1862,7 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
         ),
     )
@@ -1984,12 +1958,7 @@ def test_decode_save_marks_completed_interval_as_replay_boundary():
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
             num_prompt_tokens=48,
             prefill_end_tokens=48,
@@ -2044,7 +2013,7 @@ def test_store_sending_thread_prepares_missing_chunks_once_per_group():
                 req_id="req-a",
                 token_len_chunk=48,
                 block_ids=([1, 2, 3], [3, 2, 1]),
-                block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+                block_hashes=_hashes(b"a0", b"a1", b"a2"),
                 can_save=True,
             ),
         )
@@ -3654,7 +3623,7 @@ def test_hybrid_lookup_uses_each_pp_stage_schema(
             stages[0].token_dbs[g].metadata.store_namespace
             != stages[1].token_dbs[g].metadata.store_namespace
         )
-    hashes = [BlockHash(b"h0"), BlockHash(b"h1")]
+    hashes = _hashes(b"h0", b"h1")
     present = {
         PoolKey.build_key_string(prefix, block_hash.hex())
         for groups in stage_prefixes
@@ -4059,7 +4028,7 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
             req_id="r0",
             token_len_chunk=33,
             block_ids=([1, 2, 3],),
-            block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+            block_hashes=_hashes(b"a0", b"a1", b"a2"),
             can_save=True,
         ),
     )
@@ -4153,7 +4122,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(
             req_id="r0",
             token_len_chunk=12,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")],
+            block_hashes=_hashes(b"a0", b"a1", b"a2"),
             can_save=True,
             token_ids=[8, 9, 10, 11],
             token_ids_start=8,
@@ -4170,12 +4139,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(
             req_id="r0",
             token_len_chunk=16,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3"),
             can_save=True,
             token_ids=list(range(8, 16)),
             token_ids_start=8,
@@ -4204,14 +4168,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(
             req_id="r0",
             token_len_chunk=24,
             block_ids=([1, 2, 3], [4, 5, 6]),
-            block_hashes=[
-                BlockHash(b"a0"),
-                BlockHash(b"a1"),
-                BlockHash(b"a2"),
-                BlockHash(b"a3"),
-                BlockHash(b"a4"),
-                BlockHash(b"a5"),
-            ],
+            block_hashes=_hashes(b"a0", b"a1", b"a2", b"a3", b"a4", b"a5"),
             can_save=True,
             token_ids=list(range(16, 24)),
             token_ids_start=16,
@@ -4283,7 +4240,7 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
             req_id="r0",
             token_len_chunk=32,
             block_ids=([1, 2],),
-            block_hashes=[BlockHash(b"a0"), BlockHash(b"a1")],
+            block_hashes=_hashes(b"a0", b"a1"),
             can_save=True,
         ),
     )
@@ -5190,12 +5147,12 @@ def test_lookup_rejects_boundary_missing_one_mamba_shard():
     # 33 tokens for two 16-token blocks: the hit stops below the request end,
     # so the full-hit re-derivation stays out of the shard accounting.
     worker.store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
-    assert worker.lookup(33, [BlockHash(b"h0"), BlockHash(b"h1")]).hit_length == 32
+    assert worker.lookup(33, _hashes(b"h0", b"h1")).hit_length == 32
 
     worker.store.batch_is_exist.side_effect = lambda keys: [
         0 if "tp_rank:1" in k and "group:1" in k else 1 for k in keys
     ]
-    assert worker.lookup(33, [BlockHash(b"h0"), BlockHash(b"h1")]).hit_length == 0
+    assert worker.lookup(33, _hashes(b"h0", b"h1")).hit_length == 0
 
 
 @pytest.mark.parametrize("mamba_block_size", [4, 16])
@@ -5256,7 +5213,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
 
-    assert worker.lookup(16, [BlockHash(b"a0")]).hit_length == 0
+    assert worker.lookup(16, _hashes(b"a0")).hit_length == 0
     assert worker.store.batch_is_exist.call_args.args[0] == [
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
@@ -5268,12 +5225,7 @@ def test_lookup_requires_all_dcp_rank_namespaces():
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]
-    assert (
-        worker.lookup(
-            48, [BlockHash(b"a0"), BlockHash(b"a1"), BlockHash(b"a2")]
-        ).hit_length
-        == 32
-    )
+    assert worker.lookup(48, _hashes(b"a0", b"a1", b"a2")).hit_length == 32
 
 
 def test_lookup_partial_tail_uses_hash_alignment():
@@ -5312,12 +5264,7 @@ def test_lookup_partial_tail_uses_hash_alignment():
     _refresh_group_tp_replication_factors(worker)
     worker.store.batch_is_exist.return_value = [0, 0, 1, 0, 0, 1]
 
-    assert (
-        worker.lookup(
-            13, [BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")]
-        ).hit_length
-        == 12
-    )
+    assert worker.lookup(13, _hashes(b"h0", b"h1", b"h2")).hit_length == 12
 
 
 def test_lookup_full_hit_reuses_existing_boundary():
@@ -5325,9 +5272,7 @@ def test_lookup_full_hit_reuses_existing_boundary():
     worker = _make_bare_worker(block_size=16)
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    assert worker.lookup(
-        32, [BlockHash(b"h0"), BlockHash(b"h1")]
-    ) == MooncakeLookupResult(
+    assert worker.lookup(32, _hashes(b"h0", b"h1")) == MooncakeLookupResult(
         hit_length=16,
         tail_key_boundaries=(TailKeyBoundary(group_id=0, num_tokens=16),),
     )
@@ -5351,12 +5296,7 @@ def test_lookup_full_hit_with_eagle_pops_once_not_twice():
     # 64-token exact-multiple prompt, all 4 blocks stored: one eagle pop
     # gives 48; a spurious re-derivation (anchored at 48) would pop again
     # and return 32.
-    assert (
-        worker.lookup(
-            64, [BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2"), BlockHash(b"h3")]
-        ).hit_length
-        == 48
-    )
+    assert worker.lookup(64, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 48
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -5391,7 +5331,7 @@ def test_lookup_skips_tail_key_for_empty_chunked_local_window():
         int("@group:0@" in key) for key in keys
     ]
 
-    result = worker.lookup(33, [BlockHash(b"h0"), BlockHash(b"h1")])
+    result = worker.lookup(33, _hashes(b"h0", b"h1"))
 
     assert result.hit_length == 32
     assert result.tail_key_boundaries == (TailKeyBoundary(0, 32),)
@@ -5548,12 +5488,7 @@ def test_lookup_full_hit_swa_degrades_when_no_stored_boundary_is_usable():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
 
-    assert (
-        worker.lookup(
-            64, [BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2"), BlockHash(b"h3")]
-        ).hit_length
-        == 0
-    )
+    assert worker.lookup(64, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 0
     assert worker.store.batch_is_exist.call_count == 1
 
 
@@ -5572,12 +5507,7 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
         hash_block_size=worker.hash_block_size,
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
-    assert (
-        worker.lookup(
-            65, [BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2"), BlockHash(b"h3")]
-        ).hit_length
-        == 64
-    )
+    assert worker.lookup(65, _hashes(b"h0", b"h1", b"h2", b"h3")).hit_length == 64
 
 
 def test_lookup_checks_all_potential_swa_hit_boundaries():
@@ -6521,7 +6451,7 @@ def test_lookup_records_mooncake_metrics():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1]
 
-    result = worker.lookup(33, [BlockHash(b"a0"), BlockHash(b"a1")])
+    result = worker.lookup(33, _hashes(b"a0", b"a1"))
     stats = worker.get_kv_connector_stats()
 
     assert result.hit_length == 32
