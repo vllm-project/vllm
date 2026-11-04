@@ -283,14 +283,7 @@ class HiSparseMLAIndexGroup(SparseMLAIndexGroup):
         prefill = attn_metadata.prefill
         plan = prefill.host_staging_plan if prefill is not None else None
         assert plan is not None
-        assert cache.view is not None and cache.block_table is not None
-        state_indices = cache.runtime.request_state_indices
-        assert state_indices is not None
-        plan.ensure_gpu_sources(
-            cache.block_table,
-            state_indices[attn_metadata.num_decodes :],
-            cache.view.block_size,
-        )
+        cache.ensure_prefill_gpu_sources(plan, attn_metadata.num_decodes)
         assert plan.gpu_row_ids is not None
         return plan
 

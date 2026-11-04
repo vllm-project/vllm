@@ -54,6 +54,7 @@ from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_cache_handle,
+    hisparse_staging_block_capacity,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -78,7 +79,6 @@ class Qwen4ExpQSAHiSparseMetadata(Qwen4ExpQSAMetadata):
     req_id_per_token: torch.Tensor
     query_start_loc: torch.Tensor
     host_staging_plan: HiSparsePrefillStagingPlan | None
-    is_cudagraph_capture: bool = False
 
 
 class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
@@ -188,9 +188,7 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
                 common_attn_metadata.block_table_tensor[num_decodes:],
                 common_attn_metadata.seq_lens[num_decodes:],
                 block_size,
-                int(
-                    ((seq_lens_cpu[num_decodes:] + block_size - 1) // block_size).sum()
-                ),
+                hisparse_staging_block_capacity(seq_lens_cpu[num_decodes:], block_size),
             )
         return Qwen4ExpQSAHiSparseMetadata(
             **vars(metadata),
@@ -203,14 +201,6 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
             query_start_loc=common_attn_metadata.query_start_loc,
             host_staging_plan=staging_plan,
         )
-
-    def build_for_cudagraph_capture(
-        self, common_attn_metadata: CommonAttentionMetadata
-    ) -> Qwen4ExpQSAMetadata:
-        metadata = super().build_for_cudagraph_capture(common_attn_metadata)
-        if isinstance(metadata, Qwen4ExpQSAHiSparseMetadata):
-            metadata.is_cudagraph_capture = True
-        return metadata
 
 
 class Qwen4ExpQSABackend(AttentionBackend):
@@ -348,7 +338,6 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         output_gate: torch.Tensor,
         physical_indices: bool = False,
     ) -> None:
-        """Attend every query row; the caller sizes all row tensors."""
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -586,9 +575,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             row_width=self.num_kv_heads * 2 * self.head_dim,
             kv_dtype=self.kv_cache_torch_dtype,
         )
-        if self.hisparse_cache is not None:
-            assert physical_topk_indices_buffer is not None
-            self.physical_topk_indices_buffer = physical_topk_indices_buffer
+        self.physical_topk_indices_buffer = physical_topk_indices_buffer
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
@@ -626,11 +613,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             return spec
         return SparseFullAttentionSpec(
             **vars(spec),
-            top_k=self.indexer.output_width,
-            total_num_kv_heads=self.total_num_kv_heads,
+            topk_buffer_width=self.indexer.output_width,
         )
 
-    def _hisparse_kv_view(self, rows: torch.Tensor) -> torch.Tensor:
+    def hisparse_kv_view(self, rows: torch.Tensor) -> torch.Tensor:
         return rows.unflatten(-1, (self.num_kv_heads, 2 * self.head_dim)).transpose(
             1, 2
         )
@@ -643,8 +629,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         metadata: Qwen4ExpQSAHiSparseMetadata,
     ) -> None:
         cache = self.hisparse_cache
-        assert cache is not None and cache.view is not None
-        assert cache.block_table is not None and cache.source_block_table is not None
+        assert (
+            cache is not None
+            and cache.view is not None
+            and cache.block_table is not None
+            and cache.source_block_table is not None
+            and self.physical_topk_indices_buffer is not None
+        )
         output.zero_()
         num_decode = metadata.num_decode_tokens
         num_tokens = metadata.num_actual_tokens
@@ -664,7 +655,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             self.impl.attend(
                 self,
                 query[:num_decode],
-                self._hisparse_kv_view(cache.runtime.hot.attention_cache),
+                self.hisparse_kv_view(cache.runtime.hot.attention_cache),
                 physical,
                 metadata.block_table,
                 metadata.req_id_per_token[:num_decode],
@@ -697,7 +688,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.impl.attend(
             self,
             query[num_decode:num_tokens],
-            self._hisparse_kv_view(prefill_cache),
+            self.hisparse_kv_view(prefill_cache),
             self.topk_indices_buffer[num_decode:num_tokens],
             block_table,
             req_ids,
@@ -767,7 +758,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             resident, slot_mapping, _ = cache.write_target(
                 num_tokens, slot_mapping.shape[0]
             )
-            main_kv_cache = self._hisparse_kv_view(resident)
+            main_kv_cache = self.hisparse_kv_view(resident)
         selected, main_outputs = self.indexer(
             projected_qk,
             positions,
@@ -788,17 +779,13 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         else:
             query, output_gate = main_outputs
         if cache is not None:
-            hisparse_metadata = cast(Qwen4ExpQSAHiSparseMetadata, main_metadata)
-            # FULL warmup and capture run in mode NONE without a connector
-            # step; replay mirrors real rows when the worker finishes.
-            if not hisparse_metadata.is_cudagraph_capture:
-                cache.finish_kv_update()
+            cache.finish_kv_update()
             assert query is not None and output_gate is not None
             self._forward_hisparse(
                 query,
                 output,
                 output_gate,
-                hisparse_metadata,
+                cast(Qwen4ExpQSAHiSparseMetadata, main_metadata),
             )
             return
         assert query is not None and output_gate is not None

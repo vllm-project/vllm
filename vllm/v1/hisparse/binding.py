@@ -4,7 +4,7 @@
 
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -34,7 +34,6 @@ from vllm.v1.kv_cache_interface import (
     SparseFullAttentionSpec,
     UniformTypeKVCacheSpecs,
     create_kv_cache_views,
-    iter_layer_specs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache, select_common_block_size
 
@@ -52,7 +51,7 @@ def resolve_hisparse_specs(
     sparse_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
+        if isinstance(spec, MLAAttentionSpec | SparseFullAttentionSpec)
     }
     if not sparse_specs:
         return kv_cache_spec
@@ -91,16 +90,6 @@ def allocate_hisparse_kv_caches(
     allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
-    if layout is not KVCacheLayout.BLNHC and any(
-        isinstance(spec, SparseFullAttentionSpec)
-        for group in kv_cache_config.kv_cache_groups
-        if group.host_resident
-        for spec in iter_layer_specs(group.kv_cache_spec)
-    ):
-        raise ValueError(
-            "HiSparse sparse full attention requires BLNHC so each token's "
-            "complete K/V heads form a contiguous copy row."
-        )
     device_config = copy(kv_cache_config)
     device_config.kv_cache_tensors = [
         tensor
@@ -218,7 +207,10 @@ def bind_hisparse_kv_caches(
     """Bind existing cache storage and block tables; return the bound handles."""
     assert host_pool.registered is not None
     (source_group_id,) = kv_cache_config.host_group_ids
-    source_group_spec = kv_cache_config.kv_cache_groups[source_group_id].kv_cache_spec
+    source_specs = cast(
+        UniformTypeKVCacheSpecs,
+        kv_cache_config.kv_cache_groups[source_group_id].kv_cache_spec,
+    ).kv_cache_specs
     tensor_configs = _tensor_placements(kv_cache_config)
     resident_groups = [
         (group_id, group)
@@ -300,33 +292,15 @@ def bind_hisparse_kv_caches(
             assert source_cache.untyped_storage().data_ptr() == (
                 host_pool.registered.untyped_storage().data_ptr()
             )
-            source_spec = (
-                source_group_spec.kv_cache_specs[layer_name]
-                if isinstance(source_group_spec, UniformTypeKVCacheSpecs)
-                else source_group_spec
-            )
-            if isinstance(source_spec, SparseFullAttentionSpec):
-                expected_shape = (
-                    source_spec.num_kv_heads,
-                    source_spec.block_size,
-                    source_spec.head_size + source_spec.head_size_v,
-                )
-                if source_cache.ndim != 4 or source_cache.shape[1:] != expected_shape:
-                    raise ValueError(
-                        "HiSparse sparse full-attention source must have shape "
-                        f"[blocks, {expected_shape}], got {tuple(source_cache.shape)}."
-                    )
-                # Keep the canonical [B, H, N, K+V] view for layers/connectors.
-                # The copy runtime addresses one complete token across all heads.
+            if isinstance(source_specs[layer_name], SparseFullAttentionSpec):
                 token_rows = source_cache.transpose(1, 2)
-                if not token_rows.is_contiguous():
+                try:
+                    source_cache = token_rows.view(*token_rows.shape[:2], -1)
+                except RuntimeError as error:
                     raise ValueError(
                         "HiSparse sparse full attention requires unpadded, "
                         "contiguous token rows in the host LBNHC layout."
-                    )
-                source_cache = token_rows.view(
-                    token_rows.shape[0], token_rows.shape[1], -1
-                )
+                    ) from error
             cache_handle.draft_layer = forward_context[layer_name].is_draft_layer
             cache_handle.runtime.host_pool = host_pool
             cache_handle.runtime.bind_source_cache(

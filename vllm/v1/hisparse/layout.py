@@ -62,20 +62,12 @@ def get_hisparse_kv_cache_groups(
     sparse_specs: dict[str, KVCacheSpec] = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
+        if isinstance(spec, _SourceSpec)
     }
     other_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if not isinstance(
-            spec,
-            (
-                MLAAttentionSpec,
-                SparseFullAttentionSpec,
-                HiSparseResidentSpec,
-                HiSparseHotSpec,
-            ),
-        )
+        if not isinstance(spec, _SourceSpec | HiSparseResidentSpec | HiSparseHotSpec)
     }
     if not sparse_specs:
         return None
@@ -111,10 +103,7 @@ def _partition_hisparse_specs(
         for spec in specs.values()
     ):
         raise ValueError("HiSparse does not support DeepSeek V4.")
-    if not all(
-        isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
-        for spec in specs.values()
-    ):
+    if not all(isinstance(spec, _SourceSpec) for spec in specs.values()):
         raise ValueError(
             "HiSparse requires its first cache group to contain sparse attention only."
         )
@@ -136,12 +125,6 @@ def _partition_hisparse_specs(
     }
     if not source_specs or not indexer_specs:
         raise ValueError("HiSparse requires sparse attention and indexer cache specs.")
-    if any(
-        isinstance(spec, SparseFullAttentionSpec) for spec in source_specs.values()
-    ) and not all(
-        isinstance(spec, SparseFullAttentionSpec) for spec in source_specs.values()
-    ):
-        raise ValueError("HiSparse cannot mix MLA and sparse full-attention sources.")
     return source_specs, indexer_specs
 
 
@@ -156,25 +139,16 @@ def _lay_out_hisparse_groups(
         raise ValueError("HiSparse requires one resolved GPU block size.")
     gpu_block_size = block_sizes.pop()
 
-    sparse_full_specs = [
-        spec
-        for spec in source_specs.values()
-        if isinstance(spec, SparseFullAttentionSpec)
-    ]
-    if sparse_full_specs:
-        top_k_values = {spec.top_k for spec in sparse_full_specs}
-        if len(top_k_values) != 1:
-            raise ValueError("HiSparse requires one sparse selection capacity.")
-        top_k = top_k_values.pop()
-    else:
-        top_k = max(
+    config = ResolvedHiSparseConfig.from_vllm_config(
+        vllm_config,
+        max(
             spec.topk_buffer_width
             if spec.topk_buffer_width is not None
             else vllm_config.model_config.hf_config.index_topk
             for spec in source_specs.values()
-            if isinstance(spec, MLAAttentionSpec)
-        )
-    config = ResolvedHiSparseConfig.from_vllm_config(vllm_config, top_k, gpu_block_size)
+        ),
+        gpu_block_size,
+    )
     assert config is not None
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         cast(dict[str, KVCacheSpec], indexer_specs)
@@ -280,8 +254,6 @@ def create_hisparse_layout(
         for spec in source_group_spec.kv_cache_specs.values()
         if isinstance(spec, SparseFullAttentionSpec)
     ]
-    # Sparse full attention stores distinct TP shards. Each rank writes its
-    # own host cache; MLA retains its existing replicated, rank-0 writer pool.
     shared_host_pool = not sparse_full_specs and use_shared_hisparse_host_pool(
         vllm_config
     )
@@ -289,12 +261,10 @@ def create_hisparse_layout(
         source_group.kv_cache_spec.page_size_bytes,
         use_shared_host_pool=shared_host_pool,
     )
-    # host_pool_gib is logical capacity per DP replica, independent of TP.
-    # Count each full K/V head once even when TP replicates some heads. Rank
-    # padding and replicated shards remain physical allocation costs only.
+    total_num_kv_heads = vllm_config.model_config.get_total_num_kv_heads()
     logical_block_bytes = (
         sum(
-            spec.num_states * spec.total_num_kv_heads * spec.state_content_size_bytes
+            spec.num_states * total_num_kv_heads * spec.state_content_size_bytes
             for spec in sparse_full_specs
         )
         if sparse_full_specs

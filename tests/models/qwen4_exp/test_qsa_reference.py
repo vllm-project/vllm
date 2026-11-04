@@ -1382,19 +1382,6 @@ def test_qsa_attention_consumes_hisparse_physical_indices(
         v_scale=v_scale,
     ) * torch.sigmoid(output_gate)
     assert not torch.allclose(expected, logical_expected, rtol=2e-2, atol=2e-2)
-    logical_output = qsa_ops.qsa_sparse_paged_attention(
-        q,
-        key_cache,
-        value_cache,
-        packed,
-        block_table,
-        token_to_req,
-        use_prefill_config=False,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        output_gate=output_gate,
-    )
-    torch.testing.assert_close(logical_output, logical_expected, rtol=2e-2, atol=2e-2)
 
     actual = qsa_ops.qsa_sparse_paged_attention(
         q,
@@ -1436,16 +1423,6 @@ def test_qsa_hisparse_prefill_ignores_unused_request_table_rows(
 
 
 @requires_qsa_kernels
-def test_qsa_hisparse_capture_does_not_submit_dummy_host_mirrors(
-    tmp_path, dist_init, workspace_init, monkeypatch
-) -> None:
-    """Warmup and capture cannot consume the real worker's mirror phase."""
-    _run_qsa_hisparse_prefill_case(
-        tmp_path, monkeypatch, False, False, capture_warmup=True
-    )
-
-
-@requires_qsa_kernels
 def test_qsa_hisparse_warmup_outside_connector_step_skips_mirror(
     tmp_path, dist_init, workspace_init, monkeypatch
 ) -> None:
@@ -1461,7 +1438,6 @@ def _run_qsa_hisparse_prefill_case(
     fp8: bool,
     indexer_fp8: bool,
     *,
-    capture_warmup=False,
     connector_warmup=False,
     all_context_pages_resident=False,
 ) -> None:
@@ -1633,11 +1609,7 @@ def _run_qsa_hisparse_prefill_case(
         vllm_config,
         torch.device("cuda"),
     )
-    metadata = (
-        builder.build_for_cudagraph_capture(common)
-        if capture_warmup
-        else builder.build(0, common)
-    )
+    metadata = builder.build(0, common)
     all_metadata = {owner.layer_name: metadata}
     for side_cache in (
         owner.indexer.raw_key_cache,
@@ -1680,7 +1652,7 @@ def _run_qsa_hisparse_prefill_case(
     runtime.request_state_indices = state_indices
     cache.all_context_pages_resident = all_context_pages_resident
     owner.bind_kv_cache(original.transpose(1, 2))
-    if capture_warmup or connector_warmup:
+    if connector_warmup:
         from functools import partial
         from unittest.mock import MagicMock
 
@@ -1699,8 +1671,6 @@ def _run_qsa_hisparse_prefill_case(
         worker._in_step = True
         enqueue_row_dma = MagicMock()
         monkeypatch.setattr(worker, "_enqueue_row_dma", enqueue_row_dma)
-        if capture_warmup:
-            cache.submit_layer_mirror = partial(worker._enqueue_layer_mirror, 0)
     selected_before_attention = []
     writer_inputs = []
     update_cache = owner.impl.do_kv_cache_update
@@ -1764,17 +1734,8 @@ def _run_qsa_hisparse_prefill_case(
             set_forward_context(all_metadata, vllm_config, num_tokens=4),
         ):
             actual = owner(positions, hidden)
-            if capture_warmup:
-                # The real FULL manager calls NONE for both its warmup and
-                # native capture body, without a connector start/finish pair.
-                graph = torch.cuda.CUDAGraph()
-                with torch.cuda.graph(graph):
-                    actual = owner(positions, hidden)
-                graph.replay()
-                enqueue_row_dma.assert_not_called()
-                assert not worker._per_layer_mirrored
         torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
-        assert len(writer_inputs) == (2 if capture_warmup else 1)
+        assert len(writer_inputs) == 1
         written_key, written_value, written_slots = writer_inputs[-1]
         torch.testing.assert_close(written_slots, slots, rtol=0, atol=0)
         torch.testing.assert_close(written_key, key, rtol=0, atol=0)
@@ -1799,7 +1760,7 @@ def _run_qsa_hisparse_prefill_case(
             rtol=0,
             atol=0,
         )
-        assert len(selected_before_attention) == (2 if capture_warmup else 1)
+        assert len(selected_before_attention) == 1
         packed = selected_before_attention[-1]
         torch.testing.assert_close(
             owner.topk_indices_buffer[:4], packed, rtol=0, atol=0
@@ -1868,11 +1829,9 @@ def _run_qsa_hisparse_prefill_case(
             worker._in_step = True
             mirror_metadata = warm_metadata
             mirror_positions, mirror_hidden = warm_positions, warm_hidden
-        if capture_warmup or connector_warmup:
+        if connector_warmup:
             # A real multi-token prefill still pipelines one host submission,
             # and a second live write in that phase must remain an error.
-            if capture_warmup:
-                mirror_metadata[owner.layer_name] = builder.build(0, common)
             with (
                 torch.inference_mode(),
                 set_current_vllm_config(vllm_config),

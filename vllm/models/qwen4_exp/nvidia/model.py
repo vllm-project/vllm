@@ -195,7 +195,6 @@ def get_qsa_topk_buffer_width(config: Qwen4ExpTextConfig) -> int:
 def make_physical_topk_indices_buffer(
     vllm_config: VllmConfig, topk_indices_buffer: torch.Tensor | None
 ) -> torch.Tensor | None:
-    """HiSparse decode indices into the hot cache, shared by all QSA layers."""
     if (
         topk_indices_buffer is None
         or vllm_config.attention_config.hisparse_config is None

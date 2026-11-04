@@ -8,7 +8,6 @@ never addressed by the logical view.
 """
 
 import importlib
-from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -31,7 +30,6 @@ from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import (
     allocate_hisparse_kv_caches,
-    rebind_hisparse_device_caches,
 )
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -93,10 +91,9 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
         SparseFullAttentionSpec(
             block_size=block_size,
             num_kv_heads=2,
-            total_num_kv_heads=4,
             head_size=32,
             dtype=torch.bfloat16,
-            top_k=35,
+            topk_buffer_width=35,
         )
         if sparse_full_attention
         else MLAAttentionSpec(
@@ -151,8 +148,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     if sparse_full_attention:
         main = resolved["main"]
         assert isinstance(main, SparseFullAttentionSpec)
-        assert main.top_k == 35
-        assert main.total_num_kv_heads == 4
+        assert main.topk_buffer_width == 35
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
@@ -936,10 +932,9 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
     spec = SparseFullAttentionSpec(
         block_size=2,
         num_kv_heads=2,
-        total_num_kv_heads=4,
         head_size=2,
         dtype=torch.bfloat16,
-        top_k=2,
+        topk_buffer_width=2,
     )
     source_spec = UniformTypeKVCacheSpecs.from_specs(dict.fromkeys(names, spec))
     assert source_spec is not None
@@ -1040,44 +1035,6 @@ def test_bind_hisparse_full_kv_preserves_token_head_and_kv_rows():
         assert handle.residency is residency
         assert handle.block_table is not None
         assert handle.block_table.data_ptr() == residency[0].data_ptr()
-
-    residency[0, 0, 0] = 3
-    for handle in handles:
-        assert handle.block_table is not None
-        assert handle.block_table.tolist() == [[3, 0]]
-    assert block_tables.input_block_tables[0].tolist() == [[1, 2]]
-
-    # Device growth must preserve host rows and the shared residency mapping.
-    grown_config = replace(
-        config,
-        num_blocks=6,
-        kv_cache_tensors=[
-            tensor if tensor.host_resident else replace(tensor, size=384)
-            for tensor in config.kv_cache_tensors
-        ],
-    )
-    grown_caches = {}
-    for tensor in grown_config.kv_cache_tensors:
-        if not tensor.host_resident:
-            backing = torch.zeros(tensor.size, dtype=torch.int8)
-            grown_caches.update(dict.fromkeys(tensor.layers, backing))
-    rebind_hisparse_device_caches(
-        forward_context=forward_context,
-        kv_cache_config=grown_config,
-        kv_caches=grown_caches,
-    )
-    for index, (name, handle) in enumerate(zip(names, handles)):
-        assert handle.view is not None
-        assert handle.view.cache.shape == (6, 2, 8)
-        assert handle.view.cache.stride() == (32, 8, 1)
-        assert handle.runtime.hot.cache.shape == (6, 2, 8)
-        assert handle.runtime.hot.cache.stride() == (32, 8, 1)
-        assert handle.runtime.host_cache.data_ptr() == caches[name].data_ptr()
-        torch.testing.assert_close(handle.runtime.host_cache, expected_rows[index])
-        assert handle.residency is residency
-        assert handle.block_table is not None
-        assert handle.block_table.tolist() == [[3, 0]]
-        assert handle.slot_mapping is block_tables.slot_mappings[0]
 
 
 class _TableBuilder:

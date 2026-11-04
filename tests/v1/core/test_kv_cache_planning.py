@@ -235,7 +235,6 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
         specs[name] = SparseFullAttentionSpec(
             block_size=16,
             num_kv_heads=1,
-            total_num_kv_heads=2,
             head_size=32,
             head_size_v=32,
             dtype=main_dtype,
@@ -244,7 +243,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
                 if main_dtype == torch.uint8
                 else KVQuantMode.NONE
             ),
-            top_k=35,
+            topk_buffer_width=35,
         )
         specs[f"{name}.indexer"] = MLAAttentionSpec(
             block_size=16,
@@ -277,7 +276,11 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
         attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
         # QSA publishes its selection capacity on the cache spec. It has no
         # MLA-only hf_config.index_topk field.
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(), max_model_len=128),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(),
+            max_model_len=128,
+            get_total_num_kv_heads=lambda: 2,
+        ),
         parallel_config=SimpleNamespace(
             tensor_parallel_size=2,
             pipeline_parallel_size=1,
