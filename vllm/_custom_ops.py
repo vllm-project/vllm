@@ -1747,7 +1747,6 @@ def mxfp4_experts_quant(
     topk: int,
     sorted_expert_ids: torch.Tensor | None = None,
     input_permutation: torch.Tensor | None = None,
-    block_size_override: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
@@ -1764,9 +1763,6 @@ def mxfp4_experts_quant(
             lookup in the CUDA kernel when provided.
         input_permutation: Optional map from expert-ordered output rows to
             source token rows. When provided, it must contain m * topk entries.
-        block_size_override: CUDA block size for the gather quant kernel.
-            Must be 0 (auto), 192, or 384. Ignored when input_permutation is
-            None.
 
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
@@ -1813,7 +1809,6 @@ def mxfp4_experts_quant(
         n_experts,
         sorted_expert_ids,
         input_permutation,
-        block_size_override,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)

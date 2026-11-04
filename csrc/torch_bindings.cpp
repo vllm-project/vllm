@@ -249,7 +249,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor input, Tensor input_offset_by_experts,"
       "Tensor output_scale_offset_by_experts, int n_experts, "
       "Tensor? sorted_expert_ids=None, "
-      "Tensor? input_permutation=None, int block_size_override=0) -> ()");
+      "Tensor? input_permutation=None) -> ()");
 
   // Quantize each token once and fan out its MXFP4 row to routed experts.
   ops.def(

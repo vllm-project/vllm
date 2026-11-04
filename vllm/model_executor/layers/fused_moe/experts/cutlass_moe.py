@@ -841,32 +841,17 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
 MXFP4_QUANTIZE_ONCE_MIN_TOKENS = 58
 MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS = 80
 MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS = 96
-MXFP4_GATHER_BLOCK_SIZE_OVERRIDE = 192
-MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS = 19
-MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS = 27
 
 
-def _select_mxfp4_input_quantization(m: int, topk: int) -> tuple[bool, int]:
+def _select_mxfp4_input_quantization(m: int, topk: int) -> bool:
     """Select MXFP4 input quantization from M and top-k."""
     if topk == 1:
-        return False, 0
+        return False
     if topk == 2:
-        return m >= MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS, 0
+        return m >= MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS
     if topk == 4:
-        return m >= MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS, 0
-
-    use_fanout = m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
-    if use_fanout:
-        return True, 0
-
-    use_192_gather = (
-        topk == 8
-        and MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS
-        <= m
-        <= MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS
-    )
-    block_size = MXFP4_GATHER_BLOCK_SIZE_OVERRIDE if use_192_gather else 0
-    return False, block_size
+        return m >= MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS
+    return m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
 
 
 def run_cutlass_moe_mxfp4(
@@ -956,9 +941,7 @@ def run_cutlass_moe_mxfp4(
         sorted_expert_ids=sorted_expert_ids,
     )
 
-    use_fanout, gather_block_size_override = _select_mxfp4_input_quantization(
-        m, num_topk
-    )
+    use_fanout = _select_mxfp4_input_quantization(m, num_topk)
 
     if use_fanout:
         rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quantize_once_fanout(
@@ -978,7 +961,6 @@ def run_cutlass_moe_mxfp4(
             num_topk,
             sorted_expert_ids,
             input_permutation=a_map,
-            block_size_override=gather_block_size_override,
         )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))

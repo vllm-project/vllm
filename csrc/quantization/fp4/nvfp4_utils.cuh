@@ -238,7 +238,7 @@ __device__ __forceinline__ Fp4QuantizedVec<Type> cvt_warp_fp16_to_fp4_with_sf(
   // Get the absolute maximum among all 16 values (two threads).
 
   if constexpr (CVT_FP4_NUM_THREADS_PER_SF == 2) {
-    localMax = __hmax2(__shfl_xor_sync(__activemask(), localMax, 1), localMax);
+    localMax = __hmax2(__shfl_xor_sync(0xffffffffu, localMax, 1), localMax);
   }
   // Get the final absolute maximum values.
   float vecMax = float(__hmax(localMax.x, localMax.y));

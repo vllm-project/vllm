@@ -55,6 +55,10 @@ static constexpr int MXFP4_SF_VEC_SIZE = 32;
 // For PACK8 mode (CVT_FP4_ELTS_PER_THREAD=8): 4 threads per SF
 static constexpr int MXFP4_NUM_THREADS_PER_SF =
     MXFP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
+static constexpr int MXFP4_GATHER_BLOCK_SIZE = 192;
+static constexpr int MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS = 19;
+static constexpr int MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS = 27;
+static constexpr int MXFP4_GATHER_BLOCK_SIZE_K = 6144;
 
 // MXFP4 quantization kernel for experts.
 // Uses 32-element blocks with E8M0 (UE8M0) scale factors.
@@ -546,8 +550,7 @@ void mxfp4_experts_quant(
     torch::stable::Tensor const& output_scale_offset_by_experts,
     int64_t n_experts,
     std::optional<torch::stable::Tensor> const& sorted_expert_ids,
-    std::optional<torch::stable::Tensor> const& input_permutation,
-    int64_t block_size_override) {
+    std::optional<torch::stable::Tensor> const& input_permutation) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
   STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
@@ -561,8 +564,6 @@ void mxfp4_experts_quant(
   auto m_topk = input_permutation.has_value() ? input_permutation->size(0)
                                               : input.size(0);
   auto k = input.size(1);
-  STD_TORCH_CHECK(block_size_override == 0 || block_size_override == 192 ||
-                  block_size_override == 384);
 
   validate_mxfp4_experts_quant_inputs(
       output, output_scale, input, input_offset_by_experts,
@@ -572,6 +573,18 @@ void mxfp4_experts_quant(
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+
+  int32_t gather_block_size = 0;
+  if (input_permutation.has_value() && input.size(0) > 0 &&
+      m_topk % input.size(0) == 0) {
+    int64_t const topk = m_topk / input.size(0);
+    if (topk == 8 && input.size(0) >= MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS &&
+        input.size(0) <= MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS &&
+        k == MXFP4_GATHER_BLOCK_SIZE_K) {
+      // Keep the measured top-k-8 gather geometry internal to the launcher.
+      gather_block_size = MXFP4_GATHER_BLOCK_SIZE;
+    }
+  }
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "mxfp4_experts_quant_kernel", [&] {
@@ -591,7 +604,7 @@ void mxfp4_experts_quant(
               input_offset_by_experts.data_ptr(),
               output_scale_offset_by_experts.data_ptr(), sorted_expert_ids_ptr,
               input_permutation_ptr, m_topk, k, n_experts, stream,
-              static_cast<int32_t>(block_size_override));
+              gather_block_size);
         } else {
           vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false>(
               output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),

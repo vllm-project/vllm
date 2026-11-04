@@ -206,47 +206,42 @@ def is_b200_supported() -> bool:
 
 
 @pytest.mark.parametrize(
-    ("m", "expected_fanout", "expected_gather_block_size"),
+    ("m", "expected_fanout"),
     [
-        (18, False, 0),
-        (19, False, 192),
-        (27, False, 192),
-        (28, False, 0),
-        (57, False, 0),
-        (58, True, 0),
-        (59, True, 0),
+        (18, False),
+        (19, False),
+        (27, False),
+        (28, False),
+        (57, False),
+        (58, True),
+        (59, True),
     ],
 )
-def test_mxfp4_input_quantization_dispatch_boundaries(
-    m: int, expected_fanout: bool, expected_gather_block_size: int
-):
+def test_mxfp4_input_quantization_dispatch_boundaries(m: int, expected_fanout: bool):
     """Unmeasured shapes retain the legacy M-based dispatch boundaries."""
-    assert _select_mxfp4_input_quantization(m, 8) == (
-        expected_fanout,
-        expected_gather_block_size,
-    )
+    assert _select_mxfp4_input_quantization(m, 8) == expected_fanout
 
 
 @pytest.mark.parametrize(("topk", "min_tokens"), [(2, 80), (4, 96)])
 def test_mxfp4_measured_selector_thresholds(topk: int, min_tokens: int):
     """Shared conservative M thresholds cover the measured K range."""
-    assert _select_mxfp4_input_quantization(min_tokens - 1, topk) == (False, 0)
-    assert _select_mxfp4_input_quantization(min_tokens, topk) == (True, 0)
+    assert not _select_mxfp4_input_quantization(min_tokens - 1, topk)
+    assert _select_mxfp4_input_quantization(min_tokens, topk)
 
 
 def test_mxfp4_topk1_stays_on_gather():
     """Top-k 1 keeps gather because fanout cannot avoid repeated quantization."""
     for m in (1, 57, 58, 128, 512):
-        assert _select_mxfp4_input_quantization(m, 1) == (False, 0)
+        assert not _select_mxfp4_input_quantization(m, 1)
 
 
-def test_mxfp4_selector_uses_auto_gather_except_for_topk8_override():
-    """M<58 uses auto gather for tuned top-k values and 192 threads for top-k8."""
-    assert _select_mxfp4_input_quantization(24, 1) == (False, 0)
-    assert _select_mxfp4_input_quantization(24, 2) == (False, 0)
-    assert _select_mxfp4_input_quantization(24, 4) == (False, 0)
-    assert _select_mxfp4_input_quantization(24, 8) == (False, 192)
-    assert _select_mxfp4_input_quantization(58, 3) == (True, 0)
+def test_mxfp4_selector_uses_only_m_and_topk():
+    """The host selector chooses fanout without exposing launch geometry."""
+    assert not _select_mxfp4_input_quantization(24, 1)
+    assert not _select_mxfp4_input_quantization(24, 2)
+    assert not _select_mxfp4_input_quantization(24, 4)
+    assert not _select_mxfp4_input_quantization(24, 8)
+    assert _select_mxfp4_input_quantization(58, 3)
 
 
 def compute_ref_output(
@@ -1004,6 +999,17 @@ def test_mxfp4_scale_buffers_cover_per_expert_padding(monkeypatch):
             num_experts,
             None,
             input_permutation,
+        )
+    with pytest.raises(RuntimeError, match="at least 1024 rows"):
+        torch.ops._C.mxfp4_experts_quantize_once_fanout(
+            too_small_output,
+            too_small_scales,
+            input_tensor,
+            topk_ids,
+            output_permutation,
+            expert_offsets,
+            blockscale_offsets,
+            num_experts,
         )
 
 
