@@ -16,21 +16,17 @@ The handshake-completion callback feeds ``_deferred_push_inbox`` with
 matched pushes whose P→D handshake has finished so the writer can
 (re-)issue the WRITE without ever blocking on the network.
 
-Wake model: the writer self-polls every
-``_PUSH_WRITER_POLL_INTERVAL_MS`` only while it has unmatched
-``_push_finished_blocks`` (i.e. P-side blocks waiting for a D PUSH_REG
-notif that has no other wake source). All other progress is
-event-driven: the engine main thread sets ``_push_writer_wake`` from
-``start_load_kv`` (when handing it new work) and from ``get_finished``
-(so each engine step gives the writer a chance to drain NIXL notifs);
-the handshake-completion callback sets the same event after a deferred
-PUSH_REG send or a deferred push WRITE has been queued. When a request's
-lease expires (the base worker reports it via ``done_sending``) or the WRITE completes,
-``get_finished`` enqueues an eviction onto ``_evict_finished_inbox`` so
-the writer drops any leftover ``_push_finished_blocks`` /
-``_pending_d_registrations`` and stops self-polling.
+Wake model: the writer blocks on ``_push_writer_wake``. The engine main
+thread sets it from ``start_load_kv`` and from ``get_transfer_results``
+(every engine step, including the steps ``has_pending_push_work`` keeps
+alive while a push is unfinished). The handshake-completion callback
+sets it after a deferred PUSH_REG send or WRITE is queued. When a
+request's lease expires or its WRITE completes, ``get_transfer_results``
+enqueues the req id on ``_evict_finished_inbox`` so the writer drops any
+leftover ``_push_finished_blocks`` / ``_pending_d_registrations``.
 """
 
+import dataclasses
 import queue
 import threading
 import time
@@ -50,7 +46,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
-    HeartbeatInfo,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     RemoteMeta,
@@ -72,10 +67,6 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
-
-# Writer-thread poll cadence while a PUSH_REG match is outstanding.
-# Otherwise the writer blocks on the engine wake.
-_PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
@@ -123,21 +114,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         )
         # Main thread → writer: req_ids whose lease has expired or whose
         # WRITE has completed. Writer drops them from
-        # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
-        # writer busy-polling forever.
+        # ``_push_finished_blocks``.
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
         # Handshakes that have just completed and are ready for the WRITE on wthread
         self._deferred_push_inbox = queue.Queue[tuple[str, BlockIds, dict[str, Any]]]()
 
-        # Wake signal from engine main thread (start_load_kv / get_finished).
-        # Writer self-polls at _PUSH_WRITER_POLL_INTERVAL_MS while it has
-        # active in-flight state; otherwise it blocks until signalled.
+        # Wake signal from the engine main thread and the handshake callback.
         self._push_writer_wake = threading.Event()
 
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
-        # NIXL is not thread-safe. Serialize writer calls with handshake setup.
-        self._nixl_io_lock = threading.Lock()
 
     # --- Lifecycle ----------------------------------------------------- #
 
@@ -251,20 +237,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send[req_id] = expiration_time
 
         # Heartbeats call NIXL. Run them on the writer, not the model thread.
-        # Copy the map: the uni executor hands the scheduler's live object here.
+        # Queue a copy: the uni executor hands the scheduler's live object here,
+        # and the scheduler mutates req_ids in place.
         if metadata.heartbeat_by_engine:
-            metadata.heartbeat_by_engine = {
-                engine_id: HeartbeatInfo(
-                    req_ids=set(info.req_ids),
-                    host=info.host,
-                    port=info.port,
-                    tp_size=info.tp_size,
-                    dcp_size=info.dcp_size,
-                    pp_size=info.pp_size,
-                )
+            queued = NixlConnectorMetadata()
+            queued.heartbeat_by_engine = {
+                engine_id: dataclasses.replace(info, req_ids=set(info.req_ids))
                 for engine_id, info in metadata.heartbeat_by_engine.items()
             }
-            self._heartbeat_inbox.put(metadata)
+            self._heartbeat_inbox.put(queued)
             self._push_writer_wake.set()
 
     # --- Writer thread ------------------------------------------------- #
@@ -285,10 +266,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_result_inbox.put((done, failed))
 
     def _push_writer_loop(self) -> None:
-        sleep_s = _PUSH_WRITER_POLL_INTERVAL_MS / 1000.0
-
         while not self._push_writer_stop.is_set():
-            self._nixl_io_lock.acquire()
             try:
                 # 1. D registrations to send.
                 while True:
@@ -345,24 +323,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._poll_sending_transfers()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
-            finally:
-                self._nixl_io_lock.release()
 
-            # Completions are drained on the engine wake. Only an unmatched
-            # PUSH_REG has no other wake source.
-            if self._push_finished_blocks:
-                self._push_writer_stop.wait(timeout=sleep_s)
-            else:
-                self._push_writer_wake.wait()
-                self._push_writer_wake.clear()
-
-    def add_remote_agent(self, *args, **kwargs):
-        with self._nixl_io_lock:
-            return super().add_remote_agent(*args, **kwargs)
-
-    def _add_notif_only_remote_agent(self, *args, **kwargs):
-        with self._nixl_io_lock:
-            return super()._add_notif_only_remote_agent(*args, **kwargs)
+            self._push_writer_wake.wait()
+            self._push_writer_wake.clear()
 
     def _handle_push_reg_notif(self, notif: bytes) -> None:
         try:

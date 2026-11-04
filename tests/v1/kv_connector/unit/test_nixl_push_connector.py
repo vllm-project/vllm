@@ -367,7 +367,6 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
-        w._nixl_io_lock = threading.Lock()
 
         # Base worker fields touched by start_load_kv / _get_new_notifs.
         w._recving_metadata = {}
@@ -947,7 +946,7 @@ class TestPushWriterNotifs:
             send_heartbeats.assert_not_called()
 
             w._drain_heartbeats()
-            send_heartbeats.assert_called_once_with(metadata)
+            send_heartbeats.assert_called_once()
             sent = send_heartbeats.call_args.args[0].heartbeat_by_engine["prefill"]
             assert sent is not original
             assert sent.req_ids == {"req"}
