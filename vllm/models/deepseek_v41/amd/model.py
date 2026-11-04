@@ -19,6 +19,7 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -1034,6 +1035,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 return inv_name
             return name
 
+        def _resolve_expert_scale_name(name: str) -> str:
+            """Rename a checkpoint expert scale to the suffix its MoE layer
+            registers, which maps ``experts.E.wN.<suffix>`` to ``wN_<suffix>``."""
+            if not name.endswith(("weight_scale", "weight_scale_inv")):
+                return name
+            head, _, suffix = name.rpartition(".")
+            layer = name[: name.index(".experts.")]
+            param = _resolve_param_name(f"{layer}.experts.routed_experts.w2_{suffix}")
+            return f"{head}.{param.rpartition('.w2_')[2]}"
+
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
@@ -1086,6 +1097,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name = _resolve_expert_scale_name(name)
+                    expert_params = load_routed_experts_weight(
+                        self, name, loaded_weight
+                    )
+                    if expert_params is not None:
+                        loaded_params.update(expert_params)
+                        continue
+                    # MegaMoE experts are not under a MoERunner: own mapping.
+                    name_mapped: str | None = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1112,6 +1132,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
+                    if name_mapped is None:
+                        raise KeyError(name)
                     loaded_params.add(name_mapped)
                     continue
                 else:
