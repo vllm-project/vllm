@@ -188,7 +188,6 @@ class QuickAllReduce:
             return
 
         if regime_str == "NONE":
-            self._warn_sp_quick_reduce_inactive()
             logger.debug(
                 "Custom quick allreduce is disabled based "
                 "on env variable "
@@ -267,21 +266,11 @@ class QuickAllReduce:
         self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
         self.disabled = False
 
-    @staticmethod
-    def _warn_sp_quick_reduce_inactive() -> None:
-        if envs.VLLM_ROCM_SP_QUICK_REDUCE:
-            logger.warning(
-                "VLLM_ROCM_SP_QUICK_REDUCE needs "
-                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 and AITER's FlyDSL "
-                "QuickReduce; the sequence-parallel collectives stay exact."
-            )
-
     def _init_flydsl_int4(self, vllm_config) -> Any:
         if (
             self.qr_quant_level != QuickReduceRegime.INT4
             or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
         ):
-            self._warn_sp_quick_reduce_inactive()
             return None
         flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
             group=self.group,
@@ -293,7 +282,7 @@ class QuickAllReduce:
         # out of the first prefill and out of CUDA graph capture.
         warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
         flydsl_int4.compile(warmup, torch.empty_like(warmup))
-        self._flydsl_sp = self._init_flydsl_sp(flydsl_int4, warmup)
+        self._flydsl_sp = self._init_flydsl_sp(flydsl_int4, warmup, vllm_config)
         torch.accelerator.synchronize(self.device)
         logger.info(
             "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
@@ -310,26 +299,35 @@ class QuickAllReduce:
             )
         return flydsl_int4
 
-    def _init_flydsl_sp(self, flydsl_int4: Any, warmup: torch.Tensor) -> bool:
+    def _init_flydsl_sp(
+        self, flydsl_int4: Any, warmup: torch.Tensor, vllm_config
+    ) -> bool:
         """Enable the sequence-parallel reduce-scatter and all-gather.
 
-        They share the all-reduce object's inbox and colors, so the opt-in
-        switch is the only extra condition. Only TP2 was validated for
-        accuracy. Like `compile`, `compile_sp` launches both collectives on
-        every rank, which keeps the JIT out of the first prefill and out of
-        CUDA graph capture.
+        They share the all-reduce object's inbox and colors, so
+        `--enable-hc-sp-quick-reduce` is the only extra opt-in. Only TP2 was
+        validated for accuracy, and only gfx950 was run. Like `compile`,
+        `compile_sp` launches both collectives on every rank, which keeps the
+        JIT out of the first prefill and out of CUDA graph capture.
         """
-        if not envs.VLLM_ROCM_SP_QUICK_REDUCE:
-            return False
-        if self.world_size != 2 or not all(
-            hasattr(flydsl_int4, name)
-            for name in ("reduce_scatter", "all_gather", "compile_sp")
+        if vllm_config is None or not (
+            vllm_config.parallel_config.enable_hc_sp_quick_reduce
         ):
-            logger.warning(
-                "VLLM_ROCM_SP_QUICK_REDUCE is set, but FlyDSL QuickReduce "
-                "reduce-scatter and all-gather need TP2 and an AITER with "
-                "QuickAllReduceInt4.reduce_scatter/all_gather; the sequence-"
-                "parallel collectives stay exact."
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        if (
+            self.world_size != 2
+            or not on_gfx950()
+            or not all(
+                hasattr(flydsl_int4, name)
+                for name in ("reduce_scatter", "all_gather", "compile_sp")
+            )
+        ):
+            logger.debug(
+                "FlyDSL QuickReduce reduce-scatter and all-gather need gfx950, TP2 "
+                "and an AITER with QuickAllReduceInt4.reduce_scatter, all_gather "
+                "and compile_sp."
             )
             return False
         flydsl_int4.compile_sp(warmup, torch.empty_like(warmup[: warmup.numel() // 2]))
@@ -441,6 +439,11 @@ class QuickAllReduce:
         """Whether `all_reduce` runs `inp` through FlyDSL QuickReduce."""
         return self.should_quick_allreduce(inp) and self._use_flydsl_int4(inp)
 
+    @property
+    def sp_quick_reduce_enabled(self) -> bool:
+        """Whether `--enable-hc-sp-quick-reduce` is on and can be served."""
+        return self._flydsl_sp
+
     def _sp_chunk_rows(self, inp: torch.Tensor, chunk: int) -> int | None:
         """Rows per rank, padded to whole tiles, or None to stay exact.
 
@@ -448,13 +451,7 @@ class QuickAllReduce:
         rank's block is zero-padded to a multiple of `unit` rows. The decision
         depends on shapes only: every rank of the group reaches the same one.
         """
-        if (
-            not self._flydsl_sp
-            or self.disabled
-            or inp.dtype != torch.bfloat16
-            or inp.ndim != 2
-            or not inp.is_contiguous()
-        ):
+        if inp.dtype != torch.bfloat16 or not inp.is_contiguous():
             return None
         row_bytes = inp.shape[1] * inp.element_size()
         unit = self._SP_TILE_BYTES // math.gcd(self._SP_TILE_BYTES, row_bytes)
@@ -488,7 +485,8 @@ class QuickAllReduce:
 
         Every partial, this rank's own included, goes through the codec.
         """
-        if inp.ndim != 2 or inp.shape[0] % self.world_size:
+        # `_flydsl_sp` first: `world_size` is unset when init returned early.
+        if not self._flydsl_sp or inp.ndim != 2 or inp.shape[0] % self.world_size:
             return None
         chunk = inp.shape[0] // self.world_size
         padded = self._sp_chunk_rows(inp, chunk)
@@ -508,7 +506,7 @@ class QuickAllReduce:
     def quick_all_gather(self, inp: torch.Tensor) -> torch.Tensor | None:
         """INT4 all-gather of `inp` [T / world_size, H] in rank order, or None
         when not eligible. Every rank holds bitwise-equal output."""
-        if inp.ndim != 2:
+        if not self._flydsl_sp or inp.ndim != 2:
             return None
         chunk = inp.shape[0]
         padded = self._sp_chunk_rows(inp, chunk)

@@ -6,6 +6,7 @@ from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from typing import Annotated, Literal
+from unittest.mock import patch
 
 import pytest
 from pydantic import Field
@@ -632,6 +633,30 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
+
+def test_enable_hc_sp_quick_reduce_reaches_the_parallel_config():
+    """The flag is off by default. The CLI flag lands in `ParallelConfig`, whose
+    validation then rejects it without HC SP: a flag dropped on the way would
+    build the config silently."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    assert not EngineArgs.from_cli_args(parser.parse_args([])).enable_hc_sp_quick_reduce
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--tensor-parallel-size",
+            "2",
+            "--enable-hc-sp-quick-reduce",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.enable_hc_sp_quick_reduce
+    with (
+        patch("vllm.config.parallel.current_platform.is_rocm", return_value=True),
+        pytest.raises(ValueError, match="requires HC sequence parallelism"),
+    ):
         engine_args.create_engine_config()
 
 

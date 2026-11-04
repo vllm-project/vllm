@@ -4732,6 +4732,48 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
 
 
 @pytest.mark.parametrize(
+    "rocm,tp_size,hc_sp,moe_sp,dbo,int4,error",
+    [
+        (True, 2, True, False, False, True, None),
+        (True, 2, False, True, False, True, None),  # MoE SP turns HC SP on
+        (True, 2, False, False, False, True, "requires HC sequence parallelism"),
+        (False, 2, True, False, False, True, "requires ROCm"),
+        (True, 4, True, False, False, True, "supports TP=2 only"),
+        (True, 2, True, False, True, True, "does not support DBO"),
+        (True, 2, True, False, False, False, "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION"),
+        (False, 1, False, False, False, False, None),  # ignored with TP=1
+    ],
+)
+def test_hc_sp_quick_reduce_validation(
+    monkeypatch, rocm, tp_size, hc_sp, moe_sp, dbo, int4, error
+):
+    """The flag needs ROCm, active HC SP, TP=2, no DBO and the INT4 env var; it
+    is ignored with TP=1, like --enable-hc-sp."""
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4" if int4 else "FP")
+    envs.disable_envs_cache()
+    parallel_kwargs = dict(
+        enable_hc_sp=hc_sp,
+        enable_hc_sp_quick_reduce=True,
+        enable_dbo=dbo,
+        tensor_parallel_size=tp_size,
+        # Avoid backend auto-detection in this config-only test.
+        distributed_executor_backend="mp",
+    )
+    if moe_sp:
+        parallel_kwargs.update(
+            data_parallel_size=2,
+            enable_expert_parallel=True,
+            all2all_backend="allgather_reducescatter",
+        )
+    with patch("vllm.config.parallel.current_platform.is_rocm", return_value=rocm):
+        if error:
+            with pytest.raises(ValueError, match=error):
+                ParallelConfig(**parallel_kwargs)
+        else:
+            ParallelConfig(**parallel_kwargs)
+
+
+@pytest.mark.parametrize(
     ("layer_types", "expected_attention"),
     [
         # Qwen3-Next / Qwen3.5 spell their attention layers "full_attention".

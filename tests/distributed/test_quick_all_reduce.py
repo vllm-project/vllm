@@ -16,6 +16,7 @@ import vllm._aiter_ops as aiter_ops
 import vllm.distributed as vllm_distributed
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import ParallelConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
     KB,
@@ -25,6 +26,8 @@ from vllm.distributed.device_communicators.quick_all_reduce import (
 )
 from vllm.distributed.parallel_state import get_tp_group, graph_capture
 from vllm.envs import disable_envs_cache
+from vllm.logger import _print_warning_once
+from vllm.models.common.ops import sequence_parallel as common_sp
 from vllm.platforms import current_platform
 
 from ..utils import (
@@ -77,11 +80,13 @@ def envs_cache_disabled():
 def _make_quick_allreduce_for_test(
     min_size_mb: int | None = None,
     quantization_min_size: int | None = None,
+    max_size_mb: int = 16,
 ) -> QuickAllReduce:
     quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
     quick_reduce._flydsl_int4 = None
+    quick_reduce._flydsl_sp = False
     quick_reduce.disabled = False
-    quick_reduce.qr_max_size = 16 * MB
+    quick_reduce.qr_max_size = max_size_mb * MB
     quick_reduce.qr_min_size = min_size_mb * MB if min_size_mb is not None else None
     quick_reduce.qr_quant_level = QuickReduceRegime.INT4
     quick_reduce.qr_quantization_min_size = quantization_min_size
@@ -91,12 +96,36 @@ def _make_quick_allreduce_for_test(
 
 
 class _FakeFlyDSLInt4:
+    """The sequence-parallel methods play rank 0 of 2: the peer's all-gather
+    block is `block + 1`."""
+
     def __init__(self):
         self.allreduce_calls = 0
         self.closed = False
+        self.sp_calls = []
 
     def allreduce(self, inp, out):
         self.allreduce_calls += 1
+
+    def reduce_scatter(self, inp, out):
+        self._check_aligned(inp, out)
+        self.sp_calls.append(("reduce_scatter", inp, out))
+        out.copy_(inp[: out.shape[0]])
+
+    def all_gather(self, inp, out):
+        self._check_aligned(inp, out)
+        self.sp_calls.append(("all_gather", inp, out))
+        out[: inp.shape[0]] = inp
+        out[inp.shape[0] :] = inp + 1
+
+    @staticmethod
+    def _check_aligned(inp, out):
+        # AITER's QuickAllReduceInt4._check_tensors raises on misaligned buffers.
+        if inp.data_ptr() % 16 or out.data_ptr() % 16:
+            raise ValueError("requires 16-byte-aligned input/output")
+
+    def compile_sp(self, full, shard):
+        self.sp_calls.append(("compile_sp", full, shard))
 
     def close(self):
         self.closed = True
@@ -468,6 +497,335 @@ def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
     assert calls[0]["gemma_norm"] is False
     torch.testing.assert_close(out, inp + 1)
     torch.testing.assert_close(residual_out, residual + 1)
+
+
+# Sequence-parallel entry points (`--enable-hc-sp-quick-reduce`). The fake plays
+# AITER's FlyDSL kernels, so these cover the gating, the padding to whole tiles
+# and the unpadding, not the kernels.
+SP_HIDDEN = 2560  # a row is 5,120 B: the kernels' 32 KiB tile holds 6.4 rows
+
+
+def _make_sp_quick_allreduce(
+    sp_enabled: bool = True, **kwargs
+) -> tuple[QuickAllReduce, _FakeFlyDSLInt4]:
+    quick_reduce = _make_quick_allreduce_for_test(**kwargs)
+    fake = _FakeFlyDSLInt4()
+    quick_reduce._flydsl_int4 = fake
+    quick_reduce._flydsl_sp = sp_enabled
+    return quick_reduce, fake
+
+
+def _sp_rows(num_rows: int) -> torch.Tensor:
+    """bf16 rows that differ between the two halves of a 2 * 1,030-row tensor.
+
+    Integers up to 255 are exact in bf16, so the expected values are exact.
+    """
+    values = (
+        torch.arange(num_rows)[:, None] % 251 + torch.arange(SP_HIDDEN)[None, :] % 5
+    )
+    return values.to(torch.bfloat16)
+
+
+def test_sp_reduce_scatter_pads_each_block_to_whole_tiles():
+    quick_reduce, fake = _make_sp_quick_allreduce()
+    chunk, padded = 1030, 1056  # 33 * 32 rows: 32 rows are 5 whole tiles
+    inp = _sp_rows(2 * chunk)
+
+    out = quick_reduce.quick_reduce_scatter(inp)
+
+    ((name, src, kernel_out),) = fake.sp_calls
+    assert name == "reduce_scatter"
+    assert src.shape == (2 * padded, SP_HIDDEN)
+    assert kernel_out.shape == (padded, SP_HIDDEN)
+    for rank in range(2):  # every block keeps its rows, then zeros
+        block = src[rank * padded : (rank + 1) * padded]
+        assert torch.equal(block[:chunk], inp[rank * chunk : (rank + 1) * chunk])
+        assert not block[chunk:].any()
+    assert out.shape == (chunk, SP_HIDDEN)
+    assert torch.equal(out, inp[:chunk])  # the fake's rank-0 block, unpadded
+
+
+def test_sp_all_gather_pads_each_block_and_keeps_rank_order():
+    quick_reduce, fake = _make_sp_quick_allreduce()
+    chunk, padded = 1030, 1056
+    inp = _sp_rows(chunk)
+
+    out = quick_reduce.quick_all_gather(inp)
+
+    ((name, src, kernel_out),) = fake.sp_calls
+    assert name == "all_gather"
+    assert src.shape == (padded, SP_HIDDEN)
+    assert kernel_out.shape == (2 * padded, SP_HIDDEN)
+    assert torch.equal(src[:chunk], inp) and not src[chunk:].any()
+    assert out.shape == (2 * chunk, SP_HIDDEN)
+    assert torch.equal(out[:chunk], inp)  # rank 0, then the fake's rank 1
+    assert torch.equal(out[chunk:], inp + 1)
+
+
+def test_sp_whole_tile_blocks_are_not_copied():
+    quick_reduce, fake = _make_sp_quick_allreduce()
+    chunk = 1024  # a multiple of 32 rows
+    inp = _sp_rows(2 * chunk)
+    shard = _sp_rows(chunk)
+
+    out_rs = quick_reduce.quick_reduce_scatter(inp)
+    out_ag = quick_reduce.quick_all_gather(shard)
+
+    (_, rs_src, rs_out), (_, ag_src, ag_out) = fake.sp_calls
+    assert rs_src is inp and ag_src is shard
+    assert out_rs is rs_out and out_ag is ag_out
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["flag_off", "fp16", "non_contiguous", "below_min_size", "above_max_size"]
+    + ["below_quantization_min_size", "one_dimensional"],
+)
+def test_sp_ineligible_inputs_return_none(case):
+    kwargs = {}
+    inp = _sp_rows(2 * 1024)
+    if case == "flag_off":
+        kwargs["sp_enabled"] = False
+    elif case == "fp16":
+        inp = inp.to(torch.float16)
+    elif case == "non_contiguous":
+        inp = _sp_rows(4 * 1024)[::2]
+    elif case == "below_min_size":
+        inp = _sp_rows(2 * 64)  # 655 KB against the 8 MB built-in TP2 INT4 minimum
+    elif case == "above_max_size":
+        kwargs["max_size_mb"] = 8  # the 10.5 MB message does not fit
+    elif case == "below_quantization_min_size":
+        kwargs["quantization_min_size"] = 32 * MB
+    elif case == "one_dimensional":
+        inp = inp.reshape(-1)
+    quick_reduce, fake = _make_sp_quick_allreduce(**kwargs)
+
+    assert quick_reduce.quick_reduce_scatter(inp) is None
+    assert quick_reduce.quick_all_gather(inp) is None
+    assert not fake.sp_calls
+
+
+def _misaligned_rows(rows: int) -> torch.Tensor:
+    """A contiguous bf16 [rows, SP_HIDDEN] tensor 2 bytes past a 16-byte boundary."""
+    storage = torch.empty(rows * SP_HIDDEN + 8, dtype=torch.bfloat16)
+    view = storage[1 : 1 + rows * SP_HIDDEN].view(rows, SP_HIDDEN)
+    view.copy_(_sp_rows(rows))
+    assert view.data_ptr() % 16 == 2
+    return view
+
+
+def test_sp_misaligned_input_is_copied_not_declined():
+    """A misaligned view reaches the kernel as an aligned copy: every rank must
+    take the same path, so it is not declined."""
+    quick_reduce, fake = _make_sp_quick_allreduce()
+    inp = _misaligned_rows(2 * 1024)  # whole tiles: no padding copy hides it
+    shard = _misaligned_rows(1024)
+
+    out_rs = quick_reduce.quick_reduce_scatter(inp)
+    out_ag = quick_reduce.quick_all_gather(shard)
+
+    (_, rs_src, _), (_, ag_src, _) = fake.sp_calls
+    assert rs_src is not inp and torch.equal(rs_src, inp)
+    assert ag_src is not shard and torch.equal(ag_src, shard)
+    assert torch.equal(out_rs, inp[:1024]) and torch.equal(out_ag[:1024], shard)
+
+
+def test_sp_reduce_scatter_needs_rows_divisible_by_world_size():
+    quick_reduce, fake = _make_sp_quick_allreduce()
+
+    assert quick_reduce.quick_reduce_scatter(_sp_rows(2 * 1024 + 1)) is None
+    assert not fake.sp_calls
+
+
+def test_sp_min_size_override_admits_small_messages():
+    quick_reduce, fake = _make_sp_quick_allreduce(min_size_mb=0)
+
+    assert quick_reduce.quick_all_gather(_sp_rows(64)) is not None
+    assert len(fake.sp_calls) == 1
+
+
+def _init_flydsl_sp(
+    monkeypatch, world_size: int, flydsl_int4, flag: bool | None, gfx950: bool = True
+):
+    """`flag` None stands for no VllmConfig being set."""
+    monkeypatch.setitem(
+        sys.modules, "vllm.platforms.rocm", SimpleNamespace(on_gfx950=lambda: gfx950)
+    )
+    quick_reduce = _make_quick_allreduce_for_test()
+    quick_reduce.world_size = world_size
+    vllm_config = (
+        None
+        if flag is None
+        else SimpleNamespace(
+            parallel_config=ParallelConfig(enable_hc_sp_quick_reduce=flag)
+        )
+    )
+    warmup = torch.empty(MB, dtype=torch.bfloat16)
+    return quick_reduce._init_flydsl_sp(flydsl_int4, warmup, vllm_config), warmup
+
+
+def test_sp_init_runs_compile_sp_once_when_the_flag_is_on(monkeypatch):
+    fake = _FakeFlyDSLInt4()
+
+    enabled, warmup = _init_flydsl_sp(monkeypatch, 2, fake, True)
+
+    assert enabled
+    ((name, full, shard),) = fake.sp_calls
+    assert name == "compile_sp"
+    assert full is warmup and shard.numel() == warmup.numel() // 2
+    assert full.numel() * full.element_size() % (32 * 1024) == 0  # whole tiles
+
+
+@pytest.mark.parametrize("flag", [None, False])
+def test_sp_init_is_inert_without_the_flag(monkeypatch, flag):
+    fake = _FakeFlyDSLInt4()
+
+    enabled, _ = _init_flydsl_sp(monkeypatch, 2, fake, flag)
+
+    assert not enabled and not fake.sp_calls
+
+
+@pytest.mark.parametrize(
+    "world_size, gfx950", [(4, True), (2, False)], ids=["tp4", "not_gfx950"]
+)
+def test_sp_init_stays_exact_where_it_was_not_validated(
+    monkeypatch, world_size, gfx950
+):
+    fake = _FakeFlyDSLInt4()
+
+    enabled, _ = _init_flydsl_sp(monkeypatch, world_size, fake, True, gfx950)
+
+    assert not enabled and not fake.sp_calls
+
+
+def test_sp_init_stays_exact_when_aiter_lacks_the_methods(monkeypatch):
+    enabled, _ = _init_flydsl_sp(
+        monkeypatch, 2, SimpleNamespace(allreduce=lambda *args: None), True
+    )
+
+    assert not enabled
+
+
+def test_sp_entry_points_are_inert_after_an_early_init_return():
+    """`__init__` returns before `world_size` is set when the group spans nodes."""
+    quick_reduce = QuickAllReduce.__new__(QuickAllReduce)
+    quick_reduce.disabled = True
+    quick_reduce._flydsl_int4 = None
+    quick_reduce._flydsl_sp = False
+    inp = _sp_rows(2 * 1024)
+
+    assert quick_reduce.quick_reduce_scatter(inp) is None
+    assert quick_reduce.quick_all_gather(inp) is None
+
+
+class _FakeCommunicator:
+    def __init__(self, result=None, qr_comm=None):
+        self.result = result
+        self.qr_comm = qr_comm
+        self.seen = []
+
+    def quick_reduce_scatter(self, x):
+        self.seen.append(("reduce_scatter", x.shape))
+        return self.result
+
+    def quick_all_gather(self, x):
+        self.seen.append(("all_gather", x.shape))
+        return self.result
+
+
+def _patch_tp(monkeypatch, communicator):
+    monkeypatch.setattr(
+        common_sp,
+        "get_tp_group",
+        lambda: SimpleNamespace(device_communicator=communicator),
+    )
+    monkeypatch.setattr(common_sp, "get_tensor_model_parallel_world_size", lambda: 2)
+    exact = SimpleNamespace(rs=[], ag=[])
+    monkeypatch.setattr(
+        common_sp, "sp_reduce_scatter", lambda x: exact.rs.append(x.shape) or "exact_rs"
+    )
+    monkeypatch.setattr(
+        common_sp, "sp_all_gather", lambda x: exact.ag.append(x.shape) or "exact_ag"
+    )
+    return exact
+
+
+def test_sp_quantized_helpers_use_the_quick_result(monkeypatch):
+    sentinel = torch.zeros(1)
+    communicator = _FakeCommunicator(sentinel)
+    exact = _patch_tp(monkeypatch, communicator)
+
+    assert common_sp.sp_reduce_scatter_quantized(torch.zeros(7, 4)) is sentinel
+    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) is sentinel
+
+    # reduce-scatter pads the rows to a multiple of the world size first
+    assert communicator.seen == [("reduce_scatter", (8, 4)), ("all_gather", (3, 4))]
+    assert not exact.rs and not exact.ag
+
+
+def test_sp_quantized_helpers_fall_back_to_the_exact_collectives(monkeypatch):
+    exact = _patch_tp(monkeypatch, _FakeCommunicator(None))
+
+    assert common_sp.sp_reduce_scatter_quantized(torch.zeros(8, 4)) == "exact_rs"
+    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) == "exact_ag"
+    assert exact.rs == [(8, 4)] and exact.ag == [(3, 4)]
+
+
+def test_sp_quantized_helpers_fall_back_without_a_communicator(monkeypatch):
+    exact = _patch_tp(monkeypatch, None)
+
+    assert common_sp.sp_all_gather_quantized(torch.zeros(3, 4)) == "exact_ag"
+    assert exact.ag == [(3, 4)]
+
+
+@pytest.mark.parametrize(
+    "make_communicator, expect_quick",
+    [
+        pytest.param(
+            lambda: _FakeCommunicator(qr_comm=_make_sp_quick_allreduce()[0]),
+            True,
+            id="serves_sp",
+        ),
+        pytest.param(
+            lambda: _FakeCommunicator(
+                qr_comm=_make_sp_quick_allreduce(sp_enabled=False)[0]
+            ),
+            False,
+            id="qr_comm_without_sp",
+        ),
+        pytest.param(lambda: _FakeCommunicator(), False, id="no_qr_comm"),
+        pytest.param(lambda: SimpleNamespace(), False, id="no_qr_comm_attribute"),
+        pytest.param(lambda: None, False, id="no_communicator"),
+    ],
+)
+def test_use_quick_sp_follows_the_flag_and_the_communicator(
+    monkeypatch, caplog_vllm, make_communicator, expect_quick
+):
+    _patch_tp(monkeypatch, make_communicator())
+    _print_warning_once.cache_clear()
+    flag_on = SimpleNamespace(
+        parallel_config=ParallelConfig(enable_hc_sp_quick_reduce=True)
+    )
+    flag_off = SimpleNamespace(
+        parallel_config=ParallelConfig(enable_hc_sp_quick_reduce=False)
+    )
+
+    assert common_sp.use_quick_sp(flag_off) is False
+    assert "--enable-hc-sp-quick-reduce" not in caplog_vllm.text  # no flag, no warning
+    assert common_sp.use_quick_sp(flag_on) is expect_quick
+    # A flag that cannot be served warns, once, and says why it stays exact.
+    assert caplog_vllm.text.count("--enable-hc-sp-quick-reduce") == int(
+        not expect_quick
+    )
+
+
+def test_opaque_op_fakes_match_the_real_shapes(monkeypatch):
+    from vllm.models.qwen4_exp.amd.ops import sequence_parallel as amd_sp
+
+    monkeypatch.setattr(amd_sp, "get_tensor_model_parallel_world_size", lambda: 2)
+
+    assert amd_sp._sp_local_fake(torch.empty(7, 4)).shape == (4, 4)
+    assert amd_sp._sp_all_gather_fake(torch.empty(3, 4)).shape == (6, 4)
 
 
 @ray.remote(num_gpus=1, max_calls=1)

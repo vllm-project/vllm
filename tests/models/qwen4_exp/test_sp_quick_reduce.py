@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Two-GPU tests of the INT4 QuickReduce sequence-parallel collectives.
 
-`VLLM_ROCM_SP_QUICK_REDUCE=1` routes the decoder layer's four SP collectives
+`--enable-hc-sp-quick-reduce` routes the decoder layer's four SP collectives
 through AITER's FlyDSL reduce-scatter and all-gather. The kernels are lossy:
 the checks bound the error of the INT4 codec and require that the quantized
 path was really taken, because an exact fallback would pass any bound.
@@ -19,6 +19,7 @@ if not current_platform.is_rocm():
 
 from tests.utils import multi_gpu_test
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.utils import replace
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     get_tp_group,
@@ -28,6 +29,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
+from vllm.distributed.device_communicators.quick_all_reduce import QuickAllReduce
 from vllm.forward_context import set_forward_context
 from vllm.models.common.ops import sequence_parallel as common_sp
 from vllm.models.qwen4_exp.amd.ops import sequence_parallel as amd_sp
@@ -61,11 +63,20 @@ HIDDEN = 2560  # the width the FlyDSL kernels were validated at
 # 1e-6 (bf16 rounding only), so the floor tells the INT4 path from a fallback.
 NMSE_FLOOR = 1e-3
 NMSE_BOUND = 1.5e-2
+# The same ratio per row: a row lost at the padding seam or taken from the wrong
+# block gives 1.0, which the all-rows NMSE hides (6 lost rows of 1,030 add 6e-3).
+ROW_NMSE_BOUND = 0.1
 
 
 def _nmse(got: torch.Tensor, ref: torch.Tensor) -> float:
     got, ref = got.float(), ref.float()
     return float(((got - ref) ** 2).sum() / (ref**2).sum())
+
+
+def _max_row_nmse(got: torch.Tensor, ref: torch.Tensor) -> float:
+    got, ref = got.float(), ref.float()
+    energy = (ref**2).sum(1).clamp_min(1e-12)  # an odd tensor's padded row is zeros
+    return float((((got - ref) ** 2).sum(1) / energy).max())
 
 
 def _partials(rows: int, rank: int, seed: int = 100) -> torch.Tensor:
@@ -77,15 +88,18 @@ def _partials(rows: int, rank: int, seed: int = 100) -> torch.Tensor:
     return (x * (1.0 + 0.5 * rank)).to(torch.bfloat16)
 
 
-def _require_quick_reduce() -> None:
+def _require_quick_reduce() -> QuickAllReduce:
     communicator = get_tp_group().device_communicator
     assert isinstance(communicator, CudaCommunicator)
     qr_comm = communicator.qr_comm
-    assert qr_comm is not None and not qr_comm.disabled and qr_comm._flydsl_sp, (
+    assert (
+        qr_comm is not None and not qr_comm.disabled and qr_comm.sp_quick_reduce_enabled
+    ), (
         "FlyDSL sequence-parallel QuickReduce is not active: needs "
         "VLLM_ROCM_USE_AITER=1, VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4, "
-        "VLLM_ROCM_SP_QUICK_REDUCE=1 and an AITER with reduce_scatter/all_gather"
+        "--enable-hc-sp-quick-reduce and an AITER with reduce_scatter/all_gather"
     )
+    return qr_comm
 
 
 def _check_reduce_scatter(rank: int, config: VllmConfig) -> None:
@@ -101,8 +115,10 @@ def _check_reduce_scatter(rank: int, config: VllmConfig) -> None:
         reference = torch.nn.functional.pad(reference, (0, 0, 0, padded - rows))
         out = amd_sp.sp_reduce_scatter_quantized(x)
         assert out.shape == (chunk, HIDDEN), (rows, out.shape)
-        error = _nmse(out, reference[rank * chunk : (rank + 1) * chunk])
+        block = reference[rank * chunk : (rank + 1) * chunk]
+        error = _nmse(out, block)
         assert NMSE_FLOOR < error < NMSE_BOUND, (rows, error)
+        assert _max_row_nmse(out, block) < ROW_NMSE_BOUND, rows
 
 
 def _check_all_gather(rank: int, config: VllmConfig) -> None:
@@ -114,6 +130,7 @@ def _check_all_gather(rank: int, config: VllmConfig) -> None:
         assert out.shape == (2 * chunk, HIDDEN), (chunk, out.shape)
         error = _nmse(out, exact)
         assert NMSE_FLOOR < error < NMSE_BOUND, (chunk, error)
+        assert _max_row_nmse(out, exact) < ROW_NMSE_BOUND, chunk
         # The codec runs on every block, the rank's own included, so all ranks
         # hold the same tensor.
         gathered = tensor_model_parallel_all_gather(out.contiguous(), dim=0)
@@ -166,24 +183,7 @@ def _check_compiled_ops(rank: int, config: VllmConfig) -> None:
             torch.testing.assert_close(got, want, atol=0, rtol=0)
 
 
-def _check_layer_sites(rank: int, config: VllmConfig) -> None:
-    """A layer built with the switch on uses the quantized pair at its four sites."""
-    config.model_config.hf_text_config.ple_layer_ids = []
-    layer = _make_decoder(config, rank)
-    assert layer.sp_all_gather is amd_sp.sp_all_gather_quantized
-    assert layer.sp_reduce_scatter is amd_sp.sp_reduce_scatter_quantized
-
-    calls: list[str] = []
-
-    def record(name, collective):
-        def wrapper(x):
-            calls.append(name)
-            return collective(x)
-
-        return wrapper
-
-    layer.sp_all_gather = record("all_gather", layer.sp_all_gather)
-    layer.sp_reduce_scatter = record("reduce_scatter", layer.sp_reduce_scatter)
+def _forward_layer(layer, config: VllmConfig) -> None:
     num_tokens = 5
     torch.manual_seed(30)
     hidden = torch.randn(num_tokens, 256)
@@ -200,8 +200,59 @@ def _check_layer_sites(rank: int, config: VllmConfig) -> None:
             query_start_loc=None,
             ngram_context=None,
         )
+
+
+def _check_layer_sites(rank: int, config: VllmConfig) -> None:
+    """A layer built with the flag on uses the quantized pair at its four sites;
+    with the flag off it keeps the exact pair."""
+    # A second layer in one config would register its layer names twice.
+    exact_config = _make_config(rank, hc_sp=True)  # the flag is off by default
+    exact_config.model_config.hf_text_config.ple_layer_ids = []
+    exact_layer = _make_decoder(exact_config, rank)
+    assert exact_layer.sp_all_gather is common_sp.sp_all_gather
+    assert exact_layer.sp_reduce_scatter is amd_sp.sp_reduce_scatter
+    config.model_config.hf_text_config.ple_layer_ids = []
+    layer = _make_decoder(config, rank)
+    assert layer.sp_all_gather is amd_sp.sp_all_gather_quantized
+    assert layer.sp_reduce_scatter is amd_sp.sp_reduce_scatter_quantized
+
+    calls: list[str] = []
+
+    def record(name, collective):
+        def wrapper(x):
+            calls.append(name)
+            return collective(x)
+
+        return wrapper
+
+    layer.sp_all_gather = record("all_gather", layer.sp_all_gather)
+    layer.sp_reduce_scatter = record("reduce_scatter", layer.sp_reduce_scatter)
+    _forward_layer(layer, config)
     # all-gather and reduce-scatter around the attention block, then around the MoE
     assert calls == ["all_gather", "reduce_scatter", "all_gather", "reduce_scatter"]
+
+
+def _check_layer_launches(rank: int, config: VllmConfig) -> None:
+    """With the minimum size lowered, the layer's four sites reach the FlyDSL
+    kernels: the tiny layer tensors would otherwise stay on the exact path."""
+    kernels = _require_quick_reduce()._flydsl_int4
+    config.model_config.hf_text_config.ple_layer_ids = []
+    layer = _make_decoder(config, rank)
+    launches: list[str] = []
+
+    def spy(name):
+        kernel = getattr(kernels, name)
+
+        def wrapper(*args, **kwargs):
+            launches.append(name)
+            return kernel(*args, **kwargs)
+
+        setattr(kernels, name, wrapper)
+
+    spy("reduce_scatter")
+    spy("all_gather")
+    _forward_layer(layer, config)
+    assert launches == ["all_gather", "reduce_scatter", "all_gather", "reduce_scatter"]
 
 
 def _run(rank: int, port: int, check) -> None:
@@ -209,6 +260,9 @@ def _run(rank: int, port: int, check) -> None:
     torch.accelerator.set_device_index(rank)
     torch.set_num_threads(1)
     config = _make_config(rank, hc_sp=True)
+    config.parallel_config = replace(
+        config.parallel_config, enable_hc_sp_quick_reduce=True
+    )
     init_distributed_environment(
         world_size=2,
         rank=rank,
@@ -231,7 +285,6 @@ def _run(rank: int, port: int, check) -> None:
 def sp_quick_reduce_env(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4")
-    monkeypatch.setenv("VLLM_ROCM_SP_QUICK_REDUCE", "1")
 
 
 @pytest.mark.parametrize(
@@ -248,3 +301,9 @@ def sp_quick_reduce_env(monkeypatch):
 @multi_gpu_test(num_gpus=2)
 def test_sp_quick_reduce(sp_quick_reduce_env, check) -> None:
     mp.spawn(_run, args=(get_open_port(), check), nprocs=2)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_sp_quick_reduce_layer_launches(sp_quick_reduce_env, monkeypatch) -> None:
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "0")
+    mp.spawn(_run, args=(get_open_port(), _check_layer_launches), nprocs=2)

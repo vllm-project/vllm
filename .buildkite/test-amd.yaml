@@ -3055,7 +3055,6 @@ steps:
   - tests/distributed/test_rocm_aiter_custom_ar.py
   - tests/distributed/test_rocm_quick_reduce.py
   - tests/distributed/test_quick_all_reduce.py
-  - tests/distributed/test_quick_all_reduce_sp.py
   - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - tests/v1/distributed/test_dbo.py
   - tests/utils.py
@@ -3078,7 +3077,6 @@ steps:
   - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
-  - pytest -v -s tests/distributed/test_quick_all_reduce_sp.py
 
 - label: ":amd: (MI355) Distributed AgRs All2All"
   timeout_in_minutes: 30

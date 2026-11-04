@@ -9,7 +9,6 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
-import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
@@ -68,7 +67,7 @@ from vllm.model_executor.models.utils import (
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
-from vllm.models.common.ops.sequence_parallel import sp_all_gather
+from vllm.models.common.ops.sequence_parallel import sp_all_gather, use_quick_sp
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -205,7 +204,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # The four SP collectives of the decoder layer may use INT4 QuickReduce
         # (opt-in, lossy). The other SP sites (embedding shard, LM-head gather,
         # PLE) always stay exact.
-        quick_reduce = self.use_hc_sequence_parallel and envs.VLLM_ROCM_SP_QUICK_REDUCE
+        quick_reduce = self.use_hc_sequence_parallel and use_quick_sp(vllm_config)
         self.sp_all_gather = sp_all_gather_quantized if quick_reduce else sp_all_gather
         self.sp_reduce_scatter = (
             sp_reduce_scatter_quantized if quick_reduce else sp_reduce_scatter
