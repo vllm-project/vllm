@@ -1408,8 +1408,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # moe marlin arches
-  # note that we always set `use_atomic_add=False` for moe marlin now,
-  # so we don't need 9.0 for bf16 atomicAdd PTX
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
