@@ -198,3 +198,42 @@ def _restore_scalars(roots, saved: dict, now: dict) -> None:
         setattr(roots[root_name].get_submodule(mod_name), attr, saved[key])
     if changed:
         logger.info("Weight snapshot: restored %d data-dependent scalars", len(changed))
+
+
+def _roots(model_runner) -> dict[str, nn.Module]:
+    """The model plus any drafter modules (field names differ across versions)."""
+    roots = {"model": model_runner.model}
+    for holder in ("speculator", "drafter"):
+        obj = getattr(model_runner, holder, None)
+        for name, value in vars(obj).items() if obj is not None else ():
+            if isinstance(value, nn.Module):
+                roots[f"{holder}.{name}"] = value
+    return roots
+
+
+def install(worker_cls) -> None:
+    """Wrap worker_cls.load_model for vLLM builds without the built-in hook."""
+    import inspect
+
+    orig = worker_cls.load_model
+    takes_dummy = "load_dummy_weights" in inspect.signature(orig).parameters
+
+    def load_model(self, *args, **kwargs):
+        root = os.environ.get("VLLM_WEIGHT_SNAPSHOT_DIR")
+        if not root or kwargs.get("load_dummy_weights"):
+            return orig(self, *args, **kwargs)
+        path = snapshot_path(root, self.vllm_config.compute_hash(), self.rank)
+        restore = path.exists()
+        if restore and takes_dummy:
+            kwargs["load_dummy_weights"] = True
+        elif restore:
+            self.vllm_config.load_config.load_format = "dummy"
+        out = orig(self, *args, **kwargs)
+        roots = _roots(self.model_runner)
+        (restore_fn if restore else save)(roots, path)
+        return out
+
+    worker_cls.load_model = load_model
+
+
+restore_fn = restore
