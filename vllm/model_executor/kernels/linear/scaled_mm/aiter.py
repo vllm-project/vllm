@@ -26,6 +26,7 @@ from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
+from .rocm import ROCmFP8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -378,6 +379,99 @@ class AiterPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+
+
+class AiterTritonPerTensorFp8ScaledMMLinearKernel(ROCmFP8ScaledMMLinearKernel):
+    # Largest batch sent to Triton; larger batches run on hipBLASLt.
+    MAX_M = 256
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        if current_platform.is_fp8_fnuz():
+            return False, "requires OCP FP8, FNUZ is not supported."
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+        # Batches outside the Triton range run on ROCmFP8ScaledMMLinearKernel.
+        return ROCmFP8ScaledMMLinearKernel.is_supported(compute_capability)
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.weight_shape is None:
+            return False, "weight_shape is required for Aiter kernels"
+        N, K = c.weight_shape
+
+        if c.out_dtype is not torch.bfloat16:
+            return False, "requires bfloat16 output dtype."
+
+        can_implement, reason = ROCmFP8ScaledMMLinearKernel.can_implement(c)
+        if not can_implement:
+            return can_implement, reason
+
+        if not c.activation_quant_key.scale.static:
+            return False, "requires static activation scales."
+
+        # Aiter's Triton Gemm performs better than torch only when it's tuned.
+        if not rocm_aiter_ops.is_triton_gemm_a8w8_tuned(N, K, cls.MAX_M):
+            return (
+                False,
+                f"requires a tuned configuration for N: {N} and K: {K} "
+                f"up to M: {cls.MAX_M}.",
+            )
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        w, w_s, x_s, _ = self._get_layer_params(layer)
+        assert x_s is not None
+
+        # gemm_a8w8 reads one scale per row of x and per column of w, so the
+        # static per-tensor scales are expanded once here.
+        layer.register_buffer(
+            "aiter_x_scale_vec",
+            x_s.reshape(1).float().expand(self.MAX_M).contiguous(),
+            persistent=False,
+        )
+        layer.register_buffer(
+            "aiter_w_scale_vec",
+            w_s.reshape(1).float().expand(w.shape[1]).contiguous(),
+            persistent=False,
+        )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+
+        x_2d = x.view(-1, x.shape[-1])
+        x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
+        output = rocm_aiter_ops.triton_per_tensor_fp8_gemm(
+            x_2d_q,
+            w,
+            self.config.out_dtype,
+            x_s,
+            w_s,
+            bias,
+            layer.aiter_x_scale_vec,
+            layer.aiter_w_scale_vec,
+            self.MAX_M,
+        )
+        return output.view(*x.shape[:-1], w.shape[1])
 
 
 class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
