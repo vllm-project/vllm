@@ -4,6 +4,7 @@
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -955,6 +956,45 @@ def test_all_nan_target_logits_in_range(temperature: float):
     assert (sampled[valid] < vocab_size).all()
 
 
+@pytest.mark.parametrize("has_draft_logits", [False, True])
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_skip_masked_vocab_blocks_is_bitwise_identical(
+    has_draft_logits: bool, use_fp64: bool
+):
+    """skip_masked_vocab_blocks lets the resample kernel skip vocab blocks whose
+    target logits are all -inf (e.g. masked by top-k/top-p). The sampled tokens
+    must match the unskipped path exactly.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    K = 3
+    vocab_size = 4 * 8192
+    target_logits_1d = torch.randn(vocab_size, device=device)
+    target_logits_1d[8192 : 3 * 8192] = float("-inf")  # two whole blocks
+    target_logits_1d[3 * 8192 + 100 :] = float("-inf")  # most of the last one
+    draft_logits_1d = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d, draft_logits_1d, K, temperature=1.0, num_trials=256
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+
+    def run(skip: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        return _rejection_sample(
+            **inputs,
+            num_speculative_steps=K,
+            use_fp64=use_fp64,
+            skip_masked_vocab_blocks=skip,
+        )
+
+    ref_sampled, ref_num_sampled = run(False)
+    sampled, num_sampled = run(True)
+
+    torch.testing.assert_close(num_sampled, ref_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], ref_sampled[valid], rtol=0, atol=0)
+
+
 def test_placeholder_draft_token_rejected():
     """A placeholder draft id (-1) must be rejected without reading the logit
     tensors out of bounds, for any sampling method.
@@ -1142,6 +1182,7 @@ def test_verify_rejects_unproposed_drafts():
         ),
         use_fp64_gumbel=False,
         trace_replay_state=None,
+        may_mask_logits=np.zeros(num_trials, dtype=bool),
     )
     rejection_sampler.num_speculative_steps = K
     rejection_sampler.synthetic_conditional_rates = None
