@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import Request
 
 from vllm.entrypoints.openai.decisions.question_types import (
     Question,
+    QuestionType,
     StructuredDecisionError,
     build_question,
 )
@@ -27,6 +29,7 @@ from .protocol import (
 def parse_questions(
     request: StructuredDecisionRequest,
     limits: DecisionLimits,
+    question_types: Mapping[str, QuestionType] | None = None,
 ) -> list[Question]:
     if not request.questions:
         raise StructuredDecisionError("questions: needs at least one question")
@@ -48,6 +51,7 @@ def parse_questions(
                 spec.criteria,
                 limits.max_options,
                 labeled=limits.labeled,
+                question_types=question_types,
             )
         )
     return questions
@@ -89,7 +93,9 @@ class ServingStructuredDecisions(BaseServingDecisions):
         base_id = self._base_request_id(raw_request, default=request.request_id)
         request_id = f"decision-{base_id}"
         try:
-            questions = parse_questions(request, self.limits)
+            questions = parse_questions(
+                request, self.limits, self.strategy.question_types
+            )
             media = self._media(request)
             lora_request = self._maybe_get_adapters(request)  # type: ignore[arg-type]
             joint = self._admit(questions, request.joint)
