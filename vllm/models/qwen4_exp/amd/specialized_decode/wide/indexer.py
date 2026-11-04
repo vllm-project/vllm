@@ -86,6 +86,12 @@ class ScoreBuild:
     prep: tuple = ()
 
 
+def score_splits(rows: int) -> int:
+    """Score CTAs a row: 64 up to 4 rows (a 128K row's 129 rounds 2-3 a CTA,
+    against 8-9 at 16), else attention's ``splits_for``."""
+    return 64 if rows <= 4 else splits_for(rows)
+
+
 def _head_sum(vals, heads: int):
     """Sums over the 16-lane group's first ``heads`` lanes (the others hold
     zeros), into its lane 0."""
@@ -691,7 +697,7 @@ def score(
     divisor = math.sqrt(dim) if divisor is None else divisor
     key = ScoreBuild(
         rows,
-        splits_for(rows),
+        score_splits(rows),
         page,
         page_table.shape[1],
         heads,
