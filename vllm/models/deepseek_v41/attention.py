@@ -629,17 +629,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
         # Replay relies on the AITER sparse-MLA and Triton gather paths
-        # clamping to replay_start, validated on CDNA3 and CDNA4 only. The
-        # import is ROCm-only: it resolves the GPU arch and fails with no GPU
-        # visible.
+        # clamping to replay_start, validated on a compatible CDNA version
+        # only. The import is ROCm-only: it resolves the GPU arch and fails
+        # with no GPU visible.
         if swa_bounded_replay and current_platform.is_rocm():
             from vllm.platforms.rocm import get_cdna_version
 
             if get_cdna_version() not in (3, 4):
                 logger.warning_once(
-                    "Prefix-cache SWA replay is only enabled on ROCm CDNA3 and "
-                    "CDNA4; the sliding-window cache takes part in prefix "
-                    "caching instead."
+                    "Prefix-cache SWA replay is only enabled on a compatible "
+                    "ROCm CDNA version; the sliding-window cache takes part "
+                    "in prefix caching instead."
                 )
                 swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
