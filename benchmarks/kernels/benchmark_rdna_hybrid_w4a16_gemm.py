@@ -16,7 +16,8 @@ import os
 import torch
 
 from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (
-    pack_skinny_int4,
+    _to_skinny_int4,
+    pack_int4_exllama_shuffle,
 )
 from vllm.triton_utils import triton
 
@@ -60,14 +61,13 @@ def prepare_hybrid_weights(K, N, group_size, dtype=torch.float16, device="cuda")
     Returns (w_q_skinny, w_s_skinny, w_fp16, w_zp). The triton path derives
     its int32 view from w_q_skinny, so no separate int32 buffer is returned.
 
-    Weights go through ``pack_skinny_int4``, the packer the layer uses, so the
-    benchmark sees the production row stride rather than an always-dense one.
+    Weights use the production skinny layout conversion and row padding.
     """
     num_groups = K // group_size
 
     # Values don't matter for throughput, but the layout does.
     unpacked = torch.randint(0, 16, (N, K), dtype=torch.int32, device=device)
-    w_q_skinny = pack_skinny_int4(unpacked)
+    w_q_skinny = _to_skinny_int4(pack_int4_exllama_shuffle(unpacked))
     del unpacked
     w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
 

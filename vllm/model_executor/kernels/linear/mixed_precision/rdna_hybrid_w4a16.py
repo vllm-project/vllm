@@ -577,15 +577,6 @@ def _act_pad_bytes(row_bytes: int) -> int:
     return _STRIDE_PAD_BYTES
 
 
-def pack_skinny_int4(unpacked: torch.Tensor) -> torch.Tensor:
-    """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
-
-    ExLlama shuffle to [N, K//8] int32, viewed as int8 [N, K//2]. On gfx1151
-    the row stride is nudged off the cliff (see ``_weight_pad_bytes``).
-    """
-    return _to_skinny_int4(pack_int4_exllama_shuffle(unpacked))
-
-
 def _to_skinny_int4(shuffled: torch.Tensor) -> torch.Tensor:
     """View shuffled [N, K//8] int32 weights as int8, padding gfx1151 rows."""
     n_rows, k8 = shuffled.shape
