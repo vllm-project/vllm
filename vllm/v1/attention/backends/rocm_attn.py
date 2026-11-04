@@ -546,6 +546,8 @@ class RocmAttentionImpl(AttentionImpl):
         is_neox: bool,
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ):
         # kv_cache is logical [num_blocks, 2, block_size, num_kv_heads * head_size]
         # (see forward); the AITER shuffle writer takes one (B, N, H, hs) per side.
@@ -574,6 +576,8 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache_dtype=self.kv_cache_dtype,
             use_shuffle_layout=use_shuffle_layout,
             return_kv=True,
+            q_out_fp8=q_out_fp8,
+            q_scale=q_scale,
         )
 
     def fused_rope_kvcache_supported(self):

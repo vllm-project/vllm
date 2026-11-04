@@ -4032,6 +4032,9 @@ class rocm_aiter_ops:
         block_size: int,
         x: int,
         rotary_dim: int = 0,
+        v_norm: bool = False,
+        q_out_fp8: torch.Tensor | None = None,
+        per_tensor_q_scale: torch.Tensor | None = None,
         k_out_unquantized: torch.Tensor | None = None,
     ):
         from aiter.ops.fused_qk_norm_rope_cache_quant import (
@@ -4064,7 +4067,10 @@ class rocm_aiter_ops:
             block_size,
             x,
             rotary_dim,
-            k_out_unquantized=k_out_unquantized,
+            v_norm,
+            q_out_fp8,
+            per_tensor_q_scale,
+            k_out_unquantized,
         )
 
     @staticmethod
@@ -4089,6 +4095,8 @@ class rocm_aiter_ops:
         kv_cache_dtype: str,
         use_shuffle_layout: bool,
         return_kv: bool,
+        q_out_fp8: torch.Tensor | None = None,
+        q_scale: torch.Tensor | None = None,
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
@@ -4099,7 +4107,9 @@ class rocm_aiter_ops:
         per-tensor CPU scalars. return_kv says whether the impl consumes
         k_out (FA and ROCM_ATTN prefill do; unified reads K from the cache and
         passes False, so the kernel skips that store). For fp8 caches the
-        kernel writes the pre-quant K into k_out via k_out_unquantized.
+        kernel writes the pre-quant K into k_out via k_out_unquantized. When
+        q_out_fp8 is set, the kernel also writes Q statically quantized by the
+        fp32 device scalar q_scale (fp8 caches only).
         """
         is_fp8_cache = kv_cache_dtype.startswith("fp8")
         write_unquantized = return_kv and is_fp8_cache
@@ -4137,6 +4147,8 @@ class rocm_aiter_ops:
             x=16 // key_cache.element_size(),
             rotary_dim=kernel_rotary_dim,
             k_out_unquantized=k_out if write_unquantized else None,
+            q_out_fp8=q_out_fp8,
+            per_tensor_q_scale=q_scale,
         )
 
     @staticmethod

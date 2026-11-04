@@ -168,6 +168,10 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             )
             self.attn._k_scale_float = 0.5
             self.attn._v_scale_float = 0.25
+            if self.attn.query_quant is not None:
+                self.attn._q_scale = torch.tensor(
+                    0.5, dtype=torch.float32, device=device
+                )
         else:
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
@@ -507,15 +511,20 @@ def _run_qk_norm_rope_kvcache_fusion_test(
                 assert backend.op_count(op, before=True) > 0
                 assert backend.op_count(op) > 0
 
-        if use_quark_scalar_query_scale:
+        if q_fused.dtype == FP8_DTYPE:
+            # Only the one-local-KV-head quark scale takes the static quant op.
             expected_quant_op = (
-                torch.ops.vllm.rocm_aiter_per_tensor_quant.default
-                if num_kv_heads != 1
-                else torch.ops._C.static_scaled_fp8_quant.default
+                torch.ops._C.static_scaled_fp8_quant.default
+                if use_quark_scalar_query_scale and num_kv_heads == 1
+                else torch.ops.vllm.rocm_aiter_per_tensor_quant.default
             )
             assert backend.op_count(expected_quant_op, before=True) > 0
-            # Query quantization remains separate after the prologue fusion.
-            assert backend.op_count(expected_quant_op) > 0
+            # The plain-RoPE kernel writes the fp8 query itself (q_out_fp8);
+            # MRoPE keeps the separate quant op.
+            if mrope_section is None:
+                assert backend.op_count(expected_quant_op) == 0
+            else:
+                assert backend.op_count(expected_quant_op) > 0
 
         # Sweep-backed (18.2k pts, PR #42749): native-rope ref worst 7.7e-3 -> 1e-2;
         # AITER-triton-rope ref is itself approximate (plateau 1.28e-2) -> 2e-2.
