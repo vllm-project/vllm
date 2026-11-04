@@ -163,7 +163,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            decode_query_len=self.num_query_per_req,
+            decode_query_lens={self.num_query_per_req: self.max_num_reqs},
         )
 
     def capture(self) -> None:
@@ -614,6 +614,8 @@ class DFlashSpeculator(DraftModelSpeculator):
                 step=self.num_query_per_req,
                 causal=self._group_causal,
             )
+        else:
+            self._map_kernel_block_tables()
 
         # DFlash processes all speculative tokens in one forward pass,
         # so the real token count is num_query_tokens.
