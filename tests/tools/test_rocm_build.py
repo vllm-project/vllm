@@ -33,10 +33,10 @@ def context_sources(dockerfile: str) -> set[str]:
 
 
 def key_paths(name: str, stack: str = "") -> set[str]:
-    script = (ROOT / ".buildkite/scripts/rocm/build.sh").read_text()
+    script = (ROOT / ".buildkite/scripts/rocm/keys.sh").read_text()
     # keys_at() computes both keys, indented in its body.
     block_match = re.search(rf"^\s*{name}=\$\(.*?sha256sum", script, re.M | re.S)
-    assert block_match is not None, f"{name}= block not found in build.sh"
+    assert block_match is not None, f"{name}= block not found in keys.sh"
     pattern = r"\b(?:requirements|tools|tests)/[\w./-]+|\brust-toolchain\.toml\b"
     paths = set(re.findall(pattern, block_match.group(0)))
     # therock_wheels.py is injected into Ks via a helper variable (rocm stack only)

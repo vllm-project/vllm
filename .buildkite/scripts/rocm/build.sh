@@ -193,35 +193,8 @@ pushed() {
 # ---------------------------------------------------------------------------
 # Content keys
 # ---------------------------------------------------------------------------
-# Ks (stack key): hash of the stack Dockerfile + therock_wheels.py.
-#   A Ks cache miss triggers a full stack rebuild (hours).
-# Kr (runtime key): Ks + the portion of Dockerfile.rocm above the per-commit
-#   marker + all pip requirement files.
-#   A Kr cache miss triggers a runtime rebuild (minutes).
-
-_trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
-# keys_at <rev>  — print "Ks Kr" for the files at <rev>. In $(), set -e is off: failures are returned.
-keys_at() {
-  local rev=$1 Ks Kr
-  # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
-  # identity: an image left in an older format would hand later builds a second copy of the same layers.
-  Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree "$rev" -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16) \
-    || return 1
-  Kr=$(
-    {
-      echo "$Ks"
-      git show "$rev:docker/Dockerfile.rocm" | sed -n '1,/^# ==== per-commit stages/p' || exit 1
-      git ls-tree "$rev" -- \
-        requirements/common.txt \
-        requirements/rocm.txt \
-        requirements/test/rocm.txt \
-        rust-toolchain.toml \
-        tests/vllm_test_utils \
-        tools/install_torchcodec_rocm.sh
-    } | sha256sum | cut -c1-16
-  ) || return 1
-  echo "$Ks $Kr"
-}
+# shellcheck source=keys.sh
+source "$(dirname "${BASH_SOURCE[0]}")/keys.sh"
 keys=$(keys_at HEAD) || { echo "cannot compute the image keys of HEAD" >&2; exit 1; }
 read -r Ks Kr <<<"$keys"
 
@@ -421,7 +394,7 @@ case $MODE in
     # ROCM_PREBUILD_IMAGES: the stack images the PR's CI recorded. The maintainer's /amd-ci cache
     # vouches for them: copy them when their key is this merge's and that commit used main's recipe.
     if git diff --quiet refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA" -- \
-        .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl; then
+        .buildkite/scripts/rocm/build.sh .buildkite/scripts/rocm/keys.sh docker/docker-bake-rocm.hcl; then
       for tag in "stack-$STACK-$Ks-wheels" "stack-$STACK-$Ks"; do   # the stack tag completes the pair
         ref=$(tr ' ' '\n' <<<"${ROCM_PREBUILD_IMAGES:-}" \
           | grep -xE "rocm/vllm-dev:pr$ROCM_PREBUILD_PR-$tag@sha256:[0-9a-f]{64}") || break
