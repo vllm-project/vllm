@@ -394,3 +394,82 @@ def test_block_level_load_failure_fails_closed_with_multiple_groups():
 
     with pytest.raises(RuntimeError, match="failed_recving"):
         scheduler._handle_invalid_blocks({1}, {})
+
+
+@pytest.mark.cpu_test
+def test_sync_load_failure_with_async_scheduling():
+    """Regression test for #65131: Sync KV load failure recovery under async
+    scheduling resets output placeholders and drops stale in-flight outputs.
+    """
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    vllm_config.scheduler_config.async_scheduling = True
+    vllm_config.scheduler_config.max_num_batched_tokens = 64
+    scheduler = create_scheduler(vllm_config)
+
+    num_prompt_blocks = 4
+    num_external_computed_blocks = 3
+    num_prompt_tokens = num_prompt_blocks * scheduler.block_size
+    num_external_tokens = num_external_computed_blocks * scheduler.block_size
+
+    request = create_request(num_tokens=num_prompt_tokens, max_tokens=5)
+    scheduler.add_request(request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_tokens,
+    }
+    scheduler.connector = create_mock_connector()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
+
+    # Batch 1 scheduled (transitioning to decode since prompt is finished)
+    out1 = scheduler.schedule()
+    assert request.num_output_placeholders == 1
+
+    # Batch 2 scheduled in flight concurrently before Batch 1 completes
+    out2 = scheduler.schedule()
+    assert request.num_output_placeholders == 2
+    assert request.num_in_flight_tokens == 17
+
+    # Batch 1 returns with invalid block (sync load failure)
+    req_block_ids = out1.scheduled_new_reqs[0].block_ids[0]
+    invalid_block_ids = {req_block_ids[1]}
+    model_out1 = create_model_runner_output(
+        [request], invalid_block_ids=invalid_block_ids, use_eos=False
+    )
+    scheduler.update_from_output(out1, model_out1)
+
+    # Recovery resets placeholders and flags remaining in-flight tokens as stale
+    assert request.drop_stale_output is True
+    assert request.num_output_placeholders == 0
+    assert request.num_stale_output_tokens == 1
+    assert request.num_in_flight_tokens == 1
+
+    # Batch 2 returns (stale output from before rollback)
+    model_out2 = create_model_runner_output([request], use_eos=False)
+    scheduler.update_from_output(out2, model_out2)
+
+    # Stale output is dropped without appending corrupt tokens
+    # or corrupting placeholders
+    assert request.num_stale_output_tokens == 0
+    assert len(request.output_token_ids) == 0
+    assert request.num_output_placeholders == 0
+    assert request.num_in_flight_tokens == 0
+
+    # Rescheduled request recomputes prompt and continues to completion
+    step = 0
+    while scheduler.has_requests() and step < 20:
+        step += 1
+        out = scheduler.schedule()
+        if not out.total_num_scheduled_tokens:
+            break
+        model_out = create_model_runner_output([request], use_eos=False)
+        if request.is_prefill_chunk:
+            model_out.sampled_token_ids[0] = []
+        scheduler.update_from_output(out, model_out)
+
+    assert request.is_finished()
+    assert len(request.output_token_ids) == 5
+    assert request.num_output_placeholders == 0

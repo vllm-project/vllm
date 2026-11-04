@@ -3863,6 +3863,17 @@ class Scheduler(SchedulerInterface):
             total_failed_tokens,
         )
 
+        for req_id in sync_failed_req_ids:
+            request = self.requests.get(req_id)
+            if request is not None:
+                # Drop any in-flight outputs from concurrent steps scheduled
+                # before the load failure was discovered, and reset placeholder
+                # counters for recomputation under async scheduling.
+                request.drop_stale_output = True
+                request.num_stale_output_tokens = request.num_in_flight_tokens
+                request.num_output_placeholders = 0
+                request.spec_token_ids = []
+
         # Mark async requests with KV load failures for retry once loading completes
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
