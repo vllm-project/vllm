@@ -228,7 +228,9 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
 
 def test_hisparse_offloads_only_deepseek_v4_c4_caches():
     """Only the indexed C4 cache goes to host, in packed pages, with its hot
-    buffer sized in compressed rows rather than tokens."""
+    buffer sized in compressed rows rather than tokens. Every GPU group
+    shares the widest group's block stride, so the C128 cache joins the
+    indexer's blocks and wider groups are split to fit them."""
 
     def main_spec(compress_ratio: int, **kwargs) -> MLAAttentionSpec:
         return MLAAttentionSpec(
@@ -256,7 +258,20 @@ def test_hisparse_offloads_only_deepseek_v4_c4_caches():
         ),
         "model.layers.3.attn": main_spec(128),
     }
+    compressor_states = {
+        f"model.layers.{i}.attn.compressor.state_cache": SlidingWindowMLASpec(
+            block_size=4,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.float32,
+            sliding_window=8,
+            alignment=576,
+        )
+        for i in range(8)
+    }
+    specs |= compressor_states
     config = VllmConfig(model_config=ModelConfig(max_model_len=4096))
+    config.cache_config.kv_cache_layout = "BLHNC"
     config.attention_config.hisparse_config = HiSparseConfig()
     config.model_config.hf_config.index_topk = 512
 
@@ -272,10 +287,26 @@ def test_hisparse_offloads_only_deepseek_v4_c4_caches():
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
     assert hot.blocks_per_request == 2 * 512 // 64
-    assert any(
-        "model.layers.3.attn" in group.layer_names
-        and group.role is KVCacheGroupRole.DEFAULT
-        for group in groups
+    (indexer,) = [
+        group for group in groups if group.role is KVCacheGroupRole.HISPARSE_INDEXER
+    ]
+    assert "model.layers.3.attn" in indexer.layer_names
+    device_groups = [group for group in groups if not group.host_resident]
+    assert {
+        name for group in device_groups for name in group.layer_names
+    } >= compressor_states.keys()
+    block_bytes = specs["model.layers.2.attn"].page_size_bytes
+    assert all(
+        sum(
+            spec.page_size_bytes
+            for spec in (
+                group.kv_cache_spec.kv_cache_specs.values()
+                if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+                else [group.kv_cache_spec] * len(group.layer_names)
+            )
+        )
+        <= block_bytes
+        for group in device_groups
     )
 
 
