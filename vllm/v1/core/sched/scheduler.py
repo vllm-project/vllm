@@ -394,10 +394,16 @@ class Scheduler(SchedulerInterface):
         self.prefill_capacity_bound = False
         # With a DP-global prefill gate the engine core decides every throttled
         # step from the number of DP ranks with prefill work, so this rank's
-        # capacity-bound flag does not release it on its own.
+        # capacity-bound flag does not release it on its own. To keep a
+        # backlogged rank's queue bounded, the capacity escape (#44558) applies
+        # again once this many releases in a row have left the queue backed up.
+        # Every cadence step is a release, so this is at most that many
+        # intervals.
         self.prefill_gate_is_dp_global = (
             self.scheduler_config.prefill_release_min_dp_ranks > 0
         )
+        self.max_gated_backlogged_releases = 8
+        self.num_backlogged_releases = 0
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -736,10 +742,17 @@ class Scheduler(SchedulerInterface):
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated (or unless the DP-global gate
-        # owns the decision).
+        # owns the decision and this rank has not stayed saturated too long).
         defer_prefills = (
             throttle_prefills
-            and (self.prefill_gate_is_dp_global or not self.prefill_capacity_bound)
+            and (
+                not self.prefill_capacity_bound
+                or (
+                    self.prefill_gate_is_dp_global
+                    and self.num_backlogged_releases
+                    < self.max_gated_backlogged_releases
+                )
+            )
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
@@ -1622,10 +1635,15 @@ class Scheduler(SchedulerInterface):
                 self.async_kv_waiting.prepend_requests(step_skipped_async_kv)
 
             # DP prefill balancing: on a step that admitted prefills (release),
-            # record whether it was capacity-bound.
+            # record whether it was capacity-bound, and for how many in a row.
             if not defer_prefills:
                 _, num_waiting = self.get_request_counts()
                 self.prefill_capacity_bound = num_waiting > len(self.deferred_waiting)
+                self.num_backlogged_releases = (
+                    self.num_backlogged_releases + 1
+                    if self.prefill_capacity_bound
+                    else 0
+                )
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())

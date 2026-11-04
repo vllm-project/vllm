@@ -805,23 +805,28 @@ def test_dp_prefill_gate_counts_ranks_every_step(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("min_ranks", "ranks_with_work", "step", "throttle"),
+    ("min_ranks", "ranks_with_work", "step", "dp_size", "throttle"),
     [
-        (0, 0, 8, False),  # cadence step
-        (0, 8, 9, True),  # stock: throttle every off-cadence step
-        (4, 0, 8, False),  # cadence step releases whatever the count
-        (4, 3, 9, True),  # too few ranks with prefill work: defer everywhere
-        (4, 4, 9, False),  # enough ranks: release everywhere
+        (0, 0, 8, 8, False),  # cadence step
+        (0, 8, 9, 8, True),  # stock: throttle every off-cadence step
+        (4, 0, 8, 8, False),  # cadence step releases whatever the count
+        (4, 3, 9, 8, True),  # too few ranks with prefill work: defer everywhere
+        (4, 4, 9, 8, False),  # enough ranks: release everywhere
+        # Elastic EP scale-down to 4 ranks: the threshold is clamped to 4.
+        (8, 4, 9, 4, False),
+        (8, 3, 9, 4, True),
     ],
 )
 def test_dp_prefill_gate_throttle_decision(
-    min_ranks: int, ranks_with_work: int, step: int, throttle: bool
+    min_ranks: int, ranks_with_work: int, step: int, dp_size: int, throttle: bool
 ):
     core = object.__new__(DPEngineCoreProc)
     core.prefill_schedule_interval = 4
     core.prefill_release_min_dp_ranks = min_ranks
     core.num_dp_ranks_with_prefill_work = ranks_with_work
     core.step_counter = step
+    core.dp_group = MagicMock()
+    core.dp_group.size.return_value = dp_size
     assert DPEngineCoreProc._should_throttle_prefills(core) is throttle
 
 

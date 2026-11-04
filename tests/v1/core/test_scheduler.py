@@ -1568,6 +1568,47 @@ def test_throttle_dp_global_gate_ignores_capacity_bound():
     assert "b" in output.num_scheduled_tokens
 
 
+def test_throttle_dp_global_gate_fails_open_for_backlogged_rank():
+    """Under the DP-global prefill gate, a rank whose releases keep leaving its
+    queue backed up falls back to the per-rank capacity escape after
+    `max_gated_backlogged_releases` such releases in a row, and is gated again
+    once a release drains its queue."""
+    scheduler = create_scheduler(
+        max_num_seqs=32,
+        max_num_batched_tokens=200,
+        enable_chunked_prefill=True,
+        prefill_schedule_interval=4,
+        prefill_release_min_dp_ranks=2,
+    )
+    limit = scheduler.max_gated_backlogged_releases
+    reqs = create_requests(num_requests=limit + 3, num_tokens=200)
+    for req in reqs:
+        scheduler.add_request(req)
+
+    # Each gate release admits one request and leaves the rest waiting; until
+    # the limit is reached, throttled steps in between still defer.
+    for i in range(limit):
+        output = scheduler.schedule()
+        assert reqs[i].request_id in output.num_scheduled_tokens
+        assert scheduler.num_backlogged_releases == i + 1
+        if i < limit - 1:
+            output = scheduler.schedule(throttle_prefills=True)
+            assert reqs[i + 1].request_id not in output.num_scheduled_tokens
+
+    # Limit reached: throttled steps release this rank until its queue drains.
+    for req in reqs[limit:]:
+        output = scheduler.schedule(throttle_prefills=True)
+        assert req.request_id in output.num_scheduled_tokens
+    assert not scheduler.prefill_capacity_bound
+    assert scheduler.num_backlogged_releases == 0
+
+    # Drained: the gate decides throttled steps again.
+    (late,) = create_requests(num_requests=1, num_tokens=200, req_ids=["late"])
+    scheduler.add_request(late)
+    output = scheduler.schedule(throttle_prefills=True)
+    assert "late" not in output.num_scheduled_tokens
+
+
 def test_has_prefill_work():
     """`has_prefill_work` reports a waiting request or an in-progress prefill
     chunk, and is False once every running request is decoding."""
