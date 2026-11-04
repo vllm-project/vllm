@@ -24,6 +24,7 @@ from vllm.model_executor.layers.mamba.ops.ssd_dispatch import (
 )
 from vllm.model_executor.warmup.mamba_ssd_warmup import mamba_ssd_warmup
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import is_flashinfer_ssd_supported
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.mamba2_attn import (
     Mamba2AttentionMetadata,
@@ -657,13 +658,8 @@ def test_mamba_ssd_dispatch_preserves_outputs_cache_and_checkpoint_resume(
     """Exercise mixer dispatch with real SSD kernels and an FP64 recurrence."""
     import vllm.model_executor.layers.mamba.mamba_mixer2 as mod
 
-    if provider == "flashinfer":
-        if not current_platform.is_cuda() or not (
-            current_platform.is_device_capability(100)
-            or current_platform.is_device_capability(103)
-        ):
-            pytest.skip("FlashInfer SSD requires SM100 or SM103")
-        pytest.importorskip("flashinfer")
+    if provider == "flashinfer" and not is_flashinfer_ssd_supported():
+        pytest.skip("FlashInfer SSD is unavailable on this platform")
 
     set_random_seed(0)
     seqlens = (224, 129, 3) if checkpoints else (127, 126, 3)
