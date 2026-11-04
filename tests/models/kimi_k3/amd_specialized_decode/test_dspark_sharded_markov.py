@@ -234,3 +234,51 @@ def _worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 @multi_gpu_test(num_gpus=8)
 def test_sharded_markov_matches_vllm_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _worker)
+
+
+def test_persistent_draft_rejects_stock_backend():
+    from vllm.models.kimi_k3.amd.ops.dspark_persistent.runtime import PersistentDraft
+
+    spec = types.SimpleNamespace(
+        vllm_config=types.SimpleNamespace(additional_config={})
+    )
+    assert PersistentDraft.create(None, spec, None) is None
+
+
+@pytest.mark.skipif(not _on_gfx950(), reason="requires MI355X")
+def test_persistent_draft_builds_all_launches():
+    from vllm.models.kimi_k3.amd.ops.dspark_persistent import layer
+
+    layer.precompile()
+
+
+def test_persistent_draft_refresh_preserves_graph_addresses():
+    from vllm.models.kimi_k3.amd.ops.dspark_persistent.runtime import PersistentDraft
+
+    a = types.SimpleNamespace(
+        W_UK_T=torch.ones(1, 2, 3),
+        W_UV=torch.ones(1, 3, 2),
+        _q_scale=torch.tensor(2.0),
+        _k_scale=torch.tensor(3.0),
+        scale=0.5,
+    )
+    draft = PersistentDraft(
+        types.SimpleNamespace(layers=[types.SimpleNamespace(self_attn=a)]), None
+    )
+    b = dict(
+        wuk=torch.empty(1, 3, 2),
+        wuv=torch.empty(1, 2, 3),
+        scale=torch.empty(1),
+        vscale=torch.empty(1),
+    )
+    draft.buffers.append(b)
+    addresses = [t.data_ptr() for t in b.values()]
+    draft.refresh_weights()
+    a.W_UK_T.fill_(5)
+    a.W_UV.fill_(7)
+    a._k_scale.fill_(11)
+    draft.refresh_weights()
+    assert [t.data_ptr() for t in b.values()] == addresses
+    assert torch.equal(b["wuk"], a.W_UK_T.transpose(1, 2))
+    assert torch.equal(b["wuv"], a.W_UV.transpose(1, 2))
+    assert b["scale"].item() == b["vscale"].item() == 11

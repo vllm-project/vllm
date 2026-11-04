@@ -148,6 +148,8 @@ Hybrid READ transfers every attention group, so drafters that share the target's
 
 Kimi-K3 on MI355X supports specialized decode on built-in MoRIIO READ and WRITE consumers. Set `--additional-config '{"decode_backend":"latency_specialized"}'` on the consumer and keep the producer on the default `decode_backend=auto`.
 
+On a specialized consumer using the five-layer DSpark draft, the sharded Markov sampler can run the seven-row draft backbone in six launches on TP8 MI355X. This requires BF16 draft projections and an FP8 E4M3 MLA cache at DCP1. Other draft shapes use the regular backbone.
+
 Use matching transfer modes and cache layouts. See [supported deployments](https://github.com/vllm-project/vllm/blob/main/vllm/models/kimi_k3/amd/specialized_decode/README.md#supported-deployments) for the hardware, state dtype, and execution requirements.
 
 ### Different prefill and decode TP sizes
