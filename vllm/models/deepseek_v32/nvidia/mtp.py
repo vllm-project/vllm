@@ -72,9 +72,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        # The draft hf_config reports deepseek_mtp; the target keeps glm_moe_dsa.
         self._eh_plan = (
             build_glm52_plan(self.eh_proj.weight, vllm_config.model_config.dtype)
-            if config.model_type == "glm_moe_dsa"
+            if vllm_config.model_config.hf_config.model_type == "glm_moe_dsa"
             else None
         )
 
