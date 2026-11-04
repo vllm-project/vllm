@@ -1112,13 +1112,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn.
-        self._fp8_prefill_enabled = (
-            (
-                not envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN
-                or vllm_config.model_config.runner_type == "draft"
-            )
-            and _fp8_mla_prefill_supported()
-        ) and (
+        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
@@ -2444,9 +2438,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # KV cache is FP8. Head counts that are not a multiple of 16 are
         # replicate-padded up to one (see _mla_fp8_prefill_attn).
 
-        self._fp8_prefill_enabled = (
-            not self._use_flydsl_fp8_prefill and _fp8_mla_prefill_supported()
-        ) and (
+        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             is_quantized_kv_cache(kv_cache_dtype)
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
         )
