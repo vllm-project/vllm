@@ -33,7 +33,7 @@ def test_cpu_offload(disable_pin_memory, disable_uva):
         args.append("--enforce-eager")
 
     compare_two_settings(
-        model="hmellor/tiny-random-LlamaForCausalLM",
+        model="vllm-project/tiny-random-LlamaForCausalLM",
         arg1=[],
         arg2=args,
         env1=None,
@@ -64,7 +64,7 @@ def test_mrv2_weight_offloading(
 
     try:
         with vllm_runner(
-            "hmellor/tiny-random-LlamaForCausalLM",
+            "vllm-project/tiny-random-LlamaForCausalLM",
             enforce_eager=True,
             gpu_memory_utilization=0.03,
             max_model_len=128,

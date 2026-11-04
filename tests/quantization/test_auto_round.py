@@ -71,7 +71,7 @@ MODELS = [
         id="auto_round:auto_gptq_int2_tp2",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-MXFP8-AR",
+        "vllm-project/Qwen3-8B-MXFP8-AR",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda() or current_platform.is_xpu()),
             reason="MXFP8 AutoRound model only supports CUDA/XPU backend for now.",
@@ -79,7 +79,7 @@ MODELS = [
         id="auto_round:llm_compressor_mxfp8",
     ),
     pytest.param(
-        "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut",
+        "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut",
         marks=pytest.mark.skipif(
             not (current_platform.is_cuda()),
             reason="Block-wise AutoRound model only supports CUDA backend for now.",
@@ -132,12 +132,12 @@ MODEL_RUNNER_KWARGS: dict[str, dict[str, Any]] = {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-MXFP8-AR": {
+    "vllm-project/Qwen3-8B-MXFP8-AR": {
         "block_size": 64,
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },
-    "INC4AI/Qwen3-8B-fp-w8g128x128-for-ut": {
+    "vllm-project/Qwen3-8B-fp-w8g128x128-for-ut": {
         "gpu_memory_utilization": 0.8,
         "max_model_len": 512,
     },

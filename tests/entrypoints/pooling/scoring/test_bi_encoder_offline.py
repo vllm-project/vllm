@@ -9,7 +9,7 @@ from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
 from vllm import PoolingParams
 from vllm.utils.mistral import is_mistral_tokenizer
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 PROMPT = "The chef prepared a delicious meal."
 EMBEDDING_SIZE = 384
 

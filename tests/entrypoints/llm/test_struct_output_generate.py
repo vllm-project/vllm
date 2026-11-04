@@ -133,7 +133,7 @@ NGRAM_SPEC_CONFIG = {
 
 EAGLE_SPEC_CONFIG = {
     "method": "eagle",
-    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "model": "vllm-project/EAGLE-LLaMA3.1-Instruct-8B",
     "num_speculative_tokens": 5,
 }
 
