@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
     _SlotMappingStaging,
 )
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.model_executor.models.qwen3_vl import Qwen3VLForConditionalGeneration
 from vllm.multimodal.utils import get_mm_embedding_modalities
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot
@@ -1540,6 +1541,29 @@ class _RecordingModel:
         return torch.zeros(input_ids.size(0), self.hidden_size)
 
 
+class _PruningRecordingModel(_RecordingModel):
+    """Runs the real Qwen3-VL strip, whose channel count is model-specific."""
+
+    supports_multimodal_pruning = True
+
+    def recompute_mrope_positions(self, **kwargs):
+        return Qwen3VLForConditionalGeneration._recompute_mrope_positions(
+            **kwargs,
+            vision_start_token_id=1,
+            image_token_id=2,
+            video_token_id=3,
+        )
+
+
+def _mm_model_config(pruning: bool = False, uses_mrope: bool = False):
+    return SimpleNamespace(
+        uses_mrope=uses_mrope,
+        multimodal_config=SimpleNamespace(
+            is_multimodal_pruning_enabled=lambda: pruning
+        ),
+    )
+
+
 @pytest.mark.parametrize("num_items", [1, 8])
 def test_profile_mm_embed_input_ids_profiles_a_full_batch(num_items: int):
     """The merge path must be profiled at `max_num_batched_tokens`.
@@ -1553,7 +1577,12 @@ def test_profile_mm_embed_input_ids_profiles_a_full_batch(num_items: int):
     encoder_outputs = [torch.zeros(item_len, hidden_size) for _ in range(num_items)]
 
     profile_mm_embed_input_ids(
-        model, encoder_outputs, num_tokens, torch.device("cpu"), "image"
+        model,
+        encoder_outputs,
+        num_tokens,
+        torch.device("cpu"),
+        "image",
+        _mm_model_config(),
     )
 
     input_ids, mm_embeds, is_mm_embed = model.calls[0]
@@ -1579,12 +1608,73 @@ def test_profile_mm_embed_input_ids_tags_modality():
     encoder_outputs = [torch.zeros(item_len, hidden_size) for _ in range(2)]
 
     profile_mm_embed_input_ids(
-        model, encoder_outputs, num_tokens, torch.device("cpu"), "video"
+        model,
+        encoder_outputs,
+        num_tokens,
+        torch.device("cpu"),
+        "video",
+        _mm_model_config(),
     )
 
     _, mm_embeds, _ = model.calls[0]
     assert mm_embeds
     assert get_mm_embedding_modalities(mm_embeds) == ["video"] * len(mm_embeds)
+
+
+def test_profile_mm_embed_input_ids_strips_pruning_position_channels():
+    """Pruned embeddings must reach the merge at their serving-path width.
+
+    With EVS on, `embed_multimodal` appends mrope-position channels that the
+    serving path strips in `recompute_mrope_positions`. Passing them through
+    breaks the deepstack split and the merge's width check at startup.
+    """
+    num_tokens, item_len, hidden_size, num_position_channels = 32, 8, 4, 5
+    model = _PruningRecordingModel(hidden_size)
+    encoder_outputs = [
+        torch.zeros(item_len, hidden_size + num_position_channels) for _ in range(2)
+    ]
+
+    profile_mm_embed_input_ids(
+        model,
+        encoder_outputs,
+        num_tokens,
+        torch.device("cpu"),
+        "video",
+        _mm_model_config(pruning=True, uses_mrope=True),
+    )
+
+    _, mm_embeds, is_mm_embed = model.calls[0]
+    assert [e.size(1) for e in mm_embeds] == [hidden_size] * 2
+    assert sum(e.size(0) for e in mm_embeds) == int(is_mm_embed.sum())
+    assert get_mm_embedding_modalities(mm_embeds) == ["video"] * 2
+
+
+@pytest.mark.parametrize(
+    "pruning,uses_mrope",
+    [
+        # Pruning is supported but switched off, so nothing was appended.
+        (False, True),
+        # Non-mrope pruning models (e.g. Nemotron-Nano-VL) append nothing.
+        (True, False),
+    ],
+)
+def test_profile_mm_embed_input_ids_keeps_unpruned_width(
+    pruning: bool, uses_mrope: bool
+):
+    num_tokens, item_len, hidden_size = 32, 8, 9
+    model = _PruningRecordingModel(hidden_size)
+
+    profile_mm_embed_input_ids(
+        model,
+        [torch.zeros(item_len, hidden_size)],
+        num_tokens,
+        torch.device("cpu"),
+        "video",
+        _mm_model_config(pruning=pruning, uses_mrope=uses_mrope),
+    )
+
+    _, mm_embeds, _ = model.calls[0]
+    assert mm_embeds[0].size(1) == hidden_size
 
 
 def _memory_snapshot(total_gib: int, free_gib: int) -> MemorySnapshot:

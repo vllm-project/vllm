@@ -10,6 +10,7 @@ the processed range still fails loudly.
 """
 
 import weakref
+from contextlib import contextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -484,6 +485,57 @@ class _MergeRecordingModel:
         return torch.zeros(input_ids.size(0), HIDDEN)
 
 
+def _profile_budget() -> SimpleNamespace:
+    return SimpleNamespace(
+        get_encoder_budget=lambda: 64,
+        mm_max_toks_per_item={"image": 8},
+        model_config=SimpleNamespace(
+            is_encoder_decoder=False, multimodal_config=None, uses_mrope=False
+        ),
+    )
+
+
+def test_profile_encoder_cache_wraps_only_the_merge_in_merge_context():
+    """LoRA state is set up for the merge, not for the encoder run.
+
+    `VocabParallelEmbeddingWithLoRA` reads the punica indices, which hold
+    uninitialized memory until a mapping is activated, so the merge has to run
+    inside the context the model runner hands in.
+    """
+    events: list[str] = []
+
+    class _Model(_MergeRecordingModel):
+        def embed_input_ids(self, *args, **kwargs):
+            events.append("merge")
+            return super().embed_input_ids(*args, **kwargs)
+
+    @contextmanager
+    def merge_context():
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    def execute_mm_encoder(mm_kwargs):
+        events.append("encoder")
+        return [torch.zeros(8, HIDDEN)]
+
+    runner = EncoderRunner(
+        model=_Model(),
+        max_num_tokens=64,
+        hidden_size=HIDDEN,
+        encoder_cache=EncoderCache(),
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    runner.execute_mm_encoder = execute_mm_encoder
+
+    runner.profile_encoder_cache(
+        [("image", None)], _profile_budget(), merge_context=merge_context()
+    )
+
+    assert events == ["encoder", "enter", "merge", "exit"]
+
+
 def test_profile_encoder_cache_profiles_the_embedding_merge():
     """Startup profiling must run `embed_input_ids` on a full batch.
 
@@ -504,13 +556,8 @@ def test_profile_encoder_cache_profiles_the_embedding_merge():
     )
     dummy_outputs = [torch.zeros(8, HIDDEN)]
     runner.execute_mm_encoder = lambda mm_kwargs: dummy_outputs
-    budget = SimpleNamespace(
-        get_encoder_budget=lambda: 64,
-        mm_max_toks_per_item={"image": 8},
-        model_config=SimpleNamespace(is_encoder_decoder=False),
-    )
 
-    runner.profile_encoder_cache([("image", None)], budget)
+    runner.profile_encoder_cache([("image", None)], _profile_budget())
 
     assert model.calls, "the multimodal merge path was not profiled"
     input_ids, mm_embeds, is_mm_embed = model.calls[0]

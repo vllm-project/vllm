@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import share_replayssm_ring_trackers
@@ -18,6 +18,7 @@ from vllm.model_executor.layers.utils import warmup_rocm_skinny_gemm_workspaces
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
+    supports_multimodal_pruning,
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.utils import set_mm_embedding_modality
@@ -748,6 +749,7 @@ def profile_mm_embed_input_ids(
     num_tokens: int,
     device: torch.device,
     modality: str,
+    model_config: ModelConfig,
 ) -> None:
     """Run the multimodal embedding merge once so profiling reserves it.
 
@@ -764,8 +766,27 @@ def profile_mm_embed_input_ids(
         num_tokens: Batch size to profile, i.e. `max_num_batched_tokens`.
         device: Device to place the dummy input IDs on.
         modality: Modality of the dummy items, as tagged by the encoder gather.
+        model_config: Config used to detect appended mrope-position channels.
 
     """
+    mm_config = model_config.multimodal_config
+    if (
+        supports_multimodal_pruning(model)
+        and model_config.uses_mrope
+        and mm_config is not None
+        and mm_config.is_multimodal_pruning_enabled()
+    ):
+        # Pruning models append mrope-position channels to their embeddings
+        # and the serving path strips them before the merge. Their width is
+        # model-specific, so let the model do it: an empty prompt has no media
+        # to reposition, leaving only the strip.
+        mm_embeddings, _, _ = model.recompute_mrope_positions(
+            input_ids=[],
+            multimodal_embeddings=mm_embeddings,
+            mrope_positions=torch.empty(3, 0, dtype=torch.long, device=device),
+            num_computed_tokens=0,
+        )
+
     mm_embeds = list[torch.Tensor]()
     num_mm_tokens = 0
     for mm_embedding in mm_embeddings:
