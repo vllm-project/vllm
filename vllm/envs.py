@@ -172,6 +172,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_BENCH: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_WEIGHT_SNAPSHOT_DIR: str | None = None
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -1519,6 +1520,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    # Directory for post-processed weight snapshots (needs the cumem allocator).
+    "VLLM_WEIGHT_SNAPSHOT_DIR": lambda: os.getenv("VLLM_WEIGHT_SNAPSHOT_DIR"),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -2486,6 +2489,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
+        "VLLM_WEIGHT_SNAPSHOT_DIR",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",

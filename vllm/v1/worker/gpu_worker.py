@@ -655,7 +655,18 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
             self._external_weight_charges.track(),
         ):
-            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+            snapshot = self._weight_snapshot_path()
+            restore = snapshot is not None and snapshot.exists()
+            self.model_runner.load_model(
+                load_dummy_weights=load_dummy_weights or restore
+            )
+        if snapshot is not None and not load_dummy_weights:
+            from vllm.device_allocator import weight_snapshot
+
+            if restore:
+                weight_snapshot.restore(get_mem_allocator_instance(), snapshot)
+            else:
+                weight_snapshot.save(get_mem_allocator_instance(), snapshot)
 
         if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
@@ -679,6 +690,19 @@ class Worker(WorkerBase):
         # for profiling and compilation so Dynamo's global-state guards remain
         # valid when requests arrive.
         set_torch_threads_for_runtime()
+
+    def _weight_snapshot_path(self):
+        # Prototype: snapshot of post-processed weights, keyed by config hash.
+        if not envs.VLLM_WEIGHT_SNAPSHOT_DIR:
+            return None
+        if not self.vllm_config.model_config.enable_cumem_allocator:
+            logger.warning("VLLM_WEIGHT_SNAPSHOT_DIR needs --enable-cumem-allocator")
+            return None
+        from vllm.device_allocator import weight_snapshot
+
+        return weight_snapshot.snapshot_path(
+            envs.VLLM_WEIGHT_SNAPSHOT_DIR, self.vllm_config.compute_hash(), self.rank
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         """Apply config overrides to the worker, its model runner and the
