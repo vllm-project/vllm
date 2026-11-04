@@ -38,6 +38,7 @@ impl OpenAICompletionsBackend {
         let mut payload = serde_json::json!({
             "model": model,
             "prompt": prompt_value,
+            "repetition_penalty": 1.0,
             "max_tokens": input.output_len,
             "stream": true,
             "stream_options": {

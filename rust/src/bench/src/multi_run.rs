@@ -3,6 +3,7 @@
 
 use crate::config::BenchConfig;
 use crate::error::Result;
+use crate::output::json::save_point_result;
 
 /// Key metrics extracted from a single run's JSON result.
 struct RunMetrics {
@@ -102,16 +103,14 @@ pub async fn run_multi(config: &BenchConfig, num_runs: usize) -> Result<()> {
     println!();
 
     let mut all_runs: Vec<RunMetrics> = Vec::with_capacity(num_runs);
+    let current_dt = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
 
     for i in 0..num_runs {
         println!("{:-^70}", format!(" Run {}/{} ", i + 1, num_runs));
 
-        let mut run_config = config.clone();
-        // Suppress per-run save
-        run_config.save_result = false;
-        run_config.append_result = false;
-
-        let result = crate::benchmark::run_benchmark(&run_config).await?;
+        let result = crate::benchmark::run_benchmark(&config.without_save()).await?;
+        let point = format!("run{}", i + 1);
+        save_point_result(config, &result, &current_dt, Some(&point))?;
         all_runs.push(RunMetrics::from_json(&result));
 
         println!();

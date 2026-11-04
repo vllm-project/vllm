@@ -431,7 +431,9 @@ pub struct BenchServeArgs {
     #[arg(long)]
     pub result_dir: Option<String>,
 
-    /// Filename to save benchmark JSON results.
+    /// Filename to save benchmark JSON results. Sweeps and --num-runs add a
+    /// per-point suffix (`out-concurrency8.json`, `out-run2.json`) unless
+    /// --append-result is set.
     #[arg(long)]
     pub result_filename: Option<String>,
 
@@ -630,7 +632,8 @@ pub struct BenchServeArgs {
     pub reset_prefix_cache: bool,
 
     // --- Multi-run ---
-    /// Number of benchmark runs for statistical aggregation.
+    /// Number of benchmark runs for statistical aggregation. With
+    /// --save-result, each run is saved to its own `-run<N>` file.
     #[arg(long, default_value_t = 1)]
     pub num_runs: usize,
 

@@ -53,4 +53,21 @@ pub struct BenchmarkMetrics {
     pub max_concurrent_requests: usize,
     #[serde(default)]
     pub steady_state: Option<SteadyStateMetrics>,
+    /// Time spent waiting for a `--max-concurrency` slot. Set only with
+    /// `--max-concurrency`, as in Python.
+    #[serde(default)]
+    pub client_queue_time: Option<LatencyStats>,
+    /// E2EL plus client queue time. Set only with `--max-concurrency` and a
+    /// finite `--request-rate`, as in Python.
+    #[serde(default)]
+    pub e2el_including_client_queue: Option<LatencyStats>,
+}
+
+/// Mean, median, standard deviation and percentiles of one latency series (ms).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyStats {
+    pub mean_ms: f64,
+    pub median_ms: f64,
+    pub std_ms: f64,
+    pub percentiles_ms: Vec<(f64, f64)>,
 }
