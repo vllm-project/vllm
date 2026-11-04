@@ -1027,8 +1027,10 @@ def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch(backend):
     a different KV tile.
     """
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    targets = [_random_prompt(10, 50) for _ in range(4)]
-    fillers = [_random_prompt(1024, 2048) for _ in range(4)]
+    # Targets must span several KV tiles: within a single tile both FA3
+    # kernels produce identical bits.
+    targets = [_random_prompt(1024, 2048) for _ in range(4)]
+    fillers = [_random_prompt(4096, 8192) for _ in range(4)]
     sp = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
 
     llm = LLM(
