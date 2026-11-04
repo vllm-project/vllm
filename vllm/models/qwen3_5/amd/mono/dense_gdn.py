@@ -53,6 +53,14 @@ S x nv rows on this GPU (``tiling.gated_norm_rows``: two rows a program past
 2 x CUs, so 6 rows and up at TP1 on 128 CUs). A row whose state slot is -1
 (a pad row) writes no state and a zero core row, as stock.
 
+With ``K1Build.spec`` (TP1, MTP verify steps) a GDN task is a request's
+``spec`` tokens: the conv and the recurrence run them in order from the state
+after its last accepted token, as vLLM's spec-decode kernels
+(``causal_conv1d_update`` with ``num_accepted_tokens``,
+``fused_sigmoid_gating_delta_rule_update``). The conv state and the slots
+written match those exactly; the recurrence keeps the decode kernel's
+reductions, so its outputs match the spec kernel's within fp32 rounding.
+
 Weights: in_proj_qkvz [q | k | v | z] and in_proj_ba [b | a] (the rank's) as
 MXFP4 in the (16, 16)-shuffled order (``dense_ffn.shuffle_w``), e8m0 scales [N, K / 32].
 """
@@ -202,6 +210,10 @@ class K1Build:
     norm_rows: int = 1
     # out_proj's K splits (``oproj``; ``stock_fields``), 0 for ``o_splits``
     o_split: int = 0
+    # speculative decoding (TP1): a request's tokens in a verify step (1 + the
+    # draft tokens); its rows are ``tokens / spec`` requests of ``spec`` tokens.
+    # 0: one token a request.
+    spec: int = 0
 
 
 ABI = KernelAbi(
@@ -565,14 +577,17 @@ def stage_ba(c, ops):
 
 
 # ---------------------------------------------------------------- gdn
+# A GDN task is 8 state rows of one value head of one unit: a token, or with
+# ``K1Build.spec`` a request's verify step of ``c["NQ"]`` tokens, which the
+# conv and the recurrence take in order (the stock spec-decode kernels).
 def task_of(c, k):
-    """The CTA's task k (``n_tasks``) -> token, value head, chunk and whether it
+    """The CTA's task k (``n_tasks``) -> unit, value head, chunk and whether it
     exists (None: all of them do). A dead task aliases the last live one: it may
     read, never write."""
-    s, geo = c["S"], c["G"]
+    s, geo = c["U"], c["G"]
     grid = geo.grid
     if geo.tpt % grid == 0:
-        # A whole number of tasks a token a CTA (TP1; TP2 on 128 CTAs): no
+        # A whole number of tasks a unit a CTA (TP1; TP2 on 128 CTAs): no
         # division by tpt.
         tpc = geo.tpt // grid
         w = (k % tpc) * grid + c["bid"]
@@ -584,6 +599,16 @@ def task_of(c, k):
         g = fx.min(g, n - 1)
     w = g % geo.tpt
     return g // geo.tpt, w // NVCH, w % NVCH, ok
+
+
+def _pair(c, p):
+    """(task, token of its unit) of the pass's (task, token) pair p."""
+    nq = c["NQ"]
+    return (p, 0) if nq == 1 else (p // nq, p % nq)
+
+
+def _ld_i32(ptr, i):
+    return fx.Int32(bo.buffer_load(rsrc(ptr), i, vec_width=1, dtype=T.i32))
 
 
 def _live(pred, ok):
@@ -604,22 +629,31 @@ def gdn_loads(c):
     """Every task pair's slot and state rows of the pass (``c["P"]``: the CTA's
     first task and the count; the stock layout: 4 columns 4 (lane % 32) .. a
     lane), issued before the pass's first GDN hand-off; per conv item its window
-    and weights."""
-    tid, a, geo = c["tid"], c["args"], c["G"]
+    and weights. With ``spec`` the state is the one after the request's last
+    accepted token (slot ``idx[r, n_acc - 1]``) and each token's goes to its own
+    slot ``idx[r, j]``; a slot <= 0 is vLLM's null block."""
+    tid, a, geo, nq = c["tid"], c["args"], c["G"], c["NQ"]
     k0, nt = c["P"]
-    g: dict = {"valid": [], "live": [], "sbase": [], "st": [], "soff": []}
+    g: dict = {"valid": [], "live": [], "sbase": [], "st": [], "soff": [], "oslot": []}
     for m in range((nt + 1) // 2):
         k, valid = recur_task(c, m)
         t, h, ch, ok = task_of(c, plus(k, k0))
         valid = _live(valid, ok)
-        slot = uniform(
-            fx.Int32(bo.buffer_load(rsrc(a["st_idx"]), t, vec_width=1, dtype=T.i32))
-        )
+        if const_expr(nq == 1):
+            slot = uniform(
+                fx.Int32(bo.buffer_load(rsrc(a["st_idx"]), t, vec_width=1, dtype=T.i32))
+            )
+        else:
+            # a task pair's unit is the wave's: uniform
+            slot = uniform(_ld_i32(a["st_idx"], t * nq + _ld_i32(a["n_acc"], t) - 1))
+            g["oslot"].append(
+                [uniform(_ld_i32(a["st_idx"], t * nq + j)) for j in range(nq)]
+            )
         sbase = a["rstate"] + fx.Int64(fx.max(slot, 0)) * fx.Int64(a["rs_seq"]) * 4
         row = ch * VCH + 2 * (c["wave"] % 4) + c["lane"] // 32
         soff = (h * HD + row) * HD + 4 * (c["lane"] % 32)
         g["valid"].append(valid)
-        g["live"].append(valid & (slot >= 0))
+        g["live"].append(valid & ((slot >= 0) if nq == 1 else (slot > 0)))
         g["sbase"].append(sbase)
         g["soff"].append(soff)
         g["st"].append(
@@ -640,10 +674,21 @@ def gdn_loads(c):
             2 * geo.key + h * HD + ch * VCH + d,
             (part - 1) * geo.key + kh * HD + ch * VCH + d,
         )
-        slot = fx.Int32(bo.buffer_load(rsrc(a["st_idx"]), t, vec_width=1, dtype=T.i32))
-        cs = a["conv_st"] + fx.Int64(fx.max(slot, 0)) * fx.Int64(a["cs_seq"]) * 2
-        co = chan * a["cs_dim"]
-        win = [ld_bf(cs, co + j * a["cs_tok"]) for j in range(SL)]
+        if const_expr(nq == 1):
+            slot = fx.Int32(
+                bo.buffer_load(rsrc(a["st_idx"]), t, vec_width=1, dtype=T.i32)
+            )
+            cs = a["conv_st"] + fx.Int64(fx.max(slot, 0)) * fx.Int64(a["cs_seq"]) * 2
+            co = chan * a["cs_dim"]
+            win = [ld_bf(cs, co + j * a["cs_tok"]) for j in range(SL)]
+        else:
+            # the request's conv state lives in its first slot; the window ends at
+            # its last accepted token
+            slot = _ld_i32(a["st_idx"], t * nq)
+            off = _ld_i32(a["n_acc"], t) - 1
+            cs = a["conv_st"] + fx.Int64(fx.max(slot, 0)) * fx.Int64(a["cs_seq"]) * 2
+            co = chan * a["cs_dim"]
+            win = [ld_bf(cs, co + (off + j) * a["cs_tok"]) for j in range(SL)]
         cw = fx.Vector(
             bo.buffer_load(rsrc(a["conv_w"]), chan * 2, vec_width=2, dtype=T.i32)
         )
@@ -671,77 +716,128 @@ def gdn_loads(c):
 
 
 @traced
+def _conv_out(c, geo, it, j, o):
+    """Conv item ``it``'s output o for token j of its unit -> LDS (v) / QK."""
+    nq = c["NQ"]
+    if it["live"] & (it["part"] == 0):
+        fx.ptr_store(o, c["vloc"] + ((it["k"] * nq + j) * VCH + it["d"]))
+    if it["live"] & (it["part"] > 0):
+        at = (
+            (((it["t"] * nq + j) * geo.nk + it["kh"]) * 2 + it["part"] - 1) * HD
+            + it["ch"] * VCH
+            + it["d"]
+        )
+        c["put"](c["qk"], at, o)
+
+
+@traced
 def gdn_conv(c, g):
     """Every conv item: x (PROJ) -> window shifted in place; the width-4 conv
     (products rounded to bf16, fp32 sum in tap order), SiLU -> bf16; v -> LDS,
-    q / k -> QK."""
-    a, geo = c["args"], c["G"]
+    q / k -> QK. With ``spec`` the unit's tokens in order (the window slides
+    over them) and the widened state rewritten as the stock spec-decode conv
+    does: the two inputs after the window's first, then the step's inputs."""
+    a, geo, nq = c["args"], c["G"], c["NQ"]
     items = g["items"]
-    got = c["poll"]([(c["proj"], it["t"] * geo.qkvz + it["chan"], 1) for it in items])
+    if const_expr(nq == 1):
+        got = c["poll"](
+            [(c["proj"], it["t"] * geo.qkvz + it["chan"], 1) for it in items]
+        )
+    else:
+        got = c["poll"](
+            [
+                (c["proj"], (it["t"] * nq + j) * geo.qkvz + it["chan"], 1)
+                for it in items
+                for j in range(nq)
+            ]
+        )
     for n in range_constexpr(len(items)):
         it = items[n]
-        x = f32_of(got[n][0])
         win, w = it["win"], it["cw"]
-        if it["live"] & (it["slot"] >= 0):
-            rs = rsrc(it["cs"])
-            bo.buffer_store(fx.Float32(win[1]).to(fx.BFloat16), rs, it["co"])
-            bo.buffer_store(
-                fx.Float32(win[2]).to(fx.BFloat16), rs, it["co"] + a["cs_tok"]
-            )
-            bo.buffer_store(
-                fx.Float32(x).to(fx.BFloat16), rs, it["co"] + 2 * a["cs_tok"]
-            )
-        acc = bf16_round(w[0] * win[0]) + bf16_round(w[1] * win[1])
-        acc = acc + bf16_round(w[2] * win[2])
-        acc = acc + bf16_round(w[3] * x)
-        o = bf16_round(conv_silu(acc))
-        if it["live"] & (it["part"] == 0):
-            fx.ptr_store(o, c["vloc"] + (it["k"] * VCH + it["d"]))
-        if it["live"] & (it["part"] > 0):
-            at = (
-                ((it["t"] * geo.nk + it["kh"]) * 2 + it["part"] - 1) * HD
-                + it["ch"] * VCH
-                + it["d"]
-            )
-            c["put"](c["qk"], at, o)
+        if const_expr(nq == 1):
+            x = f32_of(got[n][0])
+            if it["live"] & (it["slot"] >= 0):
+                rs = rsrc(it["cs"])
+                bo.buffer_store(fx.Float32(win[1]).to(fx.BFloat16), rs, it["co"])
+                bo.buffer_store(
+                    fx.Float32(win[2]).to(fx.BFloat16), rs, it["co"] + a["cs_tok"]
+                )
+                bo.buffer_store(
+                    fx.Float32(x).to(fx.BFloat16), rs, it["co"] + 2 * a["cs_tok"]
+                )
+            acc = bf16_round(w[0] * win[0]) + bf16_round(w[1] * win[1])
+            acc = acc + bf16_round(w[2] * win[2])
+            acc = acc + bf16_round(w[3] * x)
+            o = bf16_round(conv_silu(acc))
+            if it["live"] & (it["part"] == 0):
+                fx.ptr_store(o, c["vloc"] + (it["k"] * VCH + it["d"]))
+            if it["live"] & (it["part"] > 0):
+                at = (
+                    ((it["t"] * geo.nk + it["kh"]) * 2 + it["part"] - 1) * HD
+                    + it["ch"] * VCH
+                    + it["d"]
+                )
+                c["put"](c["qk"], at, o)
+        else:
+            xs = [f32_of(got[n * nq + j][0]) for j in range(nq)]
+            if it["live"] & (it["slot"] > 0):
+                rs = rsrc(it["cs"])
+                for e, v in enumerate([win[1], win[2]] + xs):
+                    bo.buffer_store(
+                        fx.Float32(v).to(fx.BFloat16), rs, it["co"] + e * a["cs_tok"]
+                    )
+            c0, c1, c2 = win
+            for j in range_constexpr(nq):
+                acc = bf16_round(w[0] * c0) + bf16_round(w[1] * c1)
+                acc = acc + bf16_round(w[2] * c2)
+                acc = acc + bf16_round(w[3] * xs[j])
+                _conv_out(c, geo, it, j, bf16_round(conv_silu(acc)))
+                c0, c1, c2 = c1, c2, xs[j]
     gpu.barrier()
 
 
 @traced
 def gdn_gates(c):
-    """Every task's q, k (QK) -> LDS; b, a (BAP, the eighths in order) -> beta,
-    decay; then q / k l2-normed (q * HD^-1/2)."""
-    s, tid, lane, wave, a, geo = (
+    """Every (task, token) pair's q, k (QK) -> LDS; b, a (BAP, the eighths in
+    order) -> beta, decay; then q / k l2-normed (q * HD^-1/2): x / sqrt(sum +
+    eps) as the stock decode kernel, x * rsqrt(sum + eps) with ``spec`` as the
+    stock spec-decode kernel."""
+    s, tid, lane, wave, a, geo, nq = (
         c["S"],
         c["tid"],
         c["lane"],
         c["wave"],
         c["args"],
         c["G"],
+        c["NQ"],
     )
     k0, nt = c["P"]
-    ni = nt * 2 * HD
+    npair = nt * nq
+    ni = npair * 2 * HD
     specs, dst = [], []
     for r in range_constexpr((ni + THREADS - 1) // THREADS):
         i = fx.min(tid + THREADS * r, ni - 1)
-        k = i // (2 * HD)
+        k, j = _pair(c, i // (2 * HD))
         e = i % (2 * HD)
         t, h, _, _ = task_of(c, plus(k, k0))
-        specs.append((c["qk"], (t * geo.nk + h // HPK) * 2 * HD + e, 1))
+        tok = t if nq == 1 else t * nq + j
+        specs.append((c["qk"], (tok * geo.nk + h // HPK) * 2 * HD + e, 1))
         dst.append(i)
     got = c["poll"](specs)
     for r in range_constexpr(len(specs)):
         if tid + THREADS * r < ni:
             fx.ptr_store(f32_of(got[r][0]), c["qkl"] + dst[r])
-    if tid < 2 * nt:
-        k = tid // 2
+    if tid < 2 * npair:
+        pr = tid // 2
         which = tid % 2  # 0 b, 1 a
+        k, j = _pair(c, pr)
         t, h, _, _ = task_of(c, plus(k, k0))
+        tok = t if nq == 1 else t * nq + j
         row = which * geo.nv + h
         gb = row // ROWS
         r = row % ROWS
         got2 = c["poll"](
-            [(c["bap"], ((gb * BA_E + e) * s + t) * ROWS + r, 1) for e in range(BA_E)]
+            [(c["bap"], ((gb * BA_E + e) * s + tok) * ROWS + r, 1) for e in range(BA_E)]
         )
         v = f32_of(got2[0][0])
         for e in range_constexpr(1, BA_E):
@@ -752,19 +848,23 @@ def gdn_gates(c):
         sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
         decay = tl_exp_fma(-tl_exp_fma(ld_f32(a["a_log"], h)) * sp)
         beta = fx.Float32(1.0) / (fx.Float32(1.0) + tl_exp_fma(-v))
-        fx.ptr_store((which == 0).select(beta, decay), c["scal"] + (k * 2 + which))
+        fx.ptr_store((which == 0).select(beta, decay), c["scal"] + (pr * 2 + which))
     gpu.barrier()
-    for n in range_constexpr((2 * nt + WAVES - 1) // WAVES):
-        vi = fx.min(wave + WAVES * n, 2 * nt - 1)
+    for n in range_constexpr((2 * npair + WAVES - 1) // WAVES):
+        vi = fx.min(wave + WAVES * n, 2 * npair - 1)
         base = c["qkl"] + vi * HD
         x0 = fx.ptr_load(base + 2 * lane)
         x1 = fx.ptr_load(base + (2 * lane + 1))
-        nrm = D.tl_sqrt(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
-        y0, y1 = x0 / nrm, x1 / nrm
+        if const_expr(nq == 1):
+            nrm = D.tl_sqrt(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
+            y0, y1 = x0 / nrm, x1 / nrm
+        else:
+            rn = hw_rsq(butterfly(x0 * x0 + x1 * x1, VEC_ORDER) + fx.Float32(1e-6))
+            y0, y1 = x0 * rn, x1 * rn
         isq = vi % 2 == 0
         y0 = isq.select(y0 * fx.Float32(HD**-0.5), y0)
         y1 = isq.select(y1 * fx.Float32(HD**-0.5), y1)
-        if wave + WAVES * n < 2 * nt:
+        if wave + WAVES * n < 2 * npair:
             fx.ptr_store(y0, base + 2 * lane)
             fx.ptr_store(y1, base + (2 * lane + 1))
     gpu.barrier()
@@ -773,8 +873,10 @@ def gdn_gates(c):
 @traced
 def gdn_recur(c, g):
     """Task pair by pair (``recur_task``), the stock decode kernel's arithmetic:
-    decay, the delta rule, the new state (in place), o = bf16(h q) -> OV."""
-    lane, wave, geo = c["lane"], c["wave"], c["G"]
+    decay, the delta rule, the new state (in place), o = bf16(h q) -> OV. With
+    ``spec`` the unit's tokens in order from the accepted state, each token's
+    state stored to its slot."""
+    lane, wave, geo, nq = c["lane"], c["wave"], c["G"], c["NQ"]
     k0, nt = c["P"]
     col = 4 * (lane % 32)
     for m in range_constexpr((nt + 1) // 2):
@@ -782,40 +884,74 @@ def gdn_recur(c, g):
         t, h, ch, _ = task_of(c, plus(k, k0))
         row = 2 * (wave % 4) + lane // 32
         live = g["live"][m]
-        beta = fx.ptr_load(c["scal"] + 2 * k)
-        decay = fx.ptr_load(c["scal"] + (2 * k + 1))
-        qb = c["qkl"] + k * 2 * HD
-        q = [fx.ptr_load(qb + (col + j)) for j in range(4)]
-        kv = [fx.ptr_load(qb + (HD + col + j)) for j in range(4)]
         st = g["st"][m]
-        hd = [live.select(st[j], fx.Float32(0.0)) * decay for j in range(4)]
-        p = butterfly(dot4(hd, kv), ROW_ORDER)
-        vn = (fx.ptr_load(c["vloc"] + (k * VCH + row)) - p) * beta
-        hn = [fx.Float32(fmath.fma(vn, kv[j], hd[j])) for j in range(4)]
-        o = bf16_round(butterfly(dot4(hn, q), ROW_ORDER))
-        if live:
-            bo.buffer_store(
-                fx.Vector.from_elements(hn, fx.Float32),
-                rsrc(g["sbase"][m]),
-                g["soff"][m],
-            )
-        if g["valid"][m] & (lane % 32 == 0):
-            c["put"](
-                c["ov"],
-                (t * geo.nv + h) * HD + ch * VCH + row,
-                live.select(o, fx.Float32(0.0)),
-            )
+        if const_expr(nq == 1):
+            beta = fx.ptr_load(c["scal"] + 2 * k)
+            decay = fx.ptr_load(c["scal"] + (2 * k + 1))
+            qb = c["qkl"] + k * 2 * HD
+            q = [fx.ptr_load(qb + (col + j)) for j in range(4)]
+            kv = [fx.ptr_load(qb + (HD + col + j)) for j in range(4)]
+            hd = [live.select(st[j], fx.Float32(0.0)) * decay for j in range(4)]
+            p = butterfly(dot4(hd, kv), ROW_ORDER)
+            vn = (fx.ptr_load(c["vloc"] + (k * VCH + row)) - p) * beta
+            hn = [fx.Float32(fmath.fma(vn, kv[j], hd[j])) for j in range(4)]
+            o = bf16_round(butterfly(dot4(hn, q), ROW_ORDER))
+            if live:
+                bo.buffer_store(
+                    fx.Vector.from_elements(hn, fx.Float32),
+                    rsrc(g["sbase"][m]),
+                    g["soff"][m],
+                )
+            if g["valid"][m] & (lane % 32 == 0):
+                c["put"](
+                    c["ov"],
+                    (t * geo.nv + h) * HD + ch * VCH + row,
+                    live.select(o, fx.Float32(0.0)),
+                )
+        else:
+            a = c["args"]
+            hs = [live.select(st[j], fx.Float32(0.0)) for j in range(4)]
+            for i in range_constexpr(nq):
+                pr = k * nq + i
+                beta = fx.ptr_load(c["scal"] + 2 * pr)
+                decay = fx.ptr_load(c["scal"] + (2 * pr + 1))
+                qb = c["qkl"] + pr * 2 * HD
+                q = [fx.ptr_load(qb + (col + j)) for j in range(4)]
+                kv = [fx.ptr_load(qb + (HD + col + j)) for j in range(4)]
+                hd = [hs[j] * decay for j in range(4)]
+                p = butterfly(dot4(hd, kv), ROW_ORDER)
+                vn = (fx.ptr_load(c["vloc"] + (pr * VCH + row)) - p) * beta
+                hs = [fx.Float32(fmath.fma(vn, kv[j], hd[j])) for j in range(4)]
+                o = bf16_round(butterfly(dot4(hs, q), ROW_ORDER))
+                oslot = g["oslot"][m][i]
+                if live & (oslot > 0):
+                    obase = a["rstate"] + fx.Int64(oslot) * fx.Int64(a["rs_seq"]) * 4
+                    bo.buffer_store(
+                        fx.Vector.from_elements(hs, fx.Float32),
+                        rsrc(obase),
+                        g["soff"][m],
+                    )
+                if g["valid"][m] & (lane % 32 == 0):
+                    c["put"](
+                        c["ov"],
+                        ((t * nq + i) * geo.nv + h) * HD + ch * VCH + row,
+                        live.select(o, fx.Float32(0.0)),
+                    )
 
 
 @traced
 def gdn_norm(c, g):
-    """Wave by task: the head's 128 o (OV, two a lane, the stock RMSNormGated
-    layout and order) -> rstd; the task's 8 rows bf16(o rstd w silu(z)) -> core."""
-    lane, wave, a, geo = c["lane"], c["wave"], c["args"], c["G"]
+    """Wave by (task, token) pair: the head's 128 o (OV, two a lane, the stock
+    RMSNormGated layout and order) -> rstd; the task's 8 rows
+    bf16(o rstd w silu(z)) -> core."""
+    lane, wave, a, geo, nq = c["lane"], c["wave"], c["args"], c["G"], c["NQ"]
     k0, nt = c["P"]
-    for n in range_constexpr((nt + WAVES - 1) // WAVES):
-        k = fx.min(wave + WAVES * n, nt - 1)
+    npair = nt * nq
+    for n in range_constexpr((npair + WAVES - 1) // WAVES):
+        k, j = _pair(c, fx.min(wave + WAVES * n, npair - 1))
         t, h, ch, ok = task_of(c, plus(k, k0))
+        if const_expr(nq != 1):
+            t = t * nq + j
         e = h * HD + 2 * lane
         got = c["poll"](
             [
@@ -840,7 +976,7 @@ def gdn_norm(c, g):
             z = f32_of(got[1][j])
             sig = fx.Float32(1.0) / (fx.Float32(1.0) + tl_exp(-z))
             y.append(x[j] * rstd * ld_bf(a["norm_w"], 2 * lane + j) * (sig * z))
-        if _live((wave + WAVES * n < nt) & (lane // (VCH // 2) == ch), ok):
+        if _live((wave + WAVES * n < npair) & (lane // (VCH // 2) == ch), ok):
             # with oproj read by other CTAs: past the CU's cache
             bo.buffer_store(
                 D.pack_bf(y)[0],
@@ -852,10 +988,10 @@ def gdn_norm(c, g):
 
 def run_gdn(c):
     """The GDN phases, pass by pass (``tiling.gdn_passes``; one pass on 256
-    CTAs): a pass is whole tokens, so what it waits on is produced in the same
+    CTAs): a pass is whole units, so what it waits on is produced in the same
     pass on every CTA. A barrier before each later pass's conv: it rewrites the
     LDS the previous pass's recurrence reads."""
-    for p, ps in enumerate(gdn_passes(c["G"], c["S"])):
+    for p, ps in enumerate(gdn_passes(c["G"], c["U"])):
         c["P"] = ps
         g = gdn_loads(c)
         if p:
@@ -938,8 +1074,11 @@ def build(key: K1Build):
     o_n = key.o_split or o_splits(s)
     assert not key.oproj or (key.tp == 2 and geo.val // D.STEP % o_n == 0)
     assert key.norm_rows in (1, 2), key
+    nq = key.spec or 1
+    assert not key.spec or (key.tp == 1 and not key.oproj and s % nq == 0), key
+    units = s // nq
     # the LDS of the widest GDN pass (every pass on 256 CTAs: one)
-    nt = max(n for _, n in gdn_passes(geo, s))
+    nt = max(n for _, n in gdn_passes(geo, units))
     # Front: below 256 CTAs every CTA runs the input norm itself from the whole
     # rows (``dense_ffn.run_norm``, the same reduction order as the owners) in
     # place of the owners' two grid-wide hand-offs and their second pass. Up to
@@ -954,9 +1093,9 @@ def build(key: K1Build):
 
     @fx.struct
     class GLds:
-        qkl: fx.Array[fx.Float32, nt * 2 * HD, 16]
-        vloc: fx.Array[fx.Float32, nt * VCH, 16]
-        scal: fx.Array[fx.Float32, nt * 2, 16]
+        qkl: fx.Array[fx.Float32, nt * nq * 2 * HD, 16]
+        vloc: fx.Array[fx.Float32, nt * nq * VCH, 16]
+        scal: fx.Array[fx.Float32, nt * nq * 2, 16]
 
     @fx.struct
     class OLds:
@@ -993,6 +1132,8 @@ def build(key: K1Build):
         name += f"_r{key.norm_rows}"
     if key.o_split:
         name += f"_q{key.o_split}"
+    if key.spec:
+        name += f"_v{key.spec}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -1033,6 +1174,8 @@ def build(key: K1Build):
         mb = Mailbox(step_tag(epoch, layer) - 1)
         c = {
             "S": s,
+            "U": units,
+            "NQ": nq,
             "G": geo,
             "tid": tid,
             "bid": bid,
@@ -1078,6 +1221,9 @@ def build(key: K1Build):
                 "rstate": rstate,
                 "rs_seq": rs_seq,
                 "st_idx": st_idx,
+                # spec: the requests' accepted-token counts come in w_os (no
+                # out_proj with spec)
+                "n_acc": w_os,
                 "core": core,
                 "w_o": w_o,
                 "w_os": w_os,
@@ -1193,6 +1339,7 @@ def dense_gdn_pre(
     w_o=None,
     w_os=None,
     out=None,
+    n_acc=None,
 ):
     """Host launcher. ``hidden`` the full rows: the layer input, ``residual``
     None on the first layer (``key.first``); with ``key.normed`` the input norm's
@@ -1200,10 +1347,12 @@ def dense_gdn_pre(
     this rank's share (``Geo(key.tp)``): ``w_qkvz`` / ``w_ba`` shuffled
     (``dense_ffn.shuffle_w``); ``conv_state`` [slots, conv, 3] (strides read);
     ``rstate`` [slots, nv, HD, HD] fp32, a slot dense; ``core`` [S, val].
-    ``st_idx`` [>= S] int32, -1 a pad row; ``epoch`` a device int32 bumped once
-    a step, ``layer`` this launch's tag slot. ``key.oproj``: out_proj's rank
-    share ``w_o`` [HIDDEN, val / 2] shuffled, ``w_os``, and ``out`` [S, HIDDEN]
-    bf16 (``core`` still written)."""
+    ``st_idx`` [>= S] int32, -1 a pad row (``key.spec``: [S / spec, spec],
+    vLLM's spec-decode state slots, <= 0 null; ``n_acc`` [S / spec] int32 the
+    accepted tokens a request; ``conv_state`` [slots, conv, 2 + spec]);
+    ``epoch`` a device int32 bumped once a step, ``layer`` this launch's tag
+    slot. ``key.oproj``: out_proj's rank share ``w_o`` [HIDDEN, val / 2]
+    shuffled, ``w_os``, and ``out`` [S, HIDDEN] bf16 (``core`` still written)."""
     s, geo = key.tokens, Geo(key.tp)
     qkvz, ba = geo.qkvz, geo.ba
     if key.normed:
@@ -1218,19 +1367,25 @@ def dense_gdn_pre(
     assert w_ba.shape == (ba, HIDDEN // 2) and w_bas.shape == (ba, HIDDEN // 32)
     assert conv_w.numel() == geo.conv * CONV_W and conv_w.dtype == torch.bfloat16
     assert conv_state.dtype == torch.bfloat16
-    assert conv_state.shape[1:] == (geo.conv, SL)
+    assert conv_state.shape[1:] == (geo.conv, SL + max(key.spec - 1, 0))
     assert rstate.dtype == torch.float32 and rstate.shape[1:] == (geo.nv, HD, HD)
     assert rstate[0].is_contiguous()
     assert a_log.dtype == torch.float32 and dt_bias.dtype == torch.bfloat16
     assert a_log.numel() == geo.nv and dt_bias.numel() == geo.nv
     assert norm_w.dtype == torch.bfloat16 and norm_w.numel() == HD
     assert st_idx.dtype == torch.int32 and st_idx.numel() >= s
+    if key.spec:
+        assert not key.oproj and n_acc.dtype == torch.int32
+        assert n_acc.numel() >= s // key.spec and n_acc.is_contiguous()
+        assert st_idx.is_contiguous() and st_idx.numel() >= s
     if key.oproj:
         assert w_o.shape == (HIDDEN, geo.val // 2)
         assert w_os.shape == (HIDDEN, geo.val // 32) and w_os.is_contiguous()
         assert out.shape == (s, HIDDEN) and out.dtype == torch.bfloat16
     else:
         w_o = w_os = out = core
+        if key.spec:
+            w_os = n_acc
     assert scratch.numel() >= scratch_bytes(key)
     for t in (hidden, res_out, w_qkvz, w_qkvzs, w_ba, w_bas, conv_w, core, w_o, out):
         assert t.is_contiguous()

@@ -24,10 +24,14 @@ a GPU other than gfx950, pipeline parallel, LoRA, a KV connector, sequence
 parallel, speculative tokens at TP2, or a shape or quant method other than
 this Quark MXFP4 27B dense MLP.
 
-With speculative decoding (MTP) at TP1, K1 is off: a verify step runs a
-request's draft tokens through the GDN recurrence in order, which K1 does
-not. The compiled stock GDN layer runs up to out_proj's input, and K2 takes
-the step's rows (draft tokens included) from there, out_proj folded.
+With speculative decoding (MTP) at TP1, mono runs the verify steps: K1
+takes each request's 1 + k tokens in order through the conv and the
+recurrence, from the state after the request's last accepted token, writes
+every token's state to its own slot and rewrites the widened conv state, as
+vLLM's spec-decode kernels do (``K1Build.spec``); K2 takes the rows. Steps
+that are not whole verify steps (no drafts, fewer drafts, warm-up batches)
+run stock. With K1 switched off, the compiled stock GDN layer runs up to
+out_proj's input and K2 still takes the rows.
 
 ## Grid width
 
@@ -184,7 +188,7 @@ inside the caps (8) and K1 and K2 produce nearly every token:
 
 The model card setting is `lm_eval` `local-completions`, 5-shot, all
 1319 questions, sampled (thinking: temperature 1.0, max_gen_toks 3072;
-non-thinking: the card's `gsm8k_nothink` task). The paired differences
+non-thinking: the card's custom prompt that closes the think block). The paired differences
 over the three seeds are −0.18 ± 0.36 and −0.45 ± 0.45 points.
 With MTP-3, one request at a time (where K2 runs), one seed per arm:
 thinking 0.9265 → 0.9303 (paired +0.38 ± 0.69 points), non-thinking
@@ -205,6 +209,10 @@ that no GDN pass waits on a later one.
 SiLU-mul, including the TP2 down partial before the all-reduce.
 `DenseGdnTest` checks K1 against the stock conv update, gated delta rule,
 and RMSNormGated, including pad rows and the TP2 `out_proj` partial.
+`DenseGdnSpecTest` checks K1 on MTP verify steps against the stock
+spec-decode conv and recurrence: res_out, the conv state and the written
+state slots exactly, the recurrence's outputs within fp32 rounding (the
+stock spec kernel reduces in another order).
 `RowCapsTest`, `StockAccumulationTest`, `StockSplitTest`, and
 `StockChainTest` check the row caps and that K2 follows the stock GEMM's
 split-K order. The Buildkite job `qwen38-27b-dense-mono-numerics-amd`

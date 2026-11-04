@@ -343,6 +343,69 @@ def _k1_f32(attn, geo, x, conv, ssm, idx):
     return core, out
 
 
+def _k1_spec_f32(attn, geo, x, conv, ssm, idx, n_acc):
+    """The stock spec-decode GDN step in fp32 torch: a request's tokens in order
+    from the state after its last accepted token (``idx[r, n_acc[r] - 1]``),
+    each token's state to its own slot, the widened conv state (``idx[r, 0]``)
+    rewritten. Updates ``conv`` / ``ssm`` (fp32 copies) in place; returns core.
+    A request whose slots are vLLM's null block (<= 0) is skipped."""
+    from vllm.model_executor.layers.layernorm import RMSNormGated
+
+    n, q = idx.shape
+    nk = attn.num_k_heads // attn.tp_size
+    kd, vd = attn.head_k_dim, attn.head_v_dim
+    qkv_size = (attn.key_dim * 2 + attn.value_dim) // attn.tp_size
+    qkvz = _f32_linear(x, attn.in_proj_qkvz.weight, attn.in_proj_qkvz.weight_scale)
+    ba = _f32_linear(x, attn.in_proj_ba.weight, attn.in_proj_ba.weight_scale)
+    qkv, z = qkvz[:, :qkv_size], qkvz[:, qkv_size:]
+    b, a = ba.chunk(2, dim=-1)
+    w = attn.conv1d.weight.view(attn.conv1d.weight.size(0), -1).float()
+    width = w.size(1)
+    core = torch.zeros(x.size(0), geo.nv * vd, dtype=torch.float32, device=x.device)
+    for r in range(n):
+        cslot, acc = int(idx[r, 0]), int(n_acc[r])
+        init = int(idx[r, acc - 1])
+        if cslot <= 0 or init <= 0:
+            continue
+        state = conv[cslot].clone()
+        win = state[:, acc - 1 : acc + width - 2]
+        xs = qkv[r * q : (r + 1) * q]
+        conv[cslot] = torch.cat([state[:, acc : acc + width - 2], xs.t()], -1)
+        h = ssm[init].clone()
+        for j in range(q):
+            t = r * q + j
+            full = torch.cat([win, xs[j][:, None]], -1)
+            win = full[:, 1:]
+            mixed = torch.nn.functional.silu((full * w).sum(-1))
+            qh = mixed[: nk * kd].view(nk, kd)
+            kh = mixed[nk * kd : 2 * nk * kd].view(nk, kd)
+            v = mixed[2 * nk * kd :].view(geo.nv, vd)
+            qh = qh / torch.sqrt((qh * qh).sum(-1, keepdim=True) + 1e-6) * kd**-0.5
+            kh = kh / torch.sqrt((kh * kh).sum(-1, keepdim=True) + 1e-6)
+            rep = geo.nv // nk
+            qh, kh = qh.repeat_interleave(rep, 0), kh.repeat_interleave(rep, 0)
+            g = -torch.exp(attn.A_log.float()) * torch.nn.functional.softplus(
+                a[t] + attn.dt_bias.float()
+            )
+            h = h * torch.exp(g)[:, None, None]
+            v = (v - (h * kh[:, None, :]).sum(-1)) * torch.sigmoid(b[t])[:, None]
+            h = h + v[:, :, None] * kh[:, None, :]
+            if int(idx[r, j]) > 0:
+                ssm[int(idx[r, j])] = h
+            o = (h * qh[:, None, :]).sum(-1)
+            core[t] = RMSNormGated.forward_static(
+                o,
+                z[t].view(geo.nv, vd),
+                attn.norm.weight,
+                attn.norm.eps,
+                torch.float32,
+                None,
+                True,
+                attn.norm.activation,
+            ).flatten()
+    return core
+
+
 def _min_row_cosine(got, ref) -> float:
     """The smallest per-row cosine of two [rows, n] tensors; NaN if any is not
     finite."""
@@ -677,12 +740,15 @@ class DenseMono:
             "VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True
         )
         k1_flag = _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K1", True)
-        # Speculative decoding (TP1): verify steps run a request's draft tokens
-        # through the GDN recurrence in order and widen the conv state; K1 takes
-        # one token a request. The stock GDN layer runs instead, and K2 takes the
-        # rows, which are independent in the FFN.
+        # Speculative decoding (TP1): a verify step is spec_q tokens a request
+        # (1 + the draft tokens); K1 runs them through the conv and the
+        # recurrence in order (K1Build.spec), K2 takes the rows.
         self.spec = _spec_tokens(model)
-        self.k1 = k1_flag and (self.oproj or not self.whole_step) and not self.spec
+        self.spec_q = 1 + max(
+            (layer.linear_attn.num_spec for layer in model.layers if _is_gdn(layer)),
+            default=0,
+        )
+        self.k1 = k1_flag and (self.oproj or not self.whole_step)
         # GDN layers up to out_proj's input, for the TP1 graph with K1 off
         self.gdn_core: dict[int, nn.Module] = {}
         self.k1_oproj = (
@@ -717,7 +783,9 @@ class DenseMono:
             self.k1_rows if self.k1 else 0,
             self.k2_rows,
             self.grid,
-            "; speculative decoding: K1 off, K2 on verify steps" if self.spec else "",
+            f"; speculative decoding: verify steps of {self.spec_q} tokens a request"
+            if self.spec
+            else "",
         )
         self.scratch = None
         self.k1_scratch = None
@@ -744,6 +812,7 @@ class DenseMono:
                 eps=eps,
                 norm_eps=norm_eps,
                 grid=self.grid,
+                spec=self.spec_q if self.spec else 0,
                 **stock,
             )
         return dense_gdn.K1Build(
@@ -838,7 +907,7 @@ class DenseMono:
             self.k1_scratch = torch.zeros(
                 max(
                     dense_gdn.scratch_bytes(self._k1_key(dense_gdn, s, first=flag))
-                    for s in range(1, self.k1_rows + 1)
+                    for s in self._k1_widths()
                     for flag in (False, True)
                 ),
                 dtype=torch.uint8,
@@ -878,7 +947,7 @@ class DenseMono:
             from vllm.models.qwen3_5.amd.mono.tiling import _resident_cus
 
             try:
-                for s in range(1, self.k1_rows + 1):
+                for s in self._k1_widths():
                     dense_gdn.stock_fields(s, self.tp, self.k1_oproj, _resident_cus())
             except ValueError as exc:
                 return f"K1: {exc}"
@@ -910,6 +979,12 @@ class DenseMono:
     @staticmethod
     def _check_widths(cap: int) -> list[int]:
         return sorted({1, min(8, cap), cap})
+
+    def _k1_widths(self) -> list[int]:
+        """The step widths K1 builds: with speculative decoding whole verify
+        steps (multiples of spec_q rows) only."""
+        step = self.spec_q if self.spec else 1
+        return list(range(step, self.k1_rows + 1, step))
 
     def _shuffle_weights(self) -> None:
         from vllm.models.qwen3_5.amd.mono import dense_ffn as D
@@ -969,7 +1044,6 @@ class DenseMono:
         return core, out
 
     def _states(self, index: int, attn, rows: int):
-        from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
         from vllm.models.qwen3_5.amd.mono import dense_gdn as K
 
         meta = self._metadata(attn)
@@ -977,6 +1051,32 @@ class DenseMono:
             raise RuntimeError(
                 "VLLM_ROCM_MONO_DECODE K1 has no GDN state for this decode step"
             )
+        geo = K.Geo(self.tp)
+        sl = K.SL + self.spec_q - 1
+        if self.spec:
+            # vLLM's persistent spec-decode buffers: [requests, spec_q] slots
+            # (0 the null block, padding included) and the accepted tokens.
+            idx = meta.spec_state_indices_tensor
+            n_acc = meta.num_accepted_tokens
+            if (
+                idx is None
+                or n_acc is None
+                or idx.dtype != torch.int32
+                or n_acc.dtype != torch.int32
+                or idx.dim() != 2
+                or idx.size(1) != self.spec_q
+                or idx.size(0) * self.spec_q != rows
+                or n_acc.numel() < idx.size(0)
+                or not (idx.is_contiguous() and n_acc.is_contiguous())
+            ):
+                shape = None if idx is None else (tuple(idx.shape), idx.dtype)
+                acc = None if n_acc is None else (tuple(n_acc.shape), n_acc.dtype)
+                raise RuntimeError(
+                    "VLLM_ROCM_MONO_DECODE K1 spec-decode state indices do not "
+                    f"cover this verify step of {rows} rows: slots {shape}, "
+                    f"accepted {acc}"
+                )
+            return self._gdn_cache(attn, geo, sl) + ((idx, n_acc),)
         idx = meta.non_spec_state_indices_tensor
         if idx is None or idx.dtype != torch.int32 or idx.numel() < rows:
             raise RuntimeError(
@@ -995,15 +1095,22 @@ class DenseMono:
             buf.masked_fill_(buf == 0, -1)
             self._idx_rows[key] = buf
         idx = buf
+        return self._gdn_cache(attn, geo, sl) + (idx,)
+
+    @staticmethod
+    def _gdn_cache(attn, geo, sl):
+        """(conv state [slots, conv, sl] bf16, SSM state) of GDN layer ``attn``."""
+        from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+        from vllm.models.qwen3_5.amd.mono import dense_gdn as K
+
         conv = attn.kv_cache[0]
         if not is_conv_state_dim_first():
             conv = conv.transpose(-1, -2)
         ssm = attn.kv_cache[1]
-        geo = K.Geo(self.tp)
-        if conv.dtype != torch.bfloat16 or conv.shape[1:] != (geo.conv, K.SL):
+        if conv.dtype != torch.bfloat16 or conv.shape[1:] != (geo.conv, sl):
             raise RuntimeError(
                 f"VLLM_ROCM_MONO_DECODE K1 conv state {tuple(conv.shape)} "
-                f"{conv.dtype}, want [slots, {geo.conv}, {K.SL}] bf16"
+                f"{conv.dtype}, want [slots, {geo.conv}, {sl}] bf16"
             )
         if (
             ssm.dtype != torch.float32
@@ -1013,7 +1120,7 @@ class DenseMono:
             raise RuntimeError(
                 f"VLLM_ROCM_MONO_DECODE K1 SSM state {tuple(ssm.shape)} {ssm.dtype}"
             )
-        return conv, ssm, idx
+        return conv, ssm
 
     def _metadata(self, attn):
         if not is_forward_context_available():
@@ -1032,7 +1139,7 @@ class DenseMono:
     def _self_check(self) -> str | None:
         why = self._ffn_check() if self.whole_step or self.k2 else None
         if why is None and self.k1:
-            why = self._k1_check()
+            why = self._k1_spec_check() if self.spec else self._k1_check()
         if why is not None:
             return f"self-check failed: {why}"
         return None
@@ -1197,6 +1304,117 @@ class DenseMono:
                 return why
         return None
 
+    def _k1_spec_check(self) -> str | None:
+        """``_k1_check`` for verify steps (``K1Build.spec``): K1 against the stock
+        spec-decode kernels and fp32, random accepted-token counts; with two
+        requests the second is padding (vLLM's null block)."""
+        from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+            causal_conv1d_update,
+        )
+        from vllm.models.qwen3_5.amd.mono import dense_gdn as K
+        from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+            fused_sigmoid_gating_delta_rule_update,
+        )
+
+        geo = K.Geo(self.tp)
+        q = self.spec_q
+        index, layer = next(
+            (i, lyr) for i, lyr in enumerate(self.model.layers) if _is_gdn(lyr)
+        )
+        attn = layer.linear_attn
+        dev = self.epoch.device
+        g = torch.Generator(device=dev).manual_seed(2)
+        eps = layer.input_layernorm.variance_epsilon
+        kd, vd = attn.head_k_dim, attn.head_v_dim
+        for s in self._k1_widths():
+            n = s // q
+            first = s == q
+            h = torch.randn(s, K.HIDDEN, generator=g, device=dev).mul_(0.5).bfloat16()
+            residual = (
+                None
+                if first
+                else torch.randn(s, K.HIDDEN, generator=g, device=dev)
+                .mul_(2)
+                .bfloat16()
+            )
+            conv = torch.randn(
+                1 + s, geo.conv, K.SL + q - 1, generator=g, device=dev
+            ).bfloat16()
+            ssm = torch.randn(
+                1 + s,
+                geo.nv,
+                K.HD,
+                K.HD,
+                generator=g,
+                device=dev,
+                dtype=torch.float32,
+            ).mul_(0.05)
+            idx = torch.arange(1, 1 + s, dtype=torch.int32, device=dev).view(n, q)
+            if n > 1:
+                idx[1] = 0
+            n_acc = torch.randint(
+                1, q + 1, (n,), generator=g, device=dev, dtype=torch.int32
+            )
+            live = (idx[:, :1] > 0).expand(n, q).reshape(-1)
+            conv_ref, ssm_ref = conv.clone(), ssm.clone()
+            conv_f32, ssm_f32 = conv.float(), ssm.clone()
+            x, res_ref = _gemma(h, residual, layer.input_layernorm.weight, eps)
+            core_f32 = _k1_spec_f32(attn, geo, x, conv_f32, ssm_f32, idx, n_acc)
+            qkv_size = (attn.key_dim * 2 + attn.value_dim) // attn.tp_size
+            z_size = attn.value_dim // attn.tp_size
+            mixed_qkvz = _ref_linear(
+                x, attn.in_proj_qkvz.weight, attn.in_proj_qkvz.weight_scale
+            )
+            ba = _ref_linear(x, attn.in_proj_ba.weight, attn.in_proj_ba.weight_scale)
+            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+            b, a = ba.chunk(2, dim=-1)
+            qsl = torch.arange(0, s + 1, q, dtype=torch.int32, device=dev)
+            mixed = causal_conv1d_update(
+                mixed_qkv,
+                conv_ref,
+                attn.conv1d.weight.view(attn.conv1d.weight.size(0), -1),
+                None,
+                attn.activation,
+                conv_state_indices=idx[:, 0].contiguous(),
+                num_accepted_tokens=n_acc,
+                query_start_loc=qsl,
+                max_query_len=q,
+                validate_data=False,
+            )
+            kdim = attn.key_dim // attn.tp_size
+            mq, mk, mv = mixed.split([kdim, kdim, mixed.size(1) - 2 * kdim], dim=-1)
+            o, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=attn.A_log,
+                a=a.contiguous(),
+                b=b.contiguous(),
+                dt_bias=attn.dt_bias,
+                q=mq.reshape(1, s, -1, kd),
+                k=mk.reshape(1, s, -1, kd),
+                v=mv.reshape(1, s, -1, vd),
+                initial_state=ssm_ref,
+                inplace_final_state=True,
+                cu_seqlens=qsl,
+                ssm_state_indices=idx,
+                num_accepted_tokens=n_acc,
+                use_qk_l2norm_in_kernel=True,
+            )
+            core_ref = attn.norm(o.reshape(-1, vd), z.reshape(-1, vd)).view(s, -1)
+            self.epoch.add_(1)
+            core, res, _ = self._k1(index, layer, conv, ssm, (idx, n_acc), h, residual)
+            why = _k1_verdict(
+                s,
+                live,
+                (res, res_ref),
+                {
+                    "core": (core, core_ref, core_f32),
+                    "conv state": (conv, conv_ref, conv_f32),
+                    "SSM state": (ssm, ssm_ref, ssm_f32),
+                },
+            )
+            if why is not None:
+                return f"verify steps of {q} tokens a request: {why}"
+        return None
+
     def _pure_decode(self, rows: int) -> bool:
         if not self._prepared or not 1 <= rows <= self._max_tokens():
             return False
@@ -1213,6 +1431,18 @@ class DenseMono:
             return False
         if meta.num_prefills != 0 or meta.num_decodes + meta.num_spec_decodes <= 0:
             return False
+        if self.spec and self.k1:
+            # K1 takes whole verify steps: spec_q tokens for each of the
+            # [requests, spec_q] slot rows (a request has at most spec_q, so
+            # requests x spec_q == rows means all of them have spec_q). Others
+            # (no drafts, fewer drafts, warm-up batches) run stock.
+            idx = meta.spec_state_indices_tensor
+            return not (
+                meta.num_decodes
+                or idx is None
+                or idx.dim() != 2
+                or idx.size(0) * self.spec_q != rows
+            )
         if meta.num_spec_decodes or meta.spec_sequence_masks is not None:
             # K2 only: the stock GDN layer runs the verify step's recurrence.
             return not self.k1 or self._skip("spec decode")
@@ -1380,7 +1610,8 @@ class DenseMono:
             dt_bias=attn.dt_bias,
             norm_w=attn.norm.weight,
             rstate=ssm_state,
-            st_idx=idx,
+            st_idx=idx[0] if key.spec else idx,
+            n_acc=idx[1] if key.spec else None,
             core=core,
             scratch=self.k1_scratch,
             epoch=self.epoch,

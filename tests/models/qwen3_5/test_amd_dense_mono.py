@@ -740,5 +740,148 @@ class DenseGdnTest(unittest.TestCase):
                 self.assertEqual(bad, [])
 
 
+def _stock_gdn_spec(K, geo, w, h, residual, conv, ssm, idx, n_acc):
+    """The stock spec-decode GDN step (vLLM's MTP verify path): in_proj, the conv
+    update with the accepted-token offsets, the sigmoid-gated delta rule with a
+    state slot a token, RMSNormGated. Updates ``conv`` / ``ssm``."""
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
+    from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+        fused_sigmoid_gating_delta_rule_update,
+    )
+
+    n, nq = idx.shape
+    s = n * nq
+    x, res = _gemma_norm(h, residual, w["ln_w"])
+    qkvz = _linear(x, w["w_qkvz"], w["w_qkvzs"])
+    ba = _linear(x, w["w_ba"], w["w_bas"])
+    q, k, v, z = qkvz.split([geo.key, geo.key, geo.val, geo.val], dim=-1)
+    b, a = ba.split([geo.nv, geo.nv], dim=-1)
+    qsl = torch.arange(0, s + 1, nq, dtype=torch.int32, device="cuda")
+    mixed = causal_conv1d_update(
+        torch.cat([q, k, v], dim=-1),
+        conv,
+        w["conv_w"].view(geo.conv, K.CONV_W),
+        None,
+        "silu",
+        conv_state_indices=idx[:, 0].contiguous(),
+        num_accepted_tokens=n_acc,
+        query_start_loc=qsl,
+        max_query_len=nq,
+        validate_data=False,
+    )
+    mq, mk, mv = mixed.split([geo.key, geo.key, geo.val], dim=-1)
+    o, _ = fused_sigmoid_gating_delta_rule_update(
+        A_log=w["a_log"],
+        a=a.contiguous(),
+        b=b.contiguous(),
+        dt_bias=w["dt_bias"],
+        q=mq.reshape(1, s, geo.nk, K.HD),
+        k=mk.reshape(1, s, geo.nk, K.HD),
+        v=mv.reshape(1, s, geo.nv, K.HD),
+        initial_state=ssm,
+        inplace_final_state=True,
+        cu_seqlens=qsl,
+        ssm_state_indices=idx,
+        num_accepted_tokens=n_acc,
+        use_qk_l2norm_in_kernel=True,
+    )
+    core = w["gated_norm"](o.reshape(-1, K.HD), z.reshape(-1, K.HD))
+    return core.view(s, geo.val), res
+
+
+@unittest.skipUnless(_gfx950(), "needs FlyDSL and aiter on gfx950")
+class DenseGdnSpecTest(unittest.TestCase):
+    """K1 on MTP verify steps (``K1Build.spec``): 1 + 3 draft tokens a request.
+
+    The stock spec-decode recurrence reduces in another order than the decode
+    kernel K1 reproduces, so the recurrence's outputs are compared within fp32
+    rounding; everything else is exact: res_out, the widened conv state, which
+    slots are written, and a padded request (vLLM's null block) left alone."""
+
+    NQ = 4
+
+    def test_verify_steps(self):
+        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
+        from vllm.models.qwen3_5.amd.mono import dense_gdn as K
+
+        geo, nq = K.Geo(1), self.NQ
+        for n in (1, 2):
+            s = n * nq
+            g = torch.Generator(device="cuda").manual_seed(300 + s)
+            w = _gdn_weights(g, K)
+            w_qkvz, w_ba = D.shuffle_w(w["w_qkvz"]), D.shuffle_w(w["w_ba"])
+            key = K.K1Build(
+                tokens=s,
+                eps=EPS,
+                norm_eps=EPS,
+                grid=_grid(),
+                spec=nq,
+                **K.stock_fields(s, 1, False, _cus()),
+            )
+            core = torch.empty(s, geo.val, dtype=BF, device="cuda")
+            res_out = torch.empty(s, K.HIDDEN, dtype=BF, device="cuda")
+            epoch = torch.zeros(1, dtype=torch.int32, device="cuda")
+            scratch = torch.zeros(
+                K.scratch_bytes(key), dtype=torch.uint8, device="cuda"
+            )
+            idx = torch.arange(2, 2 + s, dtype=torch.int32, device="cuda")
+            idx = idx.view(n, nq).contiguous()
+            if n > 1:
+                idx[1] = 0  # a padded request
+            live = (idx[:, :1] > 0).expand(n, nq).reshape(-1)
+            for draw in range(GDN_DRAWS // 16):
+                n_acc = torch.randint(
+                    1, nq + 1, (n,), generator=g, device="cuda", dtype=torch.int32
+                )
+                h = _rnd(g, s, K.HIDDEN, scale=0.5)
+                residual = _rnd(g, s, K.HIDDEN, scale=2.0)
+                conv = _rnd(g, 2 + s + 2, geo.conv, K.SL + nq - 1)
+                ssm = _rnd(
+                    g, 2 + s + 2, geo.nv, K.HD, K.HD, scale=0.05, dtype=torch.float32
+                )
+                conv_ref, ssm_ref = conv.clone(), ssm.clone()
+                core_ref, res_ref = _stock_gdn_spec(
+                    K, geo, w, h, residual, conv_ref, ssm_ref, idx, n_acc
+                )
+                core.fill_(7.0)
+                epoch.add_(1)
+                K.dense_gdn_pre(
+                    key,
+                    hidden=h,
+                    residual=residual,
+                    res_out=res_out,
+                    ln_w=w["ln_w"],
+                    w_qkvz=w_qkvz,
+                    w_qkvzs=w["w_qkvzs"],
+                    w_ba=w_ba,
+                    w_bas=w["w_bas"],
+                    conv_w=w["conv_w"],
+                    conv_state=conv,
+                    a_log=w["a_log"],
+                    dt_bias=w["dt_bias"],
+                    norm_w=w["norm_w"],
+                    rstate=ssm,
+                    st_idx=idx,
+                    n_acc=n_acc,
+                    core=core,
+                    scratch=scratch,
+                    epoch=epoch,
+                    layer=LAYER_TAGS[draw % len(LAYER_TAGS)],
+                )
+                with self.subTest(requests=n, draw=draw):
+                    self.assertTrue(torch.equal(res_out, res_ref))
+                    self.assertTrue(torch.equal(conv, conv_ref))
+                    # the same slots written, the values within fp32 rounding
+                    self.assertTrue(torch.equal(ssm == 0, ssm_ref == 0))
+                    torch.testing.assert_close(ssm, ssm_ref, rtol=1e-4, atol=1e-5)
+                    torch.testing.assert_close(
+                        core[live].float(),
+                        core_ref[live].float(),
+                        rtol=1.6e-2,
+                        atol=1e-5,
+                    )
+                    self.assertFalse(core[~live].any())
+
+
 if __name__ == "__main__":
     unittest.main()
