@@ -37,6 +37,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -461,15 +462,10 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        is_not_lora = hasattr(self.model.embed_tokens, "weight")
-        if is_not_lora:
-            logits = self.logits_processor(self.model.embed_tokens, hidden_states)
-        else:
-            logits = self.logits_processor(
-                self.model.embed_tokens.base_layer, hidden_states
-            )
-
-        return logits
+        embed_tokens = self.model.embed_tokens
+        if isinstance(embed_tokens, BaseLayerWithLoRA):
+            embed_tokens = embed_tokens.base_layer
+        return self.logits_processor(embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
