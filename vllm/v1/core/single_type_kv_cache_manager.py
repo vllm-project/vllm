@@ -2638,6 +2638,8 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
     ) -> list[KVCacheBlock]:
         """The request's pages with residency changes applied; host-only pages
         are the null block. Every index must be within the request's row."""
+        if not block_indices:
+            return []
         blocks = self.req_to_blocks[request_id]
         changes = self.residency_changes.get(request_id)
         if not changes:

@@ -895,7 +895,8 @@ class HiSparseCoordinator:
             and pending.expected_worker_completions
             and pending.worker_completions >= pending.expected_worker_completions
         ]
-        clean_pages: dict[str, list[int]] = {}
+        completed_request_ids: dict[str, None] = {}
+        clean_runs: list[tuple[str, list[int]]] = []
         for pending in completed:
             self.pending_spills.pop(pending.transfer_id, None)
             request_id, page_idx = pending.page
@@ -903,10 +904,13 @@ class HiSparseCoordinator:
             if self.request_states.get(request_id) is pending.request_state:
                 if not pending.restore:
                     pending.request_state.valid_pages.add(page_idx)
-                pages = clean_pages.setdefault(request_id, [])
+                completed_request_ids[request_id] = None
                 if page_idx in pending.request_state.valid_pages:
                     pending.request_state.pinned_clean.add(page_idx)
-                    pages.append(page_idx)
+                    if clean_runs and clean_runs[-1][0] == request_id:
+                        clean_runs[-1][1].append(page_idx)
+                    else:
+                        clean_runs.append((request_id, [page_idx]))
                     if pending.restore:
                         self._record_copy(request_id, page_idx, pending.host_block)
             elif pending.request_state.publication is not None:
@@ -915,10 +919,11 @@ class HiSparseCoordinator:
                 self._publish_detached_blocks(pending.request_state)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
-        for request_id, pages in clean_pages.items():
+        for request_id, pages in clean_runs:
+            if self._can_read_from_host(request_id):
+                self._unpin_pages(request_id, self.request_states[request_id], pages)
+        for request_id in completed_request_ids:
             state = self.request_states[request_id]
-            if pages and self._can_read_from_host(request_id):
-                self._unpin_pages(request_id, state, pages)
             while state.ready_prefix_pages in state.valid_pages:
                 state.ready_prefix_pages += 1
             self._publish_host_blocks_if_ready(request_id)
