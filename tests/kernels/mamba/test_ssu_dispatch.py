@@ -674,6 +674,7 @@ def test_replayssm_mixer_selects_mtp_layout(
     mixer.use_flashinfer_replayssm = True
     mixer.replayssm_buffer_len = 16
     mixer.replayssm_state_dtype = "auto"
+    mixer.replayssm_checkpoint_mode = "shared"
     mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     mixer.cache_config = SimpleNamespace(mamba_block_size=16, mamba_cache_mode="none")
     mixer.conv_weights = torch.empty(0)
@@ -1076,3 +1077,138 @@ def test_replayssm_quantized_cache_copies_payload_and_scale(state_dtype):
         _validate_replayssm_read_state_spec(
             replace(spec, dtypes=(*spec.dtypes[:5], torch.float16))
         )
+
+
+@pytest.mark.parametrize(
+    ("read_dtype", "mode", "expected_shapes", "expected_dtypes", "expected_bytes"),
+    [
+        (
+            "fp8",
+            "separate",
+            ((16, 64, 128), (16, 64), (1,)),
+            (torch.float8_e4m3fn, torch.float32, torch.int64),
+            135176,
+        ),
+        (
+            "nvfp4",
+            "separate",
+            ((8, 128, 64), (8, 4, 256), (3, 1), (1,), (1,)),
+            (torch.uint8, torch.uint8, torch.float32, torch.int32, torch.int64),
+            73752,
+        ),
+    ],
+)
+def test_replayssm_read_state_storage(
+    read_dtype, mode, expected_shapes, expected_dtypes, expected_bytes
+):
+    """Keep payload packing and scale storage in the allocated cache record."""
+    shapes = MambaStateShapeCalculator.replayssm_read_shapes(
+        (16, 64, 128), read_dtype, mode, n_groups=1
+    )
+    dtypes = MambaStateDtypeCalculator.replayssm_read_dtypes(read_dtype, mode)
+    assert shapes == expected_shapes
+    assert dtypes == expected_dtypes
+    assert (
+        sum(
+            torch.empty(shape, dtype=dtype).nbytes
+            for shape, dtype in zip(shapes, dtypes, strict=True)
+        )
+        == expected_bytes
+    )
+
+
+@pytest.mark.parametrize("read_dtype", ["fp8", "nvfp4"])
+def test_replayssm_read_state_rejects_unsupported_dimensions(read_dtype):
+    with pytest.raises(ValueError, match="head dimension 64 and state size 128"):
+        MambaStateShapeCalculator.replayssm_read_shapes(
+            (2, 32, 128), read_dtype, "separate"
+        )
+
+
+@pytest.mark.parametrize("read_dtype", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("draft_tokens", [0, 7])
+def test_replayssm_pending_bolt_storage(read_dtype, draft_tokens):
+    """Reserve accepted history and the complete unconfirmed verification window."""
+    ring_len = 17 + draft_tokens
+    rings = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes=((3, 64), (128, 64, 128)),
+        n_groups=8,
+        tp_world_size=1,
+        logical_window=16,
+        backend=MambaBackendEnum.FLASHINFER,
+        num_speculative_tokens=draft_tokens,
+        checkpoint_mode="separate",
+        pending_state=True,
+    )[2:]
+    assert rings == ((128, ring_len, 64), (128, ring_len), (8, ring_len, 128))
+    extras = MambaStateShapeCalculator.replayssm_read_shapes(
+        (128, 64, 128), read_dtype, "separate", n_groups=8, pending_state=True
+    )
+    assert extras[-1] == (2,)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((3, 64), (128, 64, 128), *rings, *extras),
+        dtypes=(
+            torch.bfloat16,
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            *MambaStateDtypeCalculator.replayssm_read_dtypes(read_dtype, "separate"),
+        ),
+    )
+    _validate_replayssm_read_state_spec(spec)
+    for index in (2, 3, 4):
+        wrong_shapes = list(spec.shapes)
+        wrong_shapes[index] = (
+            wrong_shapes[index][0],
+            ring_len - 1,
+            *wrong_shapes[index][2:],
+        )
+        with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+            _validate_replayssm_read_state_spec(
+                replace(spec, shapes=tuple(wrong_shapes))
+            )
+
+
+@pytest.mark.parametrize(
+    ("read_dtype", "mode"),
+    [("fp8", "separate"), ("nvfp4", "separate")],
+)
+def test_replayssm_read_state_copy_spec_validates_payload_and_scales(read_dtype, mode):
+    """Reject malformed cache records before copying payloads or scales."""
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(
+            (3, 64),
+            (16, 64, 128),
+            (16, 16, 64),
+            (16, 16),
+            (1, 16, 128),
+            *MambaStateShapeCalculator.replayssm_read_shapes(
+                (16, 64, 128), read_dtype, mode, n_groups=1
+            ),
+        ),
+        dtypes=(
+            torch.bfloat16,
+            MambaStateDtypeCalculator.replayssm_checkpoint_dtype(read_dtype, mode),
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            *MambaStateDtypeCalculator.replayssm_read_dtypes(read_dtype, mode),
+        ),
+    )
+    _validate_replayssm_read_state_spec(spec)
+    for index in range(5, len(spec.shapes)):
+        wrong_shapes = list(spec.shapes)
+        wrong_shapes[index] = (*wrong_shapes[index][:-1], wrong_shapes[index][-1] + 1)
+        with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+            _validate_replayssm_read_state_spec(
+                replace(spec, shapes=tuple(wrong_shapes))
+            )
+        wrong_dtypes = list(spec.dtypes)
+        wrong_dtypes[index] = torch.float16
+        with pytest.raises(ValueError, match="Invalid quantized ReplaySSM"):
+            _validate_replayssm_read_state_spec(
+                replace(spec, dtypes=tuple(wrong_dtypes))
+            )

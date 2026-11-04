@@ -828,8 +828,11 @@ class EngineArgs:
         CacheConfig.enable_mamba_shared_prefix_checkpoint
     )
     replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
-    replayssm_state_dtype: Literal["auto", "fp8", "int8"] = (
+    replayssm_state_dtype: Literal["auto", "fp8", "int8", "nvfp4"] = (
         CacheConfig.replayssm_state_dtype
+    )
+    replayssm_checkpoint_mode: Literal["shared", "separate"] = (
+        CacheConfig.replayssm_checkpoint_mode
     )
     use_replayssm: bool = CacheConfig.use_replayssm
 
@@ -1468,6 +1471,9 @@ class EngineArgs:
         cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
         cache_group.add_argument(
             "--replayssm-state-dtype", **cache_kwargs["replayssm_state_dtype"]
+        )
+        cache_group.add_argument(
+            "--replayssm-checkpoint-mode", **cache_kwargs["replayssm_checkpoint_mode"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -2361,6 +2367,7 @@ class EngineArgs:
             ),
             replayssm_buffer_len=self.replayssm_buffer_len,
             replayssm_state_dtype=self.replayssm_state_dtype,
+            replayssm_checkpoint_mode=self.replayssm_checkpoint_mode,
             use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
