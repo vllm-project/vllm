@@ -113,6 +113,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     is_full_attention_spec,
+    iter_layer_specs,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput
@@ -508,7 +509,8 @@ def _split_kv_cache_group_kinds(
     attn: list[int] = []
     mamba: list[int] = []
     for gi, group in enumerate(kv_cache_config.transfer_groups):
-        if isinstance(group.kv_cache_spec, MambaSpec):
+        layer_specs = iter_layer_specs(group.kv_cache_spec)
+        if layer_specs and all(isinstance(spec, MambaSpec) for spec in layer_specs):
             mamba.append(gi)
         else:
             attn.append(gi)
@@ -581,8 +583,11 @@ class MoRIIOConnectorScheduler:
                     "target's group or disable KV transfer for it"
                 )
             mamba_specs = [
-                cast(MambaSpec, kv_cache_config.transfer_groups[group_id].kv_cache_spec)
+                cast(MambaSpec, spec)
                 for group_id in self._mamba_group_ids
+                for spec in iter_layer_specs(
+                    kv_cache_config.transfer_groups[group_id].kv_cache_spec
+                )
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             _validate_hybrid_speculation(vllm_config)
@@ -618,11 +623,12 @@ class MoRIIOConnectorScheduler:
             # MoRIIO handles sliding-window attention and mamba/KDA groups in
             # READ mode. Other hybrid cache specs still fail closed.
             unsupported = [
-                type(g.kv_cache_spec).__name__
+                type(spec).__name__
                 for g in kv_cache_config.transfer_groups
+                for spec in iter_layer_specs(g.kv_cache_spec)
                 if not (
-                    is_full_attention_spec(g.kv_cache_spec)
-                    or isinstance(g.kv_cache_spec, (SlidingWindowSpec, MambaSpec))
+                    is_full_attention_spec(spec)
+                    or isinstance(spec, (SlidingWindowSpec, MambaSpec))
                 )
             ]
             if unsupported:
@@ -1896,6 +1902,7 @@ class MoRIIOConnectorWorker:
         # KV Caches and moriio tracking data.
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.kv_layer_mr_offset: dict[str, int] = {}
+        self.kv_region_mr_offsets: dict[str, list[int]] = {}
         self.layer_base_addr_index: dict[str, int] = {}
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
@@ -2437,28 +2444,32 @@ class MoRIIOConnectorWorker:
     def _build_shared_kv_mr(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, dict[str, int]]:
-        page_size = 4096
-        backing = next(iter(kv_caches.values())).view(torch.uint8)
+        regions = {
+            name: self._iter_layer_registration_regions(name) for name in kv_caches
+        }
+        backing = next(iter(regions.values()))[0][0]
         nbytes = backing.untyped_storage().nbytes()
-        base = torch.as_strided(backing, (nbytes,), (1,), 0)
+        base = torch.empty(0, dtype=torch.uint8, device=backing.device)
+        base.set_(backing.untyped_storage(), 0, (nbytes,), (1,))
         ptr = base.data_ptr()
-        slack = ptr % page_size
         end = 0
-        for layer_name in kv_caches:
-            _, region_len = next(
-                iter(self._iter_layer_registration_regions(layer_name))
-            )
-            end = max(end, kv_caches[layer_name].data_ptr() - ptr + region_len)
-        reg_nbytes = ((slack + end + page_size - 1) // page_size) * page_size
-        if reg_nbytes > nbytes:
+        for layer_regions in regions.values():
+            for cache, region_len in layer_regions:
+                end = max(end, cache.data_ptr() - ptr + region_len)
+        if end > nbytes:
             raise ValueError(
-                f"shared KV backing too small for page-aligned MR: "
-                f"need {reg_nbytes}, have {nbytes}"
+                f"shared KV backing too small for MR: need {end}, have {nbytes}"
             )
-        reg = torch.as_strided(base, (reg_nbytes,), (1,), 0 if slack == 0 else -slack)
+        # Register the allocation base once; packed views can start inside a
+        # page, which the RDMA dmabuf registration path cannot export directly.
+        reg = base
         mr_ptr = reg.data_ptr()
+        self.kv_region_mr_offsets = {
+            name: [cache.data_ptr() - mr_ptr for cache, _ in layer_regions]
+            for name, layer_regions in regions.items()
+        }
         return reg, {
-            name: cache.data_ptr() - mr_ptr for name, cache in kv_caches.items()
+            name: offsets[0] for name, offsets in self.kv_region_mr_offsets.items()
         }
 
     def _remote_layer_mr_offset(
@@ -2466,16 +2477,17 @@ class MoRIIOConnectorWorker:
         layer_name: str,
         remote_moriio_meta: MoRIIOAgentMetadata,
         remote_engine_id: EngineId | None,
+        region: int = 0,
     ) -> int:
         if not self.kv_layer_mr_offset or not remote_engine_id:
             return 0
-        idx = self.layer_base_addr_index[layer_name]
+        idx = self.layer_base_addr_index[layer_name] + region
         metas = self.layer_name_to_remote_kv_cache_metadata.get(
             remote_engine_id, {}
         ).get(layer_name)
         if not metas or idx >= len(remote_moriio_meta.kv_caches_base_addr):
             return 0
-        mr_base = self.moriio_wrapper.get_unpack_memory_metadata(metas[0]).data
+        mr_base = self.moriio_wrapper.get_unpack_memory_metadata(metas[region]).data
         return remote_moriio_meta.kv_caches_base_addr[idx] - mr_base
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -2639,9 +2651,14 @@ class MoRIIOConnectorWorker:
                 kv_caches_base_addr.append(base_addr)
                 base_addr_idx += 1
 
+        registration_tensors = [
+            cache
+            for name in kv_caches
+            for cache, _ in self._iter_layer_registration_regions(name)
+        ]
         shared_backing = (
-            all(isinstance(t, torch.Tensor) for t in kv_caches.values())
-            and len({id(t.untyped_storage()) for t in kv_caches.values()}) == 1
+            len({cache.untyped_storage().data_ptr() for cache in registration_tensors})
+            == 1
         )
         shared_mr = None
         if shared_backing:
@@ -2695,7 +2712,7 @@ class MoRIIOConnectorWorker:
                 )
                 for tensor in (conv, ssm):
                     alias = self._contiguous_byte_alias(tensor)
-                    meta = self.moriio_wrapper.register_local_tensor(alias)
+                    meta = shared_mr or self.moriio_wrapper.register_local_tensor(alias)
                     self.layer_name_to_local_kv_cache_metadata[layer_name].append(meta)
                     self.local_kv_cache_size.append(alias.numel())
             else:
@@ -3841,6 +3858,8 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         request_id: str,
         deadline: float,
+        remote_moriio_meta: MoRIIOAgentMetadata | None = None,
+        remote_engine_id: EngineId | None = None,
     ) -> list:
         """Post one KDA layer's conv and ssm reads; return their statuses.
 
@@ -3855,25 +3874,57 @@ class MoRIIOConnectorWorker:
             remote_tp_size=remote_tp_size,
         )
         statuses: list = []
-        for sess_idx, sl in (
-            (region_sessions[0], slice(0, n_conv)),
-            (region_sessions[1], slice(n_conv, None)),
+        for region, (sess_idx, sl) in enumerate(
+            (
+                (region_sessions[0], slice(0, n_conv)),
+                (region_sessions[1], slice(n_conv, None)),
+            )
         ):
             region_sizes = sizes[sl]
             if not region_sizes:
                 continue
+            local_offsets, remote_offsets = self._mamba_region_mr_offsets(
+                layer_name,
+                region,
+                local[sl],
+                remote[sl],
+                remote_moriio_meta,
+                remote_engine_id,
+            )
             statuses.append(
                 self._post_read_with_backoff(
                     sessions[sess_idx],
                     region_sizes,
-                    local[sl],
-                    remote[sl],
+                    local_offsets,
+                    remote_offsets,
                     request_id,
                     layer_name,
                     deadline,
                 )
             )
         return statuses
+
+    def _mamba_region_mr_offsets(
+        self,
+        layer_name: str,
+        region: int,
+        local: list[int],
+        remote: list[int],
+        remote_moriio_meta: MoRIIOAgentMetadata | None,
+        remote_engine_id: EngineId | None,
+    ) -> tuple[list[int], list[int]]:
+        offsets = getattr(self, "kv_region_mr_offsets", {}).get(layer_name)
+        if offsets is None:
+            return local, remote
+        if remote_moriio_meta is None or remote_engine_id is None:
+            raise MoRIIOError("Packed KDA transfer requires peer MR metadata")
+        remote_offset = self._remote_layer_mr_offset(
+            layer_name, remote_moriio_meta, remote_engine_id, region
+        )
+        return (
+            [x + offsets[region] for x in local],
+            [x + remote_offset for x in remote],
+        )
 
     def _post_read_with_backoff(
         self,
@@ -4053,6 +4104,8 @@ class MoRIIOConnectorWorker:
                     remote_tp_size,
                     request_id,
                     _sq_deadline,
+                    remote_moriio_meta,
+                    remote_dp_engine_id,
                 )
             else:
                 if self._has_mamba:
