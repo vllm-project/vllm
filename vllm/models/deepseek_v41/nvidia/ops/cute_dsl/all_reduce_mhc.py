@@ -592,11 +592,13 @@ class _QuadFinalizePublishDeviceKernel:
 
 
 class _OwnerReduceMulticastDeviceKernel:
-    """FlashInfer's BT ``_OwnerReduceMulticastDeviceKernel`` without its
-    residual add: each rank waits for every rank's contribution to the tokens
-    it owns, sums them in FP32 in rank order, and multicasts the BF16 sums into
-    every rank's reduced mailbox ``[generation][token]``. It then advances the
-    generation and resets its contribution slots."""
+    """FlashInfer's BT ``_OwnerReduceMulticastDeviceKernel``: each rank waits
+    for every rank's contribution to the tokens it owns, sums them in FP32 in
+    rank order, and multicasts the BF16 sums into every rank's reduced mailbox
+    ``[generation][token]``. It then advances the generation and resets its
+    contribution slots. Given a ``residual`` ``[m, hidden]``, it adds the
+    token's residual row to the FP32 sum before rounding, as FlashInfer's
+    kernel does; DSV4.1's mHC consumer adds its residual streams itself."""
 
     def __init__(
         self,
@@ -627,6 +629,7 @@ class _OwnerReduceMulticastDeviceKernel:
         reduced_mailbox_multicast_address: Int64,
         m: Int32,
         stream: cuda.CUstream,
+        residual: cute.Tensor | None = None,
     ) -> None:
         owned_tokens = (m + Int32(self.tp - 1)) // Int32(self.tp)
         self.kernel(
@@ -634,6 +637,7 @@ class _OwnerReduceMulticastDeviceKernel:
             stage_state,
             reduced_mailbox_multicast_address,
             m,
+            residual,
         ).launch(
             grid=(owned_tokens * self.ctas_per_token, 1, 1),
             block=(self.threads, 1, 1),
@@ -648,6 +652,7 @@ class _OwnerReduceMulticastDeviceKernel:
         stage_state: cute.Tensor,
         reduced_mailbox_multicast_address: Int64,
         m: Int32,
+        residual: cute.Tensor | None,
     ) -> None:
         block, _, _ = cute.arch.block_idx()
         tidx, _, _ = cute.arch.thread_idx()
@@ -655,6 +660,25 @@ class _OwnerReduceMulticastDeviceKernel:
         fragment = (block % self.ctas_per_token) * self.threads + tidx
         token = local_token * self.tp + self.rank
         active = token < m and fragment < self.fragments
+
+        if cutlass.const_expr(residual is not None):
+            residual_values = cute.make_rmem_tensor(
+                cute.make_layout((VEC_BF16,)), BFloat16
+            )
+            residual_values.fill(BFloat16(0.0))
+            if active:
+                residual_pointer = cute.make_ptr(
+                    BFloat16,
+                    (
+                        residual.iterator
+                        + (Int64(token) * self.hidden + Int64(fragment) * VEC_BF16)
+                    ).llvm_ptr,
+                    cute.AddressSpace.gmem,
+                    assumed_align=16,
+                )
+                residual_values.store(
+                    packed_u32x4_to_bf16x8(load_global_u32x4(residual_pointer))
+                )
 
         if cutlass.const_expr(self.enable_pdl):
             cute.arch.griddepcontrol_wait()
@@ -690,6 +714,8 @@ class _OwnerReduceMulticastDeviceKernel:
                 reduced.store(
                     reduced.load() + packed_u32x4_to_bf16x8(packed.load()).to(Float32)
                 )
+            if cutlass.const_expr(residual is not None):
+                reduced.store(reduced.load() + residual_values.load().to(Float32))
             reduced_element = (
                 Int64(stage) * self.capacity_m + Int64(token)
             ) * self.hidden + Int64(fragment) * VEC_BF16
