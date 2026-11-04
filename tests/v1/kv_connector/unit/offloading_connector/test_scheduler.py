@@ -10,8 +10,10 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_hybrid_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
+    _mla_spec,
 )
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     MockOffloadingSpec,
@@ -2947,6 +2949,31 @@ def test_unsupported_store_triggers_raise(request_runner, extra_config):
             async_scheduling=False,
             extra_config_overrides=extra_config,
         )
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+def test_lazy_with_kv_cache_zeroing_needs_the_v1_runner(use_v2_model_runner: bool):
+    """V2 zeroes a reused block before the ON_OVERWRITE store reads it."""
+    vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
+    vllm_config.use_v2_model_runner = use_v2_model_runner
+    kv_cache_config = _make_hybrid_kv_cache_config()
+    kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
+        ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
+    )
+    # The flag is resolved in __post_init__, before the group above was
+    # replaced, so resolve it again for the config this test builds by hand.
+    kv_cache_config.needs_kv_cache_zeroing = (
+        kv_cache_config.has_mamba_layers or kv_cache_config.has_mixed_precision_kv_cache
+    )
+    assert kv_cache_config.needs_kv_cache_zeroing
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+    if not use_v2_model_runner:
+        scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+        assert _on_overwrite(scheduler)
+        return
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+        OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
@@ -7497,10 +7524,17 @@ class TestMambaHybridOffloadServing:
     MAMBA_BLOCK = 16
     PROMPT_TOKENS = 28  # 7 hash blocks; 1 full mamba chunk
 
-    def _make_scheduler(self, speculative_config, mamba_eagle=False, **extra_config):
+    def _make_scheduler(
+        self,
+        speculative_config,
+        mamba_eagle=False,
+        v2_model_runner=True,
+        **extra_config,
+    ):
         vllm_config = _make_vllm_config(
             extra_config={"self_describing_kv_events": True, **extra_config}
         )
+        vllm_config.use_v2_model_runner = v2_model_runner
         vllm_config.cache_config.block_size = self.BLOCK
         vllm_config.cache_config.prefix_match_unit = self.BLOCK
         vllm_config.speculative_config = speculative_config
@@ -7619,8 +7653,13 @@ class TestMambaHybridOffloadServing:
     def test_lazy_mode_leaves_the_mamba_boundary_to_the_handoff_handler(self):
         """The lazy mode needs no Mamba refusal: the layout adds the handoff
         handler for a mamba-align group, and that handler stores the group."""
+        # A hybrid mamba layout needs zeroing, which the V2 runner cannot do
+        # before the ON_OVERWRITE store reads the block.
         scheduler = self._make_scheduler(
-            None, store_mode="lazy", self_describing_kv_events=False
+            None,
+            store_mode="lazy",
+            self_describing_kv_events=False,
+            v2_model_runner=False,
         )
         assert list(scheduler._store_handlers) == [
             StoreTrigger.ON_HANDOFF,
@@ -7675,6 +7714,13 @@ class TestMambaHybridOffloadServing:
         assert all(
             get_offload_group_idx(key) == 1 for keys, _ in offers for key in keys
         )
+        with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+            self._make_scheduler(
+                None,
+                store_mode="lazy",
+                self_describing_kv_events=False,
+                v2_model_runner=True,
+            )
 
     def test_shared_group_mtp_serves_like_non_speculative(self):
         """Route 1 of #52735: with spec decode on and no drafter annotation,
