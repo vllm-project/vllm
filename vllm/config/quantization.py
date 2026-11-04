@@ -90,7 +90,7 @@ class PhaseSpec:
     "unquantized".
     """
 
-    prefill: Literal["unquantized", "nvfp4", "mxfp8"]
+    prefill: Literal["unquantized", "nvfp4", "mxfp8"] | None = None
     """Activations of large calls (required)."""
 
     decode: Literal["unquantized", "nvfp4", "mxfp8"] = "unquantized"
@@ -108,6 +108,8 @@ class PhaseSpec:
 
     @model_validator(mode="after")
     def _validate_formats(self) -> "PhaseSpec":
+        if self.prefill is None:
+            raise ValueError("phase.prefill is required")
         if self.decode != self.prefill and self.max_decode_tokens is None:
             raise ValueError(
                 "phase.max_decode_tokens is required when decode and prefill differ"
@@ -138,6 +140,7 @@ class PhaseSpec:
             "nvfp4": kNvfp4DynamicTensor,
             "mxfp8": kMxfp8Dynamic,
         }
+        assert self.prefill is not None
         return keys[self.decode], keys[self.prefill]
 
     def __str__(self) -> str:

@@ -1401,7 +1401,12 @@ def check_linear_phase_served(model: torch.nn.Module) -> None:
             str(phase),
         )
         return
-    linears = [m for m in model.modules() if isinstance(m, LinearBase)]
+    # Checkpoint lm_heads in a served format follow the phase too.
+    linears = [
+        m
+        for m in model.modules()
+        if isinstance(m, LinearBase) or hasattr(m, "phase_split_kernel")
+    ]
     served = sum(hasattr(m, "phase_split_kernel") for m in linears)
     logger.info_once(
         "quantization_config.linear.phase serves %d of %d linear layers; the "

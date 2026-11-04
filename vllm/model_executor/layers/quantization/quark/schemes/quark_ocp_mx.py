@@ -11,6 +11,7 @@ from vllm.model_executor.kernels.linear import (
     MxFp4LinearKernel,
     MxFp6LinearKernel,
     Mxfp8LinearKernel,
+    PhaseSplitLinearKernel,
     init_mxfp4_linear_kernel,
     init_mxfp6_linear_kernel,
     init_mxfp8_linear_kernel,
@@ -48,7 +49,12 @@ logger = init_logger(__name__)
 
 
 class QuarkOCP_MX(QuarkScheme):
-    ocp_mx_linear: MxFp6LinearKernel | MxFp4LinearKernel | Mxfp8LinearKernel
+    ocp_mx_linear: (
+        MxFp6LinearKernel
+        | MxFp4LinearKernel
+        | Mxfp8LinearKernel
+        | PhaseSplitLinearKernel
+    )
     supported_activation_quant_keys = [*_ACTIVATION_QUANT_KEY_MAP.values(), None]
     supported_weight_quant_keys = [*_WEIGHT_QUANT_KEY_MAP.values()]
 

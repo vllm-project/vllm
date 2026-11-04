@@ -64,7 +64,7 @@ quantization_config:
   linear:
     weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
     activation: <name>
-    phase: {decode: <format>, prefill: <format>, max_decode_tokens: <rows>}
+    phase: {decode: <format>, prefill: <format>, max_decode_tokens: <rows>, scale: <scale>}
   moe:
     weight: <name>
     activation: <name>
@@ -114,7 +114,8 @@ vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_
 `linear.phase` sets the activations of small linear calls (decode) and large
 ones (prefill) separately, served from one weight copy. A call with at most
 `max_decode_tokens` input rows uses `decode`; under CUDA graphs the rows are
-the padded capture size. Each phase is `unquantized` (the model dtype) or the
+the padded capture size. Rows count every token in the call, so decode tokens
+scheduled with a long prefill use the `prefill` format. Each phase is `unquantized` (the model dtype) or the
 quantized format of the weights:
 
 | Weights | Linear backend | `decode` | `prefill` | `scale` |
@@ -133,20 +134,22 @@ BF16 activations for decode and quantize prefills to NVFP4:
 ```bash
 vllm serve <model> --linear-backend b12x \
     --quantization-config '{"linear": {"phase": {"decode": "unquantized",
-        "prefill": "nvfp4", "max_decode_tokens": 1024,
-        "scale": "dynamic_tensor"}}}'
+        "prefill": "nvfp4", "max_decode_tokens": 1024}}}'
 ```
 
 Loading raises an error when a linear the phase applies to cannot serve it,
 naming the weight format, the phases and the platform, and logs a warning when
 no linear does, for example in an unquantized model. Other linears keep their
 own activations: unquantized linears and `draft_lm_head_quantization` lm_head
-copies use the model dtype. `phase` cannot be combined with `activation`,
+copies use the model dtype. A checkpoint lm_head in a served format follows the
+phase like other linears, so prefill-sized lm_head calls (e.g. prompt logprobs)
+use the `prefill` format. Linears whose per-GPU input size is not a multiple of
+128 keep BF16 activations. `phase` cannot be combined with `activation`,
 `moe.phase` is not supported, and online-quantized linears reject it unless
 their weights are MXFP8 (`--quantization mxfp8`). For an MXFP8 checkpoint, pass
 the phase with `--quantization-config` alone: adding `--quantization mxfp8`
-applies online MXFP8 to every linear, re-quantizing the checkpoint's MXFP8
-linears and quantizing the rest. The phase applies to every eligible
+applies online MXFP8 to every linear and MoE layer, re-quantizing the
+checkpoint's MXFP8 layers and quantizing the rest. The phase applies to every eligible
 checkpoint linear; `ignore` only affects online quantization. Batched (BMM)
 MXFP8 layers keep their own activations.
 

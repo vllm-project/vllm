@@ -51,7 +51,7 @@ def _activation_global_scale(x: torch.Tensor) -> torch.Tensor:
             f"b12x NVFP4 activations of a {x.shape[0]}-row call in a CUDA graph "
             "need the runner's padding mask (ForwardContext.is_padding), which "
             "this forward pass does not set for these rows, e.g. a draft model; "
-            'use quantization_config.linear.phase.decode "unquantized"' 
+            'use quantization_config.linear.phase.decode "unquantized"'
         )
     else:
         amax = torch.linalg.vector_norm(x, float("inf")).float()
