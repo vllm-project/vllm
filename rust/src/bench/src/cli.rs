@@ -546,7 +546,9 @@ pub struct BenchServeArgs {
     pub append_result: bool,
 
     // --- ShareGPT dataset ---
-    /// Path to dataset file (required for sharegpt dataset).
+    /// Path to the dataset file, or the HuggingFace dataset ID for `hf`.
+    /// Rejected with synthetic datasets (random, random-mm, random-rerank,
+    /// prefix_repetition), which generate their own prompts.
     #[arg(long)]
     pub dataset_path: Option<String>,
 

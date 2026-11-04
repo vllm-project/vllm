@@ -579,6 +579,27 @@ impl BenchConfig {
             }
         }
 
+        // Synthetic datasets generate their own prompts and never read a
+        // dataset file, so a path given with one would be silently ignored.
+        if let Some(path) = &args.dataset_path
+            && matches!(
+                args.dataset_name,
+                DatasetName::Random
+                    | DatasetName::RandomMm
+                    | DatasetName::RandomRerank
+                    | DatasetName::PrefixRepetition
+            )
+        {
+            let name = clap::ValueEnum::to_possible_value(&args.dataset_name)
+                .expect("DatasetName has no skipped variants");
+            return Err(BenchError::Config(format!(
+                "Cannot use '{}' dataset with --dataset-path. Please specify the \
+                 appropriate --dataset-name (e.g., 'sharegpt', 'custom', 'hf') for \
+                 your dataset file: {path}",
+                name.get_name()
+            )));
+        }
+
         // Custom dataset validation
         if args.dataset_name == DatasetName::Custom {
             match args.dataset_path.as_deref() {
@@ -1408,6 +1429,58 @@ mod tests {
         let args = parse_args(args);
 
         assert!(BenchConfig::from_args(&args).is_err());
+    }
+
+    #[test]
+    fn test_synthetic_dataset_rejects_dataset_path() {
+        // Pair each dataset with a backend it supports, so --dataset-path is
+        // the only invalid argument.
+        for (name, backend) in [
+            ("random", "openai"),
+            ("random-mm", "openai-chat"),
+            ("random-rerank", "vllm-rerank"),
+            ("prefix_repetition", "openai"),
+        ] {
+            let args = parse_args([
+                "vllm-bench",
+                "--backend",
+                backend,
+                "--dataset-name",
+                name,
+                "--dataset-path",
+                "workload.jsonl",
+            ]);
+            let msg = BenchConfig::from_args(&args)
+                .expect_err("a synthetic dataset must reject --dataset-path")
+                .to_string();
+            assert!(
+                msg.contains(&format!("Cannot use '{name}' dataset with --dataset-path")),
+                "{name}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_default_dataset_rejects_dataset_path() {
+        // --dataset-name defaults to random, so a forgotten --dataset-name must
+        // not silently benchmark random prompts instead of the given file.
+        let args = parse_args(["vllm-bench", "--dataset-path", "workload.jsonl"]);
+        let msg = BenchConfig::from_args(&args)
+            .expect_err("the default random dataset must reject --dataset-path")
+            .to_string();
+        assert!(msg.contains("Cannot use 'random' dataset"), "{msg}");
+    }
+
+    #[test]
+    fn test_file_dataset_accepts_dataset_path() {
+        let args = parse_args([
+            "vllm-bench",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            "workload.jsonl",
+        ]);
+        assert!(BenchConfig::from_args(&args).is_ok());
     }
 
     #[test]
