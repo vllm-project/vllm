@@ -144,7 +144,7 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_depyf_integration(disable_vllm_compile_cache):
     """Compile with depyf's debugging hooks installed.
 
