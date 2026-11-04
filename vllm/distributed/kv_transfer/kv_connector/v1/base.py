@@ -213,17 +213,6 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_transfer_config.is_kv_producer
 
-    @property
-    def reads_released_blocks(self) -> bool:
-        """Whether this connector may read a block's contents after the
-        scheduler frees it, until the block is reallocated.
-
-        If True and block frees are deferred for overlapping batches, an async
-        load is also held until in-flight steps finish, since it may target a
-        reused block they still read.
-        """
-        return False
-
     @classmethod
     def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
         """Whether the connector can follow the KV cache remap of sleep mode."""

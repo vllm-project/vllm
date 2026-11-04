@@ -192,8 +192,11 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
+            # HiSparse keeps reading a released page until the pool reuses it,
+            # so a load into a reused page must also wait for in-flight steps.
             self.defer_async_loads = (
-                self.defer_block_free and self.connector.reads_released_blocks
+                self.defer_block_free
+                and kv_cache_config.hisparse_host_num_blocks is not None
             )
 
             self.requires_kv_delivery = self.connector.requires_kv_delivery
