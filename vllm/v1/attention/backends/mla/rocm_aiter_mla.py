@@ -319,7 +319,13 @@ def _aiter_fp8_mla_decode_drops_v_scale(num_heads: int, qlen: int, q_fp8: bool) 
         err_scaled = (out.float() - ref).abs().max().item()
         err_unscaled = (out.float() - ref / 2).abs().max().item()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("AITER FP8 MLA V-scale probe failed: %s", exc)
+        logger.warning(
+            "AITER FP8 MLA V-scale probe failed at %d heads, qlen %d, so its "
+            "V-scale correction stays off: %s",
+            num_heads,
+            qlen,
+            exc,
+        )
         return False
     return err_unscaled < 0.05 < err_scaled
 
@@ -515,7 +521,7 @@ def _triton_verify_num_kv_splits(
 
 def _reserve_triton_verify_workspace(
     max_num_reqs: int,
-    qlen: int,
+    qlens: tuple[int, ...],
     num_heads: int,
     max_seq_len: int,
     kv_lora_rank: int,
@@ -524,15 +530,20 @@ def _reserve_triton_verify_workspace(
     """Reserve the folded verify kernel's split scratch before warmup."""
     if not is_workspace_manager_initialized():
         return
-    # Fewer requests may take more splits, so size for the largest product.
-    max_req_splits = max(
-        reqs
-        * _triton_verify_num_kv_splits(max_seq_len, reqs, qlen, num_heads, sm_count)
-        for reqs in range(1, max_num_reqs + 1)
-    )
-    current_workspace_manager().get_simultaneous(
-        ((max_req_splits * qlen, num_heads, kv_lora_rank + 1), torch.float32),
-    )
+    # Fewer requests or verify tokens may take more splits, so size for the
+    # largest launch. A single split needs no scratch.
+    max_rows = 0
+    for qlen in qlens:
+        for reqs in range(1, max_num_reqs + 1):
+            splits = _triton_verify_num_kv_splits(
+                max_seq_len, reqs, qlen, num_heads, sm_count
+            )
+            if splits > 1:
+                max_rows = max(max_rows, reqs * splits * qlen)
+    if max_rows:
+        current_workspace_manager().get_simultaneous(
+            ((max_rows, num_heads, kv_lora_rank + 1), torch.float32),
+        )
 
 
 def _reserve_triton_dcp_verify_workspace(
@@ -1407,7 +1418,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             _reserve_triton_verify_workspace(
                 max_num_reqs,
-                self._mtp_decode_qlen,
+                self._triton_verify_qlens,
                 self._decode_num_heads,
                 self._triton_verify_max_seq_len,
                 self.mla_dims.kv_lora_rank,
@@ -3339,11 +3350,13 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         lse = torch.empty(num_rows, num_heads, dtype=torch.float32, device=q_mla.device)
         num_kv_splits = decode.triton_verify_num_kv_splits
         logits_shape = (num_rows, num_heads, num_kv_splits, self.kv_lora_rank + 1)
-        if is_workspace_manager_initialized():
+        # A single split writes the output directly and needs no scratch.
+        attn_logits = None
+        if num_kv_splits > 1 and is_workspace_manager_initialized():
             (attn_logits,) = current_workspace_manager().get_simultaneous(
                 (logits_shape, torch.float32),
             )
-        else:
+        elif num_kv_splits > 1:
             attn_logits = torch.empty(
                 logits_shape, dtype=torch.float32, device=q_mla.device
             )

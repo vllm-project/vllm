@@ -832,7 +832,7 @@ def decode_attention_fwd(
 # ---------------------------------------------------------------------------
 
 _LOG2E = 1.4426950408889634
-_LN2 = 0.6931471805599453
+_LN2 = tl.constexpr(0.6931471805599453)
 
 
 @triton.jit
@@ -1155,9 +1155,7 @@ def _fwd_verify_kernel_stage1(
             )
             tl.store(
                 Lse + q_row * stride_lse_bs + head * stride_lse_h,
-                tl.where(
-                    has, (e_max + tl.log2(denom)) * 0.6931471805599453, float("-inf")
-                ),
+                tl.where(has, (e_max + tl.log2(denom)) * _LN2, float("-inf")),
                 mask=row_valid,
             )
         else:
@@ -1249,7 +1247,7 @@ def _fwd_verify_kernel_stage2(
     )
     tl.store(
         lse + q_row.to(tl.int64) * stride_lse_bs + head * stride_lse_h,
-        tl.where(has, (e_max + tl.log2(denom)) * 0.6931471805599453, float("-inf")),
+        tl.where(has, (e_max + tl.log2(denom)) * _LN2, float("-inf")),
     )
 
 
@@ -1341,6 +1339,7 @@ def decode_attention_fwd_verify(
         qlen: verify tokens per request.
         attn_logits: fp32 workspace with >= B * qlen * H * num_kv_splits *
             (Lv + 1) elements, laid out [B * qlen, H, num_kv_splits, Lv + 1].
+            Unused, and may be None, when num_kv_splits is 1.
         num_kv_splits: static cap on KV splits per request (see
             verify_num_kv_splits); shorter requests use fewer, longer splits.
         sm_scale: softmax scale.
@@ -1355,7 +1354,12 @@ def decode_attention_fwd_verify(
     num_rows, num_heads = q.shape[0], q.shape[1]
     assert num_rows % qlen == 0
     batch = num_rows // qlen
-    assert attn_logits.shape[-2] == num_kv_splits
+    if num_kv_splits == 1:
+        # Stage 1 writes o / lse directly; o only stands in for the pointer.
+        attn_logits, mid_strides = o, (0, 0, 0)
+    else:
+        assert attn_logits.shape[-2] == num_kv_splits
+        mid_strides = attn_logits.stride()[:3]
     if k_scale is None:
         k_scale = torch.ones((), dtype=torch.float32, device=q.device)
     BLOCK_DMODEL = triton.next_power_of_2(Lv)
@@ -1387,9 +1391,7 @@ def decode_attention_fwd_verify(
         q.stride(1),
         _page_stride(k_buffer, page_size),
         k_buffer.stride(-3),
-        attn_logits.stride(0),
-        attn_logits.stride(1),
-        attn_logits.stride(2),
+        *mid_strides,
         o.stride(0),
         o.stride(1),
         lse.stride(0),
@@ -1507,6 +1509,8 @@ def warmup_decode_attention_fwd_verify(
     scratch reuses attn_logits' storage, whose size the launch specializes on.
     """
     num_heads, Lv = q.shape[1], o.shape[-1]
+    if attn_logits is None:
+        attn_logits = q.new_empty(0, dtype=torch.float32)
 
     def scratch(t, rows):
         return torch.empty_strided(
@@ -1534,7 +1538,9 @@ def warmup_decode_attention_fwd_verify(
                     seq_lens,
                     seq_lens if has_real else None,
                     qlen,
-                    _storage_view(
+                    None
+                    if num_kv_splits == 1
+                    else _storage_view(
                         attn_logits, (rows, num_heads, num_kv_splits, Lv + 1)
                     ),
                     num_kv_splits,

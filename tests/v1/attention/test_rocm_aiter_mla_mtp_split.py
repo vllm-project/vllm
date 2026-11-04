@@ -1588,6 +1588,34 @@ def test_a_two_token_bf16_block_is_allowed(monkeypatch):
     assert metadata.has_persistent_metadata
 
 
+@pytest.mark.parametrize(
+    "num_heads, mtp_qlen, kv_cache_dtype, dcp, cdna, expected",
+    [
+        pytest.param(128, 8, "auto", 1, 3, True, id="bf16"),
+        pytest.param(16, 8, "fp8", 1, 3, True, id="fp8-16-heads"),
+        # FP8 at 128 heads has a persistent kernel past qlen 4.
+        pytest.param(128, 8, "fp8", 1, 3, False, id="fp8-128-heads"),
+        pytest.param(128, 4, "auto", 1, 3, False, id="qlen-4"),
+        pytest.param(128, 8, "auto", 2, 3, False, id="dcp"),
+        pytest.param(128, 8, "auto", 1, 4, False, id="cdna4"),
+    ],
+)
+def test_asm_causal_verify_unsupported(
+    monkeypatch, num_heads, mtp_qlen, kv_cache_dtype, dcp, cdna, expected
+):
+    """Only CDNA3 causal verify past qlen 4 without DCP leaves the asm decode,
+    and FP8 keeps it at 128 heads."""
+    import vllm.platforms.rocm as rocm_platform
+
+    monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
+    assert (
+        rocm_aiter_mla._asm_causal_verify_unsupported(
+            num_heads, mtp_qlen, kv_cache_dtype, dcp
+        )
+        is expected
+    )
+
+
 def _adaptive_config(
     *,
     adaptive: bool = True,
