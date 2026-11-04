@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from vllm.config import VllmConfig
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -201,6 +202,24 @@ class MambaPrefillCheckpointExporter:
             recurrent_rows is None
             or recurrent_rows.numel() == checkpoint.checkpoint_offsets.numel()
         )
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.mamba.ops.cpu.mamba_ssm import (
+                store_cache_checkpoints_cpu,
+            )
+
+            store_cache_checkpoints_cpu(
+                checkpoint.checkpoint_offsets,
+                checkpoint.state_indices,
+                raw_qkv=raw_qkv,
+                conv_state=conv_state,
+                cu_seqlens=cu_seqlens,
+                state_len=state_len,
+                recurrent_checkpoint=recurrent_checkpoint,
+                recurrent_state=recurrent_state,
+                recurrent_rows=recurrent_rows,
+                token_indices=token_indices,
+            )
+            return
         width = raw_qkv.shape[-1]
         has_recurrent = recurrent_checkpoint is not None
         if recurrent_checkpoint is None:
