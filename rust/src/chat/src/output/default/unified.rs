@@ -991,4 +991,85 @@ mod tests {
             assert_eq!(text, "Checking the weather. ", "deltas: {deltas:?}");
         }
     }
+
+    /// A DeepSeek DSML opener cut after its `｜DSML｜` token is dropped like
+    /// any other unfinished tool call, for every finish reason.
+    #[tokio::test]
+    async fn unified_stream_drops_dsml_half_opener_at_finish() {
+        use vllm_parser::reasoning::{DeepSeekV3ReasoningParser, ReasoningParser as _};
+        use vllm_parser::tool::{DeepSeekV41ToolParser, ToolParser as _};
+        use vllm_tokenizer::DynTokenizer;
+
+        for finish_reason in [crate::FinishReason::Stop(None), crate::FinishReason::Length] {
+            let tokenizer: DynTokenizer = Arc::new(
+                TestTokenizer::new()
+                    .with_special_token("<think>", 256)
+                    .with_special_token("</think>", 257)
+                    .with_regular_token("｜DSML｜", 258),
+            );
+            let reasoning = DeepSeekV3ReasoningParser::create(tokenizer.clone()).unwrap();
+            let tool = DeepSeekV41ToolParser::create(&[], tokenizer.clone()).unwrap();
+            let parser = vllm_parser::unified::CombinedParser::new(Some(reasoning), Some(tool));
+            // Attributed as the frontend decodes it, so `｜DSML｜` is the added token.
+            let attributed = |text: &str| {
+                let mut decoder = tokenizer.create_decode_stream(&[], false, 0);
+                for id in tokenizer.encode(text, false).unwrap() {
+                    decoder.push_token(id).unwrap();
+                }
+                decoder.flush(None).unwrap().1
+            };
+            let mut last = finished_delta("");
+            let vllm_text::output::DecodedTextEvent::TextDelta {
+                decoded,
+                finished: Some(finished),
+                ..
+            } = &mut last
+            else {
+                unreachable!()
+            };
+            *decoded = attributed("Checking.\n\n<｜DSML｜ calls");
+            finished.finish_reason = finish_reason.clone();
+            let deltas = vec![
+                vllm_text::output::DecodedTextEvent::TextDelta {
+                    decoded: attributed("<think>plan</think>"),
+                    sampled: vllm_text::SampledDelta::default(),
+                    finished: None,
+                },
+                last,
+            ];
+            let events =
+                unified_event_stream(stream::iter(deltas.into_iter().map(Ok)), Box::new(parser))
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<crate::Result<Vec<_>>>()
+                    .unwrap();
+
+            let block_text = |kind: AssistantBlockKind| -> String {
+                events
+                    .iter()
+                    .filter_map(|event| match event {
+                        AssistantEvent::TextDelta { kind: k, delta, .. } if *k == kind => {
+                            Some(delta.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            assert_eq!(
+                block_text(AssistantBlockKind::Reasoning),
+                "plan",
+                "{finish_reason:?}"
+            );
+            assert_eq!(
+                block_text(AssistantBlockKind::Text),
+                "Checking.",
+                "{finish_reason:?}"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(event, AssistantEvent::ToolCallStart { .. })),
+                "{finish_reason:?}"
+            );
+        }
+    }
 }
