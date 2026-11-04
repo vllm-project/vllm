@@ -5726,6 +5726,7 @@ dependencies = [
  "serde_repr",
  "serde_tuple",
  "serde_with",
+ "sha2",
  "socket2",
  "task-local",
  "tempfile",
@@ -5773,6 +5774,7 @@ dependencies = [
  "clap",
  "expect-test",
  "libc",
+ "serde_json",
  "tokio",
  "tracing",
 ]
