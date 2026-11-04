@@ -7,6 +7,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
@@ -14,15 +15,41 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention, DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerBackend,
+    dsa_indexer_uses_fp4,
+)
 from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
     ROCMAiterMLASparseBackend,
+)
+from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+    MXFP4_BLOCK_SIZE,
+    rocm_paged_mxfp4_cache_layout,
 )
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
-    def get_attn_backend(self):
+    def __init__(
+        self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
+    ):
+        vllm_config = get_current_vllm_config()
+        mxfp4 = dsa_indexer_uses_fp4(vllm_config)
+        if mxfp4:
+            # Packed e2m1 values, then one e8m0 byte per 32 of them.
+            dim = vllm_config.model_config.hf_text_config.index_head_dim
+            head_dim = dim // 2 + dim // MXFP4_BLOCK_SIZE
+        super().__init__(head_dim, dtype, prefix, cache_config)
+        self.mxfp4 = mxfp4
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        if self.mxfp4:
+            from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+                DeepseekV32RocmMxfp4IndexerBackend,
+            )
+
+            return DeepseekV32RocmMxfp4IndexerBackend
         return DeepseekV32IndexerBackend
 
     @property
@@ -49,8 +76,18 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         self.indexer_op: SparseAttnIndexer | None = None
+        self._indexer_mxfp4 = (
+            self.indexer is not None and self.indexer.k_cache.mxfp4  # type: ignore[attr-defined]
+        )
         if self.indexer is not None:
-            self.indexer_op = SparseAttnIndexer(
+            indexer_op_cls = SparseAttnIndexer
+            if self._indexer_mxfp4:
+                from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
+                    RocmSparseAttnIndexer,
+                )
+
+                indexer_op_cls = RocmSparseAttnIndexer
+            self.indexer_op = indexer_op_cls(
                 self.indexer.k_cache,
                 self.indexer.quant_block_size,
                 self.indexer.scale_fmt,
@@ -114,7 +151,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
     def _run_indexer(
         self,
         q_c: torch.Tensor,
-        index_q_fp8: torch.Tensor | None,
+        index_q_fp8: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None,
         index_weights_out: torch.Tensor | None,
     ) -> None:
         """Run the ROCm sparse indexer (forward_hip) if this layer has an indexer."""
@@ -196,6 +233,13 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
             indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
+            indexer_cache_mxfp4 = None
+            if self._indexer_mxfp4 and indexer_k_cache.numel():
+                indexer_cache_mxfp4 = rocm_paged_mxfp4_cache_layout(
+                    self.indexer.n_head,
+                    self.indexer.head_dim,
+                    indexer_k_cache.shape[1],
+                )
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
         else:
@@ -206,6 +250,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             indexer_k_rope_cos_sin_cache = None
             indexer_k_cache = None
             indexer_cache_shuffled = False
+            indexer_cache_mxfp4 = None
             indexer_softmax_scale = 0.0
             indexer_n_head_scale = 0.0
 
@@ -241,6 +286,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             slot_mapping=mla_slot,
             indexer_k_cache=indexer_k_cache,
             indexer_cache_shuffled=indexer_cache_shuffled,
+            indexer_cache_mxfp4=indexer_cache_mxfp4,
             mla_kv_cache=mla_kv_cache,
             mla_kv_cache_dtype=self.kv_cache_dtype,
             mla_k_scale=mla_k_scale,
@@ -280,6 +326,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_kv and not use_mha,
+            index_q_mxfp4=has_indexer and self._indexer_mxfp4,
         )
 
         if self.indexer is not None and not self.skip_topk:

@@ -7,6 +7,8 @@ long request, and both have to come back with the right rows and the right
 block-table rows.
 """
 
+import types
+
 import pytest
 import torch
 
@@ -161,3 +163,43 @@ def test_decode_launches_native_on_uniform_steps():
     assert native_decode(rows[:5], row_block_table, [2, 1, 2], 2, context_lens) is None
     assert native_decode(rows, row_block_table, [2, 2, 2], 2, context_lens) is None
     assert native_decode(rows[:4], row_block_table, [1] * 4, 1, context_lens) is None
+
+
+@pytest.mark.parametrize(
+    "model_type, architecture, wired",
+    [
+        ("deepseek_v4", "DeepseekV4ForCausalLM", True),
+        ("deepseek_v41", "DeepseekV41ForCausalLM", True),
+        ("glm_moe_dsa", "GlmMoeDsaForCausalLM", True),
+        ("deepseek_v32", "DeepseekV32ForCausalLM", True),
+        # MTP drafts share the rewritten model_type; only the V3.2 one is wired.
+        ("deepseek_mtp", "DeepseekV32MTPModel", True),
+        ("deepseek_mtp", "DeepSeekMTPModel", False),
+    ],
+)
+def test_mxfp4_cache_is_taken_only_by_wired_models(
+    monkeypatch, model_type, architecture, wired
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import AttentionConfig
+    from vllm.v1.attention.backends.mla import indexer
+
+    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: 4)
+    monkeypatch.setattr(rocm_aiter_ops, "is_enabled", classmethod(lambda cls: True))
+    model_config = types.SimpleNamespace(
+        hf_config=types.SimpleNamespace(model_type=model_type),
+        architectures=[architecture],
+    )
+
+    def vllm_config(kv_dtype):
+        return types.SimpleNamespace(
+            attention_config=AttentionConfig(indexer_kv_dtype=kv_dtype),
+            model_config=model_config,
+        )
+
+    assert not indexer.dsa_indexer_uses_fp4(vllm_config("auto"))
+    if wired:
+        assert indexer.dsa_indexer_uses_fp4(vllm_config("mxfp4"))
+    else:
+        with pytest.raises(ValueError, match="only supported for"):
+            indexer.dsa_indexer_uses_fp4(vllm_config("mxfp4"))

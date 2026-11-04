@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
+    DeepseekV32IndexerBackend,
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV32IndexerPrefillChunkMetadata,
@@ -309,6 +310,25 @@ class DeepseekV4RocmMxfp4IndexerBackend(DeepseekV4IndexerBackend):
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_ROCM_MXFP4_INDEXER"
+
+    @staticmethod
+    def get_builder_cls() -> type["RocmMxfp4IndexerMetadataBuilder"]:
+        return RocmMxfp4IndexerMetadataBuilder
+
+
+class DeepseekV32RocmMxfp4IndexerBackend(DeepseekV32IndexerBackend):
+    """The DeepSeek-V3.2 / GLM-5 indexer on the paged MXFP4 cache."""
+
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V32_ROCM_MXFP4_INDEXER"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes(
+        kv_cache_spec: KVCacheSpec | None = None,
+    ) -> list[int | MultipleOf]:
+        # aiter's kernel reads 64-entry KV tiles that may not straddle a page.
+        return [64, 128]
 
     @staticmethod
     def get_builder_cls() -> type["RocmMxfp4IndexerMetadataBuilder"]:
