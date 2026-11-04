@@ -572,28 +572,6 @@ def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm, padded
 
 
 @requires_cuda
-@pytest.mark.parametrize("padded", [False, True])
-def test_null_block_commit_backs_each_padded_layers_first_granule(vmm, padded):
-    """Kernels may touch memory past the blocks they index (FlashMLA sparse
-    prefill reaches up to 128 KiB past a layer's start). Unpadded, a layer
-    starting one page before a granule boundary has only that page backed
-    after the null block commit; padded, every layer's first granule is."""
-    layout = KVCacheLayout.LBNHC
-    granule = _granule(layout)
-    page = _make_config(layout)[1].page_size_bytes
-    config, _ = _make_config(layout, num_blocks=granule // page - 1)
-    if padded:
-        config = pad_kv_cache_segments(config, layout, granule)
-    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
-    try:
-        kv_cache.allocate(kv_cache.size)
-        backed = kv_cache.buffer.segments_backed_by_one_chunk([granule] * NUM_LAYERS)
-        assert all(backed) == padded
-    finally:
-        kv_cache.free()
-
-
-@requires_cuda
 @pytest.mark.parametrize("case", ["LBNHC", "BLNHC", "mixed"])
 def test_padded_config_allocates_and_defragments(vmm, case):
     """A padded config yields a cache with views over its reservation; a

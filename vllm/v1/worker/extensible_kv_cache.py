@@ -377,14 +377,14 @@ def pad_kv_cache_segments(
 ) -> KVCacheConfig:
     """Start every layer's region on a granule.
 
-    Committing the null block then backs each layer's first granule: kernels
-    may touch memory past the blocks they index (FlashMLA sparse prefill
-    reaches up to 128 KiB past a layer's start). It also lets a defragmenting
-    commit of any block count back each segment with one physical chunk, as
-    RDMA registration requires.
+    Committing the null block then backs each layer's first granule, which
+    kernels may touch beyond the blocks they index. It also lets a
+    defragmenting commit of any block count back each segment with one
+    physical chunk, as RDMA registration requires.
 
     Only address space grows: commits already map whole granules per segment.
-    Layouts without per-layer segments are returned as is.
+    Block-outermost layouts (one segment at offset 0) and layouts that are not
+    block-compact are returned as is.
     """
     if layout.is_block_outermost or not layout.is_block_compact:
         return kv_cache_config
