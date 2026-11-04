@@ -36,7 +36,10 @@ LAST_LAYER = 60
 ROWS_PER_REQUEST = 8
 K3_ROWS = (8, 16)
 K5_ROWS = (32, 64, 96, 128)
-WORLD_SIZE = 8
+# TP = EP sizes the builds cover: K3 and the 32-row HA + HM + HB at both, the larger
+# HA + HM + HB builds and the fused attention at 8.
+WORLD_SIZES = (4, 8)
+MAX_ROWS = {4: 32, 8: K5_ROWS[-1]}
 NUM_CUS = 256
 KV_BLOCK_SIZE = 16
 HEALTH_POLL_INTERVAL = 64
@@ -237,8 +240,8 @@ def deployment_refusals(
     """Parallel layout and server features the monokernel does not support."""
     reasons = []
     parallel = vllm_config.parallel_config
-    if tp_size != WORLD_SIZE:
-        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZE})")
+    if tp_size not in WORLD_SIZES:
+        reasons.append(f"tensor_parallel_size={tp_size} (kernel: {WORLD_SIZES})")
     for name in (
         "pipeline_parallel_size",
         "data_parallel_size",
@@ -409,13 +412,14 @@ def attention_type(layer: nn.Module) -> str | None:
 
 
 def fused_attention_layers(
-    layers: Sequence[nn.Module], max_model_len: int, max_keys: int
+    layers: Sequence[nn.Module], max_model_len: int, max_keys: int, world_size: int = 8
 ) -> dict[int, str]:
     """Layers whose attention the launches can fuse: ``{i: type}``.
 
-    Empty when a request may hold more keys than a build stages block ids for.
+    Empty when a request may hold more keys than a build stages block ids for,
+    and at TP 4 (the fragment is built for 2 kv heads a rank).
     """
-    if max_model_len > max_keys:
+    if max_model_len > max_keys or world_size != 8:
         return {}
     fused = {}
     for i in range(FIRST_LAYER + 1, LAST_LAYER + 1):
@@ -583,12 +587,17 @@ class _Bucket:
         self.no_rope = torch.zeros(64, dtype=torch.float32, device=device)
         self.fa: _FusedAttention | None = None
 
+    def _peer_slots(self) -> list[int]:
+        """The launch signatures take 8 peer slots; a smaller group leaves 0s."""
+        peers = self.peers.pointers
+        return [*peers, *([0] * (8 - len(peers)))]
+
     def _common(self) -> tuple[int, ...]:
         return (
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
         )
 
     def run(self, mono, layers, positions, o, g, stream, aux_layers, aux_hidden_states):
@@ -797,7 +806,7 @@ class _K5Bucket(_Bucket):
             self.epoch.data_ptr(),
             self.health.data_ptr(),
             self.timeline_m.data_ptr(),
-            *self.peers.pointers,
+            *self._peer_slots(),
             i,
             mono.rank,
             nrows,
@@ -828,14 +837,15 @@ class _K5Bucket(_Bucket):
         return self.sfull[:nrows], q_out[:nrows], g_out[:nrows]
 
 
-def built_buckets(max_num_seqs: int) -> list[int]:
-    """The builds a server with ``max_num_seqs`` requests can use."""
-    max_rows = min(max_num_seqs, K5_ROWS[-1] // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
+def built_buckets(max_num_seqs: int, world_size: int = 8) -> list[int]:
+    """The builds a server with ``max_num_seqs`` requests can use (TP 4: <= 32 rows)."""
+    top = MAX_ROWS[world_size]
+    max_rows = min(max_num_seqs, top // ROWS_PER_REQUEST) * ROWS_PER_REQUEST
     return sorted(
         {
             b
             for rows in range(ROWS_PER_REQUEST, max_rows + 1, ROWS_PER_REQUEST)
-            if (b := bucket_of(rows)) is not None
+            if (b := bucket_of(rows)) is not None and b <= top
         }
     )
 

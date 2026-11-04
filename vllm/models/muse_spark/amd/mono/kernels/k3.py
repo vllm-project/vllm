@@ -26,8 +26,8 @@
 # SOFTWARE.
 """K3: one Muse Spark decoder layer for S = 8 / 16 rows as one persistent launch.
 
-One rank of a TP = EP = 8 group (rank r owns experts [32 r, 32 r + 32)), 256 CTAs x 512
-threads, everything between two attention cores:
+One rank of a TP = EP = W group (W = 8: rank r owns experts [32 r, 32 r + 32); W = 4: 64 a
+rank), 256 CTAs x 512 threads, everything between two attention cores:
 
     [attention]  optional: this layer's verify attention (attn_frag.py) at the head
     O      o-norm x sigmoid(gate) -> o_proj rows 32 b .. over this rank's K slice; the bf16
@@ -35,17 +35,17 @@ threads, everything between two attention cores:
     AB     the owner sums the 8 partials in rank order and all-gathers the reduced o and its
            norm partials; every CTA: post-attention norm, gated residual on the fp32 stream,
            pre-FFN norm -> ffn_in (one token-reduction round for both norms)
-    A      router logits (fp32) + pre_expert_proj of this rank's shard, K in 8 parts over
-           8-CTA groups; logit partials and h_raw go to every rank's peer buffer
+    A      router logits (fp32) + pre_expert_proj of this rank's shard, K in KQ parts over
+           KQ-CTA groups (KQ = W); logit partials and h_raw go to every rank's peer buffer
     route  every CTA routes every token (identical top-8), the local experts' picks
     C, D   gate_up / down of the local experts: MXFP4 weights in vLLM's shuffled layouts,
            decoded in registers, bf16 MFMA
     E      per-pick post-expert norm and weighted sum -> the EP partial, reduce-scattered to
            the block owner, summed in rank order, all-gathered
-    F      post_expert_proj (this rank's 1024 rows, K in 4 parts) -> every rank
+    F      post_expert_proj (this rank's HID / W rows, K in KSP parts) -> every rank
     G      post-FFN norm, gated residual, the next layer's input norm -> stream (fp32) and
            the next attention input (bf16)
-    QKV    the next layer's qkv + gate GEMV (K in eighths); the owners finish whole heads:
+    QKV    the next layer's qkv + gate GEMV (K in KQ parts); the owners finish whole heads:
            qk-norm, RoPE (next_rope), q out, bf16 K / V into vLLM's LBHNC KV cache
 
 Peer regions are double buffered by tag parity; tag = epoch * 64 + layer + 1 with the
@@ -109,7 +109,7 @@ DM = 4096
 INTER = 4096
 E = 256
 TOPK = 8
-W = 8  # ranks in the TP = EP group
+W = 8  # ranks in the TP = EP group of the module-level defaults (builds take key.W)
 EL = E // W  # local experts
 ROUTE_EPS = 1e-15
 PRE_EPS = 1e-5
@@ -121,7 +121,7 @@ KCH = 128
 FCH = 256
 W2_BYTES = EL * DM * (INTER // 2)
 W2S_BYTES = EL * DM * (INTER // 32)
-KQ = 8  # stage-A K split (CTAs a group)
+KQ = 8  # stage-A / QKV K split (CTAs a group) = W
 NG = BLOCKS // KQ  # stage-A groups
 XQ = HID // KQ  # stage-A K a CTA
 XQROW = XQ + XPAD
@@ -145,8 +145,37 @@ QKV_ROWS = QROWS + 2 * KROWS  # qkvg rows a rank: q 1024 | k 128 | v 128 | gate 
 QKVG_ROWS = QKV_ROWS + QROWS
 OK_K = HID // W  # o_proj K a rank
 NQTILES = QKVG_ROWS // 16  # qkvg 16-row tiles a rank
-# qkvg tiles a CTA group (32 groups x 8 K eighths; the last group padded)
-NQT = -(-NQTILES // 32)
+# qkvg tiles a CTA group (BLOCKS / KQ groups x KQ K parts; the last group padded)
+NQT = -(-NQTILES // NG)
+
+
+class Dims:
+    """The per-rank sizes of a TP = EP = W group (W = 8: the module-level values).
+
+    Stage A and the QKV GEMV split K over KQ = W CTAs: W = 4 halves the rank count,
+    so every K part doubles and each CTA reads twice the K."""
+
+    def __init__(self, W):
+        assert W in (4, 8), W
+        self.W = W
+        self.EL = E // W
+        self.W2_BYTES = self.EL * DM * (INTER // 2)
+        self.W2S_BYTES = self.EL * DM * (INTER // 32)
+        self.KQ = W
+        self.NG = BLOCKS // self.KQ
+        self.XQ = HID // self.KQ
+        self.XQROW = self.XQ + XPAD
+        self.HQ, self.HKV = 128 // W, 16 // W
+        self.QROWS, self.KROWS = self.HQ * HD, self.HKV * HD
+        self.QKV_ROWS = self.QROWS + 2 * self.KROWS
+        self.QKVG_ROWS = self.QKV_ROWS + self.QROWS
+        self.OK_K = HID // W
+        self.NQTILES = self.QKVG_ROWS // 16
+        self.NQT = -(-self.NQTILES // self.NG)
+        self.CPRX = BLOCKS // W  # CTA blocks a rank owns (owner of block b = b // CPRX)
+
+
+_DIMS = {w: Dims(w) for w in (4, 8)}
 
 
 def bf_tile_load_mma(wbase, row16, ldk, k, lane, cm=CM_NT):
@@ -276,7 +305,7 @@ def route_token(tkns, bias_v, lgss, tid, lane, rt):
 
 def sel_peer(pl, d):
     p = pl[0]
-    for r_ in range_constexpr(1, W):
+    for r_ in range_constexpr(1, len(pl)):
         p = (d == r_).select(pl[r_], p)
     return p
 
@@ -325,8 +354,8 @@ def o_gate(xv, gv):
         ss = ss + bf_lo(xv[d]) * bf_lo(xv[d]) + bf_hi(xv[d]) * bf_hi(xv[d])
     ss = butterfly(ss, (1, 2, 4))
     rstd = fx.Float32(1.0) / hw_sqrt(ss * fx.Float32(1.0 / HD) + fx.Float32(PRE_EPS))
-    sig = lambda x: fx.Float32(1.0) / (
-        fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E))
+    sig = lambda x: (
+        fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(x * fx.Float32(-LOG2E)))
     )
     ow = []
     for d in range_constexpr(4):
@@ -352,8 +381,21 @@ def mx_chunk(ok, w, ws, rbase, k, c, lane, g, r, nbytes, sbytes):
     return ops + [ld_i32_if(ok, ws, sdw, sbytes)]
 
 
-def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
-    """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv)."""
+def dn_loads(
+    w2,
+    w2s,
+    w_post,
+    etab,
+    task,
+    lane,
+    wave,
+    ok,
+    nv=None,
+    nbytes=W2_BYTES,
+    sbytes=W2S_BYTES,
+):
+    """Task (u, j)'s w2 operands for this wave (expert etab[u], u clamped below nv);
+    nbytes / sbytes: the local experts' w2 / scale bytes (the buffer bounds)."""
     r = lane % 16
     g = lane // 16
     task = ok.select(task, fx.Int32(0))
@@ -364,7 +406,7 @@ def dn_loads(w2, w2s, w_post, etab, task, lane, wave, ok, nv=None):
     ops = []
     for i in range_constexpr(2):
         c = 2 * wave + i
-        ops += mx_chunk(ok, w2, w2s, rbase, INTER, c, lane, g, r, W2_BYTES, W2S_BYTES)
+        ops += mx_chunk(ok, w2, w2s, rbase, INTER, c, lane, g, r, nbytes, sbytes)
     # the epilogue's w_post pair (rows 16j + 2 (lane % 8), +1): loaded with the weights,
     # not in the epilogue, where it would wait behind the whole prefetch queue
     ops.append(ld_i32_if(ok, w_post, 8 * j + lane % 8, DM * 2))
@@ -406,6 +448,7 @@ REGION_IDS.update(
 @dataclass(frozen=True)
 class Build:
     S: int = 8  # rows (8 or 16)
+    W: int = 8  # ranks in the TP = EP group (8 or 4)
     next_rope: bool = True  # the next layer has RoPE (SWA) or not (full, NoPE)
     attn: str = ""  # this layer's verify attention fused at the head ("swa" / "full"); "" = run before the launch
     kv_fp8: bool = False  # e4m3 KV cache (insert and fused attention); else bf16
@@ -423,11 +466,12 @@ def _lay(items):
 def scratch_layout(S, world=W):
     """This rank's scratch regions. ss, ss1, ss2g, ssa1 and ssa2 are unused; they keep the
     offsets of the regions after them."""
-    assert world == W, world
+    d = _DIMS[world]
+    NQT, QKV_ROWS = d.NQT, d.QKV_ROWS
     P = S * TOPK
     return _lay(
         [
-            ("px", NG * KQ * 64 * S * 8),  # [group][K part][row < RT <= 64][t]
+            ("px", BLOCKS * 64 * S * 8),  # [group][K part][row < RT <= 64][t]
             ("a", P * (INTER // 2) * 8),
             ("z", P * (DM // 2) * 8),
             ("ss", P * 256 * 8),
@@ -448,8 +492,8 @@ def scratch_layout(S, world=W):
             # AB: 4 partials [t][CTA][4], then (r1, r2)[t]
             ("ssa4", (4 * S * BLOCKS + 2 * S) * 8),
             ("ssg4", (4 * S * BLOCKS + 2 * S) * 8),  # G
-            # qkvg K-eighth partials [group][src][tile row][t]
-            ("qx", 32 * 8 * NQT * 16 * S * 8),
+            # qkvg K-part partials [group][src][tile row][t]
+            ("qx", BLOCKS * NQT * 16 * S * 8),
             # q / k / v rows (tagged bf16 pairs)
             ("qkv", S * (QKV_ROWS // 2) * 8),
         ]
@@ -458,7 +502,8 @@ def scratch_layout(S, world=W):
 
 def peer_layout(S, world=W):
     """Every rank's peer buffer (IPC-shared), [parity] first."""
-    assert world == W, world
+    d = _DIMS[world]
+    W, KQ = d.W, d.KQ
     return _lay(
         [
             ("logit", 2 * KQ * S * E * 8),  # [par][kq][t][e] tagged
@@ -490,14 +535,21 @@ def build(key: Build):
     _KEYSTR = repr(key)
     S = key.S
     assert S in (8, 16), S
-    XQROW = XQ + XPAD
+    d = _DIMS[key.W]
+    W, EL, KQ, NG, XQ, XQROW = d.W, d.EL, d.KQ, d.NG, d.XQ, d.XQROW
+    HQ, HKV, QROWS = d.HQ, d.HKV, d.QROWS
+    QKV_ROWS, QKVG_ROWS, OK_K = d.QKV_ROWS, d.QKVG_ROWS, d.OK_K
+    NQTILES, NQT, CPRX = d.NQTILES, d.NQT, d.CPRX
+    W2_BYTES, W2S_BYTES = d.W2_BYTES, d.W2S_BYTES
     CA = XQ // KCH // WAVES  # stage-A pre-proj chunks a wave
     CO = OK_K // KCH // WAVES  # o_proj chunks a wave
-    QPF = 4  # qkvg tiles issued before stage G (of NQT)
+    CQ = XQ // KCH // WAVES  # qkvg chunks a wave a tile (W = 8: 1, W = 4: 2)
+    # qkvg tiles issued before stage G (of NQT): the same registers at every W
+    QPF = 4 // CQ
     P = S * TOPK
     RROUNDS = (S + WAVES - 1) // WAVES
-    lay, _ = scratch_layout(S)
-    play, _ = peer_layout(S)
+    lay, _ = scratch_layout(S, W)
+    play, _ = peer_layout(S, W)
     PF_GU = 2 if S == 8 else 1  # gate_up tasks in flight
     PF_DN = 2  # down tasks in flight
     # gate_up: the two 16-row halves of a task in separate MFMA passes
@@ -506,19 +558,24 @@ def build(key: Build):
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
     # stage A: a KQ-CTA group (K parts) covers RT pre-proj rows and EG router experts
     RS_PRE = DM // W
-    RT = RS_PRE // NG  # 512 / 32 = 16
+    RT = RS_PRE // NG  # 16 rows a group (W = 8: 512 / 32, W = 4: 1024 / 64)
     NT_A = RT // 16  # MFMA tiles a CTA
-    OWN = RT // KQ  # rows a CTA owns after the K-part exchange
+    OWN = RT // KQ  # rows a CTA owns after the K-part exchange (2 / 4)
     EG = (E // W) // NG  # router experts a group
     TPE = THREADS // EG  # threads an expert
-    KPT = XQ // TPE  # router K a thread
-    assert (NT_A, OWN, EG, KPT) == (1, 2, 1, 2), (NT_A, OWN, EG, KPT)
+    KPT = XQ // TPE  # router K a thread (2 / 4)
+    assert (NT_A, EG) == (1, 1) and OWN in (2, 4) and KPT in (2, 4), (
+        NT_A,
+        OWN,
+        EG,
+        KPT,
+    )
     # stage F: post_expert_proj rows RS_POST a rank, 16-row tiles
     RS_POST = HID // W
     NTL = RS_POST // 16
     TPC = 1  # tiles a CTA
-    KSP = BLOCKS // NTL  # K split of a tile
-    assert KSP == 4, KSP
+    KSP = BLOCKS // NTL  # K split of a tile (W = 8: 4, W = 4: 2)
+    assert KSP in (2, 4), KSP
     KR = DM // KSP  # K a CTA reads
     CPW = KR // KCH // WAVES  # chunks a wave a tile
     MROW = KR + XPAD
@@ -570,9 +627,8 @@ def build(key: Build):
         red: fx.Array[fx.Float32, WAVES * TPC * 64 * 4, 16]
 
     YROW = OK_K + XPAD
-    XQ8 = HID // 8  # qkvg K eighth
-    assert CA >= 1 and CO >= 1 and NQT * 32 * 16 >= QKVG_ROWS
-    X8ROW = XQ8 + XPAD
+    assert CA >= 1 and CO >= 1 and CQ >= 1 and NQT * NG * 16 >= QKVG_ROWS
+    X8ROW = XQ + XPAD  # the qkvg K part a CTA (= stage A's)
 
     @fx.struct
     class StageO:
@@ -583,13 +639,14 @@ def build(key: Build):
     class StageQ:
         xq: fx.Array[fx.Int32, S * X8ROW // 2, 16]
         red: fx.Array[fx.Float32, WAVES * NQT * 64 * 4, 16]
-        own: fx.Array[fx.Float32, NQT * 2 * S, 16]
+        own: fx.Array[fx.Float32, NQT * 16 * (S // KQ), 16]
 
     FA = None
     if key.attn:  # the fused attention fragment (attn_frag.py)
         from . import attn_frag
 
         assert key.attn in ("swa", "full"), key
+        assert W == 8, "the fused attention fragment is built for 2 kv heads a rank"
         FA = attn_frag.make(S // 8, key.attn == "swa", kv_fp8=key.kv_fp8)
         FaLds = FA.Lds
         # the fragment's source hash: the disk cache does not follow FA.run
@@ -612,10 +669,9 @@ def build(key: Build):
         pad: fx.Array[fx.Int64, TL_POINTS, 16]
 
     UNR = S == 8  # gate_up / down task loops as a ring (unroll 3, fixed slots)
-    name = f"muse_k3_s{S}_r{int(key.next_rope)}" + (
+    name = f"muse_k3_s{S}_w{W}_r{int(key.next_rope)}" + (
         f"_fa{key.attn}" if key.attn else ""
     )
-    CPRX = BLOCKS // W  # CTA blocks a rank owns (owner of block b = b // CPRX)
 
     # ------------------------------------------------------------ stage A (sharded)
     @traced
@@ -652,7 +708,7 @@ def build(key: Build):
         # weights first (data independent), then the ffn_in quarter's 64 flags, then x
         ei = tid // TPE
         kr = (tid % TPE) * KPT
-        wr = ld_vec(w_r, (EG * rb + ei) * HID + k0 + kr, 2)  # KPT = 2 router weights
+        wr = ld_vec(w_r, (EG * rb + ei) * HID + k0 + kr, KPT)  # KPT fp32 router weights
         bias_v = [ld_f32(bias, lane + 64 * i) for i in range(4)]
         wp = []
         for nt in range_constexpr(NT_A):
@@ -689,12 +745,13 @@ def build(key: Build):
                 kk = (e % (XQ // 8)) * 8
                 fx.ptr_store(xv[i], xl + (t * XQROW + kk) // 2)
         gpu.barrier()
-        wf = [wr[0].bitcast(fx.Float32), wr[1].bitcast(fx.Float32)]
+        wf = [wr[i].bitcast(fx.Float32) for i in range(KPT)]
         for t in range_constexpr(S):
             pr = fx.Float32(0.0)
-            xw1 = fx.ptr_load(xl + (t * XQROW + kr) // 2)
-            pr = pr + bf_lo(xw1) * wf[0]
-            pr = pr + bf_hi(xw1) * wf[1]
+            for pr_ in range_constexpr(KPT // 2):
+                xw1 = fx.ptr_load(xl + (t * XQROW + kr + 2 * pr_) // 2)
+                pr = pr + bf_lo(xw1) * wf[2 * pr_]
+                pr = pr + bf_hi(xw1) * wf[2 * pr_ + 1]
             pr = wave_sum(pr)
             if lane == 0:
                 fx.ptr_store(pr, tok + (wave * S + t))
@@ -825,7 +882,7 @@ def build(key: Build):
             REGION_IDS["logit"],
             batch=min(len(specs), 32),
             cm=CM_SYS,
-        )  # W = 8 (KQ = 8): 2 polls of 32
+        )  # KQ = 8: 2 polls of 32; KQ = 4: one of 16
         out = []
         for rr in range_constexpr(RROUNDS):
             lgs = []
@@ -1884,13 +1941,14 @@ def build(key: Build):
     # ------------------------------------------------------------ stage QKV: next layer's qkv+gate
     # Head-aligned tile map: group gq < NH = HQ + 2 HKV holds the 4 tiles of head gq (q heads, then k,
     # then v) + gate tile NQKVT + gq; groups NH .. hold the other gate tiles (5 a group, the tail padded).
-    # After the K-split partial sums, CTA k8 of the group owns the tokens t = k8 (mod 8) for all its rows,
-    # so it holds whole heads and finishes them (qk-norm, RoPE, q / KV stores). The qkv rows also go to
-    # the scratch region. The x eighth is the MFMA B operand straight from registers; the weights load in
-    # the MFMA A-operand layout (bf_tile_load_mma).
+    # After the K-split partial sums, CTA kq of the group owns the tokens t = kq (mod KQ) for all its
+    # rows, so it holds whole heads and finishes them (qk-norm, RoPE, q / KV stores). The qkv rows also
+    # go to the scratch region. The x K part is the MFMA B operand straight from registers (CQ chunks a
+    # wave); the weights load in the MFMA A-operand layout (bf_tile_load_mma).
     NH = HQ + 2 * HKV
     NQKVT = QKV_ROWS // 16
-    assert NQT == 5 and NH <= 32 and S % 8 == 0, (NQT, NH, S)
+    NXF = BLOCKS // KQ  # CTAs whose xn columns (32 each) lie in one K part
+    assert NQT == 5 and NH <= NG and S % KQ == 0, (NQT, NH, NG, S)
 
     def q8_tile(gq, n):
         """Tile index (traced) of chunk-tile n of group gq (the head-aligned map)."""
@@ -1900,14 +1958,20 @@ def build(key: Build):
         return head.select(NQKVT + gq, NQKVT + NH + NQT * (gq - NH) + n)
 
     def q8_loads(w_qkvg, bid, lane, wave, n0, n1):
-        k8 = bid % 8
-        gq = bid // 8
+        """Tiles n0 .. n1 of this CTA's group: CQ chunk operand sets a tile."""
+        kq = bid % KQ
+        gq = bid // KQ
         out = []
         for n in range_constexpr(n0, n1):
             tl = q8_tile(gq, n)
             row16 = fx.min(tl, NQTILES - 1) * 16
             out.append(
-                bf_tile_load_mma(w_qkvg, row16, HID, k8 * XQ8 + wave * KCH, lane)
+                [
+                    bf_tile_load_mma(
+                        w_qkvg, row16, HID, kq * XQ + (wave + WAVES * ci) * KCH, lane
+                    )
+                    for ci in range(CQ)
+                ]
             )
         return out
 
@@ -1989,38 +2053,42 @@ def build(key: Build):
         tid = fresh(tid)  # no cross-stage CSE of tid-derived offsets (S=16 spills)
         lane = fresh(lane)
         g = lane // 16
-        k8 = bid % 8
-        gq = bid // 8
-        if tid < 32:
+        kq = bid % KQ
+        gq = bid // KQ
+        if tid < NXF:
             mb_poll(
                 tag,
                 health,
-                [(scratch + fx.Int64(lay["xnf"][0]), k8 * 32 + tid, 1)],
+                [(scratch + fx.Int64(lay["xnf"][0]), kq * NXF + tid, 1)],
                 REGION_IDS["xnf"],
             )
         gpu.barrier()
         t = fx.min(lane % 16, S - 1)
         xb = []
-        for qq in range_constexpr(4):
-            kk = wave * KCH + 8 * g + 32 * qq
-            xb.append(
-                ld_vec(
-                    scratch + fx.Int64(lay["xn"][0]),
-                    (t * HID + k8 * XQ8 + kk) // 2,
-                    4,
-                    CM_DEV,
+        for ci in range_constexpr(CQ):
+            xc = []
+            for qq in range_constexpr(4):
+                kk = (wave + WAVES * ci) * KCH + 8 * g + 32 * qq
+                xc.append(
+                    ld_vec(
+                        scratch + fx.Int64(lay["xn"][0]),
+                        (t * HID + kq * XQ + kk) // 2,
+                        4,
+                        CM_DEV,
+                    )
                 )
-            )
+            xb.append(xc)
         rocdl.sched_barrier(0)  # keep the x loads issued here, before the MFMA loop
         for n in range_constexpr(NQT):
             acc = fx.Vector.filled(4, 0.0, fx.Float32)
-            for qq in range_constexpr(4):
-                b = xb[qq].bitcast(fx.BFloat16)
-                aop = q_ops[n][qq]
-                acc = mfma_bf16(aop.bitcast(fx.BFloat16), b, acc)
+            for ci in range_constexpr(CQ):
+                for qq in range_constexpr(4):
+                    b = xb[ci][qq].bitcast(fx.BFloat16)
+                    aop = q_ops[n][ci][qq]
+                    acc = mfma_bf16(aop.bitcast(fx.BFloat16), b, acc)
             fx.ptr_store(acc, red + ((wave * NQT + n) * 64 + lane) * 4)
         gpu.barrier()
-        SO = S // 8  # tokens an owner (t = k8 + 8 j)
+        SO = S // KQ  # tokens an owner (t = kq + KQ j)
         for it_ in range_constexpr((NQT * 8 * S + THREADS - 1) // THREADS):
             e = tid + THREADS * it_
             if e < NQT * 8 * S:
@@ -2037,46 +2105,46 @@ def build(key: Build):
                             + (((w * NQT + n) * 64 + 16 * (rr // 4) + tt) * 4 + rr % 4)
                         )
                     v.append(s_)
-                if (tt % 8) == k8:
+                if (tt % KQ) == kq:
                     for h2 in range_constexpr(2):
                         fx.ptr_store(
-                            v[h2], own + ((n * 16 + 2 * rp + h2) * SO + tt // 8)
+                            v[h2], own + ((n * 16 + 2 * rp + h2) * SO + tt // KQ)
                         )
                 else:
                     for h2 in range_constexpr(2):
                         mb_put(
                             tag,
                             scratch + fx.Int64(lay["qx"][0]),
-                            (((gq * 8 + k8) * NQT + n) * 16 + 2 * rp + h2) * S + tt,
+                            (((gq * KQ + kq) * NQT + n) * 16 + 2 * rp + h2) * S + tt,
                             v[h2],
                         )
         gpu.barrier()
-        # owner wave j: token tt = k8 + 8 j; lane p < 40 = (tile n = p / 8, row pair p % 8); a head's 32 pairs
-        # are lanes 0 .. 31 (pair p of the head = lane p)
+        # owner wave j: token tt = kq + KQ j; lane p < 40 = (tile n = p / 8, row pair p % 8); a head's
+        # 32 pairs are lanes 0 .. 31 (pair p of the head = lane p)
         if (tid < 64 * SO) & (lane < NQT * 8):
             j = tid // 64
             p = lane
             n = p // 8
             rp = p % 8
-            tt = k8 + 8 * j
+            tt = kq + KQ * j
             specs, oks = [], []
-            for src in range_constexpr(8):
+            for src in range_constexpr(KQ):
                 for h2 in range_constexpr(2):
                     specs.append(
                         (
                             scratch + fx.Int64(lay["qx"][0]),
-                            (((gq * 8 + src) * NQT + n) * 16 + 2 * rp + h2) * S + tt,
+                            (((gq * KQ + src) * NQT + n) * 16 + 2 * rp + h2) * S + tt,
                             1,
                         )
                     )
-                    oks.append(fx.Int32(src) != k8)
+                    oks.append(fx.Int32(src) != kq)
             got = mb_poll(tag, health, specs, REGION_IDS["qx"], oks=oks)
             tot = []
             for h2 in range_constexpr(2):
                 s_ = fx.Float32(0.0)
-                for src in range_constexpr(8):
+                for src in range_constexpr(KQ):
                     mine = fx.ptr_load(own + ((n * 16 + 2 * rp + h2) * SO + j))
-                    s_ = s_ + (fx.Int32(src) == k8).select(
+                    s_ = s_ + (fx.Int32(src) == kq).select(
                         mine, got[2 * src + h2][0].bitcast(fx.Float32)
                     )
                 tot.append(s_)
@@ -2236,7 +2304,7 @@ def build(key: Build):
             "upn": rl.upn.ptr,
         }
         tok = rl.tok.ptr
-        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         own_peer = sel_peer(pl, rank)
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
@@ -2322,8 +2390,20 @@ def build(key: Build):
             ops, t, i, scratch, tag, rt, tid, lane, wave, sc_.h.ptr, sc_.red.ptr
         )
         task_ring(gu_ld, gu_c, q, t0, fx.Int32(0), t1, UNR)
-        dn_ld = lambda t: dn_loads(w2, w2s, w_post, rt["uexp"], t, lane, wave, t < t1)
-        dq = [dn_loads(w2, w2s, w_post, rt["uexp"], t0, lane, wave, t0 < t1)]
+        dn_ld = lambda t: dn_loads(
+            w2,
+            w2s,
+            w_post,
+            rt["uexp"],
+            t,
+            lane,
+            wave,
+            t < t1,
+            None,
+            W2_BYTES,
+            W2S_BYTES,
+        )
+        dq = [dn_ld(t0)]
         gpu.barrier()
         u0 = t0 >> 8
         u1 = last >> 8
@@ -2550,8 +2630,9 @@ def build(key: Build):
 
 
 def build_vllm(S=8, W=8, next_rope=True, attn="", kv_fp8=False):
-    """The K3 build vLLM launches for S rows (8 / 16) of a TP = EP = 8 group; next_rope: the next
-    layer has RoPE; attn = "swa" / "full": this layer's verify attention fused at the head;
-    kv_fp8: e4m3 KV cache."""
-    assert W == 8 and S in (8, 16), (S, W)
-    return Build(S=S, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))
+    """The K3 build vLLM launches for S rows (8 / 16) of a TP = EP = W (8 / 4) group;
+    next_rope: the next layer has RoPE; attn = "swa" / "full": this layer's verify attention
+    fused at the head (W = 8 only); kv_fp8: e4m3 KV cache."""
+    assert W in (4, 8) and S in (8, 16), (S, W)
+    assert not attn or W == 8, (attn, W)
+    return Build(S=S, W=W, next_rope=bool(next_rope), attn=attn, kv_fp8=bool(kv_fp8))

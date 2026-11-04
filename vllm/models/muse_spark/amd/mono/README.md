@@ -10,8 +10,9 @@ cover run vLLM's stock path.
 ## Scope
 
 - Deployment (checked at startup; a deployment that cannot run the kernels
-  raises): gfx950 with 256 CUs, tensor parallel size 8 with
-  `--enable-expert-parallel` (linear placement, 32 experts a rank, no EPLB),
+  raises): gfx950 with 256 CUs, tensor parallel size 8 or 4 with
+  `--enable-expert-parallel` (linear placement, 32 or 64 experts a rank, no
+  EPLB),
   no PP / DP / DCP / PCP, Quark OCP-MXFP4 W4A4 experts on `AITER_MXFP4_MXFP4`
   (shuffled weights and scales), the fused QK-norm / RoPE / KV insert,
   `ROCM_AITER_FA` with a bf16 or fp8 (`--kv-cache-dtype fp8` / `fp8_e4m3`)
@@ -19,7 +20,11 @@ cover run vLLM's stock path.
   DSpark with 7 draft tokens, no LoRA, sleep mode or weight transfer, no KV
   connector or offloading.
 - Steps (checked every forward; anything else runs stock): uniform decode
-  verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager.
+  verify batches of 1-16 requests x 8 tokens, FULL CUDA graph or eager. TP 4
+  has the K3 builds and the 32-row HA + HM + HB build (1-4 requests, no fused
+  attention): stage A and the QKV GEMV split K over KQ = TP CTAs, so each CTA
+  reads twice the K of the TP 8 build and owns two row pairs of every QKV
+  tile; the post-expert projection splits K in two instead of four.
   8 / 16 rows run K3 (S = 8 / 16); 24-128 rows run HA + HM + HB with the rows
   padded up to S = 32 / 64 / 96 / 128 (`nrows` = the real rows).
 

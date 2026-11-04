@@ -111,17 +111,18 @@ def maybe_attach_mono(lm: nn.Module) -> None:
             + ("; ".join(reasons) or "a peer rank refused the deployment")
         )
     assert kernels is not None
-    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs)
+    buckets = built_buckets(lm.vllm_config.scheduler_config.max_num_seqs, world_size)
     max_model_len = lm.vllm_config.model_config.max_model_len
     fused = fused_attention_layers(
-        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS
+        model.layers, max_model_len, kernels.attn_frag.VLLM_MAX_KEYS, world_size
     )
     if not fused:
         logger.info(
             "Muse Spark monokernel: verify attention unfused (max_model_len %d, "
-            "fused builds cover %d)",
+            "fused builds cover %d at TP 8; TP %d)",
             max_model_len,
             kernels.attn_frag.VLLM_MAX_KEYS,
+            world_size,
         )
     model.mono = MuseSparkMono(
         model,
