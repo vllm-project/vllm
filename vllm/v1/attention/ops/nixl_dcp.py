@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Three-launch DCP A2A using NIXL GPU puts over CUDA IPC or mlx5 RDMA.
+"""Three-launch DCP A2A using mapped peer stores or NIXL GPU puts.
 
 Setup registers persistent storage before graph capture. Each ubatch owns an
 independent epoch, per-channel ready counters and two receive slots. Invocations
@@ -172,6 +172,7 @@ class NixlDCPA2AWorkspace:
         self.remote_view = 0
         self.remote_agents: list[str] = []
         self.peer_transports: list[list[str]] = []
+        self.peer_copy_paths: list[str] = []
         self.closed = False
 
         error = None
@@ -224,7 +225,7 @@ class NixlDCPA2AWorkspace:
         self.counter_offset = 2 * self.world_size * self.peer_bytes
         receive_bytes = self.counter_offset + self.world_size * _COUNTER_STRIDE
         layout = (
-            "rdma3-v1",
+            "mixed3-v1",
             max_num_tokens,
             heads_per_rank,
             head_dim,
@@ -260,10 +261,17 @@ class NixlDCPA2AWorkspace:
                         device=self.device,
                         dtype=torch.int64,
                     )
+                    # Same peer order as remote_view: all ranks except self.
+                    self.peer_ptrs = torch.empty(
+                        (self.world_size - 1,),
+                        device=self.device,
+                        dtype=torch.int64,
+                    )
                     self.workspace_bytes = (
                         self.send.numel()
                         + self.receive.numel()
                         + self.epoch.numel() * 8
+                        + self.peer_ptrs.numel() * 8
                     )
                     self.agent = nixl_agent(
                         f"vllm-dcp-{uuid.uuid4().hex}",
@@ -322,11 +330,15 @@ class NixlDCPA2AWorkspace:
                         device=self.device,
                         dtype=torch.int64,
                     )
-                    torch.ops._C.nixl_dcp_peer_info(self.remote_view, info)
+                    torch.ops._C.nixl_dcp_peer_info(
+                        self.remote_view, info, self.peer_ptrs
+                    )
                     peer_info = iter(info.cpu().tolist())
+                    mapped_peers = iter(self.peer_ptrs.ne(0).cpu().tolist())
                     for peer in range(self.world_size):
                         if peer == self.rank:
                             self.peer_transports.append(["self"])
+                            self.peer_copy_paths.append("self")
                             continue
                         queues = set()
                         transports = []
@@ -347,11 +359,16 @@ class NixlDCPA2AWorkspace:
                                 "cuda_ipc" if kind == 1 else "rc_mlx5_gda"
                             )
                         self.peer_transports.append(transports)
+                        self.peer_copy_paths.append(
+                            "mapped_p2p" if next(mapped_peers) else "nixl_put"
+                        )
                     logger.info(
-                        "NIXL DCP rank %d: hosts=%s transports=%s workspace_bytes=%d",
+                        "NIXL DCP rank %d: hosts=%s transports=%s "
+                        "copy_paths=%s workspace_bytes=%d",
                         self.rank,
                         [peer[2] for peer in peers],
                         self.peer_transports,
+                        self.peer_copy_paths,
                         self.workspace_bytes,
                     )
             except Exception as exc:
@@ -431,6 +448,7 @@ class NixlDCPA2AWorkspace:
             self.send,
             self.receive,
             self.epoch,
+            self.peer_ptrs,
             self.local_view,
             self.remote_view,
             self.rank,

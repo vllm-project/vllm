@@ -427,27 +427,44 @@ def test_mla_nixl_rejects_conflicting_configuration(
     "backend,dcp_size,pcp", [("ag_rs", 2, 1), ("a2a", 1, 1), ("a2a", 2, 2)]
 )
 def test_nixl_config_rejects_unused_flag(monkeypatch, backend, dcp_size, pcp):
-    from vllm.config.parallel import ParallelConfig
+    from vllm.config import DeviceConfig, ParallelConfig, VllmConfig
 
     monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
     monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
     with pytest.raises(ValueError, match="VLLM_USE_NIXL_DCP_A2A requires"):
-        ParallelConfig(
-            tensor_parallel_size=2,
-            decode_context_parallel_size=dcp_size,
-            prefill_context_parallel_size=pcp,
-            dcp_comm_backend=backend,
-            distributed_executor_backend="mp",
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=dcp_size,
+                prefill_context_parallel_size=pcp,
+                dcp_comm_backend=backend,
+                distributed_executor_backend="mp",
+            ),
         )
 
 
-def test_nixl_rejects_models_that_do_not_use_mla(monkeypatch):
-    from vllm.config.vllm import VllmConfig
+def test_nixl_rejects_models_that_do_not_use_mla(monkeypatch, tmp_path):
+    from transformers import OPTConfig
+
+    from vllm.config import DeviceConfig, ModelConfig, ParallelConfig, VllmConfig
 
     monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
-    config = SimpleNamespace(model_config=SimpleNamespace(use_mla=False))
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
+    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
     with pytest.raises(ValueError, match="MLA models only"):
-        VllmConfig.validate_nixl_dcp_model(config)
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            model_config=ModelConfig(
+                model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+            ),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                dcp_comm_backend="a2a",
+                distributed_executor_backend="mp",
+            ),
+        )
 
 
 def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
@@ -1004,6 +1021,20 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             assert any(
                 "rc_mlx5_gda" in transports for transports in workspace.peer_transports
             ), workspace.peer_transports
+            assert "nixl_put" in workspace.peer_copy_paths
+        if use_nixl:
+            remote_paths = [
+                path
+                for peer, path in enumerate(workspace.peer_copy_paths)
+                if peer != rank
+            ]
+            if env.get("TEST_REQUIRE_MAPPED_P2P") == "1":
+                assert all(path == "mapped_p2p" for path in remote_paths), remote_paths
+            if env.get("TEST_REQUIRE_MIXED") == "1":
+                assert set(remote_paths) == {"mapped_p2p", "nixl_put"}, remote_paths
+            # Mapped destinations must bypass send staging throughout eager
+            # calls and graph replay, as well as deliver the correct payload.
+            workspace.send.fill_(0xA5)
 
         def lse_layout(value: torch.Tensor) -> torch.Tensor:
             if env["TEST_LSE_LAYOUT"] == "transposed":
@@ -1360,6 +1391,13 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             outputs, lses, is_lse_base_on_e=is_lse_base_on_e
         )
         _assert_close(actual, expected, dtype)
+        if use_nixl:
+            for peer, path in enumerate(workspace.peer_copy_paths):
+                if path == "mapped_p2p":
+                    staged = workspace.send[:, peer]
+                    torch.testing.assert_close(
+                        staged, torch.full_like(staged, 0xA5), rtol=0, atol=0
+                    )
     finally:
         if use_nixl and workspace is not None:
             workspace.close()
@@ -1427,6 +1465,7 @@ def test_distributed_nixl_a2a_matches_reference(
             "TEST_LSE_LAYOUT": lse_layout,
             "LSE_BASE_E": lse_base_e,
             "TEST_NIXL_CHANNELS": str(num_channels),
+            "TEST_REQUIRE_MAPPED_P2P": "1",
         },
     )
 

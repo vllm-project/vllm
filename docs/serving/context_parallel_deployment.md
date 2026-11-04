@@ -51,6 +51,12 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+MLA deployments can opt into the experimental [NIXL GPU Device API DCP backend](../design/nixl_dcp.md)
+for output/LSE exchange. It uses direct stores to mapped peer GPUs and NIXL puts
+to unmapped peers, including supported cross-node RDMA links. It requires a
+source build with matching NIXL/UCX device-API dependencies and currently supports
+DCP groups of two to eight GPUs.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).

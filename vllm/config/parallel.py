@@ -614,14 +614,6 @@ class ParallelConfig:
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
         dcp = self.decode_context_parallel_size
-        if envs.VLLM_USE_NIXL_DCP_A2A:
-            if envs.VLLM_USE_DIRECT_DCP_A2A is True:
-                raise ValueError("NIXL and direct DCP A2A cannot both be enabled")
-            if not 2 <= dcp <= 8 or pcp != 1 or self.dcp_comm_backend != "a2a":
-                raise ValueError(
-                    "VLLM_USE_NIXL_DCP_A2A requires --dcp-comm-backend a2a, "
-                    "DCP size 2..8 and PCP size 1"
-                )
         if pcp == 1:
             # DCP reuses the TP ranks when PCP is disabled.
             if tp % dcp != 0:
