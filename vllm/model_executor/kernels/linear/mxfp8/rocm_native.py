@@ -266,14 +266,9 @@ if current_platform.is_rocm():
         _BK256_STAGES = 2
 
 
-# gfx950 tiles for the MiniMax-M3.1 TP4 MXFP8 linears, keyed by the local (N, K):
-# fused qkv, o_proj, shared-expert gate_up / down, dense gate_up / down and the
-# DSpark draft qkv. Each row is (largest M it covers, tile); decode and verify
-# batches are M = 8 x requests. These GEMMs read every weight byte once, so the
-# lever is the number of M tiles that re-read it: BLOCK_M follows M, and the
-# short-K tiles pipeline three stages. Tuned by CUDA-graph replay over rotating
-# weights (400 MiB, so the weights come from HBM as in the model). A None tile
-# (and any M past the last row) falls through to the generic selection below.
+# gfx950 tiles for the MiniMax-M3.1 TP4 MXFP8 linears, keyed by the local (N, K).
+# Each row is (largest M it covers, tile); None, or an M past the last row, uses
+# the generic selection below. Tuned by CUDA-graph replay over rotating weights.
 _M31_TP4_TILES = {
     (2560, 6144): (
         (16, (16, 16, 1024, 2, 3)),
