@@ -44,10 +44,35 @@ class HadamardTransform(torch.nn.Module):
         super().__init__()
         self.transforms = transforms
 
-        if get_tensor_model_parallel_world_size() > 1:
-            raise NotImplementedError(
-                "Online transforms with tensor parallelism is not supported"
-            )
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            # Block-diagonal transforms (`head_dim` set) apply one replicated
+            # [head_dim, head_dim] matrix per contiguous block, so they stay
+            # rank-local when head_dim divides the per-rank size they act on:
+            # the full input of column-parallel layers, the K/tp input slice of
+            # row-parallel layers, and each per-rank output partition (row-parallel
+            # outputs are rotated before the all-reduce, which commutes with a
+            # linear map). Full-width transforms span the sharded dimension.
+            for part_index, (scheme_name, scheme, args) in self.transforms.items():
+                if args.location == TransformLocation.INPUT:
+                    dim, size = "input", input_size_per_partition
+                else:
+                    dim, size = "output", output_partition_sizes[part_index]
+
+                reason = None
+                if scheme.head_dim is None:
+                    reason = "transforms without head_dim are not shardable"
+                elif size % scheme.head_dim != 0:
+                    reason = (
+                        f"{dim} size per partition {size} is not "
+                        f"divisible by head_dim {scheme.head_dim}"
+                    )
+                if reason is not None:
+                    layer_name = getattr(layer, "prefix", type(layer).__name__)
+                    raise NotImplementedError(
+                        f"Layer {layer_name}, scheme {scheme_name}: tensor parallel "
+                        f"size {tp_size}: {reason}"
+                    )
 
         # Similar to row/col parallel params, but tensors are separate
         # to allow for loading with shared memory
