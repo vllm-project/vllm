@@ -103,11 +103,14 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         else:
             activation_key = ct2vllm_act[self.input_quant.strategy]
 
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_key,
+            weight_key=weight_key,
+        )
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
+            quant_schema=quant_schema,
             allow_vllm_cutlass=True,
         )
 

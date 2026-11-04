@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     RoutingMethodType,
+    make_fused_moe_quant_schema,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
+    kMxfp4Static,
 )
 from vllm.platforms import current_platform
 
@@ -103,6 +105,13 @@ def _make_qwen38_tep8_moe_config() -> FusedMoEConfig:
     )
 
 
+def _w4a4_quant_schema():
+    return make_fused_moe_quant_schema(
+        activation_key=kMxfp4Dynamic,
+        weight_key=kMxfp4Static,
+    )
+
+
 @pytest.mark.parametrize("requested_backend", ["auto", "aiter"])
 def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
     import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
@@ -121,9 +130,7 @@ def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
         mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [SupportedExperts]
     )
 
-    backend, experts_cls = select_mxfp4_moe_backend(
-        config, activation_key=kMxfp4Dynamic
-    )
+    backend, experts_cls = select_mxfp4_moe_backend(config, _w4a4_quant_schema())
 
     assert backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4
     assert experts_cls is SupportedExperts
@@ -147,9 +154,7 @@ def mxfp4_oracle_config():
 def test_w4a4_dispatches_to_aiter(mxfp4_oracle_config, enable_rocm_aiter):
     """With AITER enabled + GFX950, W4A4 selects AITER_MXFP4_MXFP4."""
     config = _make_w4a4_moe_config()
-    backend, experts_cls = select_mxfp4_moe_backend(
-        config, activation_key=kMxfp4Dynamic
-    )
+    backend, experts_cls = select_mxfp4_moe_backend(config, _w4a4_quant_schema())
     assert backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4
     assert experts_cls is not None
 
@@ -160,9 +165,7 @@ def test_w4a4_falls_back_without_aiter(
     disable_rocm_aiter,
 ):
     config = _make_w4a4_moe_config()
-    backend, experts_cls = select_mxfp4_moe_backend(
-        config, activation_key=kMxfp4Dynamic
-    )
+    backend, experts_cls = select_mxfp4_moe_backend(config, _w4a4_quant_schema())
     assert backend == Mxfp4MoeBackend.EMULATION
     assert experts_cls is not None
 
@@ -171,8 +174,6 @@ def test_w4a4_falls_back_without_aiter(
 def test_w4a4_dispatches_to_emulation_with_moe_backend(mxfp4_oracle_config):
     """With --moe-backend emulation, W4A4 selects EMULATION."""
     config = _make_w4a4_moe_config(moe_backend="emulation")
-    backend, experts_cls = select_mxfp4_moe_backend(
-        config, activation_key=kMxfp4Dynamic
-    )
+    backend, experts_cls = select_mxfp4_moe_backend(config, _w4a4_quant_schema())
     assert backend == Mxfp4MoeBackend.EMULATION
     assert experts_cls is not None

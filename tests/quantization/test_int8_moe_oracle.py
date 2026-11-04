@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     RoutingMethodType,
+    make_fused_moe_quant_schema,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     Int8MoeBackend,
@@ -84,7 +85,11 @@ def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
     """Both dynamic-activation INT8 MoE schemes select the Triton backend."""
     config = _make_int8_moe_config()
     backend, experts_cls = select_int8_moe_backend(
-        config, weight_key=weight_key, activation_key=activation_key
+        config,
+        make_fused_moe_quant_schema(
+            activation_key=activation_key,
+            weight_key=weight_key,
+        ),
     )
     assert backend == Int8MoeBackend.TRITON
     assert experts_cls is not None
@@ -118,8 +123,10 @@ def test_int8_explicit_moe_backend_triton():
     config = _make_int8_moe_config(moe_backend="triton")
     backend, experts_cls = select_int8_moe_backend(
         config,
-        weight_key=kInt8StaticChannelSym,
-        activation_key=kInt8DynamicTokenSym,
+        make_fused_moe_quant_schema(
+            activation_key=kInt8DynamicTokenSym,
+            weight_key=kInt8StaticChannelSym,
+        ),
     )
     assert backend == Int8MoeBackend.TRITON
     assert experts_cls is not None
@@ -132,6 +139,8 @@ def test_int8_unsupported_moe_backend_raises():
     with pytest.raises(ValueError, match="not supported for Int8 MoE"):
         select_int8_moe_backend(
             config,
-            weight_key=kInt8StaticChannelSym,
-            activation_key=kInt8DynamicTokenSym,
+            make_fused_moe_quant_schema(
+                activation_key=kInt8DynamicTokenSym,
+                weight_key=kInt8StaticChannelSym,
+            ),
         )

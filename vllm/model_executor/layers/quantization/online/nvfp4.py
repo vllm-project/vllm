@@ -102,10 +102,13 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 "nvfp4_per_token online quantization requires a Blackwell (SM100) GPU."
             )
         super().__init__(moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=kNvfp4Static,
+        )
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=self.activation_quant_key,
+            quant_schema=quant_schema,
         )
 
     @property

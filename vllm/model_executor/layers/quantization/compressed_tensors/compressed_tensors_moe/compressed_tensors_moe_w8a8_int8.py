@@ -67,11 +67,14 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                 "dynamic per token quantization. Found static input scales."
             )
 
+        quant_schema = self._init_quant_schema(
+            activation_key=kInt8DynamicTokenSym,
+            weight_key=kInt8StaticChannelSym,
+        )
         # Select Int8 MoE backend.
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
-            weight_key=kInt8StaticChannelSym,
-            activation_key=kInt8DynamicTokenSym,
+            quant_schema=quant_schema,
         )
 
     def create_weights(

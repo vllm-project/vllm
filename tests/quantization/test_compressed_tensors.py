@@ -1035,7 +1035,7 @@ def _mxfp4_moe_layer(monkeypatch, input_activations):
     monkeypatch.setattr(
         mxfp4,
         "select_deepseek_v4_mxfp4_moe_backend",
-        lambda moe: (Mxfp4MoeBackend.NONE, None),
+        lambda moe, quant_schema: (Mxfp4MoeBackend.NONE, None),
     )
     weights = {
         "num_bits": 4,

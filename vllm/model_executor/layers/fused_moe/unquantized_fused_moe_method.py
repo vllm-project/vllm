@@ -51,8 +51,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=None,
+        )
         self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
             moe_config=self.moe,
+            quant_schema=quant_schema,
         )
         # MoonEP replaces the named parameters with its [E+B] gate/down
         # split and keeps the up projection outside the parameter registry,

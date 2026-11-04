@@ -36,7 +36,10 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.utils import replace_parameter
 
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
@@ -152,8 +155,13 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=kMxfp4Static,
+        )
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            config=self.moe, activation_key=self.activation_quant_key
+            config=self.moe,
+            quant_schema=quant_schema,
         )
 
     def maybe_roundup_sizes(

@@ -78,11 +78,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             self.activation_key
         )
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_key,
+            weight_key=kNvfp4Static,
+        )
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=self.activation_key,
+            quant_schema=quant_schema,
         )
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend

@@ -648,12 +648,15 @@ class HummingMoEMethod(FusedMoEMethodBase):
             allow_fallback=quant_config.allow_input_schema_fallback,
         )
         activation_key = input_schema_to_quant_key(runtime_input_schema, moe.in_dtype)
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_key,
+            weight_key=weight_key,
+        )
 
         # Select Humming MoE experts
         self.experts_cls = select_humming_moe_experts(
             config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
+            quant_schema=quant_schema,
         )
 
     def prepare_weight_loader(self, layer, weight_loader):

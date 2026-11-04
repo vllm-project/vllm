@@ -42,10 +42,13 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=kInt8DynamicTokenSym,
+            weight_key=kInt8StaticChannelSym,
+        )
         self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
-            weight_key=kInt8StaticChannelSym,
-            activation_key=kInt8DynamicTokenSym,
+            quant_schema=quant_schema,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

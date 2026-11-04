@@ -3,6 +3,7 @@
 
 from dataclasses import replace
 from inspect import signature
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4afp8_moe_quant_config,
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
+    make_fused_moe_quant_schema,
     mxfp4_moe_quant_config,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
@@ -27,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -45,6 +50,22 @@ from vllm.utils.math_utils import cdiv
 
 def _scale() -> torch.Tensor:
     return torch.ones(1)
+
+
+class _TestMoEMethod(FusedMoEMethodBase):
+    def create_weights(
+        self,
+        layer,
+        num_experts,
+        hidden_size,
+        intermediate_size_per_partition,
+        params_dtype,
+        **extra_weight_attrs,
+    ):
+        raise NotImplementedError
+
+    def get_fused_moe_quant_config(self, layer):
+        return FusedMoEQuantConfig.make()
 
 
 def _configs() -> list[FusedMoEQuantConfig]:
@@ -358,6 +379,73 @@ def test_alignment_shape_cannot_duplicate_key_shape() -> None:
         FusedMoEStaticQuantDesc(
             key=kFp8StaticTensorSym, alignment_shape=GroupShape.PER_TENSOR
         )
+
+
+def test_make_fused_moe_quant_schema_duplicates_roles() -> None:
+    schema = make_fused_moe_quant_schema(
+        activation_key=kFp8StaticTensorSym,
+        weight_key=kMxfp4Static,
+        has_bias=True,
+        has_zero_point=True,
+        weight_alignment_shape=GroupShape(1, 128),
+        is_scale_swizzled=False,
+        is_scale_transposed=True,
+        mx_alignment=32,
+        gemm1_alpha=1.5,
+        gemm1_beta=2.5,
+        gemm1_clamp_limit=3.5,
+    )
+
+    assert schema.a1 is schema.a2
+    assert schema.w1 is schema.w2
+    assert schema.activation_key == kFp8StaticTensorSym
+    assert schema.weight_key == kMxfp4Static
+    assert schema.w1.group_shape == GroupShape(1, 128)
+    assert schema.w1.has_bias is True
+    assert schema.w1.has_zero_point is True
+    assert schema.is_scale_swizzled is False
+    assert schema.is_scale_transposed is True
+    assert schema.mx_alignment == 32
+    assert schema.gemm1_alpha == 1.5
+    assert schema.gemm1_beta == 2.5
+    assert schema.gemm1_clamp_limit == 3.5
+
+
+def test_quant_method_schema_requires_initialization() -> None:
+    method = _TestMoEMethod(
+        SimpleNamespace(
+            has_bias=False,
+            swiglu_alpha=None,
+            swiglu_beta=None,
+            swiglu_limit=None,
+        )
+    )
+
+    with pytest.raises(AttributeError, match="has not initialized"):
+        _ = method.quant_schema
+
+
+def test_quant_method_schema_snapshots_activation_parameters() -> None:
+    method = _TestMoEMethod(
+        SimpleNamespace(
+            has_bias=True,
+            swiglu_alpha=1.5,
+            swiglu_beta=2.5,
+            swiglu_limit=3.5,
+        )
+    )
+    method._init_quant_schema(
+        activation_key=kFp8DynamicTokenSym,
+        weight_key=kFp8StaticTensorSym,
+    )
+    schema = method.quant_schema
+
+    assert schema.activation_key == kFp8DynamicTokenSym
+    assert schema.weight_key == kFp8StaticTensorSym
+    assert schema.w1.has_bias is True
+    assert schema.gemm1_alpha == 1.5
+    assert schema.gemm1_beta == 2.5
+    assert schema.gemm1_clamp_limit == 3.5
 
 
 def test_schema_is_immutable() -> None:

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kInt4Static32
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
@@ -107,6 +108,10 @@ class CompressedTensorsW4A16FlydslMoEMethod(CompressedTensorsMoEMethod):
         assert weight_quant.symmetric, (
             "Only symmetric quantization is supported for MoE. "
             "Try --moe-backend emulation."
+        )
+        self._init_quant_schema(
+            activation_key=None,
+            weight_key=kInt4Static32,
         )
 
     def create_weights(

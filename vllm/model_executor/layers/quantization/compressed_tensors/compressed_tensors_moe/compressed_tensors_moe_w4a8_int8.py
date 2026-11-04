@@ -91,10 +91,13 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         weight_scale_desc = ScaleDesc(scale_dtype, static=True, group_shape=group_shape)
         weight_key = QuantKey(torch.int8, weight_scale_desc, symmetric=True)
 
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=weight_key,
+        )
         self.backend, self.experts_cls = select_w4a8_int8_moe_backend(
             moe,
-            weight_key,
-            activation_key=None,  # unquantized inputs
+            quant_schema,
         )
 
     # ---- parameter creation ----

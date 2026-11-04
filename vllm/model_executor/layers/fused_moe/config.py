@@ -455,6 +455,42 @@ class FusedMoEQuantSchema:
         return (num_experts, *scale_shape)
 
 
+def make_fused_moe_quant_schema(
+    *,
+    activation_key: QuantKey | None,
+    weight_key: QuantKey | None,
+    has_bias: bool = False,
+    has_zero_point: bool = False,
+    weight_alignment_shape: GroupShape | None = None,
+    is_scale_swizzled: bool = True,
+    is_scale_transposed: bool = False,
+    mx_alignment: int = 0,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+) -> FusedMoEQuantSchema:
+    """Build a pre-selection schema using the same key for both GEMM roles."""
+    activation = FusedMoEStaticQuantDesc(key=activation_key)
+    weight = FusedMoEStaticQuantDesc(
+        key=weight_key,
+        alignment_shape=weight_alignment_shape,
+        has_bias=has_bias,
+        has_zero_point=has_zero_point,
+    )
+    return FusedMoEQuantSchema(
+        a1=activation,
+        a2=activation,
+        w1=weight,
+        w2=weight,
+        is_scale_swizzled=is_scale_swizzled,
+        is_scale_transposed=is_scale_transposed,
+        mx_alignment=mx_alignment,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
+
+
 def _is_fp4_key(key: QuantKey | None) -> bool:
     return key is not None and key.dtype == FP4_DTYPE
 

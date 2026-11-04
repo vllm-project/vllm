@@ -10,12 +10,24 @@ import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
+    make_fused_moe_quant_schema,
 )
 from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
 from vllm.platforms import current_platform
+
+
+def _dsv4_quant_schema():
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+    )
+
+    return make_fused_moe_quant_schema(
+        activation_key=None,
+        weight_key=kMxfp4Static,
+    )
 
 
 def _torch_topk_softplus_sqrt(
@@ -138,7 +150,7 @@ def test_hash_routing_backend_selection(
     layer, config = _dsv4_moe_config(
         monkeypatch, default_vllm_config, has_hash_routing, backend
     )
-    _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config, _dsv4_quant_schema())
     assert experts_cls is not None
     assert experts_cls.__name__ == expected_experts
     # Monolithic kernels route internally, so they read the table from the layer.
@@ -166,7 +178,7 @@ def test_hash_routing_rejects_monolithic_without_support(
         monkeypatch, default_vllm_config, True, "aiter_triton_mxfp4_bf16"
     )
     with pytest.raises(ValueError, match="hash routing"):
-        select_deepseek_v4_mxfp4_moe_backend(config)
+        select_deepseek_v4_mxfp4_moe_backend(config, _dsv4_quant_schema())
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm backend selection")
@@ -197,12 +209,14 @@ def test_aiter_w4a16_expert_parallel_selection(
         config, moe_parallel_config=replace(config.moe_parallel_config, **ep_config)
     )
     if supported:
-        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+        _, experts_cls = select_deepseek_v4_mxfp4_moe_backend(
+            config, _dsv4_quant_schema()
+        )
         assert experts_cls is not None
         assert experts_cls.__name__ == "AiterW4A16ExpertsMonolithic"
     else:
         with pytest.raises(ValueError, match="parallel config"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
+            select_deepseek_v4_mxfp4_moe_backend(config, _dsv4_quant_schema())
 
 
 def test_torch_topk_softplus_sqrt_breaks_ties_by_expert_id():

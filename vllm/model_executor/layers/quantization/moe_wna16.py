@@ -252,15 +252,18 @@ class MoeWNA16Method(FusedMoEMethodBase):
             raise ValueError("MoeWNA16Method only supports int4 and int8 now.")
 
         weight_key = QuantKey(quant_type, scale)
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=weight_key,
+            has_bias=False,
+            has_zero_point=self.quant_config.has_zp,
+        )
 
         # Select WNA16 MoE backend via oracle.
-        # handle ZP?
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
-            weight_key=weight_key,
+            quant_schema=quant_schema,
             quant_config=self.quant_config,
-            may_have_zp=self.quant_config.has_zp,
-            may_have_bias=False,
         )
 
     def create_weights(

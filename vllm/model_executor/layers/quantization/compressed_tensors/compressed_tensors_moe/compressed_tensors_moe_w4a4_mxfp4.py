@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.model_executor.utils import (
     move_parameter,
     replace_parameter,
@@ -65,8 +66,14 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         # repacks weights and scales, and the megakernels take the checkpoint
         # tensors as they are.
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=kMxfp4Static,
+        )
         if moe.moe_backend == "b12x" or is_flashinfer_moe_ep_backend(moe.moe_backend):
-            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(
+                moe, quant_schema
+            )
             assert experts_cls is not None
             self.experts_cls = experts_cls
             self.use_cutlass_mxfp4 = False

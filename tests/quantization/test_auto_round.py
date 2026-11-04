@@ -679,8 +679,9 @@ def test_wna16_cuda_low_bit_linear_routes_to_humming(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_linear_method",
-        lambda layer_config: captured.update({"layer_config": layer_config})
-        or expected_method,
+        lambda layer_config: (
+            captured.update({"layer_config": layer_config}) or expected_method
+        ),
     )
 
     layer_config = make_layer_config(bits=bits, packing_format=packing_format)
@@ -705,10 +706,10 @@ def test_wna16_cuda_low_bit_moe_routes_to_humming(monkeypatch, bits) -> None:
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_wna16_scheme._build_humming_moe_method",
-        lambda layer, layer_config: captured.update(
-            {"layer": layer, "layer_config": layer_config}
-        )
-        or expected_method,
+        lambda layer, layer_config: (
+            captured.update({"layer": layer, "layer_config": layer_config})
+            or expected_method
+        ),
     )
 
     layer = object.__new__(RoutedExperts)
@@ -900,8 +901,9 @@ def test_qwen3_30b_a3b_mxfp8_autoround_routes_to_mxfp8_moe(
     expected_experts_cls = object()
     captured = {}
 
-    def fake_select_mxfp8_moe_backend(*, config):
+    def fake_select_mxfp8_moe_backend(*, config, quant_schema):
         captured["moe_config"] = config
+        captured["quant_schema"] = quant_schema
         return expected_backend, expected_experts_cls
 
     monkeypatch.setattr(
@@ -932,6 +934,7 @@ def test_qwen3_30b_a3b_mxfp8_autoround_routes_to_mxfp8_moe(
     assert moe_method.mxfp8_backend is expected_backend
     assert moe_method.experts_cls is expected_experts_cls
     assert captured["moe_config"] == layer.moe_config
+    assert captured["quant_schema"] == moe_method.quant_schema
     assert isinstance(gate_method, UnquantizedLinearMethod)
 
 
@@ -942,7 +945,7 @@ def test_inc_mxfp8_moe_method_registers_block_scaled_weights(monkeypatch) -> Non
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_mxfp8_moe.select_mxfp8_moe_backend",
-        lambda *, config: (expected_backend, expected_experts_cls),
+        lambda *, config, quant_schema: (expected_backend, expected_experts_cls),
     )
     monkeypatch.setattr(
         "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
@@ -959,6 +962,10 @@ def test_inc_mxfp8_moe_method_registers_block_scaled_weights(monkeypatch) -> Non
 
     class DummyMoeConfig:
         is_act_and_mul = True
+        has_bias = False
+        swiglu_alpha = None
+        swiglu_beta = None
+        swiglu_limit = None
 
     method = INCMxfp8MoEMethod(cast(Any, DummyMoeConfig()))
     layer = torch.nn.Module()
@@ -1091,7 +1098,7 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "select_mxfp4_moe_backend",
-        lambda moe: (mxfp4_backend, expected_experts_cls),
+        lambda moe, quant_schema: (mxfp4_backend, expected_experts_cls),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
@@ -1101,8 +1108,9 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
         "make_mxfp4_moe_quant_config",
-        lambda **kwargs: captured.update({"quant_config_kwargs": kwargs})
-        or expected_quant_config,
+        lambda **kwargs: (
+            captured.update({"quant_config_kwargs": kwargs}) or expected_quant_config
+        ),
     )
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_moe."
@@ -1117,6 +1125,10 @@ def test_inc_mxfp4_moe_method_preserves_checkpoint_packing(
     expected_moe_config = SimpleNamespace(
         w13_num_shards=2,
         moe_backend=moe_backend,
+        has_bias=False,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        swiglu_limit=None,
     )
     method = INCMxfp4MoEMethod(moe=cast(Any, expected_moe_config))
     layer = torch.nn.Module()

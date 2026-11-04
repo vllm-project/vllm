@@ -3,7 +3,10 @@
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantSchema,
+)
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
@@ -81,8 +84,14 @@ def _mxfp8_backend_to_kernel_cls(
 def _select_kernel_cls(
     backend: Fp8MoeBackend,
     config: FusedMoEConfig,
+    quant_schema: FusedMoEQuantSchema,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
+    assert weight_key == kMxfp8Static
+    assert activation_key == kMxfp8Dynamic
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -93,8 +102,8 @@ def _select_kernel_cls(
         supported, reason = cls.is_supported_config(
             cls,
             config,
-            kMxfp8Static,
-            kMxfp8Dynamic,
+            weight_key,
+            activation_key,
             activation_format,
         )
         if supported:
@@ -107,6 +116,7 @@ def _select_kernel_cls(
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
 
@@ -127,13 +137,13 @@ def select_mxfp8_moe_backend(
             "Using '%s' MxFp8 MoE backend (user-requested).",
             backend.value,
         )
-        return backend, _select_kernel_cls(backend, config)
+        return backend, _select_kernel_cls(backend, config, quant_schema)
 
     # Auto-select: pick the first supported backend.
     backends = prioritize_humming(list(_SUPPORTED_BACKENDS))
     for backend in backends:
         try:
-            experts_cls = _select_kernel_cls(backend, config)
+            experts_cls = _select_kernel_cls(backend, config, quant_schema)
         except ValueError:
             continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)

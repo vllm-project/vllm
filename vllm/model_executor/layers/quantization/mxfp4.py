@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     is_layer_skipped,
+    kMxfp4Static,
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
@@ -156,7 +157,13 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "gpt_oss_mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=kMxfp4Static,
+        )
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+            moe, quant_schema
+        )
 
         self.max_capture_size = moe.max_capture_size
 
@@ -658,6 +665,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.activation_key = activation_key
         self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
         self.is_k3_situ_int4_gfx942 = _use_k3_situ_int4_gfx942(moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_key,
+            weight_key=kMxfp4Static,
+        )
         self.experts_cls: type[mk.FusedMoEExperts] | None
         if self.is_k3_situ_aiter or self.is_k3_situ_int4_gfx942:
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
@@ -680,7 +691,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         else:
             self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
-                moe
+                moe, quant_schema
             )
 
         self.max_capture_size = moe.max_capture_size

@@ -20,6 +20,13 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.model_executor.layers.fused_moe.config import (
+    make_fused_moe_quant_schema,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
@@ -34,6 +41,13 @@ DENSE_MODEL = "Qwen/Qwen3-0.6B"
 MAX_MODEL_LEN = 1024
 MAX_TOKENS = 4
 NUM_LOG_PROBS = 8
+
+
+def _mxfp8_quant_schema():
+    return make_fused_moe_quant_schema(
+        activation_key=kMxfp8Dynamic,
+        weight_key=kMxfp8Static,
+    )
 
 
 @pytest.mark.skipif(
@@ -135,7 +149,7 @@ def test_mxfp8_aiter_accepts_silu_activation(
 
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 
-    backend, experts_cls = select_mxfp8_moe_backend(config)
+    backend, experts_cls = select_mxfp8_moe_backend(config, _mxfp8_quant_schema())
 
     assert backend == Fp8MoeBackend.AITER_MXFP8
     assert experts_cls is aiter_mxfp8_moe.AiterMxfp8Experts
@@ -186,7 +200,7 @@ def test_mxfp8_aiter_requires_swigluoai_params(
     )
 
     with pytest.raises(ValueError, match="hardcodes SwiGLU-OAI"):
-        select_mxfp8_moe_backend(config)
+        select_mxfp8_moe_backend(config, _mxfp8_quant_schema())
 
 
 @pytest.mark.skipif(
@@ -236,7 +250,7 @@ def test_mxfp8_aiter_accepts_swigluoai_params(
         swiglu_beta=aiter_mxfp8_moe._AITER_SWIGLU_BETA,
     )
 
-    backend, experts_cls = select_mxfp8_moe_backend(config)
+    backend, experts_cls = select_mxfp8_moe_backend(config, _mxfp8_quant_schema())
 
     assert backend == Fp8MoeBackend.AITER_MXFP8
     assert experts_cls is aiter_mxfp8_moe.AiterMxfp8Experts

@@ -25,6 +25,10 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kInt4Static,
+)
 from vllm.model_executor.utils import (
     move_parameter,
     replace_parameter,
@@ -53,8 +57,13 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         )
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
+        quant_schema = self._init_quant_schema(
+            activation_key=kFp8DynamicTokenSym,
+            weight_key=kInt4Static,
+        )
         self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
             config=self.moe,
+            quant_schema=quant_schema,
         )
 
     def create_weights(
