@@ -724,8 +724,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     final_state_indices=(
                         final_state_indices if write_final_states else None
                     ),
-                    chunk_indices=metadata.chunk_indices_p,
-                    chunk_offsets=metadata.chunk_offsets_p,
                 )
             except Exception:
                 logger.warning(
@@ -792,8 +790,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
-            chunk_indices_p = attn_metadata.chunk_indices_p
-            chunk_offsets_p = attn_metadata.chunk_offsets_p
             zero_initial_states_p = attn_metadata.zero_initial_states_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
@@ -903,8 +899,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_dtype=ssm_state.dtype,
                 final_states_out=ssm_state,
                 final_state_indices=state_indices_tensor_p,
-                chunk_indices=chunk_indices_p,
-                chunk_offsets=chunk_offsets_p,
                 checkpoint_token_indices=checkpoint_token_indices_p,
                 checkpoint_states=checkpoint_states_p,
             )

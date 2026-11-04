@@ -42,8 +42,6 @@ class MambaSSDBackend(ABC):
         chunk_size: int | None = None,
         cu_chunk_seqlens: torch.Tensor | None = None,
         last_chunk_indices: torch.Tensor | None = None,
-        chunk_indices: torch.Tensor | None = None,
-        chunk_offsets: torch.Tensor | None = None,
         checkpoint_token_indices: torch.Tensor | None = None,
         checkpoint_states: torch.Tensor | None = None,
         final_states_out: torch.Tensor | None = None,
@@ -82,8 +80,6 @@ class TritonSSDBackend(MambaSSDBackend):
         chunk_size: int | None = None,
         cu_chunk_seqlens: torch.Tensor | None = None,
         last_chunk_indices: torch.Tensor | None = None,
-        chunk_indices: torch.Tensor | None = None,
-        chunk_offsets: torch.Tensor | None = None,
         checkpoint_token_indices: torch.Tensor | None = None,
         checkpoint_states: torch.Tensor | None = None,
         final_states_out: torch.Tensor | None = None,
@@ -151,14 +147,11 @@ class FlashInferSSDBackend(MambaSSDBackend):
         chunk_size: int | None = None,
         cu_chunk_seqlens: torch.Tensor | None = None,
         last_chunk_indices: torch.Tensor | None = None,
-        chunk_indices: torch.Tensor | None = None,
-        chunk_offsets: torch.Tensor | None = None,
         checkpoint_token_indices: torch.Tensor | None = None,
         checkpoint_states: torch.Tensor | None = None,
         final_states_out: torch.Tensor | None = None,
         final_state_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        assert seq_idx is not None
         # FlashInfer takes the state dtype from the initial states.
         assert initial_states is not None
         _, final_states = self._kernel(
@@ -171,9 +164,7 @@ class FlashInferSSDBackend(MambaSSDBackend):
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,
             initial_states=initial_states,
-            seq_idx=seq_idx.unsqueeze(0),
-            chunk_indices=chunk_indices,
-            chunk_offsets=chunk_offsets,
+            cu_seqlens=cu_seqlens,
             checkpoint_token_indices=checkpoint_token_indices,
             checkpoint_state_slots=checkpoint_chunk_indices,
             checkpoint_states=checkpoint_states,
@@ -255,8 +246,6 @@ def mamba_chunk_scan_combined_varlen(
     chunk_size: int | None = None,
     cu_chunk_seqlens: torch.Tensor | None = None,
     last_chunk_indices: torch.Tensor | None = None,
-    chunk_indices: torch.Tensor | None = None,
-    chunk_offsets: torch.Tensor | None = None,
     checkpoint_token_indices: torch.Tensor | None = None,
     checkpoint_states: torch.Tensor | None = None,
     final_states_out: torch.Tensor | None = None,
@@ -264,14 +253,12 @@ def mamba_chunk_scan_combined_varlen(
 ) -> torch.Tensor | None:
     """Unified dispatch for the Mamba2 SSD prefill scan, writing `out` in place.
 
-    `seq_idx` and `checkpoint_chunk_indices` follow the selected backend's
-    layout, as built by `build_ssd_prefill_metadata`: `seq_idx` maps Triton
-    chunks or FlashInfer tokens to sequences, and `checkpoint_chunk_indices`
-    selects each sequence's row of the returned checkpoint states. Triton also
-    reads `chunk_size`, `cu_chunk_seqlens` and `last_chunk_indices`; FlashInfer
-    reads `chunk_indices`, `chunk_offsets`, `checkpoint_token_indices` and
-    writes `checkpoint_states`, and requires `initial_states`, zeros for
-    sequences without cached state.
+    `checkpoint_chunk_indices` follows the selected backend's layout, as built
+    by `build_ssd_prefill_metadata`, and selects each sequence's row of the
+    returned checkpoint states. Triton also reads `chunk_size`, `seq_idx`,
+    `cu_chunk_seqlens` and `last_chunk_indices`; FlashInfer reads
+    `checkpoint_token_indices`, writes `checkpoint_states`, and requires
+    `initial_states`, zeros for sequences without cached state.
 
     Each sequence's final state is written into `final_states_out` at
     `final_state_indices`, or discarded when `final_states_out` is None.
@@ -298,8 +285,6 @@ def mamba_chunk_scan_combined_varlen(
         chunk_size=chunk_size,
         cu_chunk_seqlens=cu_chunk_seqlens,
         last_chunk_indices=last_chunk_indices,
-        chunk_indices=chunk_indices,
-        chunk_offsets=chunk_offsets,
         checkpoint_token_indices=checkpoint_token_indices,
         checkpoint_states=checkpoint_states,
         final_states_out=final_states_out,

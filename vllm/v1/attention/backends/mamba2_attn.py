@@ -123,9 +123,8 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     prep_initial_states: bool = False
     chunk_size: int = 0
 
-    # Sequence index of each scan unit (only for prefill): each Triton chunk
-    # (see the base cu_chunk_seqlen_p and last_chunk_indices_p), or each
-    # FlashInfer token.
+    # Sequence index of each Triton chunk (only for prefill); see the base
+    # cu_chunk_seqlen_p and last_chunk_indices_p.
     seq_idx_p: torch.Tensor | None = None
 
     # Internal prefill checkpoints, one entry per prefill row. The index
@@ -134,19 +133,12 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     checkpoint_chunk_idx: torch.Tensor | None = None
     checkpoint_meta: MambaPrefillCheckpointMetadata | None = None
 
-    # FlashInfer SSD inputs (only for prefill): segments on its packed token
-    # chunk grid, zero initial states for batches without cached state
-    # (FlashInfer takes the state dtype from them), and each row's
-    # checkpoint token with the checkpoint output.
-    chunk_indices_p: torch.Tensor | None = None
-    chunk_offsets_p: torch.Tensor | None = None
+    # FlashInfer SSD inputs (only for prefill): zero initial states for
+    # batches without cached state (FlashInfer takes the state dtype from
+    # them), and each row's checkpoint token with the checkpoint output.
     zero_initial_states_p: torch.Tensor | None = None
     checkpoint_token_indices_p: torch.Tensor | None = None
     checkpoint_states_p: torch.Tensor | None = None
-
-
-# FlashInfer's SSD tiles packed tokens in fixed 128-token chunks.
-_FLASHINFER_SSD_CHUNK_SIZE = 128
 
 
 def build_ssd_prefill_metadata(
@@ -182,39 +174,14 @@ def build_ssd_prefill_metadata(
         )
 
     num_prefills = query_start_loc_p_cpu.numel() - 1
-    num_tokens = int(query_start_loc_p_cpu[-1])
-    starts = query_start_loc_p_cpu[:-1]
-    # Segments start at each sequence, each checkpoint, and each grid line
-    # inside a sequence. Sequences tile the tokens, so that is every line.
-    segment_starts = [
-        starts,
-        torch.arange(0, num_tokens, _FLASHINFER_SSD_CHUNK_SIZE, dtype=starts.dtype),
-    ]
-    if checkpoint_offsets_p is not None:
-        offsets = torch.tensor(checkpoint_offsets_p, dtype=starts.dtype)
-        segment_starts.append((starts + offsets)[offsets > 0])
-    segment_starts_cpu = torch.cat(segment_starts).unique()
-    rows = torch.arange(num_prefills, dtype=torch.int32, device=device)
     states_shape = (num_prefills, *state_shape)
-    metadata = replace(
-        metadata,
-        seq_idx_p=rows.repeat_interleave(
-            query_start_loc_p.diff(), output_size=num_tokens
-        ),
-        chunk_indices_p=async_tensor_h2d(
-            segment_starts_cpu // _FLASHINFER_SSD_CHUNK_SIZE,
-            dtype=torch.int32,
-            device=device,
-        ),
-        chunk_offsets_p=async_tensor_h2d(
-            segment_starts_cpu % _FLASHINFER_SSD_CHUNK_SIZE,
-            dtype=torch.int32,
-            device=device,
-        ),
-        zero_initial_states_p=None
-        if metadata.prep_initial_states
-        else torch.zeros(states_shape, dtype=state_dtype, device=device),
-    )
+    if not metadata.prep_initial_states:
+        metadata = replace(
+            metadata,
+            zero_initial_states_p=torch.zeros(
+                states_shape, dtype=state_dtype, device=device
+            ),
+        )
     if checkpoint is None:
         return metadata
     checkpoint_offsets = checkpoint.checkpoint_offsets
@@ -222,7 +189,9 @@ def build_ssd_prefill_metadata(
     # one have no token to capture.
     return replace(
         metadata,
-        checkpoint_chunk_idx=rows,
+        checkpoint_chunk_idx=torch.arange(
+            num_prefills, dtype=torch.int32, device=device
+        ),
         checkpoint_token_indices_p=torch.where(
             checkpoint_offsets > 0, query_start_loc_p[:-1] + checkpoint_offsets, -1
         ),

@@ -148,12 +148,13 @@ def test_builder_emits_one_checkpoint_entry_per_prefill_row():
     assert meta.cu_chunk_seqlen_p[ckpt_chunk + 1].item() == 768
 
 
-def test_flashinfer_layout_starts_a_segment_at_each_checkpoint(monkeypatch):
+def test_flashinfer_layout_captures_each_checkpoint_token(monkeypatch):
     """FlashInfer counterpart of the chunk split landing on the checkpoint.
 
     Row 1 checkpoints 768 tokens in, at packed token 868: off FlashInfer's
-    128-token grid and not a sequence start. Unless a segment starts there and
-    the row captures that token, prefix caching stores a wrong state.
+    128-token grid and not a sequence start. FlashInfer starts a segment at
+    each checkpoint token, so unless the row names that token, prefix caching
+    stores a wrong state.
     """
     monkeypatch.setattr(
         ssd_dispatch,
@@ -163,23 +164,7 @@ def test_flashinfer_layout_starts_a_segment_at_each_checkpoint(monkeypatch):
     builder = _create_mamba2_builder()
     meta = _build(builder, seq_lens=[100, 900], query_lens=[100, 900])
 
-    segment_starts = meta.chunk_indices_p * 128 + meta.chunk_offsets_p
-    assert 868 in segment_starts.tolist()
     assert meta.checkpoint_token_indices_p.tolist() == [-1, 868]
-
-
-def test_flashinfer_layout_builds_a_prefill_shorter_than_the_grid(monkeypatch):
-    """A prefill batch under 128 tokens is one segment per sequence."""
-    monkeypatch.setattr(
-        ssd_dispatch,
-        "_mamba_ssd_backend",
-        object.__new__(ssd_dispatch.FlashInferSSDBackend),
-    )
-    builder = _create_mamba2_builder()
-    meta = _build(builder, seq_lens=[40, 60], query_lens=[40, 60])
-
-    segment_starts = meta.chunk_indices_p * 128 + meta.chunk_offsets_p
-    assert segment_starts.tolist() == [0, 40]
 
 
 def test_update_block_table_regathers_checkpoint_blocks():
