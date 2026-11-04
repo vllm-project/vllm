@@ -9,6 +9,8 @@
 
 set -euo pipefail
 
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 python3 - <<'PY'
 import importlib.metadata as metadata
 import sys
@@ -52,3 +54,8 @@ if missing:
         + ". Rebuild the CI image instead of installing them at runtime."
     )
 PY
+
+if python3 -c 'import sys, torch; sys.exit(torch.version.hip is not None)'; then
+    python3 "$root/tools/kv_connector_lock.py" verify \
+        "$root/requirements/test/kv_connectors_cuda.txt"
+fi

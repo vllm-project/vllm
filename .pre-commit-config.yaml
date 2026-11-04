@@ -60,6 +60,7 @@ repos:
       name: pip-compile-kv-connectors
       args: [
         requirements/test/kv_connectors_cuda.in,
+        -c, requirements/cuda.txt,
         -c, requirements/test/cuda.txt,
         -o, requirements/test/kv_connectors_cuda.txt,
         --generate-hashes,
@@ -308,6 +309,13 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-kv-connector-lock
+    name: Check the CI KV connector lock matches requirements/kv_connectors.txt
+    entry: python tools/kv_connector_lock.py align
+    language: python
+    files: ^(requirements/(kv_connectors\.txt|test/kv_connectors_cuda\.(in|txt))|tools/kv_connector_lock\.py)$
+    pass_filenames: false
+    additional_dependencies: [packaging]
   - id: check-dockerignore-tracked
     name: Check .dockerignore does not exclude tracked files
     entry: python tools/pre_commit/check_dockerignore_tracked.py
