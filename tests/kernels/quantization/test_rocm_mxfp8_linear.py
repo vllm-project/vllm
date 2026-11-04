@@ -72,23 +72,89 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
 
 
 @pytest.mark.parametrize(
-    "n,k,selected,fallback",
+    "n,k,tiles",
     [
-        (2560, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (1536, 6144, (16, 16, 1024, 2, 3), (16, 16, 1024, 2, 2)),
-        (6144, 768, (16, 16, 256, 2, 3), (16, 32, 256, 4, 3)),
+        (
+            2560,
+            6144,
+            {
+                16: (16, 16, 1024, 2, 3),
+                32: (32, 16, 1024, 2, 3),
+                48: (16, 16, 1024, 2, 2),
+                96: (32, 32, 512, 2, 3),
+                192: (64, 32, 512, 2, 3),
+                256: (64, 64, 512, 4, 2),
+            },
+        ),
+        (
+            6144,
+            2048,
+            {
+                16: (16, 32, 512, 2, 3),
+                32: (32, 32, 512, 2, 3),
+                64: (64, 32, 512, 2, 3),
+                128: (64, 64, 512, 4, 2),
+                256: (128, 64, 256, 8, 3),
+            },
+        ),
+        (
+            1536,
+            6144,
+            {
+                32: (16, 16, 1024, 2, 3),
+                64: (32, 16, 1024, 2, 3),
+                80: (16, 16, 1024, 2, 2),
+                160: (32, 32, 512, 2, 3),
+                256: (64, 32, 512, 2, 3),
+            },
+        ),
+        (
+            6144,
+            768,
+            {
+                16: (16, 16, 256, 2, 3),
+                32: (32, 16, 256, 2, 3),
+                64: (64, 32, 256, 4, 3),
+                128: (64, 64, 256, 4, 3),
+                256: (128, 64, 256, 8, 3),
+            },
+        ),
     ],
 )
-def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, selected, fallback):
-    """The gfx950 small-M tuning is shape-scoped and ends after M=16."""
+def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, tiles):
+    """The gfx950 tuning is shape-scoped: each tile covers M up to its key
+    (and past the previous key); M beyond 256 uses the generic selection."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
     from vllm.platforms.rocm import on_gfx950
 
     if not on_gfx950():
-        pytest.skip("MiniMax-M3.1 small-M tuning requires gfx950")
-    for num_tokens in (1, 8, 16):
-        assert rocm_native._select_cfg(num_tokens, n, k) == selected
-    assert rocm_native._select_cfg(17, n, k) == fallback
+        pytest.skip("MiniMax-M3.1 tuning requires gfx950")
+    lo = 1
+    for max_m, tile in tiles.items():
+        for num_tokens in (lo, max_m):
+            assert rocm_native._select_cfg(num_tokens, n, k) == tile
+        lo = max_m + 1
+    assert rocm_native._select_m31_tp4_cfg(257, n, k) is None
+
+
+@pytest.mark.parametrize(
+    "n,k",
+    [
+        (2560, 6144),
+        (2304, 6144),
+        (6144, 2048),
+        (1536, 6144),
+        (6144, 768),
+        (6144, 6144),
+        (6144, 3072),
+    ],
+)
+def test_rocm_mxfp8_linear_m31_tp4_tiles_are_valid(n, k):
+    from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
+
+    for _, tile in rocm_native._M31_TP4_TILES[(n, k)]:
+        if tile is not None:
+            assert k % tile[2] == 0, "the K loop is unmasked"
 
 
 @pytest.mark.parametrize(
