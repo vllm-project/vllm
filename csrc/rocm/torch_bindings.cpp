@@ -39,6 +39,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "int group_size) -> Tensor");
   rocm_ops.impl("wvSplitK_int4_g", torch::kCUDA, &wvSplitK_int4_g);
 
+  // Fused MoE variant of wvSplitK_int4_g for decode: one launch over all
+  // expert blocks, symmetric weights only
+  rocm_ops.def(
+      "fused_moe_wvSplitK_int4_gemm(Tensor a, Tensor w, Tensor scales, "
+      "Tensor! c, Tensor expert_ids, Tensor? sorted_token_ids, "
+      "int block_size_m, int top_k, int CuCount, int group_size) -> ()");
+  rocm_ops.impl("fused_moe_wvSplitK_int4_gemm", torch::kCUDA,
+                &fused_moe_wvSplitK_int4_gemm);
+
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
       "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "

@@ -221,15 +221,12 @@ __device__ __forceinline__ void load_act_chunk_into_lds(
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false,
           bool CHUNKED = false, uint32_t LDS_LEN = LDS_SIZE / 2>
-__global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx, const int By,
-                          const uint8_t* B_packed,
-                          const scalar_t* __restrict__ A, const scalar_t* scale,
-                          const uint32_t* zero_points,
-                          const scalar_t* __restrict__ BIAS, scalar_t* C,
-                          const int _WvPrGrp, const int CuCount,
-                          const int group_stride,
-                          const int B_row_stride_bytes) {
+__device__ __forceinline__ void wvSplitK_int4_compute_sml_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const uint32_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int group_stride, const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_LEN;
 
   union bigTypeA {
@@ -590,6 +587,24 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false,
+          bool CHUNKED = false, uint32_t LDS_LEN = LDS_SIZE / 2>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitK_int4_hf_sml_(const int K, const int M, const int Bx, const int By,
+                          const uint8_t* B_packed,
+                          const scalar_t* __restrict__ A, const scalar_t* scale,
+                          const uint32_t* zero_points,
+                          const scalar_t* __restrict__ BIAS, scalar_t* C,
+                          const int _WvPrGrp, const int CuCount,
+                          const int group_stride,
+                          const int B_row_stride_bytes) {
+  wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
+                             GROUP_SIZE, HAS_ZERO_POINTS, CHUNKED, LDS_LEN>(
+      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
+      group_stride, B_row_stride_bytes);
+}
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false,
@@ -610,13 +625,12 @@ __global__ void wvSplitK_int4_hf_sml_(
 #if defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
-__global__ void __launch_bounds__(WvPrGrp* THRDS)
-    wvSplitK_int4_hf_(const int K, const int M, const int Bx, const int By,
-                      const uint8_t* B_packed, const scalar_t* __restrict__ A,
-                      const scalar_t* scale, const uint32_t* zero_points,
-                      const scalar_t* __restrict__ BIAS, scalar_t* C,
-                      const int _WvPrGrp, const int CuCount,
-                      const int group_stride, const int B_row_stride_bytes) {
+__device__ __forceinline__ void wvSplitK_int4_compute_(
+    const int K, const int M, const int Bx, const int By,
+    const uint8_t* B_packed, const scalar_t* __restrict__ A,
+    const scalar_t* scale, const uint32_t* zero_points,
+    const scalar_t* __restrict__ BIAS, scalar_t* C, const int _WvPrGrp,
+    const int CuCount, const int group_stride, const int B_row_stride_bytes) {
   constexpr int max_lds_len = LDS_SIZE / 2;
 
   union bigTypeA {
@@ -871,6 +885,21 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       m = startColumn;
     }
   }
+}
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE = 0, bool HAS_ZERO_POINTS = false>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    wvSplitK_int4_hf_(const int K, const int M, const int Bx, const int By,
+                      const uint8_t* B_packed, const scalar_t* __restrict__ A,
+                      const scalar_t* scale, const uint32_t* zero_points,
+                      const scalar_t* __restrict__ BIAS, scalar_t* C,
+                      const int _WvPrGrp, const int CuCount,
+                      const int group_stride, const int B_row_stride_bytes) {
+  wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
+                         GROUP_SIZE, HAS_ZERO_POINTS>(
+      K, M, Bx, By, B_packed, A, scale, zero_points, BIAS, C, _WvPrGrp, CuCount,
+      group_stride, B_row_stride_bytes);
 }
 #else   // !defined(__HIP__GFX1X__)
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
@@ -1271,4 +1300,227 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
 #undef WVSPLIT_INT4G_DISPATCH
 
   return out_c;
+}
+
+// Reduced LDS for the MoE sml kernel: 8192 elements (16 KB) covers N*K up to
+// e.g. N=4, K=2048 and lets more workgroups share a CU than the full 64 KB.
+constexpr int MOE_LDS_ELEMS = 8192;
+
+// MoE kernels: blockIdx.y selects a block of N rows routed to one expert.
+// With sorted_token_ids (N == 1), the row is read from the unpermuted
+// activations and written to its slot; otherwise rows are pre-permuted.
+#if defined(__HIP__GFX1X__)
+template <typename scalar_t, int N>
+__device__ __forceinline__ void moe_block_rows(
+    const scalar_t* A_base, scalar_t* C_base,
+    const int* __restrict__ sorted_token_ids, const int top_k, const int K,
+    const int M, const scalar_t*& A, scalar_t*& C) {
+  if (sorted_token_ids) {
+    const int slot_id = sorted_token_ids[blockIdx.y * N];
+    A = A_base + (long)(slot_id / top_k) * K;
+    C = C_base + (long)slot_id * M;
+  } else {
+    const long base_row = (long)blockIdx.y * N;
+    A = A_base + base_row * K;
+    C = C_base + base_row * M;
+  }
+}
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    moe_wvSplitK_int4_hf_sml_(const int K, const int M, const uint8_t* B_base,
+                              const int B_row_stride,
+                              const scalar_t* __restrict__ A_base,
+                              const scalar_t* scale_base, scalar_t* C_base,
+                              const int* __restrict__ expert_ids,
+                              const int* __restrict__ sorted_token_ids,
+                              const int top_k, const long expert_stride_w,
+                              const long expert_stride_s, const int _WvPrGrp,
+                              const int CuCount) {
+  const int expert_id = expert_ids[blockIdx.y];
+  if (expert_id == -1) return;
+
+  const scalar_t* A;
+  scalar_t* C;
+  moe_block_rows<scalar_t, N>(A_base, C_base, sorted_token_ids, top_k, K, M, A,
+                              C);
+  wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
+                             GROUP_SIZE, false, false, MOE_LDS_ELEMS>(
+      K, M, 1, 1, B_base + expert_id * expert_stride_w, A,
+      scale_base + expert_id * expert_stride_s, nullptr, nullptr, C, _WvPrGrp,
+      CuCount, K / GROUP_SIZE, B_row_stride);
+}
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    moe_wvSplitK_int4_hf_(const int K, const int M, const uint8_t* B_base,
+                          const int B_row_stride,
+                          const scalar_t* __restrict__ A_base,
+                          const scalar_t* scale_base, scalar_t* C_base,
+                          const int* __restrict__ expert_ids,
+                          const int* __restrict__ sorted_token_ids,
+                          const int top_k, const long expert_stride_w,
+                          const long expert_stride_s, const int _WvPrGrp,
+                          const int CuCount) {
+  const int expert_id = expert_ids[blockIdx.y];
+  if (expert_id == -1) return;
+
+  const scalar_t* A;
+  scalar_t* C;
+  moe_block_rows<scalar_t, N>(A_base, C_base, sorted_token_ids, top_k, K, M, A,
+                              C);
+  wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
+                         GROUP_SIZE, false>(
+      K, M, 1, 1, B_base + expert_id * expert_stride_w, A,
+      scale_base + expert_id * expert_stride_s, nullptr, nullptr, C, _WvPrGrp,
+      CuCount, K / GROUP_SIZE, B_row_stride);
+}
+#else   // !defined(__HIP__GFX1X__)
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE>
+__global__ void moe_wvSplitK_int4_hf_sml_(
+    const int K, const int M, const uint8_t* B_base, const int B_row_stride,
+    const scalar_t* __restrict__ A_base, const scalar_t* scale_base,
+    scalar_t* C_base, const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_token_ids, const int top_k,
+    const long expert_stride_w, const long expert_stride_s, const int _WvPrGrp,
+    const int CuCount) {
+  UNREACHABLE_CODE
+}
+
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GROUP_SIZE>
+__global__ void moe_wvSplitK_int4_hf_(
+    const int K, const int M, const uint8_t* B_base, const int B_row_stride,
+    const scalar_t* __restrict__ A_base, const scalar_t* scale_base,
+    scalar_t* C_base, const int* __restrict__ expert_ids,
+    const int* __restrict__ sorted_token_ids, const int top_k,
+    const long expert_stride_w, const long expert_stride_s, const int _WvPrGrp,
+    const int CuCount) {
+  UNREACHABLE_CODE
+}
+#endif  // defined(__HIP__GFX1X__)
+
+// Fused MoE W4A16 GEMM for decode, symmetric (uint4b8) weights only.
+// A single launch covers all experts: grid.y indexes the expert blocks.
+// a:                [num_tokens, K] if sorted_token_ids is given, else
+//                   [num_expert_blocks * block_size_m, K] pre-permuted
+// w:                [E, N_weight, K/8] int32, ExLlama shuffle packed; the
+//                   row stride may be padded
+// scales:           [E, N_weight, K/group_size]
+// c:                [num_slots, N_weight] output
+// expert_ids:       [num_expert_blocks] int32, -1 marks a padding block
+// sorted_token_ids: optional [num_expert_blocks] int32 slot ids, only valid
+//                   with block_size_m == 1
+// N is block_size_m, the rows per expert block.
+template <int N>
+void fused_moe_wvSplitK_int4_gemm_impl(VLLM_MOE_SKINNY_INT4_SIG) {
+  TORCH_CHECK(a.dtype() == torch::kFloat16 || a.dtype() == torch::kBFloat16,
+              "Activation must be float16 or bfloat16");
+  TORCH_CHECK(scales.dtype() == a.dtype() && c.dtype() == a.dtype(),
+              "Scale and output dtypes must match activation dtype");
+  TORCH_CHECK(a.is_contiguous() && c.is_contiguous() && scales.is_contiguous(),
+              "Activations, output and scales must be contiguous");
+  TORCH_CHECK(w.dtype() == torch::kInt32 && w.dim() == 3 && w.stride(2) == 1,
+              "Weights must be int32 [E, N, K/8] with contiguous rows");
+  TORCH_CHECK(group_size == 128, "group_size must be 128, got ", group_size);
+  TORCH_CHECK(!sorted_token_ids.has_value() || N == 1,
+              "sorted_token_ids requires block_size_m == 1");
+
+  const int M_in = static_cast<int>(w.size(1));
+  const int K_in = static_cast<int>(w.size(2)) * 8;
+  TORCH_CHECK(a.size(1) == K_in, "Activation K (", a.size(1),
+              ") does not match weight K (", K_in, ")");
+  TORCH_CHECK(K_in % 16 == 0, "K must be divisible by 16");
+  TORCH_CHECK(scales.size(1) == M_in && scales.size(2) == K_in / group_size,
+              "Scales must be [E, N, K/group_size]");
+
+  const int num_expert_blocks = static_cast<int>(expert_ids.size(0));
+  const int B_row_stride = static_cast<int>(w.stride(1) * sizeof(int32_t));
+  const long expert_stride_w = w.stride(0) * static_cast<long>(sizeof(int32_t));
+  const long expert_stride_s = scales.stride(0);
+  const int top_k_in =
+      sorted_token_ids.has_value() ? static_cast<int>(top_k) : 1;
+  const int max_lds_len = get_lds_size_int4() / 2;
+
+  // Every expert block is spread across all CUs.
+  dim3 grid(CuCount, num_expert_blocks);
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+#define MOE_WVSPLITK_INT4G_LAUNCH(_YTILE, _W, _AC, _UNRL, _N, _GS)            \
+  {                                                                           \
+    dim3 block(32, _W);                                                       \
+    int __wvPrGrp = mindiv_int4(M_in, CuCount * _YTILE, _W);                  \
+    if (K_in * _N <= MOE_LDS_ELEMS && M_in % _YTILE == 0)                     \
+      moe_wvSplitK_int4_hf_sml_<fptype, 32, _YTILE, _W, _AC, _UNRL, _N, _GS>  \
+          <<<grid, block, 0, stream>>>(K_in, M_in, wptr, B_row_stride, aptr,  \
+                                       sptr, cptr, eidptr, stidptr, top_k_in, \
+                                       expert_stride_w, expert_stride_s,      \
+                                       __wvPrGrp, CuCount);                   \
+    else                                                                      \
+      moe_wvSplitK_int4_hf_<fptype, 32, _YTILE, _W, _AC, _UNRL, _N, _GS>      \
+          <<<grid, block, 0, stream>>>(K_in, M_in, wptr, B_row_stride, aptr,  \
+                                       sptr, cptr, eidptr, stidptr, top_k_in, \
+                                       expert_stride_w, expert_stride_s,      \
+                                       __wvPrGrp, CuCount);                   \
+  }
+
+#define MOE_WVSPLIT_INT4G_GS_W_AC(_YTILE, _W, _AC, _UNRL, _N) \
+  MOE_WVSPLITK_INT4G_LAUNCH(_YTILE, _W, _AC, _UNRL, _N, 128)
+
+#define MOE_WVSPLIT_INT4G_GS(_YTILE, _UNRL, _N) \
+  MOE_WVSPLIT_INT4G_GS_W_AC(_YTILE, 16, 16, _UNRL, _N)
+
+#define MOE_WVSPLIT_INT4G_TILE(_sYT, __N)                             \
+  {                                                                   \
+    if (K_in * __N > max_lds_len) {                                   \
+      if (_sYT < 30)                                                  \
+        MOE_WVSPLIT_INT4G_GS(4, 2, __N)                               \
+      else                                                            \
+        MOE_WVSPLIT_INT4G_GS(4, 1, __N)                               \
+    } else if (__N >= 4 && _sYT >= 480)                               \
+      MOE_WVSPLIT_INT4G_GS(4, 1, __N)                                 \
+    else if (__N >= 3 && _sYT >= 40)                                  \
+      MOE_WVSPLIT_INT4G_GS(4, 1, __N)                                 \
+    else if (__N >= 3 && _sYT < 40 && (K_in <= 2048 || K_in >= 4096)) \
+      MOE_WVSPLIT_INT4G_GS(2, 4, __N)                                 \
+    else if (__N >= 3 && _sYT < 40)                                   \
+      MOE_WVSPLIT_INT4G_GS(2, 2, __N)                                 \
+    else if (__N >= 2)                                                \
+      MOE_WVSPLIT_INT4G_GS(2, 2, __N)                                 \
+    else if (K_in == 2048)                                            \
+      /* gfx1151 gate_up: wider per-thread loads. */                  \
+      MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 32, 4, __N)                    \
+    else if (K_in == 512)                                             \
+      /* gfx1151 down-proj: narrow loads avoid the VGPR spills of     \
+         W=32, AC=32. */                                              \
+      MOE_WVSPLIT_INT4G_GS_W_AC(4, 32, 8, 1, __N)                     \
+    else                                                              \
+      MOE_WVSPLIT_INT4G_GS(2, 4, __N)                                 \
+  }
+
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
+      a.scalar_type(), "fused_moe_wvSplitK_int4_gemm", [&] {
+        using fptype = typename scalar<scalar_t>::type;
+        const uint8_t* wptr = reinterpret_cast<const uint8_t*>(w.data_ptr());
+        const fptype* aptr = reinterpret_cast<const fptype*>(a.data_ptr());
+        const fptype* sptr = reinterpret_cast<const fptype*>(scales.data_ptr());
+        fptype* cptr = reinterpret_cast<fptype*>(c.data_ptr());
+        const int* eidptr = expert_ids.data_ptr<int32_t>();
+        const int* stidptr = sorted_token_ids.has_value()
+                                 ? sorted_token_ids->data_ptr<int32_t>()
+                                 : nullptr;
+
+        int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);
+        MOE_WVSPLIT_INT4G_TILE(sYT, N)
+      });
+
+#undef MOE_WVSPLITK_INT4G_LAUNCH
+#undef MOE_WVSPLIT_INT4G_GS_W_AC
+#undef MOE_WVSPLIT_INT4G_GS
+#undef MOE_WVSPLIT_INT4G_TILE
 }

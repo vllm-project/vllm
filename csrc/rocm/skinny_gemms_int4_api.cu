@@ -35,3 +35,35 @@ torch::Tensor wvSplitK_int4_g(VLLM_SKINNY_INT4_SIG) {
                                std::to_string(in_b.size(0)));
   }
 }
+
+void fused_moe_wvSplitK_int4_gemm(
+    const at::Tensor& a, const at::Tensor& w, const at::Tensor& scales,
+    at::Tensor& c, const at::Tensor& expert_ids,
+    const std::optional<at::Tensor>& sorted_token_ids,
+    const int64_t block_size_m, const int64_t top_k, const int64_t CuCount,
+    const int64_t group_size) {
+  switch (block_size_m) {
+    case 1:
+      return fused_moe_wvSplitK_int4_gemm_impl<1>(a, w, scales, c, expert_ids,
+                                                  sorted_token_ids, top_k,
+                                                  CuCount, group_size);
+    case 2:
+      return fused_moe_wvSplitK_int4_gemm_impl<2>(a, w, scales, c, expert_ids,
+                                                  sorted_token_ids, top_k,
+                                                  CuCount, group_size);
+    case 3:
+      return fused_moe_wvSplitK_int4_gemm_impl<3>(a, w, scales, c, expert_ids,
+                                                  sorted_token_ids, top_k,
+                                                  CuCount, group_size);
+    case 4:
+      return fused_moe_wvSplitK_int4_gemm_impl<4>(a, w, scales, c, expert_ids,
+                                                  sorted_token_ids, top_k,
+                                                  CuCount, group_size);
+    case 5:
+      return fused_moe_wvSplitK_int4_gemm_impl<5>(a, w, scales, c, expert_ids,
+                                                  sorted_token_ids, top_k,
+                                                  CuCount, group_size);
+    default:
+      TORCH_CHECK(false, "block_size_m must be in [1, 5], got ", block_size_m);
+  }
+}

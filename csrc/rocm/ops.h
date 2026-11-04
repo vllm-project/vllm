@@ -15,6 +15,13 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
                               const std::optional<at::Tensor>& in_bias,
                               const int64_t CuCount, const int64_t group_size);
 
+void fused_moe_wvSplitK_int4_gemm(
+    const at::Tensor& a, const at::Tensor& w, const at::Tensor& scales,
+    at::Tensor& c, const at::Tensor& expert_ids,
+    const std::optional<at::Tensor>& sorted_token_ids,
+    const int64_t block_size_m, const int64_t top_k, const int64_t CuCount,
+    const int64_t group_size);
+
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
                          const int64_t CuCount);
