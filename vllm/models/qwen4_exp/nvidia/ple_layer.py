@@ -23,7 +23,6 @@ from vllm.model_executor.layers.mamba.checkpoint import (
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
 from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
@@ -35,6 +34,7 @@ from vllm.v1.attention.backends.short_conv_attn import (
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 from ..common.ops.ple import ple_conv, ple_gate
+from ..common.ple import ple_conv_state_shape
 from .ngram_embedding import Qwen4ExpNGramEmbedding
 
 
@@ -192,11 +192,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
 
     def get_state_shape(self) -> Sequence[tuple[int, ...]]:
-        return MambaStateShapeCalculator.short_conv_state_shape(
-            tp_world_size=1,
-            intermediate_size=self.hc_hidden_size,
-            conv_kernel=self.conv_state_len + 1,
-            num_spec=self.num_spec_tokens,
+        return ple_conv_state_shape(
+            self.model_config.hf_text_config, self.num_spec_tokens
         )
 
     def get_prefill_checkpoint_alignment(self) -> int | None:

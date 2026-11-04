@@ -962,7 +962,6 @@ class Platform:
         from vllm.v1.attention.backend import MultipleOf
         from vllm.v1.kv_cache_interface import (
             FullAttentionSpec,
-            MambaSpec,
             MLAAttentionSpec,
             get_kv_quant_mode,
         )
@@ -1052,18 +1051,10 @@ class Platform:
             model_config.architecture,
             model_config=model_config,
         )
-        # Qwen4Exp has multiple Mamba state layouts with different sizes.
-        if hasattr(model_cls, "get_mamba_specs_from_config"):
-            mamba_page_size = max(
-                spec.page_size_bytes
-                for spec in model_cls.get_mamba_specs_from_config(vllm_config)
-            )
-        else:
-            mamba_page_size = MambaSpec(
-                shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
-                dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-                block_size=-1,
-            ).page_size_bytes
+        mamba_page_size = max(
+            spec.page_size_bytes
+            for spec in model_cls.get_mamba_specs_from_config(vllm_config)
+        )
 
         if mamba_page_size == 0:
             return

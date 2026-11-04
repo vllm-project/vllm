@@ -164,10 +164,6 @@ class Qwen4ExpQSABackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
-    @classmethod
-    def supports_kv_connector(cls) -> bool:
-        return False
-
 
 class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
     """Run paged sparse GQA with the QSA Triton kernel."""
