@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -76,6 +77,8 @@ from ..common.engram import (
     gather_engram_hashes,
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
+from ..nvidia.pipeline import PipelineBoundary, get_pipeline_boundaries
+from .pipeline import RocmPipelineRelay
 
 if typing.TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -356,6 +359,15 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
+                if self.engram is not None and engram_hashes is not None:
+                    # A pipeline stage that starts at an Engram layer receives
+                    # the stream with the previous stage's post already
+                    # applied: inject here, before this block's pre.
+                    residual = self.engram(
+                        residual,
+                        engram_hashes[:, self.engram.layer_hash_index],
+                        engram_mask,
+                    )
                 residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
                     residual,
                     self.hc_attn_fn,
@@ -460,14 +472,17 @@ class DeepseekV4DecoderLayer(nn.Module):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> None:
         """Write the KV ``forward`` would for the replay layers' inputs, skipping
         the rest of the layer; the replay batch then reruns its rows."""
         # The replay batch rules out Engram and sequence parallel here.
         assert self.engram is None and not self.use_sequence_parallel
+        if residual is None:
+            # A PP stage that starts at the cut: x is the posted stream.
+            residual, x, post_mix, res_mix = x, None, None, None
         fuse_attn_norm = self.fuse_seam_norm
         residual, post_mix, res_mix, x, _attn_pre = self.mhc_pre_delayed(
             residual,
@@ -500,6 +515,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        self.pipeline_relay = self._make_pipeline_relay(vllm_config, prefix)
         self.use_mega_moe = False
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
         if self.use_mega_moe and not vllm_config.parallel_config.enable_expert_parallel:
@@ -574,6 +590,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
+        if self.pipeline_relay is not None:
+            self.pipeline_relay.configure(
+                self.layers[self.start_layer].attn, vllm_config
+            )
+            self.pipeline_relay.configure_consumers(
+                islice(self.layers, self.start_layer, self.end_layer)
+            )
 
         # Config flag is the switch. On ROCm, attention forces
         # swa_cache_layer.bounded_replay off only when the CDNA version is
@@ -658,6 +681,42 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _make_pipeline_relay(
+        self, vllm_config: VllmConfig, prefix: str
+    ) -> RocmPipelineRelay | None:
+        """The relay of the cache rows, top-k and source replicas a cut inside a
+        KV-sharing group needs; built before the layers, which look the
+        replicas up."""
+        config = vllm_config.model_config.hf_config
+        pp_size = self.parallel_config.pipeline_parallel_size
+        boundaries = get_pipeline_boundaries(
+            config,
+            [
+                get_pp_indices(config.num_hidden_layers, rank, pp_size)
+                for rank in range(pp_size)
+            ],
+        )
+        if not any(boundary.needs_relay for boundary in boundaries):
+            return None
+        if (
+            not vllm_config.use_v2_model_runner
+            or self.parallel_config.decode_context_parallel_size != 1
+            or self.parallel_config.use_ubatching
+            or vllm_config.speculative_config is not None
+            or vllm_config.kv_transfer_config is not None
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 cross-stage cache relay requires MRV2 and DCP=1, "
+                "without microbatching, speculative decoding or KV transfer."
+            )
+        pp_rank = get_pp_group().rank_in_group
+        return RocmPipelineRelay(
+            vllm_config,
+            prefix,
+            boundaries[pp_rank - 1] if pp_rank > 0 else PipelineBoundary(),
+            boundaries[pp_rank] if pp_rank < pp_size - 1 else PipelineBoundary(),
+        )
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -670,20 +729,25 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # layer and keeps that shape until the final hc collapse — plus the
         # (num_tokens, hc_mult) pre-mix the next rank's first layer needs
         # for its attention collapse.
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.hc_mult, self.config.hidden_size),
-                    dtype=dtype,
-                    device=device,
-                ),
-                "pre_mix": torch.zeros(
-                    (batch_size, self.hc_mult),
-                    dtype=torch.float32,
-                    device=device,
-                ),
-            }
-        )
+        tensors = {
+            "hidden_states": torch.zeros(
+                (batch_size, self.hc_mult, self.config.hidden_size),
+                dtype=dtype,
+                device=device,
+            ),
+            "pre_mix": torch.zeros(
+                (batch_size, self.hc_mult),
+                dtype=torch.float32,
+                device=device,
+            ),
+        }
+        if self.pipeline_relay is not None:
+            tensors.update(
+                self.pipeline_relay.empty_tensors(
+                    self.pipeline_relay.incoming, batch_size, device
+                )
+            )
+        return IntermediateTensors(tensors)
 
     def forward(
         self,
@@ -701,6 +765,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            if self.pipeline_relay is not None:
+                self.pipeline_relay.transfer(
+                    positions,
+                    self.topk_indices_buffer,
+                    self.candidate_block_buffer,
+                    intermediate_tensors,
+                )
 
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
@@ -832,8 +903,15 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
 
         if not get_pp_group().is_last_rank:
+            relayed = (
+                self.pipeline_relay.transfer(
+                    positions, self.topk_indices_buffer, self.candidate_block_buffer
+                )
+                if self.pipeline_relay is not None
+                else {}
+            )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "pre_mix": pre_mix}
+                {"hidden_states": hidden_states, "pre_mix": pre_mix, **relayed}
             )
 
         if self.use_sequence_parallel:
@@ -922,9 +1000,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
         pre_mix: torch.Tensor,
-        post_mix: torch.Tensor,
-        res_mix: torch.Tensor,
-        residual: torch.Tensor,
+        post_mix: torch.Tensor | None,
+        res_mix: torch.Tensor | None,
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, ...]:
         """Layers past the last KV source, on the rows they are given.
 
@@ -935,9 +1013,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # and sequence parallel is unsupported while replay is on.
         cut_aux: list[torch.Tensor] = []
         if self.decoder_replay_start in self.aux_hidden_state_layers:
-            cut_aux.append(
-                self.mhc_post(hidden_states, residual, post_mix, res_mix).mean(dim=1)
+            # No residual: the stage starts at the cut, its input already posted.
+            settled = (
+                hidden_states
+                if residual is None
+                else self.mhc_post(hidden_states, residual, post_mix, res_mix)
             )
+            cut_aux.append(settled.mean(dim=1))
         (
             hidden_states,
             residual,

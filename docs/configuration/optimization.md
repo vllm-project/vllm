@@ -123,6 +123,8 @@ llm = LLM(
 )
 ```
 
+Stages get equal layer counts by default. Set `VLLM_PP_LAYER_PARTITION` to the per-stage layer counts (e.g. `VLLM_PP_LAYER_PARTITION=10,30`) when layers cost unequal amounts. For example, with DeepSeek-V4.1's decoder SWA bounded replay, prefill runs layers 21 and up on each request's last 128 tokens only, so PP2 balances near a 10/30 cut rather than 20/20. A DeepSeek-V4.1 cut inside a KV-sharing group (layers sharing one KV source layer) sends that source's KV, index keys and top-k to the next stage, which keeps a copy of the source's caches, so that stage's KV cache pool shrinks.
+
 ### Expert Parallelism (EP)
 
 Expert parallelism is a specialized form of parallelism for Mixture of Experts (MoE) models, where different expert networks are distributed across GPUs.

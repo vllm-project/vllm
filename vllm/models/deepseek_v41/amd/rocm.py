@@ -582,6 +582,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             str, tuple[torch.Tensor, torch.Tensor]
         ] = {}
         self._index_source_prefix: str | None = None
+        # Set on a pipeline stage's first consumer of a relayed index source:
+        # the replica never runs, so that consumer refreshes its memos.
+        self._refreshes_relayed_index_source = False
         if self.compress_ratio > 0:
             assert self.index_source_layer_id is not None
             self._index_source_prefix = _replace_layer_index(
@@ -1109,7 +1112,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         assert self._index_source_prefix is not None
 
         source = self._static_forward_context[self._index_source_prefix]
-        if source is self:
+        if source is self or self._refreshes_relayed_index_source:
             # Fresh indices as of this layer; drop what the last step cached.
             source._topk_ragged_cache = {}
         cached = source._topk_ragged_cache.get(self.compress_ratio)
@@ -1390,7 +1393,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         assert self.compressed_cache_prefix is not None
 
         source = self._static_forward_context[self._index_source_prefix]
-        if source is self:
+        if source is self or self._refreshes_relayed_index_source:
             source._prefill_topk_ragged_cache = {}
         cached = source._prefill_topk_ragged_cache.get(self.compressed_cache_prefix)
         if cached is not None:

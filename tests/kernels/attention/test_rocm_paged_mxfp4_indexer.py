@@ -21,6 +21,7 @@ if not current_platform.is_rocm():
     pytest.skip("ROCm-only", allow_module_level=True)
 
 from vllm.config import CUDAGraphMode
+from vllm.models.deepseek_v41.amd.pipeline import copy_rocm_mxfp4_index_rows
 from vllm.models.deepseek_v41.amd.rocm import (
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
@@ -296,6 +297,38 @@ def test_k_store_stays_inside_its_pages(block):
     set_random_seed(0)
     case = _Case([700, 333], block)
     assert int(case.pool[~case.page_bytes].count_nonzero()) == 0
+
+
+@BLOCKS
+def test_pipeline_relay_round_trips_preshuffled_keys(block):
+    """The PP cache relay reads each compressed key out of the preshuffled
+    pages as its natural-order row, and writing the rows back rebuilds the
+    pages byte for byte."""
+    set_random_seed(0)
+    case = _Case([700, 333], block)
+    rebuilt = torch.zeros_like(case.pool)
+    for ratio, cache in case.cache.items():
+        entries = cache.shape[1]
+        target = torch.as_strided(
+            rebuilt, cache.shape, cache.stride(), cache.storage_offset()
+        )
+        for req, n in enumerate(case.seq_lens):
+            pos = torch.arange(n, device=DEVICE)
+            comp = pos // ratio
+            boundary = (pos + 1) % ratio == 0
+            page = case.block_table[req, comp // entries].long()
+            slot = torch.where(boundary, page * entries + comp % entries, -1)
+            rows = torch.zeros(n, WIDTH, dtype=torch.uint8, device=DEVICE)
+            copy_rocm_mxfp4_index_rows(
+                cache, rows, pos, slot, ratio, HEADS, HEAD_DIM, scatter=False
+            )
+            natural = case.natural[ratio][case.offsets[req] + comp[boundary], 0]
+            assert torch.equal(rows[boundary], natural)
+            assert int(rows[~boundary].count_nonzero()) == 0
+            copy_rocm_mxfp4_index_rows(
+                target, rows, pos, slot, ratio, HEADS, HEAD_DIM, scatter=True
+            )
+    assert torch.equal(rebuilt, case.pool)
 
 
 @pytest.mark.parametrize(
