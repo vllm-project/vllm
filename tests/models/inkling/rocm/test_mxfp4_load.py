@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.models.inkling.amd.moe import InklingMoE
 
 
@@ -67,48 +68,87 @@ def test_unflattens_quark_scales_and_preserves_scale_padding():
     assert torch.all(routed.w2_weight_scale[:, :, 2] == 1)
 
 
-def test_direct_reload_restores_aiter_padding():
+def test_direct_reload_restores_aiter_padding(monkeypatch):
     """After a dummy cold start (no loader ran), a direct reload resets the
-    AITER padding (zero weights, 0x01 scales, as Quark OCP_MX creates them)
-    instead of keeping the dummy or post-processed bytes."""
-    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    AITER padding of a Quark OCP_MX layer (zero weights, 0x01 scales, as
+    ``create_weights`` makes them) instead of keeping the dummy bytes."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe import routed_experts
+    from vllm.model_executor.layers.quantization.quark import quark_moe
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp4Static,
+    )
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,
     )
-    from vllm.model_executor.utils import set_weight_attrs
+    from vllm.utils.math_utils import round_up
 
-    class Routed(nn.Module):
-        has_padding = RoutedExperts.has_padding
-        padding_fill_params = RoutedExperts.padding_fill_params
+    monkeypatch.setattr(
+        quark_moe,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=SimpleNamespace(hf_config=None)),
+    )
+    monkeypatch.setattr(
+        quark_moe,
+        "select_mxfp4_moe_backend",
+        lambda *args, **kwargs: (quark_moe.Mxfp4MoeBackend.NONE, None),
+    )
+    # AITER rounds the intermediate size up (to 256; 64 here).
+    monkeypatch.setattr(
+        quark_moe,
+        "mxfp4_round_up_hidden_size_and_intermediate_size",
+        lambda backend, hidden, intermediate: (hidden, round_up(intermediate, 64)),
+    )
+    monkeypatch.setattr(
+        routed_experts,
+        "resolve_quant_method",
+        lambda quant_config, layer, prefix: quark_moe.QuarkOCP_MX_MoEMethod(
+            layer.moe_config, kMxfp4Static, None
+        ),
+    )
+    num_experts, hidden, intermediate = 4, 64, 32
 
-    def make_moe():
-        moe, fake = _fake_moe()
-        # A module tree so the reload sees the parameters.
-        routed = Routed()
-        routed.moe_config = fake.moe_config
-        routed.moe_config.__dict__.update(
-            hidden_dim=5,
-            hidden_dim_unpadded=5,
-            intermediate_size_per_partition=4,
-            intermediate_size_per_partition_unpadded=3,
-            tp_shard_with_padding=False,
+    def make_moe() -> tuple[InklingMoE, RoutedExperts]:
+        config = make_dummy_moe_config(
+            num_experts=num_experts,
+            hidden_dim=hidden,
+            intermediate_size=intermediate,
+            experts_per_token=2,
+            in_dtype=torch.float32,
         )
-        names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
-        for name in names:
-            routed.register_parameter(name, getattr(fake, name))
-        routed._padding_fill_names = list(names)  # set by RoutedExperts
-        set_weight_attrs(routed.w13_weight_scale, {"padding_value": 1})
-        set_weight_attrs(routed.w2_weight_scale, {"padding_value": 1})
+        layer = RoutedExperts(
+            "model.layers.0.mlp.experts",
+            torch.float32,
+            config,
+            SimpleNamespace(get_name=lambda: "quark"),
+            expert_map_manager=SimpleNamespace(
+                local_num_experts=num_experts,
+                num_fused_shared_experts=0,
+                placement_strategy="linear",
+                expert_map=None,
+                expert_mask=None,
+                routing_tables=None,
+                map_global_to_local=lambda index: index,
+            ),
+        )
+        assert layer.w13_weight.shape == (num_experts, 128, hidden // 2)
+        moe, _ = _fake_moe()
         moe.experts = nn.Module()
-        moe.experts.routed_experts = routed
-        return moe, routed
+        moe.experts.routed_experts = layer
+        return moe, layer
 
+    generator = torch.Generator().manual_seed(0)
+
+    def randbytes(*shape):
+        return torch.randint(2, 255, shape, generator=generator, dtype=torch.uint8)
+
+    # Quark flattens the block scales over experts.
     checkpoint = {
-        "experts.w13_weight": torch.arange(96, dtype=torch.uint8).view(4, 12, 2),
-        "experts.w2_weight": torch.arange(80, dtype=torch.uint8).view(4, 5, 4),
-        "experts.w13_weight_scale": torch.arange(96, dtype=torch.uint8).view(48, 2),
-        "experts.w2_weight_scale": torch.arange(80, dtype=torch.uint8).view(20, 4),
+        "experts.w13_weight": randbytes(num_experts, 2 * intermediate, hidden // 2),
+        "experts.w2_weight": randbytes(num_experts, hidden, intermediate // 2),
+        "experts.w13_weight_scale": randbytes(num_experts * 2 * intermediate, 2),
+        "experts.w2_weight_scale": randbytes(num_experts * hidden, 1),
     }
 
     def load(moe):
@@ -117,14 +157,15 @@ def test_direct_reload_restores_aiter_padding():
 
     expected_moe, expected = make_moe()
     load(expected_moe)
+    assert torch.all(expected.w2_weight_scale[:, :, 1] == 1)
 
-    moe, routed = make_moe()
-    for p in routed.parameters():
+    moe, layer = make_moe()
+    for p in layer.parameters():
         p.data.fill_(7)  # dummy weights; no loader ran
     record_checkpoint_layout(moe)
 
     begin_direct_reload(moe)
     load(moe)
 
-    for name, p in routed.named_parameters():
+    for name, p in layer.named_parameters():
         torch.testing.assert_close(p, getattr(expected, name), rtol=0, atol=0)

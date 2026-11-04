@@ -12,10 +12,11 @@ no rollback, the next full update repairs it.
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
 every checkpoint tensor loaded into a parameter a module lists in
-``padding_fill_params()``: ``begin`` refills those whole (weights with 0,
-ones-initialized scales with 1), erasing the checkpoint region too. Today only
-padded MoE layers list parameters (`RoutedExperts.has_padding`, decided from
-``moe_config``; other padding sources can reuse the same hook and fill).
+``padding_fill_params()`` at cold start: ``begin`` refills those whole (weights
+with 0, ones-initialized scales with 1), erasing the checkpoint region too.
+Today only padded MoE layers list parameters (`RoutedExperts.has_padding`,
+decided from ``moe_config``; other padding sources can reuse the same hook and
+fill).
 """
 
 from collections.abc import Iterator
@@ -127,6 +128,15 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
+    # Before post-load processing, which may pad only the runtime copy and
+    # record that in the layer's config: refilled by every `begin`.
+    model._ckpt_padding_fill = [
+        (t, value)
+        for module in model.modules()
+        if hasattr(module, "padding_fill_params")
+        for t, value in module.padding_fill_params()
+        if _owned(model, t)
+    ]
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -217,13 +227,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     # Reset the padding the loaders skip (PWAL left its output there; after a
     # dummy cold start it holds random values). Erases the data region too:
     # every checkpoint tensor loaded into these must be resent.
-    for module in model.modules():
-        padding_fill_params = getattr(module, "padding_fill_params", None)
-        if padding_fill_params is None:
-            continue
-        for t, value in padding_fill_params():
-            if _owned(model, t):
-                t.data.fill_(value)
+    for t, value in model._ckpt_padding_fill:
+        t.data.fill_(value)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

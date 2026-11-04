@@ -231,17 +231,16 @@ class RoutedExperts(PluggableLayer):
 
         registered = set(self._parameters)
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        # Parameters that may hold expert padding, for `padding_fill_params`.
-        # Per-expert scalars (per-tensor and static input scales, possibly
-        # absent from the checkpoint) cannot hold padding: keep them out.
-        num_shards = 2 if self.moe_config.is_act_and_mul else 1
+        # Parameters that may hold expert padding, for `padding_fill_params`:
+        # per-element ones. Per-expert scalars ((E,), (E, 1), (E, 2): per-tensor
+        # and global scales, static input scales a checkpoint may omit) and
+        # metadata like `weight_shape` cannot.
         self._padding_fill_names = [
             name
             for name, p in self._parameters.items()
             if name not in registered
             and p is not None
-            and p.ndim > 0
-            and p.numel() > p.shape[0] * num_shards
+            and (p.ndim >= 3 or (p.ndim == 2 and p.shape[1] > 2))
         ]
 
         loader = self.shared_expert_online_loader
@@ -254,13 +253,14 @@ class RoutedExperts(PluggableLayer):
         """Whether the expert parameters are larger than the checkpoint
         tensors loaded into them, leaving padding the loaders do not write.
 
+        Valid at cold start before post-load processing only: some of it pads
+        just the runtime copy and writes the padded size into ``moe_config``.
         The source used today is ``moe_config``: a hidden or per-partition
         intermediate size rounded up past its unpadded value (e.g. by
         ``maybe_roundup_sizes``, or a model overriding
-        ``intermediate_size_per_partition_unpadded``), or block-aligned TP
-        sharding. It is not the only possible one: a layer padded another way
-        should extend this check, and reuses the same fill. Evaluated when
-        called, so later overrides of ``moe_config`` count.
+        ``intermediate_size_per_partition_unpadded`` after construction), or
+        block-aligned TP sharding. It is not the only possible one: a layer
+        padded another way should extend this check, and reuses the same fill.
         """
         config = self.moe_config
         hidden = config.hidden_dim
@@ -275,8 +275,9 @@ class RoutedExperts(PluggableLayer):
     def padding_fill_params(self) -> list[tuple[torch.Tensor, float]]:
         """(parameter, padding value) pairs a direct reload refills whole
         before the loaders rewrite the checkpoint region: if `has_padding`,
-        the quant method's parameters except per-expert scalars. Weights get
-        0, ones-initialized scales (``padding_value`` attribute) get 1."""
+        the quant method's per-element parameters. Weights get 0,
+        ones-initialized scales (``padding_value`` attribute) get 1. Direct
+        reload reads this once, at cold start before post-load processing."""
         if not self.has_padding():
             return []
         params = (self._parameters.get(name) for name in self._padding_fill_names)

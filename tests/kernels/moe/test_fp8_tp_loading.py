@@ -452,6 +452,9 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, scheme):
         }
     assert {n for n, _ in layer.named_parameters()} >= excluded
     record_checkpoint_layout(model)
+    # Post-load processing may rewrite moe_config (e.g. padding only the
+    # runtime copy); the fill is decided by the cold-start record.
+    layer.moe_config.intermediate_size_per_partition_unpadded = 384
 
     begin_direct_reload(model)
     load(layer)
