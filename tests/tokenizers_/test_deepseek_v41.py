@@ -186,6 +186,30 @@ def test_raw_text_parts_preserve_reference_separator():
 
 
 @pytest.mark.parametrize(
+    ("content", "stream"),
+    [
+        ([], False),
+        ([], True),
+        ([{"type": "text", "text": "hello"}], False),
+    ],
+)
+def test_request_content_iterator_can_be_rendered_repeatedly(content, stream):
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "deepseek-ai/DeepSeek-V4.1-Flash",
+            "messages": [{"role": "user", "content": content}],
+            "stream": stream,
+        }
+    )
+
+    first = render(request.messages, thinking=False)
+    assert first == render(request.messages, thinking=False)
+    assert request.messages[0]["content"] == content
+    request.model_dump_json()
+    assert first == render(request.messages, thinking=False)
+
+
+@pytest.mark.parametrize(
     ("role", "responses_type"),
     [("user", "input_text"), ("assistant", "output_text")],
 )
@@ -241,13 +265,17 @@ def test_encode_uses_one_bos_and_forwards_truncation():
     assert kwargs == {"truncation": True, "max_length": 16}
 
 
-@pytest.mark.parametrize("image_type", ["image_url", "input_image", "image_pil"])
+@pytest.mark.parametrize(
+    "image_type", ["image_url", "input_image", "image_pil", "image_embeds"]
+)
 def test_images_preserve_content_order_and_reference_separator(image_type):
     from PIL import Image
 
     def image_part(color):
         if image_type == "image_pil":
             return {"type": image_type, "image_pil": Image.new("RGB", (2, 2), color)}
+        if image_type == "image_embeds":
+            return {"type": image_type, "image_embeds": {"llm_grid": [2, 2]}}
         url = f"https://example.com/{color}.png"
         return {
             "type": image_type,
@@ -271,6 +299,24 @@ def test_images_preserve_content_order_and_reference_separator(image_type):
 def test_unsupported_media_is_a_request_error():
     with pytest.raises(ValueError, match="text and image content only"):
         render([{"role": "user", "content": [{"type": "input_audio"}]}])
+
+
+def test_tool_references_render_as_tool_names():
+    messages = [
+        {"role": "assistant", "tool_calls": [tool_call("tool_search")]},
+        {
+            "role": "tool",
+            "tool_call_id": "tool_search",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+            ],
+        },
+    ]
+    assert render(messages, thinking=False).endswith(
+        "<｜User｜><tool_result>get_weather\n\nget_time</tool_result>"
+        "<｜Assistant｜></think>"
+    )
 
 
 @pytest.fixture(params=[False, True], ids=["sync", "async"])

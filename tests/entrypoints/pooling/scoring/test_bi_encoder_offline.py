@@ -6,6 +6,8 @@ import weakref
 import pytest
 
 from tests.entrypoints.pooling.scoring.util import EncoderScoringHfRunner
+from vllm import PoolingParams
+from vllm.utils.mistral import is_mistral_tokenizer
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 PROMPT = "The chef prepared a delicious meal."
@@ -99,3 +101,32 @@ def test_embed(llm):
     outputs = llm.encode(PROMPT, pooling_task="embed", use_tqdm=False)
     assert len(outputs) == 1
     assert len(outputs[0].outputs.data) == EMBEDDING_SIZE
+
+
+def test_token_limits_with_mistral_tokenizer(vllm_runner):
+    """MistralTokenizer cannot return offset_mapping, but scoring token limits
+    must still truncate the query and leave a short document unchanged.
+
+    Only tokenization matters, so the model has dummy weights and one layer.
+    """
+    with vllm_runner(
+        "mistralai/Mistral-7B-Instruct-v0.3",
+        runner="pooling",
+        convert="embed",
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 1},
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+    ) as runner:
+        llm = runner.llm
+        assert is_mistral_tokenizer(llm.get_tokenizer())
+
+        params = PoolingParams(
+            extra_kwargs={"max_tokens_per_query": 3, "max_tokens_per_doc": 100}
+        )
+        (limited,) = llm.score(
+            TEXTS_1[0], TEXTS_2[0], pooling_params=params, use_tqdm=False
+        )
+        (expected,) = llm.score("What is the", TEXTS_2[0], use_tqdm=False)
+
+    assert limited.prompt_token_ids == expected.prompt_token_ids
