@@ -18,13 +18,12 @@ Each check runs one rank late, so a missing wait reads a peer's stale data:
 * one CUDA graph of all of these, replayed ``REPLAYS`` times bitwise.
 
 Needs four SM100-family GPUs with NVLink multicast and flashinfer-python
-0.7.2; about 5 minutes. For a race stress run, run this file as a module
-(``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics``)
+0.7.2 or newer; about 5 minutes. For a race stress run, run this file as a
+module (``python -m tests.models.deepseek_v41.nvidia.specialized_decode.test_numerics``)
 with ``--replays 100000``.
 """
 
 import argparse
-import importlib.metadata
 import os
 import tempfile
 from types import SimpleNamespace
@@ -605,7 +604,9 @@ def _index_scores(indexer, step):
     decode = step.metadata.decode
     q, q_scale = step.q
     q = q.unsqueeze(1).view(torch.int8)
-    q_scale, weights = mqa_logits_mx_inputs(q, q_scale.unsqueeze(1), step.weights)
+    q_scale, weights = mqa_logits_mx_inputs(
+        q, q_scale.unsqueeze(1), step.weights, indexer.logits_dtype
+    )
     ends = decode.seq_lens.view(-1)
     logits = as_fp32_logits(
         fp8_fp4_paged_mqa_logits(
@@ -616,6 +617,7 @@ def _index_scores(indexer, step):
             decode.block_table,
             decode.schedule_metadata,
             max_model_len=indexer.max_model_len,
+            logits_dtype=indexer.logits_dtype,
             indices=decode.indices,
         ),
         ends,
@@ -809,14 +811,13 @@ def run(replays: int) -> str | None:
 def test_specialized_decode_numerics():
     if torch.accelerator.device_count() < TP:
         pytest.skip("needs four GPUs")
-    from vllm.models.deepseek_v41.nvidia.specialized_decode import FLASHINFER_VERSION
+    from vllm.models.deepseek_v41.nvidia.specialized_decode import (
+        MIN_FLASHINFER_VERSION,
+        uses_checked_flashinfer,
+    )
 
-    try:
-        version = importlib.metadata.version("flashinfer-python")
-    except importlib.metadata.PackageNotFoundError:
-        version = None
-    if version != FLASHINFER_VERSION:
-        pytest.skip(f"needs flashinfer-python {FLASHINFER_VERSION}, found {version}")
+    if not uses_checked_flashinfer("the numerics test"):
+        pytest.skip(f"needs flashinfer-python >= {MIN_FLASHINFER_VERSION}")
     skipped = run(REPLAYS)
     if skipped:
         pytest.skip(skipped)
