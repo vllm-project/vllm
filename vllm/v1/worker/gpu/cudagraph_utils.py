@@ -43,6 +43,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import current_stream
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.hisparse.binding import unbind_hisparse_caches
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -896,6 +897,7 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
+    slot_mappings_buffer: torch.Tensor | None = None,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -910,6 +912,13 @@ def prepare_inputs_to_capture(
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)
+    if slot_mappings_buffer is not None:
+        # CUDA graphs capture the slot-mapping pointer, so use the same buffer
+        # that the runtime forward updates when it has a custom mapping buffer.
+        assert slot_mappings_buffer.shape[0] == slot_mappings.shape[0]
+        assert slot_mappings_buffer.shape[1] >= num_tokens
+        slot_mappings_buffer.fill_(PAD_SLOT_ID)
+        slot_mappings = slot_mappings_buffer[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
         slot_mappings, kv_cache_config
     )

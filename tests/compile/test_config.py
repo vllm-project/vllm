@@ -930,6 +930,7 @@ def test_adaptive_verification_sees_the_resolved_decode_sizes(
         # The target's default decode graphs stop at 512 // 8 = 64 requests.
         ("eagle3", {}, 1024, 1024),
         ("mtp", {"max_decode_cudagraph_capture_requests": 16}, 1024, 1024),
+        ("draft_model", {}, 1024, 1024),
         ("eagle3", {"decode_cudagraph_capture_request_sizes": []}, None, 512),
         # Draft blocks of K tokens take the target's request counts.
         ("dspark", {}, None, 512),
