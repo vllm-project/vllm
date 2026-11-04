@@ -102,6 +102,11 @@ impl ChunkUsage {
 use crate::cli::BackendKind;
 use crate::error::Result;
 
+/// Error for a 200 stream that never carried a token, shared by the streaming
+/// backends so they report it the same way.
+pub(crate) const NO_VALID_CHUNK_ERROR: &str =
+    "Never received a valid chunk to calculate TTFT. This response will be marked as failed!";
+
 /// Input for a single benchmark request.
 #[derive(Debug, Clone)]
 pub struct RequestFuncInput {
