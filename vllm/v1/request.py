@@ -135,7 +135,7 @@ class Request:
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
-        # Little-endian int32 bytes from vllm-rs are copied, not decoded per token.
+        # An int32 ndarray from the frontends is copied, not read per token.
         self.prompt_token_ids: list[int] | None = (
             TokenBuffer(prompt_token_ids) if prompt_token_ids is not None else None
         )

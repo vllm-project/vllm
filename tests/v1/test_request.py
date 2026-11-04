@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
-import struct
 from array import array
 
 import numpy as np
@@ -78,15 +77,6 @@ def test_request_stores_token_ids_as_int32_buffers():
     assert request.all_token_ids.copy() == list(range(1024))
 
 
-@pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
-def test_token_buffer_from_packed_bytes(wrap):
-    ids = [1, 70000, 129279]
-    tokens = TokenBuffer(wrap(struct.pack(f"<{len(ids)}i", *ids)))
-    assert type(tokens) is TokenBuffer and tokens == ids
-    with pytest.raises(ValueError):
-        TokenBuffer(wrap(b"\x01\x02\x03"))
-
-
 @pytest.mark.parametrize("protocol", range(pickle.HIGHEST_PROTOCOL + 1))
 def test_token_buffer_pickles(protocol):
     tokens = TokenBuffer([1, 70000, 129279])
@@ -117,7 +107,7 @@ def test_extend_from_slice():
     assert dst == [7, 2, 3, 4]
 
 
-@pytest.mark.parametrize("wrap", [list, TokenBuffer])
+@pytest.mark.parametrize("wrap", [list, tuple, TokenBuffer])
 def test_rfind_token_sequences(wrap):
     ids = wrap([5, 1, 2, 9, 1, 2, 3, 7, 1])
     # The newest of the markers; the first listed wins a tie at one index.

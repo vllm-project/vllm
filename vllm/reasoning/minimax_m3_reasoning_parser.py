@@ -89,16 +89,12 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     def _contains_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> bool:
-        return (
-            bool(marker_ids) and rfind_token_sequences(token_ids, (marker_ids,))[0] >= 0
-        )
+        return rfind_token_sequences(token_ids, (marker_ids,))[0] >= 0
 
     @staticmethod
     def _rfind_token_sequence(
         token_ids: Sequence[int], marker_ids: Sequence[int]
     ) -> int:
-        if not marker_ids:
-            return -1
         return rfind_token_sequences(token_ids, (marker_ids,))[0]
 
     @staticmethod

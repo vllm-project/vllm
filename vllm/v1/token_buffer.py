@@ -24,14 +24,10 @@ else:
 
         def __new__(cls, tokens: Iterable[int] = ()):
             if isinstance(tokens, np.ndarray):
-                # A 32-bit int array, as the frontends send.
+                # A 32-bit int array, as the frontends send, copied as one block.
                 assert tokens.dtype.kind in "iu" and tokens.dtype.itemsize == 4
-                tokens = memoryview(np.ascontiguousarray(tokens)).cast("B")
-            if isinstance(tokens, (bytes, bytearray, memoryview)):
-                # Packed int32 ids. array("i", memoryview) would instead take
-                # each byte as a token.
                 buf = super().__new__(cls, "i")
-                buf.frombytes(tokens)
+                buf.frombytes(memoryview(np.ascontiguousarray(tokens)).cast("B"))
                 return buf
             # From another array of the same type this is a memcpy.
             return super().__new__(cls, "i", tokens)
@@ -46,10 +42,7 @@ else:
             return array.__eq__(self, other)
 
         def __ne__(self, other):
-            eq = self.__eq__(other)
-            return eq if eq is NotImplemented else not eq
-
-        __hash__ = None  # type: ignore[assignment]
+            return not self == other
 
         def __add__(self, other):
             return self.tolist() + as_list(other)
@@ -147,7 +140,8 @@ def rfind_token_sequences(
         head = token_ids[i]
         for k, marker in enumerate(marker_lists):
             if (marker and marker[0] == head and i + len(marker) <= stop) and (
-                len(marker) == 1 or token_ids[i + 1 : i + len(marker)] == marker[1:]
+                len(marker) == 1
+                or as_list(token_ids[i + 1 : i + len(marker)]) == marker[1:]
             ):
                 return i, k
         end = i
