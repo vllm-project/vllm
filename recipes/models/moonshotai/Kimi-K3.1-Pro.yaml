@@ -5,7 +5,7 @@ meta:
   provider: "Moonshot AI"
   description: "2.8T-parameter native multimodal MoE with Kimi Delta Attention, sparse MLA, and a 1M-token context window"
   date_added: 2026-11-02
-  date_updated: 2026-11-03
+  date_updated: 2026-11-04
   tasks:
     - multimodal
     - text
@@ -22,7 +22,7 @@ model:
   nightly_required: true
   install:
     docker:
-      note: "Use a K3.1-enabled nightly image after the integration lands. On NVIDIA it is a CUDA 13 (cu130) build only; the host needs an r580+ driver. On MI355X, see the AgentX TP8 preset's runbook for the image."
+      note: "Use `vllm/vllm-openai:kimi-k31` (multi-arch; CUDA 13 / cu130 build only). For CUDA 13.4 (Rubin) use `vllm/vllm-openai:kimi-k31-cu134`. On MI355X use `vllm/vllm-openai-rocm:kimi-k31`."
     pip:
       note: "Use a K3.1-enabled vLLM nightly after the integration lands."
   architecture: moe
@@ -94,10 +94,9 @@ variants:
     supported_hardware: [b300, gb300, mi355x]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
-      # The K3.1 integration is not in a published ROCm image yet. Use a
-      # K3.1-enabled ROCm 10.0 nightly once it lands.
+      # Day-0 ROCm 10.0 image published with the release.
       mi355x:
-        docker_image: "vllm/vllm-openai-rocm:nightly-rocm100"
+        docker_image: "vllm/vllm-openai-rocm:kimi-k31"
 
 compatible_strategies:
   - single_node_tp
@@ -279,15 +278,15 @@ guide: |
   ## Overview
 
   Kimi-K3.1 keeps the Kimi-K3 layout (Kimi Delta Attention, 896 routed experts with 16 active
-  per token, a latent MoE projection and a vision encoder) and adds DeepSeek-style sparse
+  per token, a latent MoE projection and a vision encoder) and adds sparse
   attention (DSA, top-2048 indexer) to 24 of its MLA layers. The checkpoint ships MXFP4
   routed-expert weights; everything else is BF16.
 
   The baseline is the simplest working setup on NVIDIA: one tensor-parallel group of 8 GPUs,
   either two GB300 trays or one B300 node. Throughput was not tuned.
 
-  On MI355X, one node takes the same TP8 layout with the AMD profile's AITER environment. The K3.1
-  integration is not in a published ROCm image yet. So far only the
+  On MI355X, one node takes the same TP8 layout with the AMD profile's AITER environment, in the
+  day-0 `vllm/vllm-openai-rocm:kimi-k31` image. So far only the
   [AgentX TP8](#preset-mi355x_agentx) configuration has run on MI355X: the tuned single-node AgentX
   configuration for concurrency 48, with DCP8, the K3.1 DSpark draft and host KV offload.
 
