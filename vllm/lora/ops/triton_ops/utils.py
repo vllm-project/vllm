@@ -237,7 +237,7 @@ def get_lora_op_configs(
         k_blocks = max(1, cdiv(hidden_size, block_k))
         num_ctas = min(8, 1 << (k_blocks.bit_length() - 1))
         default = {
-            "block_m": 32,
+            "block_m": 16 if batch <= 16 else 32,
             "block_n": 16,
             "block_k": block_k,
             "split_k": num_ctas,
