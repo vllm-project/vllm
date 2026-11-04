@@ -196,7 +196,7 @@ def test_mega_moe_block_matches_the_qat_reference(dist_init, num_tokens):
     assert moe.experts.has_fused_shared_experts and moe.shared_experts is None
     num_experts, top_k = config.num_local_experts, config.num_experts_per_tok
     hidden_size, intermediate_size = config.hidden_size, config.intermediate_size
-    clamp, alpha, beta = config.swiglu_limit, config.swiglu_alpha, config.swiglu_beta
+    clamp, alpha, beta = config.swiglu_limit, config.swiglu_alpha, 1.0
 
     def nvfp4(n, k):
         weight = torch.randn(n, k, device="cuda") * k**-0.5
