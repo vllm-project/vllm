@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -8,17 +9,28 @@ import numpy as np
 import pytest
 import torch
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    MockMambaBuilder,
+    create_common_attn_metadata,
+)
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
+from vllm.config import CacheConfig
+from vllm.config.mamba import MambaConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    is_conv_state_dim_first,
 )
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -34,6 +46,14 @@ from vllm.v1.worker.mamba_utils import (
     get_mamba_groups,
     preprocess_mamba,
     stage_postprocess_inputs_to_gpu,
+)
+from vllm.v1.worker.replayssm_utils import (
+    ReplaySSMModelContext,
+    initialize_replayssm_ring_trackers,
+)
+from vllm.v1.worker.utils import (
+    allocate_kv_cache,
+    bind_kv_cache_to_layers,
 )
 
 # Conv + temporal copy specs, in the order the tests' MambaSpec shapes expect.
@@ -59,7 +79,7 @@ def postprocess_mamba(
 ):
     """CPU reference for the align-mode postprocess.
 
-    Used as a golden against the GPU fused kernel (``postprocess_mamba_align_gpu``).
+    Used as a golden against the GPU fused kernel (``postprocess_mamba_gpu``).
     Mirrors what the production code did before the fused kernel replaced it;
     kept here because production no longer has a CPU implementation.
     """
@@ -118,7 +138,6 @@ def _make_scheduler_output(
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=finished_req_ids,
         free_encoder_mm_hashes=[],
         preempted_req_ids=preempted_req_ids,
@@ -254,7 +273,6 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")
     kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
-    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
     conv_ptr = 1 << 63
     temporal_ptr = (1 << 64) - 8
     block_table_ptr = (1 << 63) + 42
@@ -277,6 +295,7 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
         block_table_ptr,
     )
     forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
 
     gpu_ctx.initialize_from_forward_context(
         kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
@@ -305,7 +324,6 @@ def _make_postprocess_scheduler_output(
         total_num_scheduled_tokens=sum(num_scheduled_tokens.values()),
         scheduled_spec_decode_tokens=scheduled_spec_decode_tokens or {},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
         preempted_req_ids=set(),
@@ -316,7 +334,7 @@ def _make_mock_attention(
     conv_state: torch.Tensor, temporal_state: torch.Tensor
 ) -> MagicMock:
     """Create a mock attention object with kv_cache."""
-    attention = MagicMock()
+    attention = MagicMock(use_flashinfer_replayssm=False)
     attention.kv_cache = [conv_state, temporal_state]
     return attention
 
@@ -431,12 +449,18 @@ def _make_requests(
     req_ids: list[str],
     num_computed_tokens: list[int],
     block_ids_per_req: list[list[int]],
+    num_prompt_tokens: list[int] | None = None,
 ) -> dict[str, MagicMock]:
     """Create mock CachedRequestState objects."""
     requests = {}
     for i, req_id in enumerate(req_ids):
         req = MagicMock()
         req.num_computed_tokens = num_computed_tokens[i]
+        req.num_prompt_tokens = (
+            num_computed_tokens[i]
+            if num_prompt_tokens is None
+            else num_prompt_tokens[i]
+        )
         req.block_ids = {0: block_ids_per_req[i]}  # group_id=0
         requests[req_id] = req
     return requests
@@ -465,6 +489,7 @@ def _make_gpu_ctx(
     cfg: _TestConfig,
     kv_cache_config: KVCacheConfig,
     device: torch.device,
+    forward_context: dict[str, Any],
     copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaSpecDecodeGPUContext:
     """Create MambaSpecDecodeGPUContext for the GPU path."""
@@ -476,9 +501,256 @@ def _make_gpu_ctx(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
         copy_funcs=copy_funcs,
+        forward_context=forward_context,
         device=device,
         make_buffer=make_buffer,
     )
+
+
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
+    mixer = _TestReplaySSMMixer()
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixer.get_state_shape(),
+        dtypes=mixer.get_state_dtype(),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+    )
+    cfg = _TestConfig(num_layers=1, max_num_reqs=2)
+    device = torch.device("cpu")
+    canonical = _make_copy_bufs(cfg, kv_config, device)
+    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+
+    assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
+    assert replay.num_states == 5
+    assert replay.state_base_addrs.numel() == 5
+    assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
+
+
+def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
+    class DifferentRingMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            shapes = super().get_state_shape()
+            return (*shapes[:2], (1, 4), *shapes[3:])
+
+    mixers = [_TestReplaySSMMixer(), DifferentRingMixer()]
+    specs = [
+        MambaSpec(
+            block_size=16,
+            shapes=mixer.get_state_shape(),
+            dtypes=mixer.get_state_dtype(),
+            state_alignment=16,
+            page_size_padded=128,
+        )
+        for mixer in mixers
+    ]
+    assert specs[0].is_uniform_with_collection({"first": specs[0], "second": specs[1]})
+    for mixer in mixers:
+        mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
+        mixer.A = -torch.ones(1)
+        mixer.replayssm_buffer_len = 16
+
+    with pytest.raises(AssertionError, match="equal materialization geometry"):
+        ReplaySSMModelContext.create(
+            [(mixers, specs[0], torch.zeros((1, 1), dtype=torch.int32))],
+            max_num_reqs=1,
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    (
+        "use_v2",
+        "layout",
+        "previous_column",
+        "computed",
+        "scheduled",
+        "destination_column",
+    ),
+    [
+        (False, KVCacheLayout.LBNHC, 0, 15, 4, 1),
+        (True, KVCacheLayout.BLHNC, 1, 14, 1, 0),
+        (False, KVCacheLayout.BLHNC, 0, 11, 4, 0),
+        (True, KVCacheLayout.LBNHC, -1, 0, 4, 0),
+    ],
+    ids=[
+        "forward_after_rejection",
+        "backward_after_fewer_drafts",
+        "same_column",
+        "fresh_slot",
+    ],
+)
+def test_replayssm_precopy_moves_packed_state_and_trackers(
+    monkeypatch,
+    use_v2,
+    layout,
+    previous_column,
+    computed,
+    scheduled,
+    destination_column,
+):
+    device = torch.device("cuda")
+    conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
+    spec = MambaSpec(
+        block_size=16,
+        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4)),
+        dtypes=(
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+            torch.float32,
+            torch.bfloat16,
+        ),
+        mamba_cache_mode="align",
+        state_alignment=16,
+        block_stride_alignment=16,
+    )
+    spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
+    config = SimpleNamespace(
+        cache_config=CacheConfig(),
+        attention_config=SimpleNamespace(hisparse_config=None),
+    )
+    config.cache_config.kv_cache_layout = layout.name
+    layer_names = ["layers.0.mixer", "layers.1.mixer"]
+    kv_config = get_kv_cache_config_from_groups(
+        config,
+        [KVCacheGroupSpec(layer_names, spec)],
+        5 * (2 * spec.page_size_bytes + 8),
+    )
+    pages = allocate_kv_cache(kv_config, device, layout)
+
+    class PackedReplaySSMMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            return spec.shapes
+
+        def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+            return spec.dtypes
+
+    forward_context = {}
+    for name in layer_names:
+        mixer = PackedReplaySSMMixer()
+        mixer.replayssm_buffer_len = 16
+        mixer.A = -torch.ones(1, device=device)
+        forward_context[name] = mixer
+    bind_kv_cache_to_layers(pages, forward_context)
+    initialize_replayssm_ring_trackers(kv_config, forward_context)
+    source_slot, destination_slot = previous_column + 1, destination_column + 1
+    original = {}
+    for name, mixer in forward_context.items():
+        for state_index, tensor in enumerate(mixer.kv_cache):
+            tensor.fill_(-7)
+            tensor[source_slot].copy_(
+                torch.arange(tensor[source_slot].numel(), device=device)
+                .reshape(tensor[source_slot].shape)
+                .add_(100 * state_index)
+            )
+        original[name] = [tensor.clone() for tensor in mixer.kv_cache]
+        mixer._replayssm_ring_start.fill_(2)
+        mixer._replayssm_prev_num_accepted.fill_(3)
+        mixer._replayssm_ring_start[source_slot] = 7
+        mixer._replayssm_prev_num_accepted[source_slot] = 9
+    cfg = _TestConfig(num_layers=2, max_num_reqs=2)
+    ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
+    batch_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
+    persistent_table = torch.tensor([[0, 0], [1, 2]], dtype=torch.int32, device=device)
+    ctx.initialize_from_forward_context(
+        kv_config,
+        forward_context,
+        _COPY_FUNCS,
+        [persistent_table if use_v2 else batch_table],
+        [batch_table],
+    )
+    initial_accepted = 1 if previous_column < 0 else 3
+    accepted = torch.tensor(
+        [1, initial_accepted] if use_v2 else [initial_accepted],
+        dtype=torch.int32,
+        device=device,
+    )
+    computed_gpu = torch.tensor(
+        [0, computed] if use_v2 else [computed], dtype=torch.int32, device=device
+    )
+    query_start = torch.tensor([0, scheduled], dtype=torch.int32, device=device)
+    if use_v2:
+        model_state = object.__new__(MambaHybridModelState)
+        model_state._align_mode = True
+        model_state._mamba_ctx = ctx
+        monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
+        model_state._mamba_state_idx_gpu = torch.tensor(
+            [-1, previous_column], dtype=torch.int32, device=device
+        )
+        model_state._mamba_src_col_gpu = torch.empty(
+            2, dtype=torch.int32, device=device
+        )
+        model_state._mamba_src_off_gpu = torch.empty(
+            2, dtype=torch.int32, device=device
+        )
+        model_state.num_accepted_tokens_gpu = accepted
+        batch = SimpleNamespace(
+            num_reqs=1,
+            idx_mapping=torch.tensor([1], dtype=torch.int32, device=device),
+            query_start_loc=query_start,
+        )
+        model_state.preprocess_state(batch, (batch_table,), kv_config, computed_gpu)
+    else:
+        batch = _make_input_batch(["request"], [-99], [previous_column])
+        requests = _make_requests(["request"], [computed], [[1, 2]])
+        preprocess_mamba(
+            _make_postprocess_scheduler_output(["request"], {"request": scheduled}),
+            kv_config,
+            SimpleNamespace(enable_prefix_caching=True),
+            {"request": previous_column},
+            batch,
+            requests,
+            forward_context,
+            _COPY_FUNCS,
+            _make_copy_bufs(cfg, kv_config, device),
+            align_ctx=ctx,
+            num_accepted_tokens_gpu=accepted,
+            num_computed_tokens_gpu=computed_gpu,
+            query_start_loc_gpu=query_start,
+        )
+        assert batch.num_accepted_tokens_cpu.tolist() == [-99]
+    moved = previous_column >= 0 and previous_column != destination_column
+    assert accepted[-1].item() == (1 if moved else initial_accepted)
+    for name, mixer in forward_context.items():
+        source = original[name]
+        if not moved:
+            for actual, before in zip(mixer.kv_cache, source):
+                torch.testing.assert_close(actual, before, rtol=0, atol=0)
+            expected_start, expected_committed = (
+                (0, 0) if previous_column < 0 else (7, 9)
+            )
+            assert (
+                mixer._replayssm_ring_start[destination_slot].item() == expected_start
+            )
+            assert (
+                mixer._replayssm_prev_num_accepted[destination_slot].item()
+                == expected_committed
+            )
+            continue
+        conv = mixer.kv_cache[0][destination_slot]
+        if is_conv_state_dim_first():
+            torch.testing.assert_close(
+                conv[:, :4], source[0][source_slot, :, 2:], rtol=0, atol=0
+            )
+        else:
+            torch.testing.assert_close(
+                conv[:4], source[0][source_slot, 2:], rtol=0, atol=0
+            )
+        for index, tensor in enumerate(mixer.kv_cache):
+            torch.testing.assert_close(
+                tensor[source_slot], source[index][source_slot], rtol=0, atol=0
+            )
+            torch.testing.assert_close(tensor[4], source[index][4], rtol=0, atol=0)
+            if index > 0:
+                torch.testing.assert_close(
+                    tensor[destination_slot], source[index][source_slot], rtol=0, atol=0
+                )
+        assert mixer._replayssm_ring_start[destination_slot].item() == 7
+        assert mixer._replayssm_prev_num_accepted[destination_slot].item() == 9
 
 
 def test_mamba_groups_support_different_state_specs():
@@ -523,19 +795,16 @@ def test_mamba_groups_support_different_state_specs():
     assert copy_bufs.dst_ptrs.cpu.numel() == cfg.max_num_reqs * 5
     assert copy_bufs.sizes.cpu.numel() == cfg.max_num_reqs * 5
 
-    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
-    assert ctx.num_states == 5
-
     forward_context = {}
     gdn_spec_layer_names = ["gdn.0", "gdn.1"]
     for layer_name in gdn_spec_layer_names:
-        attention = MagicMock()
+        attention = MagicMock(use_flashinfer_replayssm=False)
         attention.kv_cache = (
             torch.empty(8, 4, 4, dtype=torch.float16),
             torch.empty(8, 2, 4, 4, dtype=torch.float32),
         )
         forward_context[layer_name] = attention
-    ple_attention = MagicMock()
+    ple_attention = MagicMock(use_flashinfer_replayssm=False)
     ple_attention.kv_cache = (torch.empty(8, 12, 8, dtype=torch.float16),)
     forward_context["ple.0"] = ple_attention
     assert gdn_spec_layer_names == kv_cache_config.kv_cache_groups[0].layer_names
@@ -544,6 +813,8 @@ def test_mamba_groups_support_different_state_specs():
         torch.zeros(4, 8, dtype=torch.int32),
         torch.zeros(4, 8, dtype=torch.int32),
     ]
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.num_states == 5
     ctx.initialize_from_forward_context(
         kv_cache_config,
         forward_context,
@@ -610,25 +881,29 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
     assert copy_bufs.mamba_group_ids == [0]
     assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
 
-    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
-    assert ctx.mamba_group_ids == [0]
-    assert ctx.num_states == 5
-
     forward_context = {
         "gdn.0": MagicMock(
+            use_flashinfer_replayssm=False,
             kv_cache=(
                 torch.empty(8, 4, 4, dtype=torch.float16),
                 torch.empty(8, 2, 4, 4, dtype=torch.float32),
-            )
+            ),
         ),
         "gdn.1": MagicMock(
+            use_flashinfer_replayssm=False,
             kv_cache=(
                 torch.empty(8, 4, 4, dtype=torch.float16),
                 torch.empty(8, 2, 4, 4, dtype=torch.float32),
-            )
+            ),
         ),
-        "ple.0": MagicMock(kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),)),
+        "ple.0": MagicMock(
+            use_flashinfer_replayssm=False,
+            kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),),
+        ),
     }
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.mamba_group_ids == [0]
+    assert ctx.num_states == 5
     ctx.initialize_from_forward_context(
         kv_cache_config,
         forward_context,
@@ -659,11 +934,12 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[4],
         device=device,
-        kernel_block_sizes=[cfg.block_size],
     )
 
     state = object.__new__(MambaHybridModelState)
+    state.cache_config = CacheConfig(mamba_cache_mode="align")
     state._align_mode = True
+    state._use_flashinfer_replayssm = False
     state._mamba_group_ids = []
     state._mamba_spec = None
     state._mamba_state_copy_funcs = _COPY_FUNCS
@@ -693,51 +969,89 @@ def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
     """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
     per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
     ctx = MagicMock()
-    ctx.mamba_state_idx_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
     ctx.num_draft_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
+    ctx.is_prefilling_buf = _MockCpuGpuBuffer(max_num_reqs, torch.bool, device)
     return ctx
 
 
+def _build_staging_metadata(computed, scheduled, prompt_lens, drafts, num_spec=3):
+    # Use the real Mamba split without allocating unused CUDA-graph buffers.
+    builder = object.__new__(MockMambaBuilder)
+    builder.kv_cache_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,) * 2,
+    )
+    builder.vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(mamba_cache_mode="none")
+    )
+    builder.num_spec_tokens = num_spec
+    builder.use_spec_decode = num_spec > 0
+    builder.reorder_batch_threshold = 1 + num_spec
+    builder.use_replayssm = builder.use_flashinfer_replayssm = False
+    builder.needs_causal_conv1d_metadata = False
+    builder.decode_bc_pre_scratch = None
+    builder.decode_cudagraph_max_bs = 0
+    common = create_common_attn_metadata(
+        BatchSpec(
+            seq_lens=[c + q for c, q in zip(computed, scheduled)],
+            query_lens=scheduled,
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    ).replace(
+        is_prefilling=torch.tensor([c < p for c, p in zip(computed, prompt_lens)])
+    )
+    return builder.build(
+        0,
+        common,
+        num_accepted_tokens=torch.ones(len(computed), dtype=torch.int32)
+        if num_spec
+        else None,
+        num_decode_draft_tokens_cpu=torch.tensor(drafts, dtype=torch.int32)
+        if num_spec
+        else None,
+    )
+
+
 def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
-    """stage_postprocess_inputs_to_gpu writes each request's state_idx and
-    scheduled/computed/draft counts into slot `i` for `req_ids[i]`, leaves
-    slots past `num_reqs` untouched, and mirrors the values to the GPU buffers."""
+    """Stage request counts and prefill flags without changing unused slots."""
     device = torch.device("cpu")
     max_num_reqs = 8
     ctx = _make_staging_ctx(max_num_reqs, device)
 
-    # Any negative int32 works as a sentinel: all staged values (state_idx,
-    # scheduled/computed/draft token counts) are non-negative, so a negative
-    # entry surviving in slots [num_reqs:] proves the loop didn't overrun.
+    # Counts are non-negative, so unchanged negative values identify unused slots.
     sentinel = np.int32(-1)
     bufs = (
-        ctx.mamba_state_idx_buf,
         ctx.num_scheduled_tokens_buf,
         ctx.num_computed_tokens_buf,
         ctx.num_draft_tokens_buf,
     )
     for buf in bufs:
         buf.np[:] = sentinel
+        buf.gpu.fill_(int(sentinel))
+    ctx.is_prefilling_buf.np[:] = True
+    ctx.is_prefilling_buf.gpu.fill_(True)
 
-    req_ids = ["req_a", "req_b", "req_c"]
+    req_ids = ["req_b", "req_a", "req_c"]
     num_reqs = len(req_ids)
     scheduler_output = _make_postprocess_scheduler_output(
         req_ids=req_ids,
-        num_scheduled_tokens={"req_a": 5, "req_b": 12, "req_c": 3},
+        num_scheduled_tokens={"req_a": 4, "req_b": 1, "req_c": 8},
         # req_b intentionally absent -> defaults to 0 drafts.
         scheduled_spec_decode_tokens={
-            "req_a": [1, 2],
-            "req_c": [1, 2, 3, 4],
+            "req_a": [1, 2, 3],
+            "req_c": [],
         },
     )
     requests = _make_requests(
         req_ids=req_ids,
-        num_computed_tokens=[10, 20, 30],
+        num_computed_tokens=[20, 0, 64],
         block_ids_per_req=[[0], [0], [0]],
+        num_prompt_tokens=[20, 1, 64],
     )
-    mamba_state_idx = {"req_a": 100, "req_b": 200, "req_c": 300}
     # A trailing entry past num_reqs must not be read.
     req_ids_padded = req_ids + ["not_scheduled"]
 
@@ -747,58 +1061,114 @@ def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
         req_ids_padded,
         num_reqs,
         requests,
-        mamba_state_idx,
+        num_decodes=_build_staging_metadata(
+            [20, 0, 64], [1, 4, 8], [20, 1, 64], [0, 3, 0]
+        ).num_decodes,
     )
 
-    np.testing.assert_array_equal(
-        ctx.mamba_state_idx_buf.np[:num_reqs], [100, 200, 300]
-    )
-    np.testing.assert_array_equal(
-        ctx.num_scheduled_tokens_buf.np[:num_reqs], [5, 12, 3]
-    )
-    np.testing.assert_array_equal(
-        ctx.num_computed_tokens_buf.np[:num_reqs], [10, 20, 30]
-    )
-    np.testing.assert_array_equal(ctx.num_draft_tokens_buf.np[:num_reqs], [2, 0, 4])
-    for buf in bufs:
+    for buf, expected in zip(bufs, ([1, 4, 8], [20, 0, 64], [0, 3, 0]), strict=True):
+        np.testing.assert_array_equal(buf.np[:num_reqs], expected)
+        assert buf.gpu[:num_reqs].tolist() == expected
         assert (buf.np[num_reqs:] == sentinel).all()
-
-    assert torch.equal(
-        ctx.mamba_state_idx_buf.gpu[:num_reqs],
-        torch.tensor([100, 200, 300], dtype=torch.int32),
+        assert (buf.gpu[num_reqs:] == sentinel).all()
+    np.testing.assert_array_equal(
+        ctx.is_prefilling_buf.np[:num_reqs], [False, True, True]
     )
     assert torch.equal(
-        ctx.num_draft_tokens_buf.gpu[:num_reqs],
-        torch.tensor([2, 0, 4], dtype=torch.int32),
+        ctx.is_prefilling_buf.gpu[:num_reqs],
+        torch.tensor([False, True, True]),
+    )
+    assert ctx.is_prefilling_buf.np[num_reqs:].all()
+    assert ctx.is_prefilling_buf.gpu[num_reqs:].all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    ("num_spec", "cache_mode"), [(0, "none"), (3, "align")], ids=["stp", "mtp3"]
+)
+def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_mode):
+    """A resumed prefill replaces the SSM state, so decode must ignore old rings."""
+    from vllm.v1.worker.replayssm_utils import (
+        ReplaySSMModelContext,
+        _postprocess_replayssm_kernel,
     )
 
-
-def test_stage_postprocess_inputs_to_gpu_asserts_on_missing_state_idx():
-    """If preprocess_mamba didn't populate mamba_state_idx for a req in the
-    batch, staging must fail loudly rather than silently writing a stale index."""
-    device = torch.device("cpu")
-    ctx = _make_staging_ctx(max_num_reqs=4, device=device)
-    scheduler_output = _make_postprocess_scheduler_output(
-        req_ids=["req_a"],
-        num_scheduled_tokens={"req_a": 1},
+    device = torch.device("cuda")
+    heads, dim, dstate = 2, 4, 8
+    tokens = num_spec + 1
+    ring_len = 16 + tokens
+    # Prefill has already written a complete state into live slot 1.
+    state = torch.full((3, heads, dim, dstate), 0.1, device=device)
+    x_ring = torch.ones(3, heads, ring_len, dim, dtype=torch.bfloat16, device=device)
+    B_ring = torch.ones(3, 1, ring_len, dstate, dtype=torch.bfloat16, device=device)
+    dt_ring = torch.full((3, heads, ring_len), 0.05, device=device)
+    starts = torch.full((3,), 7, dtype=torch.int32, device=device)
+    committed = torch.full((3,), 3, dtype=torch.int32, device=device)
+    cache = (state, x_ring, B_ring, dt_ring, starts, committed)
+    original_cache = tuple(tensor.clone() for tensor in cache)
+    mixer = SimpleNamespace(
+        kv_cache=[torch.empty(3, 1, device=device), state, x_ring, dt_ring, B_ring],
+        A=-torch.ones(heads, device=device),
+        _replayssm_ring_start=starts,
+        _replayssm_prev_num_accepted=committed,
+        replayssm_buffer_len=16,
+        mamba_config=MambaConfig(),
     )
-    requests = _make_requests(["req_a"], [0], [[0]])
-
-    # mamba_state_idx has an entry for a *different* request but not for
-    # req_a (the one being staged). This is the realistic failure mode:
-    # preprocess_mamba ran, populated some reqs, but missed this one.
-    # The safety assert in stage_postprocess_inputs_to_gpu must fire on
-    # req_a's missing entry rather than silently writing None.
-    mamba_state_idx: dict[str, int] = {"other_req": 42}
-    with pytest.raises(AssertionError, match="mamba_state_idx missing entry"):
-        stage_postprocess_inputs_to_gpu(
-            ctx,
-            scheduler_output,
-            ["req_a"],
-            1,
-            requests,
-            mamba_state_idx,
-        )
+    spec = MambaSpec(
+        block_size=128,
+        shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
+        dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
+        mamba_cache_mode=cache_mode,
+    )
+    replay = ReplaySSMModelContext.create(
+        [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
+        max_num_reqs=1,
+    )
+    metadata = _build_staging_metadata([64], [8], [64], [0], num_spec)
+    ctx = _make_staging_ctx(1, device)
+    stage_postprocess_inputs_to_gpu(
+        ctx,
+        _make_postprocess_scheduler_output(
+            ["req"], {"req": 8}, scheduled_spec_decode_tokens={}
+        ),
+        ["req"],
+        1,
+        _make_requests(["req"], [64], [[1]], [64]),
+        num_decodes=metadata.num_decodes,
+    )
+    _postprocess_replayssm_kernel[(1, 1)](
+        None,
+        ctx.num_scheduled_tokens_buf.gpu,
+        ctx.num_computed_tokens_buf.gpu,
+        torch.ones(1, dtype=torch.int32, device=device),
+        ctx.is_prefilling_buf.gpu,
+        None,
+        replay.block_table_ptrs,
+        replay.ring_start_ptrs,
+        replay.num_committed_ptrs,
+        replay.src_slots_ptrs,
+        replay.dst_slots_ptrs,
+        replay.plan_ring_start,
+        replay.plan_flush_count,
+        replay.block_table_strides,
+        replay.num_layers,
+        MAX_NUM_REQS=1,
+        MAMBA_BLOCK_SIZE=128,
+        LOGICAL_WINDOW=16,
+        RING_BUFFER_LEN=ring_len,
+        PAD_SLOT_ID=0,
+        QUERY_METADATA_IS_CUMULATIVE=False,
+        NUM_COMPUTED_IS_POST_STEP=False,
+        HAS_IDX_MAPPING=False,
+        MATERIALIZE_PREFIXES=cache_mode == "align",
+        LIVE_COL_IS_ZERO=True,
+    )
+    assert starts.tolist() == [7, 0, 7]
+    assert committed.tolist() == [3, 0, 3]
+    for actual, original in zip(cache[:4], original_cache[:4]):
+        torch.testing.assert_close(actual, original, rtol=0, atol=0)
+    for actual, original in zip(cache[4:], original_cache[4:]):
+        torch.testing.assert_close(actual[[0, 2]], original[[0, 2]], rtol=0, atol=0)
 
 
 def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
@@ -815,13 +1185,13 @@ def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
     temporal_state = torch.empty(
         config.num_blocks, config.temporal_state_dim, dtype=config.dtype
     )
-    attention = MagicMock()
+    attention = MagicMock(use_flashinfer_replayssm=False)
     attention.kv_cache = [
         conv_state,
         temporal_state,
         *(torch.empty(config.num_blocks, 1) for _ in range(4)),
     ]
-    context = _make_gpu_ctx(config, kv_cache_config, device)
+    context = _make_gpu_ctx(config, kv_cache_config, device, {"layer_0": attention})
 
     context.initialize_from_forward_context(
         kv_cache_config,
@@ -851,9 +1221,8 @@ def _run_gpu_postprocess(
     num_computed_tokens: list[int],
     num_draft_tokens: dict[str, int],
     device: torch.device,
-) -> None:
-    """Initialize the GPU context against `block_table`, run the fused
-    postprocess kernel for `req_ids`, and synchronize."""
+) -> torch.Tensor:
+    """Run the fused postprocess kernel and return normalized accepted counts."""
 
     def t(values):
         return torch.tensor(values, dtype=torch.int32, device=device)
@@ -861,15 +1230,17 @@ def _run_gpu_postprocess(
     gpu_ctx.initialize_from_forward_context(
         kv_cache_config, forward_context, copy_funcs, [block_table]
     )
+    accepted_gpu = t(num_accepted_tokens)
     gpu_ctx.run_fused_postprocess(
         num_reqs=len(req_ids),
-        num_accepted_tokens_gpu=t(num_accepted_tokens),
+        num_accepted_tokens_gpu=accepted_gpu,
         mamba_state_idx_gpu=t(mamba_state_idx),
         num_scheduled_tokens_gpu=t([num_scheduled_tokens[r] for r in req_ids]),
         num_computed_tokens_gpu=t(num_computed_tokens),
         num_draft_tokens_gpu=t([num_draft_tokens.get(r, 0) for r in req_ids]),
     )
     torch.accelerator.synchronize()
+    return accepted_gpu
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -987,7 +1358,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
@@ -998,7 +1369,7 @@ class TestPostprocessMambaFusedKernel:
             block_table_gpu[i, : len(block_ids)] = torch.tensor(
                 block_ids, dtype=torch.int32
             )
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1034,7 +1405,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
@@ -1075,7 +1446,7 @@ class TestPostprocessMambaFusedKernel:
 
         forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
 
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -1156,7 +1527,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         max_blocks_per_req = 8
         block_table_gpu = torch.zeros(
@@ -1261,7 +1632,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path with REALISTIC block table stride
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         # KEY DIFFERENCE: Create a large block table like real code does
         # Real system has max_num_blocks_per_req >> blocks actually used
@@ -1398,13 +1769,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1454,7 +1825,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1538,13 +1909,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1617,7 +1988,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1696,13 +2067,13 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1749,7 +2120,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python",
         )
@@ -1828,12 +2199,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -1883,7 +2254,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="GPU num_accepted_tokens should match Python (must NOT be 1)",
         )
@@ -1981,7 +2352,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -1992,7 +2363,7 @@ class TestPostprocessMambaFusedKernel:
                 block_ids, dtype=torch.int32
             )
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -2029,7 +2400,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch with non-sequential block IDs",
         )
@@ -2134,7 +2505,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -2145,7 +2516,7 @@ class TestPostprocessMambaFusedKernel:
                 block_ids, dtype=torch.int32
             )
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -2186,7 +2557,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch in mixed PC batch",
         )
@@ -2287,12 +2658,12 @@ class TestPostprocessMambaFusedKernel:
         )
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_gpu,
@@ -2314,7 +2685,7 @@ class TestPostprocessMambaFusedKernel:
         # Old kernel (959ca0fd): `if src_addr == dst_addr` -> FAILS here (sets 1)
         # Fixed kernel (6466ce0d): `if src_block_idx == dest_block_idx and
         #   accept_token_bias == 0` -> PASSES (preserves 3)
-        kernel_accepted = gpu_ctx.num_accepted_tokens_out[0].item()
+        kernel_accepted = accepted_gpu[0].item()
         assert kernel_accepted == 3, (
             f"Kernel set num_accepted_tokens to {kernel_accepted} but expected 3. "
             f"The early-return guard likely compared physical addresses "
@@ -2444,12 +2815,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=fwd_gpu,
@@ -2488,7 +2859,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch",
         )
@@ -2569,12 +2940,12 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
 
-        _run_gpu_postprocess(
+        accepted_gpu = _run_gpu_postprocess(
             gpu_ctx,
             kv_cache_config=kv_cache_config,
             forward_context=fwd_gpu,
@@ -2633,7 +3004,7 @@ class TestPostprocessMambaFusedKernel:
             device=device,
         )
         torch.testing.assert_close(
-            gpu_ctx.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
@@ -2706,8 +3077,8 @@ class TestPostprocessMambaFusedKernel:
         forward_context_sd = {
             "layer_0": _make_mock_attention(sd_conv, sd_temporal),
         }
-        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device)
-        _run_gpu_postprocess(
+        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_sd)
+        accepted_gpu_sd = _run_gpu_postprocess(
             gpu_ctx_sd,
             kv_cache_config=kv_cache_config,
             forward_context=forward_context_sd,
@@ -2760,8 +3131,8 @@ class TestPostprocessMambaFusedKernel:
             forward_context_ds = {
                 "layer_0": _make_mock_attention(ds_conv, ds_temporal),
             }
-            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device)
-            _run_gpu_postprocess(
+            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_ds)
+            accepted_gpu_ds = _run_gpu_postprocess(
                 gpu_ctx_ds,
                 kv_cache_config=kv_cache_config,
                 forward_context=forward_context_ds,
@@ -2803,14 +3174,14 @@ class TestPostprocessMambaFusedKernel:
             [expected_accepted], dtype=torch.int32, device=device
         )
         torch.testing.assert_close(
-            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu_sd[:num_reqs],
             expected_accepted_tensor,
             rtol=0,
             atol=0,
             msg="SD num_accepted_tokens result is wrong",
         )
         torch.testing.assert_close(
-            gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
+            accepted_gpu_ds[:num_reqs],
             expected_accepted_tensor,
             rtol=0,
             atol=0,

@@ -42,7 +42,9 @@ class DummyConfig:
 
 
 def make_model(config: DummyConfig) -> PaddleOCRVLForConditionalGeneration:
-    model = object.__new__(PaddleOCRVLForConditionalGeneration)
+    model = object.__new__(
+        PaddleOCRVLForConditionalGeneration  # type: ignore[type-abstract]  # protocol attrs unset
+    )
     model.config = config
     return model
 

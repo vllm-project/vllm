@@ -106,7 +106,8 @@ def tokenizer() -> MistralTokenizer:
 
 
 @pytest_asyncio.fixture
-async def async_engine():
+async def async_engine(request):
+    engine_config = {**ENGINE_CONFIG, **getattr(request, "param", {})}
     gpu_memory_utilization = ENGINE_CONFIG.get("gpu_memory_utilization", 0.9)
     from vllm.platforms import current_platform
 
@@ -115,7 +116,7 @@ async def async_engine():
 
         wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
-    engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
+    engine_args = AsyncEngineArgs(**engine_config)
     llm = AsyncLLM.from_engine_args(engine_args)
     try:
         yield llm
@@ -275,3 +276,82 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
             f"  got:      {got!r}\n"
             f"  expected: {expected!r}"
         )
+
+
+@pytest.mark.asyncio
+async def test_voxtral_realtime_buffer_stops_at_max_model_len(tokenizer):
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+    audio = Audio.from_file(AudioAsset("winning_call").get_local_path(), strict=False)
+    req = TranscriptionRequest(
+        streaming=StreamingMode.OFFLINE,
+        audio=audio.to_base64(audio.format),
+        language=None,
+    )
+    audio_enc = tokenizer.encode_transcription(req)
+
+    max_model_len = 64
+    buffer = VoxtralRealtimeBuffer(
+        audio_config, audio_enc.tokens, max_model_len=max_model_len
+    )
+    await buffer.append_audio(audio_enc.audios[0].audio_array)
+    await buffer.append_audio(None)
+    # Unlimited feedback tokens so only the length cap can stop the stream.
+    await buffer.append_tokens([0] * max_model_len)
+
+    n_tokens = 0
+    async for prompt in buffer.get_input_stream():
+        n_tokens += len(prompt["prompt_token_ids"])
+
+    assert len(audio_enc.tokens) < n_tokens < max_model_len
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_engine", [{"max_model_len": 128}], indirect=True)
+async def test_voxtral_realtime_generator_max_model_len(
+    audio_assets, tokenizer, async_engine
+):
+    # Lazy import to avoid CUDA-reinitialization error
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    max_model_len = async_engine.model_config.max_model_len
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
+    audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+
+    async def input_stream(audio_buffer):
+        async for prompt in audio_buffer.get_input_stream():
+            parsed_prompt = parse_model_prompt(async_engine.model_config, prompt)
+            (engine_input,) = await async_engine.renderer.render_cmpl_async(
+                [parsed_prompt]
+            )
+            yield StreamingInput(prompt=engine_input)
+
+    # winning_call is ~300 tokens long, well past max_model_len.
+    audio = Audio.from_file(audio_assets[1].get_local_path(), strict=False)
+    req = TranscriptionRequest(
+        streaming=StreamingMode.OFFLINE,
+        audio=audio.to_base64(audio.format),
+        language=None,
+    )
+    audio_enc = tokenizer.encode_transcription(req)
+    buffer = VoxtralRealtimeBuffer(
+        audio_config, audio_enc.tokens, max_model_len=max_model_len
+    )
+    await buffer.append_audio(audio_enc.audios[0].audio_array)
+    await buffer.append_audio(None)
+
+    output_tokens = []
+    async for resp in async_engine.generate(
+        prompt=input_stream(buffer),
+        sampling_params=sampling_params,
+        request_id="session-max-len",
+    ):
+        tokens = resp.outputs[0].token_ids[-1:]
+        output_tokens.extend(tokens)
+        await buffer.append_tokens(tokens)
+
+    assert resp.finished
+    assert 0 < len(output_tokens) < max_model_len
+    # The engine is still healthy after the session hit the cap.
+    assert not async_engine.errored

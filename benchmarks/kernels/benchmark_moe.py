@@ -15,6 +15,7 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -35,6 +36,14 @@ from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import set_random_seed
+
+logger = init_logger(__name__)
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_cdna, on_rdna
+
+    # AMD RDNA doesn't have MFMA but WMMA
+    WMMA_TILE = 16
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -64,6 +73,13 @@ def clear_triton_cache():
             and hasattr(triton.runtime.cache, "clear")
         ):
             triton.runtime.cache.clear()
+        else:
+            # On Triton 3.6+ triton.runtime.cache is a module without
+            # .clear(). The real compiled-kernel cache lives on each
+            # JITFunction.device_caches defaultdict.
+            for obj in gc.get_objects():
+                if isinstance(obj, triton.JITFunction):
+                    obj.device_caches.clear()
     except ImportError:
         # Triton not installed, skip cache clearing
         pass
@@ -107,6 +123,7 @@ def benchmark_config(
     num_iters: int = 100,
     block_quant_shape: list[int] = None,
     use_deep_gemm: bool = False,
+    per_act_token_quant: bool = False,
 ) -> float:
     init_dtype = torch.float16 if use_fp8_w8a8 else dtype
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)
@@ -208,12 +225,19 @@ def benchmark_config(
                 torch.rand((E, n_tiles_w2, k_tiles_w2), dtype=torch.float32)
                 * factor_for_scale
             )
+        elif per_act_token_quant:
+            # Per-channel weights; activations are quantized per token at run time.
+            w1_scale = torch.rand(
+                (num_experts, shard_intermediate_size, 1), dtype=torch.float32
+            )
+            w2_scale = torch.rand((num_experts, hidden_size, 1), dtype=torch.float32)
         else:
             w1_scale = torch.randn(num_experts, dtype=torch.float32)
             w2_scale = torch.randn(num_experts, dtype=torch.float32)
 
-        a1_scale = torch.randn(1, dtype=torch.float32)
-        a2_scale = torch.randn(1, dtype=torch.float32)
+        if not per_act_token_quant:
+            a1_scale = torch.randn(1, dtype=torch.float32)
+            a2_scale = torch.randn(1, dtype=torch.float32)
 
         w1 = w1.to(FP8_DTYPE)
         w2 = w2.to(FP8_DTYPE)
@@ -239,6 +263,8 @@ def benchmark_config(
             w2_scale=w2_scale,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_act_token_quant,
             block_shape=block_quant_shape,
             weight_dtype="int4" if use_int4_w4a16 else None,
         )
@@ -346,8 +372,6 @@ def get_rocm_tuning_space(use_fp16):
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
     waves_per_eu_range = [0, 1, 2, 4]
-    matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
-    kpack_range = [1, 2] if use_fp16 else []
 
     param_ranges = {
         "BLOCK_SIZE_M": block_mn_range,
@@ -358,9 +382,10 @@ def get_rocm_tuning_space(use_fp16):
         "num_stages": num_stage_range,
         "waves_per_eu": waves_per_eu_range,
     }
-    if use_fp16:
-        param_ranges["matrix_instr_nonkdim"] = matrix_instr_nonkdim_range
-        param_ranges["kpack"] = kpack_range
+    # RDNA doesn't use matrix_instr_nonkdim nor kpack
+    if use_fp16 and on_cdna():
+        param_ranges["matrix_instr_nonkdim"] = [16, 32]
+        param_ranges["kpack"] = [1, 2]
 
     return param_ranges
 
@@ -478,7 +503,7 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
         num_warps = config.get("num_warps")
 
         if is_fp16:
-            matrix_instr_nonkdim = config.get("matrix_instr_nonkdim")
+            matrix_instr_nonkdim = config.get("matrix_instr_nonkdim", WMMA_TILE)
             if matrix_instr_nonkdim > mfma:
                 continue
         if mfma == 4 and BLOCK_SIZE_K < 64:
@@ -534,6 +559,20 @@ def prune_rocm_configs(M, N, K, configs, is_fp16=True):
             if num_warps < 4:
                 continue
 
+        # RDNA (gfx11/gfx12): reject configs that exceed 256 VGPRs per wave.
+        # WMMA is 16x16; the accumulator is 8 VGPRs per tile in wave32 mode
+        # regardless of dtype (MoE always accumulates in fp32/int32).
+        if on_rdna():
+            accum_vgprs = (
+                (BLOCK_SIZE_M // WMMA_TILE)
+                * (BLOCK_SIZE_N // WMMA_TILE)
+                // num_warps
+                * 8
+            )
+            # Reject edge case to leave room for inputs and weights
+            if accum_vgprs >= 256:
+                continue
+
         pruned_configs.append(config)
 
     return pruned_configs
@@ -577,6 +616,7 @@ class BenchmarkWorker:
         use_int4_w4a16: bool = False,
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
+        per_act_token_quant: bool = False,
     ) -> tuple[dict[str, int], float]:
         # local import to allow serialization by ray
 
@@ -620,6 +660,7 @@ class BenchmarkWorker:
             num_iters=100,
             block_quant_shape=block_quant_shape,
             use_deep_gemm=use_deep_gemm,
+            per_act_token_quant=per_act_token_quant,
         )
         return config, kernel_time
 
@@ -637,6 +678,7 @@ class BenchmarkWorker:
         search_space: list[dict[str, int]],
         block_quant_shape: list[int],
         use_deep_gemm: bool,
+        per_act_token_quant: bool = False,
     ) -> dict[str, int]:
         # local import to allow serialization by ray
         from vllm.platforms import current_platform
@@ -684,9 +726,13 @@ class BenchmarkWorker:
                         num_iters=20,
                         block_quant_shape=block_quant_shape,
                         use_deep_gemm=use_deep_gemm,
+                        per_act_token_quant=per_act_token_quant,
                     )
                 except triton.runtime.autotuner.OutOfResources:
                     # Some configurations may be invalid and fail to compile.
+                    continue
+                except RuntimeError as e:
+                    logger.warning("Skipping config %s: %s", config, e)
                     continue
 
                 if kernel_time < best_time:
@@ -787,6 +833,24 @@ def get_weight_block_size_safety(config, default_value=None):
     return default_value
 
 
+def uses_per_token_act_quant(config) -> bool:
+    """Whether a compressed-tensors checkpoint quantizes activations per token.
+
+    vLLM then runs the fused MoE with per-token activation and per-channel
+    weight scales, which is a different kernel specialization from per-tensor
+    FP8 but reads the same config file.
+    """
+    quantization_config = getattr(config, "quantization_config", {})
+    if not isinstance(quantization_config, dict):
+        return False
+    config_groups = quantization_config.get("config_groups", {})
+    if len(config_groups) != 1:
+        return False
+    group = next(iter(config_groups.values()))
+    input_activations = group.get("input_activations") or {}
+    return input_activations.get("strategy") == "token"
+
+
 def get_model_params(config):
     architectures = getattr(config, "architectures", None) or [type(config).__name__]
     architecture = architectures[0]
@@ -818,6 +882,7 @@ def get_model_params(config):
         hidden_size = config.hidden_size
     elif architecture in (
         "BailingMoeV3ForCausalLM",
+        "BeamForCausalLM",
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
@@ -836,7 +901,11 @@ def get_model_params(config):
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif architecture == "DiffusionGemmaForBlockDiffusion":
+    elif architecture in (
+        "DiffusionGemmaForBlockDiffusion",
+        "Gemma4ForCausalLM",
+        "Gemma4ForConditionalGeneration",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.top_k_experts
@@ -873,10 +942,15 @@ def get_model_params(config):
         # Support for llama4
         config = config.get_text_config()
         # Default: Mixtral.
-        E = config.num_local_experts
-        topk = config.num_experts_per_tok
+        E = getattr(config, "num_local_experts", None)
+        topk = getattr(config, "num_experts_per_tok", None)
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
+    if not E:
+        raise ValueError(
+            f"{architecture} has no MoE experts in its config; "
+            "benchmark_moe.py only tunes MoE layers."
+        )
     return E, topk, intermediate_size, hidden_size
 
 
@@ -949,6 +1023,11 @@ def main(args: argparse.Namespace):
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     use_int4_w4a16 = args.dtype == "int4_w4a16"
     block_quant_shape = get_weight_block_size_safety(config)
+    per_act_token_quant = (
+        use_fp8_w8a8 and block_quant_shape is None and uses_per_token_act_quant(config)
+    )
+    if per_act_token_quant:
+        print("Benchmarking per-token activation and per-channel weight FP8.")
     if use_int4_w4a16:
         group_size = get_quantization_group_size(config)
         if group_size is None:
@@ -1051,6 +1130,7 @@ def main(args: argparse.Namespace):
                     search_space,
                     block_quant_shape,
                     use_deep_gemm,
+                    per_act_token_quant,
                 )
                 for batch_size in batch_sizes
             ],
@@ -1089,6 +1169,7 @@ def main(args: argparse.Namespace):
                     use_int4_w4a16,
                     block_quant_shape,
                     use_deep_gemm,
+                    per_act_token_quant,
                 )
                 for batch_size in batch_sizes
             ],

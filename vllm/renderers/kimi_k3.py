@@ -3,14 +3,14 @@
 from typing import Any, cast
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.exceptions import VLLMValidationError
+from vllm.multimodal.media.connector import merge_media_io_kwargs
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.exceptions import VLLMValidationError
-from vllm.multimodal.media.connector import merge_media_io_kwargs
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 

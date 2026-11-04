@@ -10,6 +10,7 @@
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.triton_utils import tl, triton
 
 
@@ -207,7 +208,7 @@ def attn_res(
         HAS_DELTA=delta is not None,
         WRITE_BLOCK=block_write_idx >= 0,
         APPLY_OUTPUT_NORM=output_norm_weight is not None,
-        QUANT_MAX=0.0 if quant_dtype is None else torch.finfo(quant_dtype).max,
+        QUANT_MAX=0.0 if quant_dtype is None else get_fp8_min_max()[1],
         BLOCK_L=block_l,
         BLOCK_D=triton.next_power_of_2(hidden_size),
         num_warps=num_warps,

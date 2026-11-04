@@ -136,7 +136,7 @@ class MultiModalHasher:
             return cls.iter_item_to_bytes("video", obj.original_bytes)
 
         if isinstance(obj, torch.Tensor):
-            tensor_obj: torch.Tensor = obj.cpu()
+            tensor_obj: torch.Tensor = obj.detach().cpu()
             tensor_dtype = tensor_obj.dtype
             tensor_shape = tensor_obj.shape
 

@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kInt4Static32,
+    kInt8Dynamic32Sym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp4Static,
@@ -43,6 +44,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp4": kMxfp4Dynamic,
     "nvfp4_per_token": kNvfp4DynamicToken,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    # Dynamic per-32-element int8 activations (RDNA3 MXFP4 W4A8 GEMV).
+    "int8_per_group_32": kInt8Dynamic32Sym,
     # Load-time MXFP4-to-int4 for Kimi-K3 on gfx942.
     "int4_per_group_32": kInt4Static32,
 }
@@ -88,6 +91,20 @@ class QuantSpec:
     activation: QuantKeyField = None
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
+    hadamard_size: int | None = None
+    """Block size (a power of two) of an orthonormal Hadamard rotation applied
+    along the input dimension of both the weight and the activation before
+    quantization (see `InputHadamardLinearMethod`). The GEMM result is
+    unchanged up to quantization error, which the rotation shrinks by spreading
+    outliers across each block. Linear layers only; validated with MXFP4."""
+
+    @field_validator("hadamard_size")
+    @classmethod
+    def _check_hadamard_size(cls, size: int | None) -> int | None:
+        if size is not None and (size <= 0 or size & (size - 1)):
+            raise ValueError(f"hadamard_size must be a power of two, got {size}")
+        return size
+
     def __str__(self) -> str:
         def quant_key_str(quant_key: QuantKey | None) -> str:
             if quant_key is None:
@@ -101,7 +118,10 @@ class QuantSpec:
                 str(quant_key),
             )
 
-        return quant_key_str(self.weight)
+        name = quant_key_str(self.weight)
+        if self.hadamard_size is not None:
+            name = f"{name}_hadamard{self.hadamard_size}"
+        return name
 
 
 @config
@@ -211,6 +231,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     "mxfp4": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
+    ),
+    # MXFP4 linear with a 32-wide Hadamard rotation of weights and activations;
+    # MoE stays unquantized (no `moe` field).
+    "mxfp4_hadamard32": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(

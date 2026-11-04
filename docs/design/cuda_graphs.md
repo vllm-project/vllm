@@ -52,8 +52,6 @@ While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply
 !!! note
     Here, the single-modes `NONE`, `PIECEWISE`, and `FULL` are treated as the runtime modes for CUDA Graphs dispatching. If using a dual-mode, the dispatcher will always dispatch to one of its member modes (plus a potential `NONE` if no suitable CUDA Graph available), depending on the batch composition.
 
-While cascade attention is not cudagraph compatible, it is now compatible with all possible cudagraph mode configurations. If a batch uses cascade attention, it always gets dispatched to `PIECEWISE` mode if available (otherwise `NONE`).
-
 !!! note
     Not all CUDA Graph modes are compatible with every attention backend. We automatically "downgrade" modes to the closest supported mode. For example, if a backend only supports CUDA Graphs for pure decode/uniform batches, we convert `FULL` to `FULL_AND_PIECEWISE` if piecewise compilation is enabled, and `FULL_DECODE_ONLY` otherwise.
 
@@ -154,9 +152,7 @@ To signal the CUDA Graphs compatibility of the attention backends, we introduce 
 
 ```python
 class AttentionCGSupport(enum.Enum):
-    """ Constants for the CUDA Graphs support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never CUDA Graphs supported."""
+    """Constants for the CUDA Graphs support of the attention backend"""
 
     ALWAYS = 3
     """CUDA Graphs always supported; supports mixed-prefill-decode"""
