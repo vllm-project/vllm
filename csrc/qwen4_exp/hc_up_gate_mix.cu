@@ -1,11 +1,11 @@
 // Fused HyperConnection up projection + gate mix for Qwen4Exp on SM100.
 //
-// out[m, c] = sum_s sigmoid(bf16(lowrank[m] . w_up[s * H + c])) *
+// out[m, c] = sum_s sigmoid(lowrank[m] . w_up[s * H + c]) *
 //             xn[m, s * H + c] / HC
 //
 // with HC = 4, H = 2560 and rank R = 320. The [M, HC * H] gate is never
-// written to global memory. The gate is rounded to bf16 as in the unfused
-// F.linear + hc_gate_mix chain; the sigmoid uses tanh.approx.
+// written to global memory and stays in fp32 (the unfused F.linear +
+// hc_gate_mix chain rounds it to bf16); the sigmoid uses tanh.approx.
 //
 // Persistent kernel, one CTA per SM. An output tile is 128 (or, with a CTA
 // pair, 256) rows x BC hidden columns; its GEMM tile has N = HC * BC columns,
@@ -384,11 +384,11 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
         const auto* x2 = reinterpret_cast<const __nv_bfloat162*>(x[s]);
   #pragma unroll
         for (uint32_t i = 0; i < kChunk / 2; ++i) {
-          const float2 gate = __bfloat1622float2(__floats2bfloat162_rn(
-              __uint_as_float(g[s][2 * i]), __uint_as_float(g[s][2 * i + 1])));
           const float2 xf = __bfloat1622float2(x2[i]);
-          o[2 * i] = fmaf(sigmoid(gate.x), xf.x, o[2 * i]);
-          o[2 * i + 1] = fmaf(sigmoid(gate.y), xf.y, o[2 * i + 1]);
+          o[2 * i] =
+              fmaf(sigmoid(__uint_as_float(g[s][2 * i])), xf.x, o[2 * i]);
+          o[2 * i + 1] = fmaf(sigmoid(__uint_as_float(g[s][2 * i + 1])), xf.y,
+                              o[2 * i + 1]);
         }
       }
       uint4 y[kChunk / 8];
