@@ -14,7 +14,8 @@ from tests.utils import (
     multi_gpu_test,
     multi_process_parallel,
 )
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_tp_group, parallel_state
+from vllm.distributed.device_communicators import custom_all_reduce
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
     TrtLlmMxfp4ExpertsMonolithic,
@@ -52,6 +53,8 @@ class FakeMoEConfig:
 def build_runner(
     monkeypatch: pytest.MonkeyPatch,
     enable_sleep_mode: bool,
+    *,
+    multicast: bool = True,
 ) -> tuple[latent_moe_runner.LatentMoERunner, FakeMoEConfig, dict[str, object]]:
     moe_config = FakeMoEConfig()
     quant_method = SimpleNamespace(
@@ -77,6 +80,9 @@ def build_runner(
     tail_op = SimpleNamespace(contract=SimpleNamespace(max_num_tokens=128))
 
     def fake_tail_initialize(**kwargs):
+        if not multicast:
+            # What the NVLS rendezvous raises when multicast is unavailable.
+            raise RuntimeError("routed NVLS multicast mapping is unavailable")
         initialized_with.update(kwargs)
         return tail_op
 
@@ -89,6 +95,7 @@ def build_runner(
             is_cuda=lambda: True,
             is_device_capability_family=lambda capability: capability == 100,
             current_device=lambda: torch.device("cuda"),
+            device_type="cuda",
         ),
     )
     monkeypatch.setattr(
@@ -99,6 +106,13 @@ def build_runner(
             model_config=SimpleNamespace(enable_sleep_mode=enable_sleep_mode),
         ),
     )
+    # Single-rank stand-ins for the TP group and the device multicast probe.
+    monkeypatch.setattr(parallel_state, "_TP", SimpleNamespace(cpu_group=None))
+    monkeypatch.setattr(custom_all_reduce, "_all_ranks_true", lambda group, v: v)
+    monkeypatch.setattr(
+        custom_all_reduce, "_has_local_multicast_support", lambda device: multicast
+    )
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     monkeypatch.setattr(KimiK3LatentMoETailOp, "initialize", fake_tail_initialize)
 
     return latent_moe_runner.LatentMoERunner(), moe_config, initialized_with
@@ -107,8 +121,9 @@ def build_runner(
 def test_deferred_finalize_enabled_before_moe_kernel_setup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, moe_config, initialized_with = build_runner(monkeypatch, False)
+    runner, moe_config, initialized_with = build_runner(monkeypatch, False)
 
+    assert runner.enable_k3_latent_moe_tail_fusion
     # The stand-in deliberately borrows the real config's property.
     assert moe_config.use_deferred_moe_finalize  # type: ignore[misc]
     assert moe_config.defer_moe_finalize_max_num_tokens == 128
@@ -119,6 +134,19 @@ def test_sleep_mode_falls_back_to_default_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner, moe_config, initialized_with = build_runner(monkeypatch, True)
+
+    assert not runner.enable_k3_latent_moe_tail_fusion
+    assert not initialized_with
+    assert not moe_config.use_deferred_moe_finalize  # type: ignore[misc]
+
+
+def test_tail_fusion_falls_back_without_multicast(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # E.g. multi-GPU Confidential Computing.
+    runner, moe_config, initialized_with = build_runner(
+        monkeypatch, False, multicast=False
+    )
 
     assert not runner.enable_k3_latent_moe_tail_fusion
     assert not initialized_with
