@@ -14,6 +14,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -193,6 +194,11 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        # Token id lists hold only ints and grow with the context: hide them
+        # from the cyclic GC. They are only ever mutated in place.
+        gc_untrack(self.prompt_token_ids)
+        gc_untrack(self._all_token_ids)
+        gc_untrack(self._output_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
@@ -224,8 +230,9 @@ class Request:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         # Prompt block hashes precomputed by the frontend; the hasher continues
-        # from the first block they don't cover.
-        self.block_hashes: list[BlockHash] = block_hashes or []
+        # from the first block they don't cover. Hidden from the cyclic GC: it
+        # only holds bytes, one per block.
+        self.block_hashes: list[BlockHash] = gc_untrack(block_hashes or [])
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -305,6 +312,19 @@ class Request:
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None
+
+    @property
+    def prefill_token_ids(self) -> list[int]:
+        """All token ids, as the prompt_token_ids object itself while they hold
+        the same tokens, so that pickling both sends them once."""
+        prompt = self.prompt_token_ids
+        if (
+            prompt is not None
+            and self.prompt_is_token_ids is None
+            and len(prompt) == len(self._all_token_ids)
+        ):
+            return prompt
+        return self._all_token_ids
 
     @property
     def num_tokens(self) -> int:
