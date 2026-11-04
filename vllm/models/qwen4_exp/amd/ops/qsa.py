@@ -11,6 +11,9 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import cdiv, round_up
+
+from .qsa_mfma_scorer import launch_qsa_mqa_paged_mfma, mfma_scorer_applies
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
@@ -609,8 +612,15 @@ def qsa_mqa_paged(
     compress_ratio: int,
     num_columns: int | None = None,
     score_scale: float | None = None,
+    allow_mfma: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute QSA scores directly from a paged compressed-key cache."""
+    """Compute QSA scores directly from a paged compressed-key cache.
+
+    ``allow_mfma`` marks rows of prefill requests: such a call with at least
+    ``MFMA_SCORER_MIN_ROWS`` rows and a bf16 or fp16 query and cache is scored
+    by the MFMA tile kernel (``qsa_mfma_scorer.py``), which is not bitwise
+    equal to the per-row kernel.
+    """
     _validate_mqa(q)
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA scoring requires a GPU and Triton")
@@ -641,6 +651,20 @@ def qsa_mqa_paged(
     logits = torch.empty((q.shape[0], columns), dtype=torch.float32, device=q.device)
     visible_blocks = torch.empty(q.shape[0], dtype=torch.int32, device=q.device)
     if not q.shape[0] or not columns:
+        return logits, visible_blocks
+    if allow_mfma and mfma_scorer_applies(q, k_cache):
+        launch_qsa_mqa_paged_mfma(
+            q,
+            k_cache,
+            page_table,
+            token_to_req,
+            query_positions,
+            sequence_lengths,
+            compress_ratio,
+            logits,
+            visible_blocks,
+            float(score_divisor),
+        )
         return logits, visible_blocks
     block_n = 32
     # A fixed grid for the shapes (CUDA graph safe): the programs of a row
@@ -749,8 +773,23 @@ def qsa_select_paged_tokens(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    max_seq_len: int | None = None,
+    num_decode_tokens: int | None = None,
 ) -> torch.Tensor:
-    """Score, select, and expand QSA indices without host synchronization."""
+    """Score, select, and expand QSA indices without host synchronization.
+
+    ``max_seq_len``, a host-side bound on every ``sequence_lengths`` entry,
+    trims the score width to the compressed columns a row can see, as the
+    NVIDIA prefill path does: visible = min((pos + 1) // ratio,
+    seq_len // ratio) <= cdiv(max_seq_len, ratio). A captured graph keeps the
+    full width, since it replays at any length. The narrower rows also let
+    more rows share one logits workspace chunk.
+
+    ``num_decode_tokens`` counts the leading decode rows (the batch puts
+    decode requests first). Chunks never mix decode and prefill rows, and only
+    prefill chunks may take the MFMA scorer (``qsa_mqa_paged``'s
+    ``allow_mfma``); with None every row keeps the per-row kernel.
+    """
     rows = q.shape[0]
     output_width = token_topk + compress_ratio - 1
     if out is None:
@@ -761,6 +800,8 @@ def qsa_select_paged_tokens(
         return out
 
     columns = page_table.shape[1] * k_cache.shape[1]
+    if max_seq_len is not None and not torch.cuda.is_current_stream_capturing():
+        columns = min(max(64, round_up(cdiv(max_seq_len, compress_ratio), 64)), columns)
     block_topk = token_topk // compress_ratio
     rows_per_chunk = max(1, _LOGITS_WORKSPACE_BYTES // max(columns * 4, 1))
     chunk_rows = min(rows, rows_per_chunk)
@@ -770,8 +811,13 @@ def qsa_select_paged_tokens(
     topk_workspace = torch.empty(
         (_TOPK_WORKSPACE_BYTES,), dtype=torch.uint8, device=q.device
     )
-    for row_start in range(0, rows, rows_per_chunk):
-        row_end = min(row_start + rows_per_chunk, rows)
+    prefill_start = rows if num_decode_tokens is None else num_decode_tokens
+    chunks = [
+        (row_start, min(row_start + rows_per_chunk, end))
+        for begin, end in ((0, prefill_start), (prefill_start, rows))
+        for row_start in range(begin, end, rows_per_chunk)
+    ]
+    for row_start, row_end in chunks:
         row_slice = slice(row_start, row_end)
         logits, visible_blocks = qsa_mqa_paged(
             q[row_slice],
@@ -781,6 +827,8 @@ def qsa_select_paged_tokens(
             query_positions[row_slice],
             sequence_lengths,
             compress_ratio,
+            num_columns=columns,
+            allow_mfma=row_start >= prefill_start,
         )
         blocks = blocks_buffer[: row_end - row_start]
         use_cooperative_topk = (
