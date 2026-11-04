@@ -1030,6 +1030,7 @@ def test_state_cleanup_is_fenced_through_real_runner(monkeypatch, lose_ack):
     runner.req_states = SimpleNamespace(remove_request=lambda _: 0)
     runner.lora_state = SimpleNamespace(remove_request=lambda _: None)
     runner.pooling_runner = runner.pp_handler = runner.encoder_cache = None
+    runner.speculator = None
     runner.prompt_logprobs_worker = runner.aux_output_connector = None
     for name in ("update_pp_decode_requests", "add_requests", "update_requests"):
         setattr(runner, name, lambda *args: None)

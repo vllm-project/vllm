@@ -8926,6 +8926,7 @@ def _stream_core(*, num_slots=2):
     core = object.__new__(EngineCore)
     core.scheduler = _state_scheduler(num_slots=num_slots)
     core.request_block_hasher = None
+    core.vllm_config = core.scheduler.vllm_config
     core.scheduler.stream_admissions.clock = lambda: 100.0
     return core
 
@@ -9929,6 +9930,7 @@ def test_stream_admission_ingress_rejection_preserves_identity(
 
     proc = object.__new__(EngineCoreProc)
     proc.scheduler = scheduler
+    proc.vllm_config = scheduler.vllm_config
     proc.output_queue = queue.Queue()
     proc.mm_receiver_cache = None
     proc.request_block_hasher = None
