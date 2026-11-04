@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.models import mimo_v2
+from vllm.model_executor.models import utils as model_utils
 from vllm.model_executor.models.nemotron_h_mtp import NemotronHMTP
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.kimi_k3.amd import linear as kimi_amd
@@ -32,6 +33,8 @@ ROUTER = torch.randn(E, H, generator=torch.Generator().manual_seed(1))
 def _vllm_config(monkeypatch):
     monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+    # Cached by id(model); the short-lived test models reuse ids.
+    monkeypatch.setattr(model_utils, "_model_to_pp_missing_layer_names", {})
     with set_current_vllm_config(VllmConfig()):
         yield
 
@@ -75,8 +78,12 @@ class _Family(nn.Module):
         """Expert tensors named relative to `experts` in this family's
         projection names; a non-gated family keeps only the up rows."""
         gate, down, up = cls.ckpt_names
-        rename = {"gate_up_proj": cls.fused_gate_up, "down_proj": down}
-        rename.update({"gate_proj": gate, "up_proj": up or gate})
+        rename = {
+            "gate_proj": gate,
+            "up_proj": up or gate,
+            "down_proj": down,
+            "gate_up_proj": cls.fused_gate_up,
+        }
         tensors = []
         for name, tensor in routed_expert_checkpoint(E, H, INTER, fused, suffix):
             proj = name.split(".")[-2] if "." in name else name
@@ -94,7 +101,8 @@ class _Family(nn.Module):
         ] + [(f"{self.ckpt_prefix}.gate.weight", ROUTER)]
 
     def load_with_old_loop(self, num_redundant_experts: int) -> None:
-        """The replaced loop, trying every matching mapping entry."""
+        """The replaced loops' mapping semantics on post-rewrite names, trying
+        every matching entry (so EPLB replicas too)."""
         mapping = fused_moe_make_expert_params_mapping(
             self, *self.ckpt_names, E, num_redundant_experts
         )
@@ -228,7 +236,7 @@ def test_routed_experts_load_through_the_moe_layer(
 def test_unmatched_expert_names_fall_through(family):
     model = family()
     unknown = (f"{family.ckpt_prefix}.experts.7.unknown_proj.weight", torch.zeros(1))
-    # The router keeps the MTP layer-completeness checks satisfied.
+    # The router keeps the Kimi-K3 MTP layer-completeness check satisfied.
     weights = [unknown, (f"{family.ckpt_prefix}.gate.weight", ROUTER)]
     if family in (_KimiK3, _KimiK3AMD):
         with pytest.raises(KeyError):
