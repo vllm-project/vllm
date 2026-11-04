@@ -56,7 +56,7 @@ use winnow::error::{ContextError, ErrMode, ModalResult, StrContext};
 use winnow::prelude::*;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, special_token};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, special_token};
 use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -380,7 +380,7 @@ impl UnifiedParser for KimiK3UnifiedParser {
             // closing markers; keep the calls already emitted.
             KimiK3Mode::Tools if self.buffer.text.is_empty() => {}
             KimiK3Mode::Tools | KimiK3Mode::Call { .. } => {
-                return Err(parsing_failed!("incomplete Kimi K3 tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Kimi K3" });
             }
         }
 

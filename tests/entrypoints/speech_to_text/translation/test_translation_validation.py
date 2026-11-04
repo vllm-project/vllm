@@ -140,6 +140,49 @@ async def test_basic_audio_with_lora(mary_had_lamb):
     assert "pequeño" in out.split(" ")
 
 
+@pytest.mark.asyncio
+async def test_canary_translation(mary_had_lamb):
+    """Canary cannot detect the audio's language and only translates to or
+    from English, so requests it cannot serve must fail instead of returning
+    wrong text."""
+    # NOTE - like the LoRA test above, run before the module scoped server.
+    # Canary has cross-attention, which ROCM_AITER_FA does not support, so
+    # keep the platform default backend.
+    model_name = "nvidia/canary-1b-v2"
+    with RemoteOpenAIServer(model_name, SERVER_ARGS) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=model_name,
+            file=mary_had_lamb,
+            extra_body=dict(language="en", to_language="de"),
+            response_format="text",
+            temperature=0.0,
+        )
+        out = json.loads(translation)["text"].strip().lower()
+        assert "kleines lamm" in out
+
+        mary_had_lamb.seek(0)
+        with pytest.raises(
+            openai.BadRequestError, match="cannot detect the audio's language"
+        ):
+            await client.audio.transcriptions.create(
+                model=model_name, file=mary_had_lamb, temperature=0.0
+            )
+
+        for extra_body, match in [
+            (None, "cannot detect the audio's language"),
+            (dict(language="de", to_language="fr"), "to or from English only"),
+        ]:
+            mary_had_lamb.seek(0)
+            with pytest.raises(openai.BadRequestError, match=match):
+                await client.audio.translations.create(
+                    model=model_name,
+                    file=mary_had_lamb,
+                    extra_body=extra_body,
+                    temperature=0.0,
+                )
+
+
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
 @pytest.mark.asyncio
 async def test_basic_audio(foscolo, client_and_model):
