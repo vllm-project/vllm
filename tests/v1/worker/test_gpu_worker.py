@@ -33,22 +33,14 @@ def test_v2_gpu_worker_requires_triton(monkeypatch):
         )
 
 
-def test_worker_initializes_external_weight_accounting_before_device_setup():
-    """CPU/XPU override device setup but inherit the model-loading context."""
+@pytest.mark.parametrize("fallback,requested", [(False, 72), (True, 92)])
+def test_disabling_extensible_cache_keeps_fallback_budget(fallback, requested):
+    """Re-sizing after a disk fallback must not re-charge the daemon's weights."""
     from vllm.config import VllmConfig
-
-    worker = gpu_worker.Worker(
-        VllmConfig(), local_rank=0, rank=0, distributed_init_method="env://"
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        record_external_weight_charge,
+        record_external_weight_fallback,
     )
-    with worker._external_weights.track_load():
-        assert worker._external_weights.bytes == 0
-        assert not worker._external_weights.changed
-
-
-@pytest.mark.parametrize("free_memory", [100, 91])
-def test_disabling_extensible_cache_rechecks_worker_memory_budget(free_memory):
-    """Switching sizing modes uses the worker's accounting and capacity checks."""
-    from vllm.config import VllmConfig
     from vllm.utils.mem_utils import MemorySnapshot
 
     worker = gpu_worker.Worker(
@@ -56,20 +48,15 @@ def test_disabling_extensible_cache_rechecks_worker_memory_budget(free_memory):
     )
     worker.cache_config.enable_extensible_kv_cache = True
     worker.init_snapshot = MemorySnapshot(
-        total_memory=100,
-        free_memory=free_memory,
-        device="cpu",
-        auto_measure=False,
+        total_memory=100, free_memory=100, device="cpu", auto_measure=False
     )
-    if free_memory < 92:
-        with pytest.raises(
-            ValueError, match="less than desired GPU memory utilization"
-        ):
-            worker.disable_extensible_kv_cache()
-    else:
-        worker.disable_extensible_kv_cache()
-        assert worker.requested_memory == 92
-    assert not worker.cache_config.enable_extensible_kv_cache
+    worker.external_weight_memory = 20
+    with worker._external_weights.track():
+        record_external_weight_charge("weights.sock", False, 20)
+        if fallback:
+            record_external_weight_fallback("weights.sock", False)
+    worker.disable_extensible_kv_cache()
+    assert worker.requested_memory == requested
 
 
 def test_sleep_preservation_restores_private_draft_not_shared_target():

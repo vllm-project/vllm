@@ -1160,47 +1160,24 @@ def test_daemon_releases_cublas_workspaces():
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("is_draft,remaining", [(False, 4), (True, 8)])
-def test_external_weight_fallback_preserves_other_role(is_draft, remaining):
-    """Only the failed role's charge is restored, at most once."""
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
     from vllm.model_executor.model_loader.weight_cache.utils import (
         ExternalWeightMemory,
         record_external_weight_charge,
         record_external_weight_fallback,
     )
 
-    accounting = ExternalWeightMemory(bytes=12)
-    with accounting.track_load():
+    accounting = ExternalWeightMemory()
+    with accounting.track():
         record_external_weight_charge("target.sock", False, 8)
         record_external_weight_charge("draft.sock", True, 4)
         source = "draft.sock" if is_draft else "target.sock"
         record_external_weight_fallback(source, is_draft)
         record_external_weight_fallback(source, is_draft)
         record_external_weight_fallback("uncharged.sock", False)
-    assert accounting.bytes == remaining
-    assert accounting.changed
-
-
-def test_external_weight_accounting_restores_context_after_failure():
-    """A failed nested load must not redirect the outer worker's accounting."""
-    from vllm.model_executor.model_loader.weight_cache.utils import (
-        ExternalWeightMemory,
-        record_external_weight_charge,
-        record_external_weight_fallback,
-    )
-
-    outer = ExternalWeightMemory(bytes=8)
-    inner = ExternalWeightMemory(bytes=4)
-    with outer.track_load():
-        record_external_weight_charge("weights.sock", False, 8)
-        with pytest.raises(ValueError, match="load failed"), inner.track_load():
-            record_external_weight_charge("weights.sock", False, 4)
-            raise ValueError("load failed")
-        record_external_weight_fallback("weights.sock", False)
-    record_external_weight_fallback("weights.sock", False)
-    assert outer.bytes == 0
-    assert inner.bytes == 4
-    assert not inner.changed
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

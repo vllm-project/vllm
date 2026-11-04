@@ -26,25 +26,13 @@ if TYPE_CHECKING:
 
 @dataclass
 class ExternalWeightMemory:
-    """Track external weight charges across one worker's model loading."""
+    """Track a worker's external weight charges and those freed by disk fallback."""
 
-    bytes: int = 0
-    changed: bool = field(default=False, init=False)
+    fallback_bytes: int = field(default=0, init=False)
     _charges: dict[tuple[str, bool], int] = field(default_factory=dict, init=False)
 
-    @classmethod
-    def query(cls, vllm_config: VllmConfig) -> "ExternalWeightMemory":
-        from vllm.model_executor.model_loader import get_model_loader
-
-        accounting = cls()
-        with accounting.track_load():
-            accounting.bytes = get_model_loader(
-                vllm_config.load_config
-            ).get_external_weight_memory(vllm_config)
-        return accounting
-
     @contextmanager
-    def track_load(self) -> Generator[None, None, None]:
+    def track(self) -> Generator[None, None, None]:
         token = _external_weight_memory.set(self)
         try:
             yield
@@ -66,10 +54,7 @@ def record_external_weight_charge(
 
 def record_external_weight_fallback(socket_path: str, is_draft: bool) -> None:
     if accounting := _external_weight_memory.get():
-        charge = accounting._charges.pop((socket_path, is_draft), 0)
-        if charge:
-            accounting.bytes -= charge
-            accounting.changed = True
+        accounting.fallback_bytes += accounting._charges.pop((socket_path, is_draft), 0)
 
 
 # Speculative methods whose draft model the daemon caches in its own group.
