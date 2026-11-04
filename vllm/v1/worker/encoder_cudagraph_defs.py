@@ -39,6 +39,12 @@ class EncoderItemSpec:
     default path.
     """
 
+    batch_key: Hashable | None = None
+    """Optional compatibility key for fixed-shape encoder microbatches.
+    Items with different keys must run separately. Unset preserves the
+    single-batch execution policy.
+    """
+
     def get_path_output_tokens(self, path: str) -> int:
         if path == "default" and not self.path_output_tokens:
             return self.output_tokens
