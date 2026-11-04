@@ -109,6 +109,7 @@ def _build_layer(
     layer = types.SimpleNamespace()
     layer.prefix = PREFIX
     layer.enable_packed_recurrent_decode = False
+    layer.use_replayssm = False
     layer.tp_size = 1
     layer.num_k_heads = H
     layer.num_v_heads = HV
