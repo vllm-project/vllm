@@ -195,13 +195,10 @@ def append_logprobs_for_next_position(
     if isinstance(request_logprobs, FlatLogprobs):
         request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
     else:
+        # Positional arguments: this runs for every streamed token.
         request_logprobs.append(
             {
-                token_id: Logprob(
-                    logprob=logprob,
-                    rank=rank,
-                    decoded_token=token,
-                )
+                token_id: Logprob(logprob, rank, token)
                 for token_id, logprob, rank, token in zip(
                     token_ids, logprobs, ranks, decoded_tokens
                 )

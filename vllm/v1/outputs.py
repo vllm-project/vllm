@@ -55,6 +55,46 @@ class LogprobsLists(NamedTuple):
             None,
         )
 
+    def slice_request_rows(self, req_idx: int, num_positions: int) -> "LogprobsRows":
+        """Like `slice_request`, but as Python lists."""
+        if self.cu_num_generated_tokens is not None:
+            req_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = req_idx + num_positions
+        return LogprobsRows(
+            self.logprob_token_ids[req_idx:end_idx].tolist(),
+            self.logprobs[req_idx:end_idx].tolist(),
+            self.sampled_token_ranks[req_idx:end_idx].tolist(),
+        )
+
+
+# Widest sample logprob rows sent as LogprobsRows. Rows are as wide as the
+# step's widest request (1 + max num_logprobs, the vocab size for -1) and lists
+# cost EngineCore a Python object per value, so wider rows keep the zero-copy
+# arrays of LogprobsLists.
+MAX_LOGPROB_ROWS_WIDTH = 33
+
+
+class LogprobsRows(NamedTuple):
+    """Sample logprobs of one request, one row per generated position.
+
+    msgspec encodes and decodes these natively, so unlike the arrays of
+    `LogprobsLists` they cost no per-array serialization hooks.
+    """
+
+    # [num_positions, max_num_logprobs + 1]
+    logprob_token_ids: list[list[int]]
+    # [num_positions, max_num_logprobs + 1]
+    logprobs: list[list[float]]
+    # [num_positions]
+    sampled_token_ranks: list[int]
+
+    def slice_positions(self, num_positions: int) -> "LogprobsRows":
+        return LogprobsRows(
+            self.logprob_token_ids[:num_positions],
+            self.logprobs[:num_positions],
+            self.sampled_token_ranks[:num_positions],
+        )
+
 
 class SamplingMaskLists(NamedTuple):
     """CSR sampling masks; a request slice may contain multiple positions."""

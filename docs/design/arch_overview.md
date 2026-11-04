@@ -84,6 +84,13 @@ There is **1 engine core process per data parallel rank**. For example, with `--
 
 The code can be found in [vllm/v1/engine/core.py](../../vllm/v1/engine/core.py) and [vllm/v1/engine/utils.py](../../vllm/v1/engine/utils.py).
 
+Sample logprobs can cross the engine boundary in two forms. Python frontends set
+`EngineCoreRequest.return_logprob_rows` and accept `EngineCoreOutput.new_logprob_rows`
+for steps with at most 33 columns per row. Wider steps retain the NumPy arrays in
+`new_logprobs`, so a reader that opts in must handle either field on each output.
+Other clients keep the array representation by default. This changes internal
+transport only; HTTP logprob fields and their values remain unchanged.
+
 ### GPU Worker Processes
 
 Each GPU is managed by a dedicated worker process. The worker process loads model weights, executes forward passes, and manages GPU memory. Workers communicate with the engine core process that owns them.

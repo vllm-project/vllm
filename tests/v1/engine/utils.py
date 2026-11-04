@@ -336,12 +336,15 @@ class MockEngineCore:
         eos_token_id: int | None = None,
         stop_token_ids: list[int] | None = None,
         request_ids: list[str] | None = None,
+        # Send sample logprobs as LogprobsRows instead of LogprobsLists.
+        logprob_rows: bool = False,
     ) -> None:
         self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
         self.prompts_list = prompts_list
         self.generated_logprobs_raw = generated_logprobs_raw
         self.do_logprobs = generated_logprobs_raw is not None
+        self.logprob_rows = logprob_rows
         self.prompt_logprobs_raw = prompt_logprobs_raw
         self.do_prompt_logprobs = prompt_logprobs_raw is not None
         self.request_finished = [False for _ in range(self.num_requests)]
@@ -402,10 +405,13 @@ class MockEngineCore:
                 output = EngineCoreOutput(
                     request_id=self.request_ids[req_idx],
                     new_token_ids=[new_token_id],
-                    new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
                     prefill_stats=prefill_stats,
                 )
+                if logprobs is not None and self.logprob_rows:
+                    output.new_logprob_rows = logprobs.slice_request_rows(0, 1)
+                else:
+                    output.new_logprobs = logprobs
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = FinishReason.LENGTH
                     self.request_finished[req_idx] = True

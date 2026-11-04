@@ -2,12 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import math
 
+import numpy as np
 import pytest
 
 from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionLogProbs,
+    CompletionRequest,
+    CompletionResponseStreamChoice,
+    CompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.serving import (
+    OpenAIServingCompletion,
+    _logprobs_frame_templates_match,
+    _LogprobsFrameTemplate,
+)
 from vllm.inputs import tokens_input
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -113,3 +124,59 @@ def test_non_stream_response_omits_null_prompt_tokens_details():
     )
 
     assert "prompt_tokens_details" not in response.model_dump()["usage"]
+
+
+@pytest.mark.parametrize(
+    "text", [' "q" \\ back\nslash\t', "\x00\x1f\x7f\x85", "café 中文 🚀", ""]
+)
+def test_logprobs_frame_template_matches_response_model(text):
+    """Template bytes retain model field ordering, escaping and float encoding."""
+    fields = (
+        [0, 3],
+        [-0.0, -math.inf],
+        [text, "é"],
+        [{text: math.nan, "é": -1e-45}, None],
+    )
+    template = _LogprobsFrameTemplate.build("cmpl-test", 123, "model", 2)
+    assert template is not None
+    chunk = CompletionStreamResponse(
+        id="cmpl-test",
+        object="text_completion",
+        created=123,
+        model="model",
+        choices=[
+            CompletionResponseStreamChoice(
+                index=2,
+                text=text,
+                logprobs=CompletionLogProbs(
+                    text_offset=fields[0],
+                    token_logprobs=fields[1],
+                    tokens=fields[2],
+                    top_logprobs=fields[3],
+                ),
+                finish_reason=None,
+                stop_reason=None,
+                prompt_token_ids=None,
+                token_ids=None,
+                weight_versions=None,
+            )
+        ],
+        kv_transfer_params=None,
+    )
+    assert (
+        template.render(text, fields)
+        == f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "text,value", [("lone \ud800", -0.5), ("token", np.float32(-0.5))]
+)
+def test_logprobs_frame_template_rejects_values_requiring_model_validation(text, value):
+    template = _LogprobsFrameTemplate.build("cmpl-test", 123, "model", 0)
+    assert template is not None
+    assert template.render(text, ([0], [value], ["token"], [None])) is None
+
+
+def test_logprobs_frame_templates_match_installed_pydantic():
+    assert _logprobs_frame_templates_match()

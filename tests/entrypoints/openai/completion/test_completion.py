@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import suppress
+from typing import Any
 
 import openai  # use the official client for correctness check
 import pytest
@@ -229,6 +230,68 @@ async def test_logprob_token_ids_stream(client: openai.AsyncOpenAI):
 
     assert len(returned_top_logprobs) == 1
     assert set(returned_top_logprobs[0]) == {"token_id:42", "token_id:5000"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("logprobs", [0, 5])
+@pytest.mark.parametrize(
+    "echo,continuous_usage", [(False, False), (True, False), (False, True)]
+)
+async def test_streamed_logprobs_match_complete_response(
+    client: openai.AsyncOpenAI, logprobs: int, echo: bool, continuous_usage: bool
+):
+    """Streaming templates and model fallbacks keep every returned position."""
+    request = dict(
+        model=MODEL_NAME,
+        prompt="Hello, café 中文",
+        max_tokens=16,
+        temperature=0.0,
+        logprobs=logprobs,
+        echo=echo,
+    )
+    complete = await client.completions.create(**request)
+    stream = await client.completions.create(
+        **request,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": continuous_usage,
+        },
+    )
+    text = ""
+    fields: dict[str, list[Any]] = {
+        key: [] for key in ("tokens", "text_offset", "token_logprobs", "top_logprobs")
+    }
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        text += choice.text
+        if choice.logprobs is not None:
+            for key in fields:
+                fields[key].extend(getattr(choice.logprobs, key))
+    expected = complete.choices[0]
+    assert text == expected.text
+    assert fields["tokens"] == expected.logprobs.tokens
+    assert fields["text_offset"] == expected.logprobs.text_offset
+    assert len(fields["token_logprobs"]) == len(expected.logprobs.token_logprobs)
+    assert len(fields["top_logprobs"]) == len(expected.logprobs.top_logprobs)
+    for actual, reference in zip(
+        fields["token_logprobs"], expected.logprobs.token_logprobs
+    ):
+        assert (
+            actual == pytest.approx(reference, abs=1e-6)
+            if reference is not None
+            else actual is None
+        )
+    for actual, reference in zip(
+        fields["top_logprobs"], expected.logprobs.top_logprobs
+    ):
+        assert (
+            actual == pytest.approx(reference, abs=1e-6)
+            if reference is not None
+            else actual is None
+        )
 
 
 @pytest.mark.asyncio

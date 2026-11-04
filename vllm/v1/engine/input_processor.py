@@ -568,6 +568,7 @@ class InputProcessor:
             resumable=resumable,
             session_id=session_id,
             kv_hints=kv_hints,
+            return_logprob_rows=True,
         )
 
     def _validate_prompt_len(

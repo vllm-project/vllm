@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import struct
 from unittest import TestCase
 
 import numpy as np
@@ -7,15 +8,18 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     ECConnectorOutput,
     LogprobsLists,
+    LogprobsRows,
     LogprobsTensors,
     ModelRunnerOutput,
     SamplingMaskLists,
 )
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 
 DEVICE_TYPE = current_platform.device_type
@@ -311,6 +315,66 @@ class TestLogprobsLists(TestCase):
         assert len(sliced.logprob_token_ids) == 9  # All tokens
         assert sliced.logprob_token_ids == self.logprobsLists.logprob_token_ids
         assert sliced.cu_num_generated_tokens is None
+
+
+def _float_bits(rows: list) -> list:
+    """Compare floats by their bits, so -0.0 and NaN count too."""
+    return [
+        _float_bits(x) if isinstance(x, list) else struct.pack("<d", x) for x in rows
+    ]
+
+
+@pytest.mark.parametrize("cu_num_generated_tokens", [None, [0, 1, 3, 4]])
+def test_logprob_rows_round_trip_matches_array_slices(cu_num_generated_tokens):
+    """Rows sent over the engine IPC codec hold the same Python values that the
+    frontend gets from the array form: same ints, and floats bit for bit."""
+    lists = LogprobsLists(
+        np.array([[7, 7], [2**40, 0], [3, 5], [151642, 11]], dtype=np.int64),
+        np.array(
+            [[-0.0, -np.inf], [np.nan, -1.2345e-05], [1e-45, -9999.0], [-0.5, 3.25]],
+            dtype=np.float32,
+        ),
+        np.array([1, 4096, 2, 3], dtype=np.int64),
+        cu_num_generated_tokens,
+    )
+    num_positions = [1, 2, 1] if cu_num_generated_tokens else [1, 1, 1, 1]
+    outputs = []
+    for req_idx, n in enumerate(num_positions):
+        outputs.append(
+            EngineCoreOutput(
+                f"arrays-{req_idx}",
+                [0] * n,
+                new_logprobs=lists.slice_request(req_idx, n),
+            )
+        )
+        outputs.append(
+            EngineCoreOutput(
+                f"rows-{req_idx}",
+                [0] * n,
+                new_logprob_rows=lists.slice_request_rows(req_idx, n),
+            )
+        )
+
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(
+        MsgpackEncoder().encode(EngineCoreOutputs(outputs=outputs))
+    )
+
+    for arrays, rows in zip(decoded.outputs[::2], decoded.outputs[1::2]):
+        assert rows.new_logprobs is None and arrays.new_logprob_rows is None
+        token_ids, logprobs, ranks, _ = arrays.new_logprobs
+        assert type(rows.new_logprob_rows) is LogprobsRows
+        assert rows.new_logprob_rows.logprob_token_ids == token_ids.tolist()
+        assert _float_bits(rows.new_logprob_rows.logprobs) == _float_bits(
+            logprobs.tolist()
+        )
+        assert rows.new_logprob_rows.sampled_token_ranks == ranks.tolist()
+
+
+def test_logprob_rows_slice_positions():
+    rows = LogprobsRows([[1, 2], [3, 4], [5, 6]], [[-0.1, -0.2]] * 3, [1, 2, 3])
+    assert rows.slice_positions(2) == LogprobsRows(
+        [[1, 2], [3, 4]], [[-0.1, -0.2]] * 2, [1, 2]
+    )
 
 
 def test_with_ec_conn_output_copies_shared_empty_output():

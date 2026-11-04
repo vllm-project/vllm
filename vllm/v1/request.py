@@ -82,6 +82,7 @@ class Request:
         abort_immediately: bool = False,
         kv_hints: KvHintsEnvelope | None = None,
         block_hashes: list["BlockHash"] | None = None,
+        return_logprob_rows: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -249,6 +250,8 @@ class Request:
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
+        # Return sample logprobs as LogprobsRows (see EngineCoreRequest).
+        self.return_logprob_rows = return_logprob_rows
 
     @classmethod
     def from_engine_core_request(
@@ -279,6 +282,7 @@ class Request:
             reasoning_parser_kwargs=request.reasoning_parser_kwargs,
             abort_immediately=request.abort_immediately,
             block_hashes=block_hashes,
+            return_logprob_rows=request.return_logprob_rows,
         )
 
     def append_output_token_ids(
