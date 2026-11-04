@@ -4,6 +4,10 @@
 
 One 64-lane workgroup per (row, head) returns the 16 highest-scoring block ids
 in AITER's order, walking the row in windows of STRIPS x 64 blocks.
+
+Decode gives each row four waves: wave w walks windows w, w + 4, ... with its
+own candidates and running top 16, then the four lists merge by an exact rank
+over the (key, index) order.
 """
 
 import flydsl.compiler as flyc
@@ -72,8 +76,10 @@ def _comp(k, i):
 
 
 def compile_topk_prefill(strips: int, *, decode: bool = False):
-    assert strips == 26 if decode else strips in PREFILL_STRIPS
+    assert strips == 16 if decode else strips in PREFILL_STRIPS
     STRIPS = strips
+    WAVES = 4 if decode else 1
+    NTHR = 64 * WAVES
     WIN = STRIPS * 64
     RANK_BLOCK = 8
     # Candidates, rank-loop padding, then one discard slot per lane.
@@ -83,10 +89,10 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
 
     @fx.struct
     class Shared:
-        cand: fx.Array[fx.Int32, 2 * CAND, 16]
-        sel: fx.Array[fx.Int32, 4 * TOPK, 16]
+        cand: fx.Array[fx.Int32, WAVES * 2 * CAND, 16]
+        sel: fx.Array[fx.Int32, WAVES * 4 * TOPK, 16]
 
-    @flyc.kernel(name=name, known_block_size=[64, 1, 1])
+    @flyc.kernel(name=name, known_block_size=[NTHR, 1, 1])
     def kernel(
         arg_score: fx.Int64,
         i64_s_head: fx.Int64,
@@ -100,7 +106,19 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
     ):
         smem = fx.SharedAllocator().allocate(Shared).peek()
         n, h = fx.block_idx.x, fx.block_idx.y
-        lane = fx.thread_idx.x
+        if const_expr(decode):
+            tid = fx.Int32(fx.thread_idx.x)
+            lane = tid & 63
+            # Wave index, scalar.
+            wv = fx.Int32(fx.rocdl.readfirstlane(T.i32, (tid >> 6).ir_value()))
+            c_off = wv * CAND  # this wave's candidate pairs
+            s_off = wv * TOPK  # this wave's running top 16
+            w_off = wv * WIN  # this wave's first window
+        else:
+            lane = fx.thread_idx.x
+            c_off = 0
+            s_off = 0
+            w_off = 0
         n64 = fx.Int32(n).to(fx.Int64)
         h64 = fx.Int32(h).to(fx.Int64)
 
@@ -131,7 +149,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             )
 
         # The first window is loaded before the row's length is known.
-        bits = load_window(srs, 0)
+        bits = load_window(srs, w_off)
 
         def scalar_at(base, idx64, nbytes):
             return fx.Int32(
@@ -161,9 +179,9 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
                 fx.make_layout(width, 1),
             )
 
-        pairs = view(smem.cand.ptr, 2 * CAND, 2)
-        quads = view(smem.cand.ptr, 2 * CAND, 4)
-        sels = view(smem.sel.ptr, 4 * TOPK, 4)
+        pairs = view(smem.cand.ptr, WAVES * 2 * CAND, 2)
+        quads = view(smem.cand.ptr, WAVES * 2 * CAND, 4)
+        sels = view(smem.sel.ptr, WAVES * 4 * TOPK, 4)
         atom64 = fx.make_copy_atom(fx.UniversalCopy64b(), fx.Int32)
         atom128 = fx.make_copy_atom(fx.UniversalCopy128b(), fx.Int32)
 
@@ -179,7 +197,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             return [fx.Int32(x[e]) for e in range_constexpr(w)]
 
         def put_pair(pos, i, k):
-            lds_put(atom64, fx.slice(pairs, (None, pos)), 2, [i, k])
+            lds_put(atom64, fx.slice(pairs, (None, c_off + pos)), 2, [i, k])
 
         def wave_sum(c):
             """Sum over the wave of a per-lane count in [0, 63]."""
@@ -242,9 +260,11 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
                 b = b - 1
             return v, ie
 
-        def lane_max_bound(m):
-            p = fx.Int32(0)
-            for d in range_constexpr(12):
+        def lane_max_bound(m, d1=12, d0=0, key=INT_MIN):
+            """The 16th largest lane maximum m, to its top d1 bits (from d0 on,
+            above the bound ``key`` of the top d0)."""
+            p = fx.Int32(key ^ INT_MIN)
+            for d in range_constexpr(d0, d1):
                 t = p | _s32(1 << (31 - d))
                 count = _popc(_ballot(m >= (t ^ INT_MIN)))
                 p = (count >= TOPK).select(t, p)
@@ -260,15 +280,25 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             for j in range_constexpr(1, STRIPS):
                 m = _imax(m, keys[j])
             # Bound: the lane maxima in the first window, the running 16th later.
-            tw = fx.Int32(INT_MIN)
-            if nrun < TOPK:
-                tw = lane_max_bound(m)
+            if const_expr(decode):
+                tw = lane_max_bound(m, 16)  # every window; 16 bits, not 12
+            else:
+                tw = fx.Int32(INT_MIN)
+                if nrun < TOPK:
+                    tw = lane_max_bound(m)
             ta = _imax(tw, tprev)
             total = compact(keys, wbase, nrun, lambda k, i: k >= ta)
+            if const_expr(decode):  # noqa: SIM102
+                if total > CAP:  # too loose: the bound to all 32 bits
+                    ta = _imax(lane_max_bound(m, 32, 16, tw), tprev)
+                    total = compact(keys, wbase, nrun, lambda k, i: k >= ta)
             # Exact only if 16 keys above -inf bound it and no NaN is above +inf.
             nan_hi = _ballot(m > KEY_POS_INF) != fx.Int64(0)
             if (total > CAP) | (ta <= KEY_NEG_INF) | nan_hi:
                 wl = nlive - wbase
+                if const_expr(decode):
+                    # A wave's windows past the row's end are empty.
+                    wl = (wl < 0).select(fx.Int32(0), wl)
                 if wl <= CAP - nrun:
                     # Every live block of the window is a candidate.
                     put_pair(
@@ -299,14 +329,18 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             if lane < RANK_BLOCK:
                 put_pair(total + lane, fx.Int32(0), fx.Int32(INT_MIN))
             fx.gpu.barrier()
-            mi, mk = lds_get(atom64, fx.slice(pairs, (None, lane)), 2)
+            mi, mk = lds_get(atom64, fx.slice(pairs, (None, c_off + lane)), 2)
             mw = _comp(mk, mi)
             rank = fx.Int32(0)
             for g in range_constexpr(CAP // RANK_BLOCK):
                 if total > RANK_BLOCK * g:
                     es = [
                         lds_get(
-                            atom128, fx.slice(quads, (None, RANK_BLOCK // 2 * g + u)), 4
+                            atom128,
+                            fx.slice(
+                                quads, (None, c_off // 2 + RANK_BLOCK // 2 * g + u)
+                            ),
+                            4,
                         )
                         for u in range_constexpr(RANK_BLOCK // 2)
                     ]
@@ -316,18 +350,29 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
                         rank = rank + _one(_comp(e[1], e[0]) > mw)
                         rank = rank + _one(_comp(e[3], e[2]) > mw)
             if (lane < total) & (rank < TOPK):
-                lds_put(atom128, fx.slice(sels, (None, rank)), 4, [mi, mk, 0, mi])
+                lds_put(
+                    atom128, fx.slice(sels, (None, s_off + rank)), 4, [mi, mk, 0, mi]
+                )
             return (total < TOPK).select(total, fx.Int32(TOPK))
 
-        wbase = fx.Int32(0)
+        # Every wave runs the same trip count (the row's), so the barriers match.
+        gbase = fx.Int32(0)
         nrun = fx.Int32(0)
         tprev = fx.Int32(INT_MIN + 1)  # dead keys are INT_MIN
-        while (wbase == 0) | (wbase < nlive):
-            if wbase > 0:
-                bits = load_window(srs_live, wbase)
+        while (gbase == 0) | (gbase < nlive):
+            wbase = gbase + w_off
+            if const_expr(decode):
+                # The next trip's window is in flight while this one ranks;
+                # past the row's end it reads nothing.
+                nxt = load_window(srs_live, wbase + WAVES * WIN)
+            if gbase > 0:
+                if const_expr(not decode):
+                    bits = load_window(srs_live, wbase)
                 # The running top 16 back into cand; its 16th key bounds the window.
                 fx.gpu.barrier()
-                r = lds_get(atom128, fx.slice(sels, (None, lane & (TOPK - 1))), 4)
+                r = lds_get(
+                    atom128, fx.slice(sels, (None, s_off + (lane & (TOPK - 1)))), 4
+                )
                 if lane < nrun:
                     put_pair(lane, r[0], r[1])
                 k15 = fx.Int32(fx.rocdl.readlane(T.i32, r[1], fx.Int32(TOPK - 1)))
@@ -339,17 +384,62 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
                 nrun,
                 tprev,
             )
-            wbase = wbase + WIN
+            if const_expr(decode):
+                bits = nxt
+            gbase = gbase + WAVES * WIN
 
-        fx.gpu.barrier()
-        r = lds_get(atom128, fx.slice(sels, (None, lane & (TOPK - 1))), 4)
-        blk = (lane < nrun).select(r[0], fx.Int32(-1))
-        buffer_ops.buffer_store(
-            blk,
-            rsrc(arg_topk + (h64 * i64_t_head + n64 * i64_t_row) * 4, TOPK * 4),
-            lane,
-            mask=lane < TOPK,
-        )
+        out_rs = rsrc(arg_topk + (h64 * i64_t_head + n64 * i64_t_row) * 4, TOPK * 4)
+        if const_expr(not decode):
+            fx.gpu.barrier()
+            r = lds_get(atom128, fx.slice(sels, (None, lane & (TOPK - 1))), 4)
+            blk = (lane < nrun).select(r[0], fx.Int32(-1))
+            buffer_ops.buffer_store(blk, out_rs, lane, mask=lane < TOPK)
+        else:
+            # Pad each wave's list with dead entries, then merge the four sorted
+            # lists: an entry's slot is its rank among all the entries.
+            if (lane < TOPK) & (lane >= nrun):
+                lds_put(
+                    atom128,
+                    fx.slice(sels, (None, s_off + lane)),
+                    4,
+                    [0, INT_MIN, 0, 0],
+                )
+            fx.gpu.barrier()
+            if nlive <= WIN:
+                # Only wave 0 saw live blocks: its list is the answer.
+                if tid < TOPK:
+                    w0 = lds_get(atom128, fx.slice(sels, (None, tid)), 4)
+                    live0 = w0[1] > INT_MIN
+                    buffer_ops.buffer_store(
+                        live0.select(w0[0], fx.Int32(-1)), out_rs, tid, mask=tid < TOPK
+                    )
+            elif tid < TOPK * WAVES:
+                e = lds_get(atom128, fx.slice(sels, (None, tid)), 4)
+                cv = _comp(e[1], e[0])
+                # Each list is sorted: binary-lift its count above cv.
+                cs = [fx.Int32(0) for _ in range_constexpr(WAVES)]
+                for st in (16, 8, 4, 2, 1):
+                    prb = [cs[w] + (st - 1) for w in range_constexpr(WAVES)]
+                    es = [
+                        lds_get(
+                            atom128,
+                            fx.slice(sels, (None, w * TOPK + (prb[w] & (TOPK - 1)))),
+                            4,
+                        )
+                        for w in range_constexpr(WAVES)
+                    ]
+                    fx.rocdl.sched_barrier(0)
+                    for w in range_constexpr(WAVES):
+                        hit = (prb[w] < TOPK) & (_comp(es[w][1], es[w][0]) > cv)
+                        cs[w] = cs[w] + hit.select(fx.Int32(st), fx.Int32(0))
+                rank = cs[0]
+                for w in range_constexpr(1, WAVES):
+                    rank = rank + cs[w]
+                live = e[1] > INT_MIN
+                buffer_ops.buffer_store(e[0], out_rs, rank, mask=live & (rank < TOPK))
+                tot = _popc(_ballot(live))  # tid < 64 is wave 0
+                if (tid < TOPK) & (tid >= tot):
+                    buffer_ops.buffer_store(fx.Int32(-1), out_rs, tid, mask=tid < TOPK)
 
     @flyc.jit
     def launch(
@@ -378,7 +468,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             i64_t_row,
         ).launch(
             grid=(fx.Int64(i32_rows), fx.Int64(i32_heads), 1),
-            block=(64, 1, 1),
+            block=(NTHR, 1, 1),
             stream=stream,
         )
 
