@@ -229,6 +229,9 @@ def test_block_fp8_mtp_fused_scales(gate_up, down):
     assert torch.all(a.w2_weight_scale_inv != -7.0)
     assert torch.equal(a.w13_weight_scale_inv, b.w13_weight_scale_inv)
     assert torch.equal(a.w2_weight_scale_inv, b.w2_weight_scale_inv)
+    # `.scale` bytes are UE8M0 exponents, viewed rather than converted.
+    expected = torch.cat(scales[:2], dim=1).view(torch.float8_e8m0fnu).float()
+    assert torch.equal(a.w13_weight_scale_inv, expected)
 
 
 @pytest.mark.parametrize("model_cls", [_HYV4, _HYV4ROCm])
