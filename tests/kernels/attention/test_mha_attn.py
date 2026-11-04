@@ -433,6 +433,105 @@ def test_mha_attn_varlen_forward_aiter_fp8(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_rocm() or not on_mi3xx(),
+    reason="AITER FP8 attention requires MI300/MI350",
+)
+@pytest.mark.parametrize("pad_head_dim", [16, 128])
+@pytest.mark.parametrize(
+    "layout",
+    [
+        # (sequence lengths, rows, cu_seqlens slots, max_seqlen)
+        ([2304, 2048], 4352, 2, 2304),
+        # As an encoder CUDA graph replays: zero-length trailing slots up to
+        # max_batch_size, rows past the last sequence, max_seqlen baked to the
+        # buffer rows.
+        ([2304, 2048], 4608, 64, 4608),
+    ],
+    ids=["eager", "graph"],
+)
+def test_mha_attn_aiter_fp8_pad_head_dim(
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+    pad_head_dim: int,
+    layout: tuple[list[int], int, int, int],
+):
+    """VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 pads head_dim 80 to 128 in the eager
+    and in the encoder CUDA graph layout; the real rows match the reference
+    either way."""
+    aiter = pytest.importorskip("aiter")
+    if not hasattr(aiter, "flash_attn_varlen_fp8_pertensor_func"):
+        pytest.skip("Installed AITER does not provide varlen FP8 attention")
+    import vllm.model_executor.layers.attention.mm_encoder_attention as mm_attn
+
+    monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", str(pad_head_dim))
+    var_seq_len, num_rows, num_slots, max_seqlen = layout
+    num_heads, head_size = 16, 80
+    set_random_seed(0)
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(torch.bfloat16)
+
+    vllm_config = get_current_vllm_config()
+    old_model_config = vllm_config.model_config
+    vllm_config.model_config = type(
+        "MinimalModelConfig",
+        (),
+        {
+            "multimodal_config": MultiModalConfig(
+                mm_encoder_attn_backend=AttentionBackendEnum.ROCM_AITER_FA,
+                mm_encoder_attn_dtype="fp8",
+            ),
+        },
+    )()
+    try:
+        real_len = sum(var_seq_len)
+        offsets = [0, *itertools.accumulate(var_seq_len)]
+        offsets += [real_len] * (num_slots + 1 - len(offsets))
+        qkv = torch.randn(1, num_rows, 3, num_heads, head_size)
+        q, k, v = qkv.unbind(dim=2)
+        cu_seqlens = torch.tensor(offsets, dtype=torch.int32)
+        scale = 1.0 / head_size**0.5
+
+        attn = MMEncoderAttention(num_heads, head_size, scale=scale)
+        launched_head_dims = []
+        wrapper = mm_attn.vit_aiter_fp8_attn_wrapper
+
+        def spy(**kwargs):
+            launched_head_dims.append(kwargs["q"].shape[-1])
+            return wrapper(**kwargs)
+
+        monkeypatch.setattr(mm_attn, "vit_aiter_fp8_attn_wrapper", spy)
+        output = attn(
+            q,
+            k,
+            v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=torch.tensor(max_seqlen, dtype=torch.int32, device="cpu"),
+        )
+
+        assert launched_head_dims == [128 if pad_head_dim == 128 else head_size]
+        assert output.shape == (1, num_rows, num_heads, head_size)
+        output = output[:, :real_len].float()
+        ref_output = torch.cat(
+            [
+                ref_attention(q_i, k_i, v_i, scale=scale)
+                for q_i, k_i, v_i in zip(
+                    torch.split(q[:, :real_len], var_seq_len, dim=1),
+                    torch.split(k[:, :real_len], var_seq_len, dim=1),
+                    torch.split(v[:, :real_len], var_seq_len, dim=1),
+                )
+            ],
+            dim=1,
+        ).float()
+        cosine = torch.nn.functional.cosine_similarity(
+            output.flatten(), ref_output.flatten(), dim=0
+        )
+        assert cosine.item() >= 0.99
+        assert (output - ref_output).abs().max().item() <= 0.30
+    finally:
+        vllm_config.model_config = old_model_config
+
+
+@pytest.mark.skipif(
     not current_platform.is_rocm(), reason="AITER FP8 attention requires ROCm"
 )
 def test_mha_attn_aiter_fp8_rejects_unsupported_arch(default_vllm_config):
