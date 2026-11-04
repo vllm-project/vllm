@@ -166,7 +166,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         )
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
-        # Set in `_setup_kernel` for Triton / AITER_MXFP4_FP8 backends.
+        # Set in `_setup_kernel` for Triton backends.
         self.w13_precision_config: Any = None
         self.w2_precision_config: Any = None
 
@@ -299,9 +299,9 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
-        if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
-            Mxfp4MoeBackend.AITER_MXFP4_FP8,
-        ):
+        # AITER_MXFP4_FP8 needs static activation scales, which online cannot
+        # provide, so only the Triton backends store a PrecisionConfig here.
+        if self.mxfp4_backend in TRITON_BACKENDS:
             w1_scale = self.w13_precision_config
             w2_scale = self.w2_precision_config
         else:

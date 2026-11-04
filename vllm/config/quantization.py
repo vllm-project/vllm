@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import field
 from typing import Annotated, Any, cast
 
@@ -400,13 +403,34 @@ def merge_quantization_config(
     )
 
 
+# `quantization_config.targets` spec matching the pre-quantized layer whose
+# checkpoint quant method is being built (see `resolve_quant_method`).
+_layer_target_spec: ContextVar[QuantSpec | None] = ContextVar(
+    "layer_target_spec", default=None
+)
+
+
+@contextmanager
+def layer_target_spec_scope(spec: QuantSpec | None) -> Iterator[None]:
+    """Apply a layer's `targets` spec to `user_activation_override`."""
+    token = _layer_target_spec.set(spec)
+    try:
+        yield
+    finally:
+        _layer_target_spec.reset(token)
+
+
 def user_activation_override(kind: str, config: Any) -> tuple[QuantKey | None, bool]:
-    """The user's `quantization_config.<kind>.activation` override in `config`
-    (a `VllmConfig` or None; `kind` is `linear` or `moe`), and whether it was
-    set (explicit `null` included)."""
-    model_config = config.model_config if config else None
-    args = model_config.quantization_config if model_config else None
-    spec = getattr(args, kind) if isinstance(args, QuantizationConfigArgs) else None
+    """The user's activation override for the layer being built, and whether it
+    was set (explicit `null` included): the layer's `targets` spec if any, else
+    `quantization_config.<kind>` in `config` (a `VllmConfig` or None; `kind` is
+    `linear` or `moe`)."""
+    spec = _layer_target_spec.get()
+    if spec is None:
+        model_config = config.model_config if config else None
+        args = model_config.quantization_config if model_config else None
+        is_args = isinstance(args, QuantizationConfigArgs)
+        spec = getattr(args, kind) if is_args else None
     if spec is None:
         return None, False
     return spec.activation, "activation" in spec.fields_set

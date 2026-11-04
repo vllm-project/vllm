@@ -1568,15 +1568,20 @@ def test_online_requantized_moe_reload(
         torch.testing.assert_close(parameter, expected_parameters[name], rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("targets", [False, True])
 def test_activation_only_override_applies_to_checkpoint_method(
-    default_vllm_config, tmp_path
+    default_vllm_config, tmp_path, monkeypatch, targets
 ) -> None:
     """Activation-only overrides remain available to the checkpoint method."""
     _write_minimal_llama_config(tmp_path)
     model_config = ModelConfig(
         model=str(tmp_path),
         quantization="compressed-tensors",
-        quantization_config=quant_config_args(moe={"activation": "mxfp8"}),
+        quantization_config=quant_config_args(
+            **{"targets": {"*layers.0.mlp.experts": {"activation": "mxfp8"}}}
+            if targets
+            else {"moe": {"activation": "mxfp8"}}
+        ),
         hf_overrides={
             "quantization_config": {
                 "quant_method": "compressed-tensors",
@@ -1602,8 +1607,19 @@ def test_activation_only_override_applies_to_checkpoint_method(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         _resolve_activation_key,
     )
+    from vllm.model_executor.layers.quantization import resolve_quant_method
 
-    assert _resolve_activation_key(None) == kMxfp8Dynamic
+    # The activation key the checkpoint method resolves while it is built; a
+    # `targets` override only applies to the layers it matches.
+    keys = []
+    monkeypatch.setattr(
+        result,
+        "get_quant_method",
+        lambda *_: keys.append(_resolve_activation_key(None)),
+    )
+    for prefix in ("model.layers.0.mlp.experts", "model.layers.1.mlp.experts"):
+        resolve_quant_method(result, _TestRoutedExperts(), prefix)
+    assert keys == [kMxfp8Dynamic, None if targets else kMxfp8Dynamic]
 
 
 def test_online_overlay_requires_normalized_quantization_config(tmp_path) -> None:
