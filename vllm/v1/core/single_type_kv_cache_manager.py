@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
+from vllm.utils.gc_utils import untracked_list
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -122,8 +123,12 @@ class SingleTypeKVCacheManager(ABC):
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished.
-        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(list)
+        # is finished. Blocks hold no strong reference back to these lists or
+        # their owner, so the lists cannot be part of a cycle and are hidden from
+        # the cyclic GC, which would otherwise visit every block of every request.
+        self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(
+            untracked_list
+        )
 
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
