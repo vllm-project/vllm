@@ -5,6 +5,7 @@ import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import msgspec
 import pytest
 import torch
 
@@ -257,6 +258,8 @@ def test_take_events_forwards_locality_to_placeholder_store():
     assert len(events) == 1
     assert isinstance(events[0], BlockStored)
     assert events[0].block_size == 0
+    assert events[0].chunk_size is None
+    assert "chunk_size" not in msgspec.msgpack.decode(msgspec.msgpack.encode(events[0]))
     assert events[0].locality == "REMOTE"
 
 
@@ -304,6 +307,7 @@ def test_partial_tail_event_describes_hash_aligned_physical_block_prefix():
     assert event.parent_block_hash == _wire_hash(_hash(3))
     assert event.token_ids == list(range(17, 29))
     assert event.block_size == 4
+    assert event.chunk_size == 12
 
 
 def test_partial_tail_lookup_does_not_overwrite_store_metadata():
@@ -397,6 +401,7 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
     assert stored.token_ids == ([] if record_snapshot else list(range(1, 9)))
     assert stored.block_size == 4
+    assert stored.chunk_size == 8
     assert stored.lookahead_token_ids == [
         list(range(5, 10)),
         list(range(9, 14)),
@@ -528,6 +533,11 @@ def test_event_hashes_use_group_block_size(
     assert isinstance(event, BlockStored)
     assert event.block_hashes == [_wire_hash(_hash(i)) for i in expected_hash_indices]
     assert event.block_size == block_size
+    assert event.chunk_size == block_size * blocks_per_chunk
+    assert (
+        msgspec.msgpack.decode(msgspec.msgpack.encode(event))["chunk_size"]
+        == event.chunk_size
+    )
     assert len(event.token_ids) == block_size * blocks_per_chunk
 
 
@@ -671,6 +681,7 @@ def test_mamba_multi_hash_chunk_announces_only_last_hash():
     assert event.parent_block_hash == _wire_hash(_hash(6))
     assert event.token_ids == []
     assert event.block_size == 4
+    assert event.chunk_size == 16
 
     [removed] = tracker.take_events([_removed_event(keys[1:])])
     assert isinstance(removed, BlockRemoved)
@@ -696,6 +707,7 @@ def test_mamba_partial_tail_event_is_state_checkpoint(record_method):
     assert event.parent_block_hash == _wire_hash(_hash(5))
     assert event.token_ids == []
     assert event.block_size == 4
+    assert event.chunk_size == 12
     assert event.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 
 

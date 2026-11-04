@@ -117,6 +117,12 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 | `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
 
+Self-describing offload `BlockStored` events set `chunk_size` to the token span
+of one retrievable chunk. `block_size` remains the size of each advertised block;
+the last hash in `block_hashes` identifies the chunk. Partial tails report their
+valid token span. Placeholder events leave `chunk_size` unset. This does not
+change `BlockRemoved` events.
+
 ## Canonical Layout
 
 By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.
