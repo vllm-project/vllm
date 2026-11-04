@@ -1272,7 +1272,7 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
                     layer_names=[f"g{i}.r{j}" for j in range(2)],
                     kv_cache_spec=None,
                     kv_cache_group_id=i,
-                    metadata_builders=[_ReaderBuilder(10 + i, 64)],
+                    metadata_builders=[_ReaderBuilder(10 + i, 64)],  # type: ignore[list-item]
                 )
             )
 
