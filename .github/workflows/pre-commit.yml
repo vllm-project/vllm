@@ -65,16 +65,18 @@ jobs:
     - run: >-
         uvx pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
     # A PR that changes the ROCm base image needs it cached for main before merging (/amd-ci cache
-    # adds rocm-base-cached), or a maintainer's rocm-base-cache-skip. Labels need triage access.
+    # adds rocm-base-cached and re-runs this job), or a maintainer's rocm-base-cache-skip. Labels
+    # need triage access.
     - name: ROCm base image cache
       if: github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'main'
       uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         script: |
-          const pr = context.payload.pull_request;
+          // Live labels: a re-run keeps the event payload of the first run.
+          const { data: pr } = await github.rest.pulls.get({...context.repo, pull_number: context.payload.pull_request.number});
           if (pr.labels.some(l => ['rocm-base-cached', 'rocm-base-cache-skip'].includes(l.name))) return;
           const stack = ['docker/Dockerfile.rocm_base', 'tools/vllm-rocm/therock_wheels.py'];
           const files = await github.paginate(github.rest.pulls.listFiles, {...context.repo, pull_number: pr.number, per_page: 100});
-          if (files.some(f => stack.includes(f.filename))) {
-            core.setFailed('This PR changes the ROCm base image. Once its CI built the image, a maintainer comments /amd-ci cache, which caches it for main and adds the rocm-base-cached label; or a maintainer adds rocm-base-cache-skip.');
+          if (files.some(f => stack.includes(f.filename) || stack.includes(f.previous_filename))) {
+            core.setFailed('This PR changes the ROCm base image, so it needs the rocm-base-cached label: once its CI has built the image, a maintainer comments /amd-ci cache, which starts copying it for main and adds the label. Maintainers can instead add rocm-base-cache-skip.');
           }

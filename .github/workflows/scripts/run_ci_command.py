@@ -88,6 +88,8 @@ ROCM_CACHED_LABEL = "rocm-base-cached"
 ROCM_CACHE_SKIP_LABEL = "rocm-base-cache-skip"
 # build.sh base mode records the stack images it built under these keys.
 ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
+# build.sh promote copies only images built with main's versions of these.
+ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
 
 
 class ApiError(RuntimeError):
@@ -345,7 +347,34 @@ class GitHubClient:
 
     def list_pr_files(self, number: int) -> list[str]:
         files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
-        return [str(file["filename"]) for file in files]
+        return [
+            str(path)
+            for file in files
+            for path in (file["filename"], file.get("previous_filename"))
+            if path
+        ]
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
+        except ApiError as error:
+            if error.status == 404:
+                return "none"
+            raise
+
+    def rerun_failed_pre_commit(self, sha: str) -> None:
+        """A label added with GITHUB_TOKEN starts no workflow: re-run the gate."""
+        sha = urllib.parse.quote(sha, safe="")
+        runs = self._request(
+            self._repo_path(f"/actions/workflows/pre-commit.yml/runs?head_sha={sha}")
+        )["workflow_runs"]
+        latest = max(runs, key=lambda run: run["created_at"], default=None)
+        if latest and latest.get("conclusion") == "failure":
+            self._request(
+                self._repo_path(f"/actions/runs/{latest['id']}/rerun-failed-jobs"),
+                method="POST",
+            )
 
     def add_label(self, issue_number: int, label: str) -> None:
         self._request(
@@ -1207,6 +1236,11 @@ def changes_rocm_stack(github: GitHubClient, pr: Mapping[str, Any]) -> bool:
 
 
 def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
+    labels = (ROCM_CACHED_LABEL, ROCM_CACHE_SKIP_LABEL)
+    if pr["base"]["ref"] != "main" or any(
+        label["name"] in labels for label in pr["labels"]
+    ):
+        return ""
     try:
         if not changes_rocm_stack(github, pr):
             return ""
@@ -1214,9 +1248,10 @@ def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
         print(f"Could not check the ROCm stack inputs: {error}", file=sys.stderr)
         return ""
     return (
-        "\n\nℹ️ This PR changes the ROCm base image. Before it merges, a maintainer "
-        f"comments `{COMMAND_CACHE_AMD}` once this CI built the image, or adds the "
-        f"`{ROCM_CACHE_SKIP_LABEL}` label; `pre-commit` fails until then."
+        "\n\nℹ️ This PR changes the ROCm base image, so `pre-commit` fails until it "
+        f"has the `{ROCM_CACHED_LABEL}` label: once this CI has built the image, a "
+        f"maintainer comments `{COMMAND_CACHE_AMD}`, which adds it. Maintainers can "
+        f"instead add `{ROCM_CACHE_SKIP_LABEL}`."
     )
 
 
@@ -1231,6 +1266,16 @@ def handle_cache_amd(
     if not changes_rocm_stack(github, pr):
         return "This PR does not change the ROCm base image; nothing to cache."
     sha = pr["head"]["sha"]
+    if any(
+        github.get_file_sha(p, "main") != github.get_file_sha(p, sha)
+        for p in ROCM_RECIPE
+    ):
+        raise CiPreparationError(
+            f"`{sha[:12]}` has another `build.sh` or `docker-bake-rocm.hcl` than main, "
+            "so its images cannot be cached for main. Merge main with "
+            f"`{COMMAND_RUN_CI}` and run `{COMMAND_CACHE_AMD}` again, or add "
+            f"`{ROCM_CACHE_SKIP_LABEL}`."
+        )
     # The images this PR's own CI built, by the digests it recorded: copied as
     # built, whatever happens to their tags afterwards.
     sources = [
@@ -1261,10 +1306,12 @@ def handle_cache_amd(
         }
     )
     github.add_label(pr["number"], ROCM_CACHED_LABEL)
+    github.rerun_failed_pre_commit(sha)
     return (
         f"Started [Buildkite AMD CI #{build['number']}]({build['web_url']}) to copy "
         f"the ROCm stack images of [this PR's CI]({source['web_url']}) into "
-        f"`rocm/vllm-ci`, and added `{ROCM_CACHED_LABEL}`."
+        f"`rocm/vllm-ci`, and added `{ROCM_CACHED_LABEL}`. If that build fails, "
+        f"remove the label and run `{COMMAND_CACHE_AMD}` again once fixed."
     )
 
 

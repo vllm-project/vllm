@@ -96,6 +96,9 @@ class FakeGitHub:
         self.comments = comments or []
         self.files = files or []
         self.labels: list[str] = []
+        # (path, ref) -> blob; main and the PR head share every blob by default.
+        self.file_shas: dict[tuple[str, str], str] = {}
+        self.reran: list[str] = []
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -152,6 +155,12 @@ class FakeGitHub:
 
     def add_label(self, issue_number: int, label: str) -> None:
         self.labels.append(label)
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        return self.file_shas.get((path, ref), "blob")
+
+    def rerun_failed_pre_commit(self, sha: str) -> None:
+        self.reran.append(sha)
 
 
 class FakeBranchUpdater:
@@ -1679,7 +1688,20 @@ class RocmCacheTest(unittest.TestCase):
             },
         )
         self.assertEqual(github.labels, ["rocm-base-cached"])
+        # The label came from GITHUB_TOKEN, which starts no pre-commit run.
+        self.assertEqual(github.reran, ["0123456789abcdef"])
         self.assertIn("ci/builds/2", github.comments[0])
+
+    def test_cache_refuses_a_pr_built_with_another_recipe(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        github.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
+
+        amd = self.cache(github, [ci_build()])
+
+        self.assertEqual((amd.created_builds, github.labels), ([], []))
+        self.assertIn(
+            "another `build.sh` or `docker-bake-rocm.hcl`", github.comments[0]
+        )
 
     def test_cache_needs_a_ci_build_that_recorded_the_images(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
@@ -1712,9 +1734,16 @@ class RocmCacheTest(unittest.TestCase):
         self.assertIn("nothing to cache", github.comments[0])
 
     def test_run_commands_remind_about_the_cache_on_stack_prs(self) -> None:
-        for files, reminded in ((STACK_PR_FILES, True), (["vllm/foo.py"], False)):
-            with self.subTest(files=files):
-                github = FakeGitHub(files=files)
+        skip = [{"name": "rocm-base-cache-skip"}]
+        cases = [
+            (STACK_PR_FILES, {}, True),
+            (["vllm/foo.py"], {}, False),
+            (STACK_PR_FILES, {"labels": skip}, False),
+            (STACK_PR_FILES, {"base": {"ref": "releases/v1"}}, False),
+        ]
+        for files, pr, reminded in cases:
+            with self.subTest(files=files, pr=pr):
+                github = FakeGitHub(files=files, pr=make_pr(**pr))
 
                 run(make_event(COMMAND_RUN_AMD_CI), github, FakeBuildkite([[], []]))
 

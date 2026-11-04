@@ -396,10 +396,10 @@ case $MODE in
     keys=$(keys_at "$ROCM_PROMOTE_SHA") || { echo "cannot compute the keys of $ROCM_PROMOTE_SHA" >&2; exit 1; }
     read -r pKs _ <<<"$keys"
     for tag in "stack-$STACK-$pKs-wheels" "stack-$STACK-$pKs"; do   # the stack tag completes the pair
+      if digest "$TRUSTED:$tag" >/dev/null; then echo "$TRUSTED:$tag already exists" >&2; continue; fi
       ref=$(tr ' ' '\n' <<<"${ROCM_PROMOTE_IMAGES:-}" \
         | grep -xE "rocm/vllm-dev:pr${ROCM_PROMOTE_PR:?}-$tag@sha256:[0-9a-f]{64}") \
         || { echo "#$ROCM_PROMOTE_PR's CI recorded no $tag" >&2; exit 1; }
-      if digest "$TRUSTED:$tag" >/dev/null; then echo "$TRUSTED:$tag already exists" >&2; continue; fi
       echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
       docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75
     done
