@@ -68,3 +68,14 @@ struct Utils {
   #define VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(FUNC, VAL) \
     hipFuncSetAttribute(FUNC, hipFuncAttributeMaxDynamicSharedMemorySize, VAL)
 #endif
+
+// FP8 quant kernels convert two values per saturating `cvt`, see
+// scaled_fp8_conversion_vec and per_token_group_quant_8bit_packed. The
+// instruction exists from sm_89; lower the minimum arch once validated there.
+#define VLLM_FP8_CVT_X2_MIN_ARCH 1000
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && \
+    __CUDA_ARCH__ >= VLLM_FP8_CVT_X2_MIN_ARCH
+  #define VLLM_FP8_CVT_X2 1
+#else
+  #define VLLM_FP8_CVT_X2 0
+#endif
