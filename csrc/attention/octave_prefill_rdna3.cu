@@ -35,8 +35,7 @@
   #include <hip/hip_fp16.h>
 
   #include "octave_format.cuh"
-
-  #if defined(__HIP_DEVICE_COMPILE__) && !defined(__gfx1100__)
+  #if defined(__HIP_DEVICE_COMPILE__) && (!defined(__gfx1100__) || !defined(__gfx1151__))
     #define OCTAVE_PREFILL_STUB
   #endif
 
@@ -745,6 +744,7 @@ void octave_prefill(torch::Tensor out, torch::Tensor q, torch::Tensor k,
     const std::string name =
         at::cuda::getCurrentDeviceProperties()->gcnArchName;
     if (name.rfind("gfx1100", 0) == 0) return 0;
+    if (name.rfind("gfx1151", 0) == 0) return 0;
     if (name.rfind("gfx942", 0) == 0) return 1;
     return -1;
   }();
