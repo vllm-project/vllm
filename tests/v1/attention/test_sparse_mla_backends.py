@@ -106,6 +106,7 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
     FlashInferMLASparseSM120Impl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    QUANTIZED_DS_MLA_CACHE_FORMATS,
     FlashMLASparseBackend,
     FlashMLASparseImpl,
     FlashMLASparseMetadata,
@@ -795,7 +796,7 @@ def _quantize_dequantize_nvfp4_ds_mla(
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", SPARSE_KV_CACHE_DTYPES)
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("block_size", SPARSE_BLOCK_SIZES)
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize(
@@ -1224,6 +1225,27 @@ def test_sparse_backend_decode_correctness(
             metadata,
             out_buffer,
         )
+
+        # Below 32 heads the quantized-cache path concatenates the query straight
+        # into a head-padded buffer; padding per call must give the same output.
+        uses_padded_query = (
+            backend_cls == FlashMLASparseBackend
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+            and num_heads < 32
+            and qk_rope_head_dim > 0
+        )
+        assert (getattr(impl, "fp8_q_padded", None) is not None) == uses_padded_query
+        if uses_padded_query:
+            impl.fp8_q_padded = None
+            unpadded_output = mock_layer.forward_impl(
+                query_vllm,
+                kv_c_vllm,
+                k_pe_vllm,
+                kv_cache,
+                metadata,
+                torch.empty_like(out_buffer),
+            )
+            torch.testing.assert_close(backend_output, unpadded_output, rtol=0, atol=0)
 
     if block_stride_rows is not None and kv_cache_dtype == "auto":
         expected_row = torch.cat((kv_c_vllm[-1], k_pe_vllm[-1, 0]))
