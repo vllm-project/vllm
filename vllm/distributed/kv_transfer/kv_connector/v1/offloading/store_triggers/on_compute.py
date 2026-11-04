@@ -74,7 +74,7 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self._next_stored_chunk_idxs.pop(req_id, None)
 
     @override
-    def reset(self) -> None:
+    def reset(self, req_states: Mapping[ReqId, RequestOffloadState]) -> None:
         # Active requests store again from chunk 0.
         self._next_stored_chunk_idxs.clear()
 

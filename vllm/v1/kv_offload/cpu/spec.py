@@ -205,6 +205,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
                 info=self.cpu_info,
+                store_mode=self.store_mode,
             )
         return self._manager
 

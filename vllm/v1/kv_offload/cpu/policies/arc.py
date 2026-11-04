@@ -100,14 +100,19 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         self.t1[key] = chunk
         self.b1.pop(key, None)
         self.b2.pop(key, None)
-        position = req_context.get_offload_key_position(key)
+        # A request-free store has no running position.
+        position = (
+            None if req_context is None else req_context.get_offload_key_position(key)
+        )
         if position is None:
             return
+        # Only a request gives a position.
+        assert req_context is not None
         state = self._get_running_keys(req_context)
         entry = (position, key)
         if state.entries and entry < state.entries[-1]:
@@ -137,7 +142,7 @@ class ARCCachePolicy(CachePolicy):
 
     @override
     def on_store_miss(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         for key in reversed(list(keys)):
             self._adapt_to_ghost_hit(key)
