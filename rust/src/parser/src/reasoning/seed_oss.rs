@@ -53,7 +53,7 @@ mod tests {
     use super::SeedOssReasoningParser;
     use crate::reasoning::ReasoningParser;
     use crate::reasoning::tests::{
-        SEED_THINK_END_ID, SEED_THINK_START_ID, content_str, fake_tokenizer, push_str,
+        SEED_THINK_END_ID, SEED_THINK_START_ID, content_str, decode, fake_tokenizer, push_str,
         reasoning_str,
     };
 
@@ -142,11 +142,12 @@ mod tests {
         parser.initialize(&[SEED_THINK_START_ID]).unwrap();
 
         // Closing delimiter `</seed:think>` arrives in two halves.
-        let first = push_str(&mut parser, "reason</seed:");
+        let [first, second] = decode(["reason</seed:", "think>answer"]);
+        let first = parser.push(first).unwrap();
         assert_eq!(reasoning_str(&first), Some("reason"));
         assert_eq!(first.content, None);
 
-        let second = push_str(&mut parser, "think>answer");
+        let second = parser.push(second).unwrap();
         assert_eq!(second.reasoning, None);
         assert_eq!(content_str(&second), Some("answer"));
     }

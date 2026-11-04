@@ -31,7 +31,7 @@ SSM_MODELS = [
     "tiiuae/falcon-mamba-tiny-dev",
     # mamba2-codestral in transformers is broken pending:
     # https://github.com/huggingface/transformers/pull/40861
-    # "yujiepan/mamba2-codestral-v0.1-tiny-random",
+    # "vllm-project/mamba2-codestral-v0.1-tiny-random",
 ]
 
 HYBRID_MODELS = [
@@ -211,7 +211,7 @@ def test_mamba_cache_cg_padding(
         vllm_config.compilation_config.cudagraph_mode
     )
     if cudagraph_dispatcher.cudagraph_mode == CUDAGraphMode.NONE:
-        pytest.skip("CUDA/XPU graph is disabled.Please enable it to run this test. ")
+        pytest.skip("CUDA/XPU graph is disabled. Please enable it to run this test.")
     while (
         len(example_prompts)
         == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
