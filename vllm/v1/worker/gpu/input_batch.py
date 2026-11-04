@@ -132,6 +132,8 @@ class InputBatch:
         input_buffers: InputBuffers,
         max_query_len: int | None = None,
         is_padding: bool = True,
+        for_capture: bool = False,
+        cg_mode: "CUDAGraphMode | None" = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
