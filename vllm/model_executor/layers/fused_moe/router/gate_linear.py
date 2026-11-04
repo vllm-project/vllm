@@ -552,6 +552,10 @@ def fp32_router_gemm_dispatch_impl(
         elif weight.shape == (352, 4096):
             # Step-5 on B300: BF16x3 becomes competitive at M=12.
             max_tokens = 11
+    if weight.shape == (256, 8192):
+        # Muse Spark on B300: the FP32 kernel's grid starves the main stream
+        # when it runs on the routing stream.
+        max_tokens = 16
     if x.shape[0] <= max_tokens:
         return ops.fp32_router_gemm(x, weight)
 
