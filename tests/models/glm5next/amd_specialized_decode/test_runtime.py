@@ -284,6 +284,33 @@ def test_other_ranks_exit_their_worker(monkeypatch):
     assert exited.value.code == failstop.WORKER_EXIT_CODE
 
 
+class _LateEvent:
+    """Lands two steps after it is recorded, as when async scheduling keeps the
+    host a step ahead of the GPU."""
+
+    now = 0
+
+    def record(self):
+        self.at = _LateEvent.now
+
+    def query(self):
+        return _LateEvent.now - self.at >= 2
+
+
+def test_after_step_checks_a_copy_before_starting_the_next(monkeypatch):
+    monkeypatch.setattr(failstop.torch.cuda, "Event", _LateEvent)
+    monkeypatch.setattr(_LateEvent, "now", 0)
+    watch, words, _ = _watch(monkeypatch, 0)
+    checked: list[list[list[int]]] = []
+    monkeypatch.setattr(watch, "check", checked.append)
+    words[1][0] = 1  # an expiry before the first step's copy
+    for _ in range(3):
+        _LateEvent.now += 1
+        watch.after_step()
+    # step 2 found the copy in flight and left it; step 3 checked it
+    assert checked == [[[0, 0], [1, 0], [0, 0, 0, 0]]]
+
+
 def test_unsafe_warn_logs_and_clears(monkeypatch):
     watch, words, flags = _watch(monkeypatch, 0, unsafe=True)
     words[0][1] = 1
@@ -301,4 +328,7 @@ def test_fault_spec(monkeypatch):
     assert abi.fault_spec() == abi.FaultSpec(1, 5, 2000)
     monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=1")
     with pytest.raises(ValueError, match="rank=R,step=N,us=D"):
+        abi.fault_spec()
+    monkeypatch.setenv(abi.FAULT_INJECT_ENV, "rank=0,step=0,us=0")
+    with pytest.raises(ValueError, match="us > 0"):
         abi.fault_spec()

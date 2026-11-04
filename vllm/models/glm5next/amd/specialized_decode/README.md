@@ -56,8 +56,11 @@ strides).
 
 Every cross-CTA and cross-rank wait is bounded. An expired wait sets its
 stage's sticky error word. After each step (`compute_logits`) the health check
-reads the previous step's words without blocking the stream: the output rank
-raises with the stage names and exits after a grace period, the other ranks
-exit their workers. `VLLM_MONO_UNSAFE_WARN=1` logs and clears instead (debug
-only); `VLLM_MONO_FAULT_INJECT=rank=R,step=N,us=D` stalls a rank for the fault
-test.
+reads the words copied at an earlier step, once that copy has landed, without
+blocking the stream: the output rank raises with the stage names and exits
+after a grace period, the other ranks exit their workers. The check trails the
+GPU by a step or two, so the step that expired, and the steps until the check,
+can return wrong tokens to their requests; if the engine goes idle after such a
+step, the stop comes with the next step it runs. `VLLM_MONO_UNSAFE_WARN=1` logs
+and clears instead (debug only); `VLLM_MONO_FAULT_INJECT=rank=R,step=N,us=D`
+stalls a rank for the fault test.

@@ -40,7 +40,10 @@ class HealthWatch:
     on the output rank, every rank's expiry flag.
 
     ``health()`` is what the runner reads after a step. ``after_step()`` checks the
-    previous step's copy without blocking the stream. Words are sticky; only
+    last copy once it has landed, without blocking the stream, and starts the next
+    copy only after that check, so under async scheduling every copy is checked a
+    step or two late instead of being overwritten unchecked. Words are sticky (the
+    kernels only ever set them), so a later copy still holds an expiry; only
     ``VLLM_MONO_UNSAFE_WARN=1`` clears them, after logging."""
 
     def __init__(
@@ -67,7 +70,9 @@ class HealthWatch:
         return torch.cat([t.to(torch.int32).flatten() for t in self._dev])
 
     def after_step(self) -> None:
-        if self._event is not None and self._event.query():
+        if self._event is not None:
+            if not self._event.query():
+                return
             self.check([h.tolist() for h in self._host])
         for h, d in zip(self._host, self._dev):
             h.copy_(d, non_blocking=True)
