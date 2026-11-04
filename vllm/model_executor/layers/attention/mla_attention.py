@@ -694,6 +694,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             raise NotImplementedError(
                 f"{type(self).__name__} does not support PCP+DCP."
             )
+        # MHA prefill attends over the layer's own new latent KV, which a
+        # KV-sharing layer lacks, and the MHA/MQA split must match across
+        # layers (FlashMLA's FP8 scheduler metadata is shared per batch).
+        if (
+            kv_sharing_target_layer_name is not None
+            and self.impl.is_sparse
+            and not vllm_config.attention_config.sparse_mla_force_mqa
+        ):
+            raise ValueError(
+                "Sparse MLA KV sharing requires "
+                "attention_config.sparse_mla_force_mqa=True."
+            )
         self.dcp_manager: MLADCPManager | None = None
         if self.impl.dcp_world_size > 1:
             query_dtype = (
