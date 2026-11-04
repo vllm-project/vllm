@@ -731,7 +731,7 @@ def test_daemon_keys_dense_dp_ranks_like_the_engine():
     from types import SimpleNamespace
 
     from vllm.config import ParallelConfig
-    from vllm.model_executor.model_loader.weight_cache.daemon import (
+    from vllm.model_executor.model_loader.weight_cache.utils import (
         get_engine_dp_placement,
     )
 
@@ -1222,7 +1222,9 @@ def test_ipc_cache_key_tracks_kv_quantization(
         return WeightCacheState(entries={}, aliases={}, attrs={})
 
     monkeypatch.setattr(loader, "_request_state", request_state)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     model = loader.load_model(config, model_config)
@@ -1296,7 +1298,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
 
@@ -1332,7 +1336,7 @@ def _warmup_cache_request(config_hash: str = "a" * 64, **overrides) -> dict:
 def test_warmup_cache_request_validation_and_miss(tmp_path, monkeypatch):
     """The source validates the wire key before touching the filesystem."""
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    from vllm.model_executor.model_loader.weight_cache.seed import SeedTransport
+    from vllm.model_executor.model_loader.weight_cache.transport import SeedTransport
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
         FlashInferWarmupCache,
     )
@@ -1391,7 +1395,7 @@ def test_remote_warmup_cache_listener(tmp_path, monkeypatch):
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
@@ -1437,12 +1441,12 @@ def test_transport_cuts_off_trickling_peer(monkeypatch):
     import socket
     import time
 
-    import vllm.model_executor.model_loader.weight_cache.seed as seed_mod
+    import vllm.model_executor.model_loader.weight_cache.transport as seed_mod
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         recv_json,
         send_json,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedConfig,
         SeedTransport,
     )
@@ -1469,15 +1473,150 @@ def test_warmup_cache_install_writes_table(tmp_path, monkeypatch):
     """Install writes the fetched table to the rank's on-disk cache path."""
     import json
 
+    from vllm.model_executor.model_loader.weight_cache import warmup_cache
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
         FlashInferWarmupCache,
     )
-    from vllm.model_executor.warmup import flashinfer_autotune_cache as fi_cache
 
     target = tmp_path / "autotune_configs_dp0_rank0.json"
     monkeypatch.setattr(
-        fi_cache, "resolve_rank_flashinfer_autotune_file", lambda _: target
+        warmup_cache, "resolve_rank_flashinfer_autotune_file", lambda _: target
     )
     table = {"records": {"op": {"shape": 1}}}
     FlashInferWarmupCache().install(None, {"autotune_configs_dp0_rank0.json": table})
     assert json.loads(target.read_text()) == table
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
+    """A mirror daemon fills its shard from a same-host source over peer_ipc.
+
+    The source is pinned to GPU 0; the mirror must land on the free GPU 1
+    (the launcher infers this from the source's GPU UUIDs) and copy the
+    weights through CUDA IPC, never reading the checkpoint. Daemon sockets
+    are keyed by the daemon's GPU UUID, so engines serving from the mirror
+    must run on the mirror's GPU: this whole test process pins itself to
+    GPU 1. Identical outputs with fallback disabled prove the mirrored
+    weights are real.
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+
+    # Engines (baseline and mirror-serving) run on the mirror's GPU 1; the
+    # mirror daemon itself keeps full visibility (below) because a CUDA IPC
+    # handle names the source's device by its index.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+
+    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    with WeightCacheDaemon(
+        QWEN_CASE.model,
+        tp_size=1,
+        extra_args=QWEN_CASE.daemon_args,
+        # Pinned to GPU 0, so its IPC handles name index 0, which the mirror
+        # (full visibility) resolves to the same physical GPU.
+        env_extra={"CUDA_VISIBLE_DEVICES": "0"},
+    ) as source:
+        source.wait_until_ready()
+        source_socks = sorted(
+            os.path.join(source.socket_dir, name)
+            for name in os.listdir(source.socket_dir)
+            if name.endswith(".sock")
+        )
+        assert len(source_socks) == 1
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=[
+                *QWEN_CASE.daemon_args,
+                "--weight-cache-seed",
+                ",".join(source_socks),
+            ],
+            # Full visibility: the source's IPC handle names its device by
+            # index, and the mirror lands on the free GPU (GPU 1) via the
+            # launcher's placement inference.
+            env_extra={"CUDA_VISIBLE_DEVICES": "0,1"},
+        ) as mirror:
+            mirror.wait_until_ready()
+            # The mover reported a completed copy, through CUDA IPC.
+            assert " over peer_ipc " in mirror.logs
+            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
+            assert transfer is not None
+            # The copy of a tiny model takes ~1s; a pathological transport
+            # (or a silent disk fallback) would take far longer.
+            assert float(transfer.group(1)) < 10.0
+            mirror_outputs = generate(
+                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
+    """A mirror daemon pulls its shard over the remote JSON control plane
+    with the rdma mover (Mooncake TransferEngine).
+
+    Both daemons run on this host, but the exchange goes through the
+    token-authenticated TCP listener exactly as a cross-host seed would. The
+    mirror is pinned to GPU 1; daemon sockets are keyed by GPU UUID, so the
+    engines serving from it run there too (the whole test process pins
+    itself to GPU 1, as in the same-host test). Mooncake's dmabuf path is
+    used for GPU-buffer registration on hosts without a working
+    nvidia-peermem module (export WITH_NVIDIA_PEERMEM=0 in the job
+    environment; the daemon subprocesses inherit it).
+    """
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    pytest.importorskip("mooncake.engine")
+
+    # Engines (baseline and mirror-serving) run on the mirror's GPU 1.
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+
+    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    token = "d2d-rdma-test-token"
+    base_port = get_open_port()
+    with WeightCacheDaemon(
+        QWEN_CASE.model,
+        tp_size=1,
+        extra_args=[
+            *QWEN_CASE.daemon_args,
+            "--seed-listen-host",
+            "127.0.0.1",
+            "--seed-listen-port",
+            str(base_port),
+            "--seed-token",
+            token,
+        ],
+    ) as source:
+        source.wait_until_ready()
+        with WeightCacheDaemon(
+            QWEN_CASE.model,
+            tp_size=1,
+            extra_args=[
+                *QWEN_CASE.daemon_args,
+                "--weight-cache-seed",
+                f"127.0.0.1:{base_port}",
+                "--seed-token",
+                token,
+            ],
+            # Cross-host peers cannot share GPUs; the mirror takes GPU 1
+            # (remote seeding needs no placement inference).
+            env_extra={"CUDA_VISIBLE_DEVICES": "1"},
+        ) as mirror:
+            mirror.wait_until_ready()
+            assert " over rdma " in mirror.logs
+            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
+            assert transfer is not None
+            # Loopback RDMA is latency-dominated (~1s); bound stalls, not bandwidth.
+            assert float(transfer.group(1)) < 10.0
+            mirror_outputs = generate(
+                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
+            )
+
+    assert mirror_outputs == baseline_outputs

@@ -41,6 +41,9 @@ class LoadConfig:
     - "ipc_cache" will map post-quantized weights from a local weight cache
       daemon via CUDA IPC for fast engine restarts. Launch the daemon with
       `vllm preload` first.
+    - "peer_cache" will build the model on meta and pull post-processed
+      weights from a source replica's weight cache daemon. Set internally
+      by `vllm preload --weight-cache-seed`; not for engine use.
     - "npcache" will load the weights in pytorch format and store a numpy cache
       to speed up the loading.
     - "dummy" will initialize the weights with random values, which is mainly

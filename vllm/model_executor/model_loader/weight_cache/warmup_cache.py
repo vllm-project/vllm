@@ -4,7 +4,7 @@
 
 Each warmup-cache object (currently only :class:`FlashInferWarmupCache`)
 drives its own warmup pass on the daemon; the seeding flow itself
-(:class:`seed.SeedTransport`) is shared with future kinds such as weight
+(:class:`transport.SeedTransport`) is shared with other kinds such as weight
 shards. A target daemon installs its rank-matched cache before tuning, so
 both the daemon's own warmup and the later engine start skip re-tuning. The
 disk layout is the index: a request names the cache by the same key the
@@ -27,11 +27,19 @@ from typing import TYPE_CHECKING, Any, Protocol
 import regex as re
 import torch
 
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_cache.seed import Seedable
+from vllm.model_executor.model_loader.weight_cache.transport import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
+)
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    flashinfer_autotune_cache_hash,
+    flashinfer_autotune_filename,
+    flashinfer_autotune_root,
+    resolve_rank_flashinfer_autotune_file,
+    write_flashinfer_autotune_cache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -40,7 +48,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.weight_cache.daemon import (
         WeightCacheDaemon,
     )
-    from vllm.model_executor.model_loader.weight_cache.seed import (
+    from vllm.model_executor.model_loader.weight_cache.transport import (
         SeedTransport,
     )
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -53,7 +61,7 @@ _CONFIG_HASH_RE = re.compile(r"[0-9a-f]{64}")
 class WarmupCache(Seedable, Protocol):
     """One daemon warmup cache: its warmup pass and its cache's semantics.
 
-    The warmup layer; the D2D exchange lives in seed.py (SeedTransport).
+    The warmup layer; the D2D exchange lives in transport.py (SeedTransport).
     """
 
     def warmup(self, daemon: "WeightCacheDaemon", transport: "SeedTransport") -> None:
@@ -82,7 +90,7 @@ class FlashInferWarmupCache(WarmupCache):
             current_platform.update_block_size_for_backend(vllm_config)
             runner = build_warmup_runner(
                 vllm_config,
-                daemon.local_rank,
+                daemon.device_index,
                 is_draft=daemon.is_draft,
                 model_config=daemon.model_config,
             )
@@ -104,11 +112,6 @@ class FlashInferWarmupCache(WarmupCache):
             torch.accelerator.empty_cache()
 
     def request_params(self, runner: "GPUModelRunner") -> dict[str, Any]:
-        from vllm.distributed.parallel_state import get_world_group
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_cache_hash,
-        )
-
         return {
             "config_hash": flashinfer_autotune_cache_hash(runner),
             "dp_rank": runner.vllm_config.parallel_config.data_parallel_rank,
@@ -116,11 +119,6 @@ class FlashInferWarmupCache(WarmupCache):
         }
 
     def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_filename,
-            flashinfer_autotune_root,
-        )
-
         config_hash = request.get("config_hash")
         if not isinstance(config_hash, str) or not _CONFIG_HASH_RE.fullmatch(
             config_hash
@@ -172,11 +170,6 @@ class FlashInferWarmupCache(WarmupCache):
         return payload
 
     def install(self, runner: "GPUModelRunner", payload: dict[str, Any]) -> None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            resolve_rank_flashinfer_autotune_file,
-            write_flashinfer_autotune_cache,
-        )
-
         (data,) = payload.values()
         cache_path = resolve_rank_flashinfer_autotune_file(runner)
         write_flashinfer_autotune_cache(cache_path, json.dumps(data).encode())
