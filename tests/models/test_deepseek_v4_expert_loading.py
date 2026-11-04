@@ -207,7 +207,9 @@ def _experts(model) -> nn.Module:
 
 def _assert_same_experts(reference, model):
     for (name, a), b in zip(
-        _experts(reference).named_parameters(), _experts(model).parameters()
+        _experts(reference).named_parameters(),
+        _experts(model).parameters(),
+        strict=True,
     ):
         assert torch.equal(a.view(torch.uint8), b.view(torch.uint8)), name
 

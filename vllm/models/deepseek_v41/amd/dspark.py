@@ -478,7 +478,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 if expert_params is not None:
                     loaded_params.update(expert_params)
                     continue
-                # Names the layer does not map: own mapping.
+                # Unmapped names: dropped, as before.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
