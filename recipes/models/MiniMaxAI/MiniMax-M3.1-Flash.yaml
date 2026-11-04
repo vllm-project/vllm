@@ -124,14 +124,14 @@ features:
           blackwell: unsupported
   parallel_topk:
     label: "Parallel index top-k"
-    description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_MINIMAX_M3_1_PARALLEL_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
+    description: "AMD MI355X: parallel decode top-16 selection for the NVFP4 indexer. Disabled by default; requires an image containing VLLM_ROCM_PARALLEL_INDEX_TOPK. FP8 indexers, including mono decode, bypass this path. Benchmark/CI jobs must explicitly enable this feature or set the environment variable to 1."
     strategies: [single_node_tp]
     modes:
       nvfp4:
         variants: [default, mxfp4]
         args: []
         env:
-          VLLM_ROCM_MINIMAX_M3_1_PARALLEL_TOPK: "1"
+          VLLM_ROCM_PARALLEL_INDEX_TOPK: "1"
         hardware:
           hopper: unsupported
           blackwell: unsupported
@@ -1556,7 +1556,7 @@ guide: |
 
   `parallel_topk` enables parallel decode top-16 selection for the NVFP4
   indexer. It is disabled by default. Use a build containing the selector and
-  set `VLLM_ROCM_MINIMAX_M3_1_PARALLEL_TOPK=1`, or enable the recipe feature.
+  set `VLLM_ROCM_PARALLEL_INDEX_TOPK=1`, or enable the recipe feature.
   FP8 indexers, including mono decode, bypass this path. Benchmark and CI
   lanes must explicitly enable it in an image containing the patch; adding
   the kernel or running correctness CI alone does not enable it for serving.

@@ -212,7 +212,7 @@ def test_parallel_decode_matches_flydsl(
     seq = seq.cuda()
     results = []
     for enabled in ("0", "1"):
-        monkeypatch.setenv("VLLM_ROCM_MINIMAX_M3_1_PARALLEL_TOPK", enabled)
+        monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", enabled)
         output, compared = _topk_out(heads, rows, pad=True)
         minimax_m3_index_topk_decode_indices(
             score, output, seq, max_seq_len=max_seq_len, query_len=query_len
@@ -252,7 +252,7 @@ def test_parallel_decode_graph_replay_resets_counters(monkeypatch, query_len, fu
     ]
     streams = [torch.cuda.Stream(), torch.cuda.Stream()]
     graphs, inputs, outputs, counters = [], [], [], []
-    monkeypatch.setenv("VLLM_ROCM_MINIMAX_M3_1_PARALLEL_TOPK", "0")
+    monkeypatch.setenv("VLLM_ROCM_PARALLEL_INDEX_TOPK", "0")
     for stream in streams:
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
