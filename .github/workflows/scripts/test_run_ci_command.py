@@ -95,6 +95,8 @@ class FakeGitHub:
     ) -> None:
         self.comments = comments or []
         self.files = files or []
+        # main's blob of each ROCm stack input; /amd-ci cache keys its builds on them.
+        self.main_blobs: dict[str, str] = {}
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -152,7 +154,8 @@ class FakeGitHub:
         ]
 
     def get_file_sha(self, path: str, ref: str) -> str:
-        return "none"
+        assert ref == "main"  # the only ref /amd-ci cache reads blobs from
+        return self.main_blobs.get(path, "none")
 
 
 class FakeBranchUpdater:
@@ -1742,7 +1745,7 @@ class RocmCacheTest(unittest.TestCase):
                 "no failed `ROCm base image cache` job",
             ),
             (cache_build("failed"), [[]], True, [], "Started"),
-            # The stack inputs changed on the PR or on main since that build.
+            # The PR changed its stack inputs since that build.
             (cache_build("passed", "other"), [[]], True, [], "Started"),
         ]
         for build, ci_lists, starts, retried, text in cases:
@@ -1754,6 +1757,18 @@ class RocmCacheTest(unittest.TestCase):
                 self.assertEqual(bool(amd.created_builds), starts)
                 self.assertEqual(ci.retry_calls, retried)
                 self.assertIn(text, github.comments[0])
+
+    def test_a_stack_change_on_main_needs_a_new_cache_build(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        github.main_blobs = {"docker/Dockerfile.rocm_base": "newer"}
+
+        amd, _ = self.cache(github, [[cache_build("passed")], []], [[]])
+
+        (build,) = amd.created_builds
+        self.assertIn(
+            "docker/Dockerfile.rocm_base=blob:newer",
+            build["meta_data"]["rocm-prebuild-inputs"],
+        )
 
     def test_cache_is_a_noop_without_stack_changes(self) -> None:
         github = FakeGitHub(files=["vllm/foo.py"])
