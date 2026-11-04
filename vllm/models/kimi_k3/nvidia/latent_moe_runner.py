@@ -28,6 +28,26 @@ from vllm.utils.torch_utils import aux_stream
 logger = init_logger(__name__)
 
 
+def _tp_group_has_multicast_support() -> bool:
+    """Whether every TP rank can allocate NVLS multicast memory.
+
+    Collective over the TP group's CPU group, so every rank must call it.
+    Multicast is unavailable, for example, with multi-GPU NVIDIA Confidential
+    Computing, where the tail fusion would otherwise fail at startup.
+    """
+    from vllm.distributed.device_communicators.custom_all_reduce import (
+        _all_ranks_true,
+        _has_local_multicast_support,
+    )
+
+    device = torch.device(
+        current_platform.device_type, torch.accelerator.current_device_index()
+    )
+    return _all_ranks_true(
+        get_tp_group().cpu_group, _has_local_multicast_support(device)
+    )
+
+
 class LatentTailTier(IntEnum):
     """Which tail implementation the fused path runs, by token count.
 
@@ -106,6 +126,18 @@ class LatentMoERunner(MoERunner):
             logger.warning_once(
                 "K3 latent-MoE tail fusion requires TP ranks to share a "
                 "symmetric-memory fabric. Falling back to the default path."
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and not _tp_group_has_multicast_support()
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion requires NVLS multicast memory on "
+                "every TP rank, which is unavailable. Falling back to the "
+                "default path."
             )
             self.enable_k3_latent_moe_tail_fusion = False
 
