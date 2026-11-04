@@ -1375,7 +1375,6 @@ def test_modelopt_fp8_pb_wo_hides_output_padding(monkeypatch):
     method.wkey = mo.SCHEME_FOR[kFp8Static128BlockSym]
     method.akey = mo.SCHEME_FOR[kFp8Dynamic128Sym]
     method.input_dtype = method.out_dtype = torch.bfloat16
-    method.marlin_input_dtype = None
 
     layer = torch.nn.Module()
     with (

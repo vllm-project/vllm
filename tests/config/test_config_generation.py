@@ -110,6 +110,11 @@ def test_unrecognized_env(monkeypatch):
     )
     engine_args.create_engine_config()
 
+    # Removed env vars always raise, pointing at their replacement
+    monkeypatch.setenv("VLLM_MARLIN_INPUT_DTYPE", "int8")
+    with pytest.raises(ValueError, match="--quantization humming"):
+        EngineArgs().create_engine_config()
+
 
 def test_get_diff_sampling_param_includes_penalties():
     """``--override-generation-config`` must apply presence_penalty and

@@ -441,7 +441,7 @@ def test_zen_cpu_process_weights_layout(mock_zentorch_ops):
     assert w2_s_out.shape == (NUM_EXPERTS, INTERMEDIATE // group_size, HIDDEN)
     assert w13_s_out.dtype == w2_s_out.dtype == torch.bfloat16
     # Symmetric checkpoints carry no zero points into the kernel.
-    assert converted[8] is None and converted[9] is None
+    assert converted[4] is None and converted[5] is None
 
 
 def test_zen_cpu_repack_is_value_exact(mock_zentorch_ops):

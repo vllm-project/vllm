@@ -208,7 +208,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         self.block_quant = False
         self.use_deep_gemm = False
         self.use_marlin = False
-        self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
 
     @property
@@ -275,8 +274,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
         layer.processed_weight_dims = (0, 1)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
-            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
         self.fp8_linear.process_weights_after_loading(layer)
         self.release_requantization_source_weights(layer)
 

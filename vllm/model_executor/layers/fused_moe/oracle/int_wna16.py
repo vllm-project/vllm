@@ -35,7 +35,6 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.utils.humming import prioritize_humming
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_moe_marlin_supports_config,
-    marlin_act_int8_process_scales,
     marlin_moe_padded_intermediate,
     marlin_moe_permute_scales,
     marlin_permute_bias,
@@ -372,8 +371,6 @@ def make_wna16_moe_quant_config(
     w2_zp: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    a1_gscale: torch.Tensor | None = None,
-    a2_gscale: torch.Tensor | None = None,
     gemm1_clamp_limit: float | None = None,
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
@@ -388,8 +385,6 @@ def make_wna16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=[0, group_size],
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             gemm1_clamp_limit=gemm1_clamp_limit,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
@@ -404,8 +399,6 @@ def make_wna16_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=[0, group_size],
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             gemm1_clamp_limit=gemm1_clamp_limit,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
@@ -509,8 +502,6 @@ def _process_weights_flashinfer(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -537,8 +528,6 @@ def _process_weights_flashinfer(
         dict_weights_mxint4["gemm2_weights"],
         dict_weights_mxint4["gemm1_scales"],
         dict_weights_mxint4["gemm2_scales"],
-        None,
-        None,
         None,
         None,
         w13_bias,
@@ -576,7 +565,6 @@ def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
 
 def _process_weights_marlin(
     layer: torch.nn.Module,
-    input_dtype: torch.dtype | None,
     num_bits: int,
     pack_factor: int,
     group_size: int,
@@ -595,8 +583,6 @@ def _process_weights_marlin(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -608,10 +594,9 @@ def _process_weights_marlin(
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
-    2. Optional FP8 preprocessing of packed weights / scales.
-    3. Repack weights via ``gptq_marlin_moe_repack``.
-    4. Permute scales (and optionally extract INT8 global scales).
-    5. Permute bias tensors.
+    2. Repack weights via ``gptq_marlin_moe_repack``.
+    3. Permute scales.
+    4. Permute bias tensors.
     """
     # Canonical N-first → K-first for Marlin.
     w13_qweight = w13_qweight.transpose(1, 2).contiguous()
@@ -623,29 +608,12 @@ def _process_weights_marlin(
     if w2_qzeros is not None:
         w2_qzeros = w2_qzeros.transpose(1, 2).contiguous()
 
-    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-
-    marlin_w13_qweight: torch.Tensor
-    marlin_w2_qweight: torch.Tensor
-    marlin_w13_scales: torch.Tensor
-    marlin_w2_scales: torch.Tensor
-    w13_input_global_scale: torch.Tensor | None = None
-    w2_input_global_scale: torch.Tensor | None = None
+    marlin_w13_qweight = w13_qweight
+    marlin_w2_qweight = w2_qweight
+    marlin_w13_scales = w13_scales
+    marlin_w2_scales = w2_scales
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-
-    # --- FP8 weight / scale adjustment ---
-    if input_dtype == torch.float8_e4m3fn:
-        # NOTE: for non-zp quantization format only
-        marlin_w13_qweight = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
-        marlin_w2_qweight = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
-        marlin_w13_scales = w13_scales.data * 512
-        marlin_w2_scales = w2_scales.data * 512
-    else:
-        marlin_w13_qweight = w13_qweight
-        marlin_w2_qweight = w2_qweight
-        marlin_w13_scales = w13_scales
-        marlin_w2_scales = w2_scales
 
     # --- Pad the intermediate size to a valid Marlin thread tile ---
     # GPTQ packs along K: w13's N is in the (shard) columns, w2's N in the rows.
@@ -672,14 +640,12 @@ def _process_weights_marlin(
         marlin_w13_qweight.shape[1] * pack_factor,
         marlin_w13_qweight.shape[2],
         num_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
         marlin_w2_qweight,
         marlin_w2_qweight.shape[1] * pack_factor,
         marlin_w2_qweight.shape[2],
         num_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     # --- Permute scales ---
@@ -688,7 +654,6 @@ def _process_weights_marlin(
         size_k=layer.intermediate_size_per_partition,
         size_n=marlin_w13_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
     group_size_or_pack_factor = group_size if group_size != -1 else pack_factor
     marlin_w2_scales = marlin_moe_permute_scales(
@@ -696,18 +661,7 @@ def _process_weights_marlin(
         size_k=marlin_w2_scales.shape[1] * group_size_or_pack_factor,
         size_n=marlin_w2_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-
-    if input_dtype == torch.int8:
-        if layer.num_groups_w13 > 1:
-            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w13_scales
-            )
-        if layer.num_groups_w2 > 1:
-            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-                marlin_w2_scales
-            )
 
     # --- Permute zero points ---
     if w13_qzeros is not None and w2_qzeros is not None:
@@ -716,14 +670,12 @@ def _process_weights_marlin(
             size_k=w13_qzeros.shape[1],
             size_n=w13_qzeros.shape[2] * pack_factor,
             num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
         )
         w2_qzeros = moe_packed_to_marlin_zero_points(
             w2_qzeros,
             size_k=w2_qzeros.shape[1],
             size_n=w2_qzeros.shape[2] * pack_factor,
             num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
         )
 
     # --- Permute bias ---
@@ -739,8 +691,6 @@ def _process_weights_marlin(
         marlin_w2_scales,
         w13_qzeros,
         w2_qzeros,
-        w13_input_global_scale,
-        w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
     )
@@ -751,7 +701,6 @@ def _process_awq_weights_marlin(
     weight_bits: int,
     pack_factor: int,
     group_size: int,
-    input_dtype: torch.dtype | None,
     w13_qweight: torch.Tensor,
     w2_qweight: torch.Tensor,
     w13_scales: torch.Tensor,
@@ -767,8 +716,6 @@ def _process_awq_weights_marlin(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -777,25 +724,8 @@ def _process_awq_weights_marlin(
     AWQ checkpoints use a different packing order than GPTQ, so they need
     AWQ-specific weight repacking and zero-point conversion before Marlin runs.
     """
-    is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
-    w13_input_global_scale: torch.Tensor | None = None
-    w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-
-    if input_dtype == torch.float8_e4m3fn:
-        ops.marlin_int4_fp8_preprocess(
-            w13_qweight.view(-1, w13_qweight.size(2)),
-            w13_qzeros.view(-1, w13_qzeros.size(2)),
-            inplace=True,
-        )
-        ops.marlin_int4_fp8_preprocess(
-            w2_qweight.view(-1, w2_qweight.size(2)),
-            w2_qzeros.view(-1, w2_qzeros.size(2)),
-            inplace=True,
-        )
-        w13_scales = w13_scales.data * 512
-        w2_scales = w2_scales.data * 512
 
     # --- Pad the intermediate size to a valid Marlin thread tile ---
     # AWQ packs along N: w13's N is in the (shard) columns, w2's N in the rows.
@@ -821,14 +751,12 @@ def _process_awq_weights_marlin(
         size_k=w13_qweight.shape[1],
         size_n=w13_qweight.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.awq_marlin_moe_repack(
         w2_qweight,
         size_k=w2_qweight.shape[1],
         size_n=w2_qweight.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     marlin_w13_scales = marlin_moe_permute_scales(
@@ -836,38 +764,26 @@ def _process_awq_weights_marlin(
         size_k=layer.intermediate_size_per_partition,
         size_n=w13_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-        marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w13_scales
-        )
 
     marlin_w2_scales = marlin_moe_permute_scales(
         s=w2_scales,
         size_k=layer.intermediate_size_per_partition,
         size_n=w2_scales.shape[2],
         group_size=group_size,
-        is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-        marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w2_scales
-        )
 
     marlin_w13_qzeros = moe_awq_to_marlin_zero_points(
         w13_qzeros,
         size_k=w13_qzeros.shape[1],
         size_n=w13_qzeros.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
     marlin_w2_qzeros = moe_awq_to_marlin_zero_points(
         w2_qzeros,
         size_k=w2_qzeros.shape[1],
         size_n=w2_qzeros.shape[2] * pack_factor,
         num_bits=weight_bits,
-        is_a_8bit=is_a_8bit,
     )
 
     if w13_bias is not None:
@@ -882,8 +798,6 @@ def _process_awq_weights_marlin(
         marlin_w2_scales,
         marlin_w13_qzeros,
         marlin_w2_qzeros,
-        w13_input_global_scale,
-        w2_input_global_scale,
         w13_bias_out,
         w2_bias_out,
     )
@@ -919,8 +833,6 @@ def _process_weights_rdna3(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -957,8 +869,6 @@ def _process_weights_rdna3(
         w2_scale.transpose(1, 2).contiguous(),
         _qzeros(w13),
         _qzeros(w2),
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         None,  # w13_bias
         None,  # w2_bias
     )
@@ -981,8 +891,6 @@ def _process_weights_cpu(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -1066,8 +974,6 @@ def _process_weights_cpu(
         blocked_s2,
         blocked_z13,
         blocked_z2,
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         w13_bias.to(torch.float32) if w13_bias is not None else None,
         w2_bias.to(torch.float32) if w2_bias is not None else None,
     )
@@ -1106,8 +1012,6 @@ def _process_weights_zen_cpu(
     torch.Tensor,  # w2_scales
     torch.Tensor | None,  # w13_qzeros
     torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
     torch.Tensor | None,  # w13_bias
     torch.Tensor | None,  # w2_bias
 ]:
@@ -1124,8 +1028,6 @@ def _process_weights_zen_cpu(
         w2_scale.data.transpose(1, 2).to(torch.bfloat16).contiguous(),
         None,  # w13_qzeros (symmetric)
         None,  # w2_qzeros (symmetric)
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         w13_bias,
         w2_bias,
     )
@@ -1459,8 +1361,6 @@ def _process_weights_emulation_gptq(
         dummy,  # w2_scales    (unused)
         None,  # w13_qzeros
         None,  # w2_qzeros
-        None,  # w13_input_global_scale
-        None,  # w2_input_global_scale
         None,  # w13_bias
         None,  # w2_bias
     )
@@ -1512,8 +1412,6 @@ def _process_weights_emulation_awq(
         None,
         None,
         None,
-        None,
-        None,
     )
 
 
@@ -1521,7 +1419,6 @@ def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
     quant_config: QuantizationConfig | QuantizationArgs | None,
-    input_dtype: torch.dtype | None,
     w13: torch.Tensor,
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
@@ -1538,8 +1435,6 @@ def convert_to_wna16_moe_kernel_format(
         torch.Tensor,  # w2_scales
         torch.Tensor | None,  # w13_qzeros
         torch.Tensor | None,  # w2_qzeros
-        torch.Tensor | None,  # w13_input_global_scale
-        torch.Tensor | None,  # w2_input_global_scale
         torch.Tensor | None,  # w13_bias
         torch.Tensor | None,  # w2_bias
     ]
@@ -1559,7 +1454,6 @@ def convert_to_wna16_moe_kernel_format(
         backend: the selected ``WNA16MoEBackend``.
         layer: the ``MoERunner`` layer whose parameters are being prepared.
         quant_config: the ``QuantizationConfig`` for this layer.
-        input_dtype: optional activation dtype, usually should be 16 bit.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
         w13_scale: quantization scales for ``w13``.
@@ -1634,7 +1528,6 @@ def convert_to_wna16_moe_kernel_format(
                 num_bits,
                 pack_factor,
                 group_size,
-                input_dtype,
                 w13,
                 w2,
                 w13_scale,
@@ -1647,7 +1540,6 @@ def convert_to_wna16_moe_kernel_format(
         else:
             return _process_weights_marlin(
                 layer,
-                input_dtype,
                 num_bits,
                 pack_factor,
                 group_size,
@@ -1725,8 +1617,6 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale_xpu,
             None,  # w13_qzeros — sym int4 on XPU has none; kernel does uint4b8→s4
             None,  # w2_qzeros
-            None,  # w13_input_global_scale
-            None,  # w2_input_global_scale
             w13_bias_out,
             w2_bias_out,
         )
@@ -1785,8 +1675,6 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             w13_qzeros,
             w2_qzeros,
-            None,
-            None,
             w13_bias,
             w2_bias,
         )

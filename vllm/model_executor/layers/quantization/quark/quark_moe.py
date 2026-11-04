@@ -465,7 +465,6 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             backend=self.wna16_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=None,
             w13=layer.w13_weight,
             w2=layer.w2_weight,
             w13_scale=layer.w13_weight_scale,
@@ -486,8 +485,6 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             w2_scales,
             _,  # w13_qzeros
             _,  # w2_qzeros
-            _,  # w13_input_global_scale
-            _,  # w2_input_global_scale
             _,  # w13_bias
             _,  # w2_bias
         ) = converted
