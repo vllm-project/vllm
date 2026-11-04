@@ -50,6 +50,7 @@ class AuxOutputConnectorMetadata:
     logprob_boundary_token_ids: dict[str, tuple[int | None, ...]] = field(
         default_factory=dict
     )
+    logprob_widths: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -184,6 +185,13 @@ class AuxOutputSchedulerConnector:
             hashes, boundary_token_ids = update
             logprob_block_hashes[request_id] = hashes
             logprob_boundary_token_ids[request_id] = boundary_token_ids
+        logprob_widths = {}
+        for request_id in scheduled_requests:
+            if request_id not in self._logprob_fingerprints:
+                continue
+            params = requests[request_id].sampling_params
+            assert params is not None and params.num_logprobs is not None
+            logprob_widths[request_id] = params.num_logprobs + 1
         metadata = AuxOutputConnectorMetadata(
             self._generation,
             scheduled_requests,
@@ -207,6 +215,7 @@ class AuxOutputSchedulerConnector:
             },
             logprob_block_hashes,
             logprob_boundary_token_ids,
+            logprob_widths,
         )
         for request_id in finished_requests:
             self._logprob_fingerprints.pop(request_id, None)

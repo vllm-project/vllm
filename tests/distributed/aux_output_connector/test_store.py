@@ -646,6 +646,7 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
         finished_requests=(),
         logprobs={"aux": "fingerprint"},
         prompt_lens={"plain": 1, "aux": 1},
+        logprob_widths={"aux": 1},
     )
     worker.begin_step(metadata)
     pending = worker.prepare_output(
@@ -675,6 +676,51 @@ def test_logprobs_only_mixed_batch_returns_opted_in_rows(with_boundaries):
     np.testing.assert_array_equal(
         logprobs.logprobs, np.array([[-0.9]], dtype=np.float32)
     )
+    worker.close()
+
+
+@pytest.mark.parametrize(
+    "sampler_widths", [(6, 1), (1, 6)], ids=["mixed-then-solo", "solo-then-mixed"]
+)
+def test_logprob_publication_normalizes_per_request_width(sampler_widths):
+    worker = _make_worker(1, logprobs_only=True)
+    block_keys = [f"block-{index}" for index in range(5)]
+    metadata = AuxOutputConnectorMetadata(
+        generation=0,
+        requests={"aux": 1},
+        block_hashes={},
+        finished_requests=(),
+        logprobs={"aux": "fingerprint"},
+        prompt_lens={"aux": 18},
+        logprob_widths={"aux": 1},
+    )
+    worker.begin_step(metadata)
+    worker._requests["aux"].logprob_keys = block_keys
+
+    for token_start, sampler_width in zip((17, 18), sampler_widths, strict=True):
+        worker.begin_step(metadata)
+        pending = worker.prepare_output(
+            _input_batch(["aux"], np.array([token_start]), np.array([0, 1]))
+        )
+        assert pending is not None
+        token_ids = torch.arange(sampler_width, dtype=torch.int32).reshape(1, -1)
+        values = -torch.arange(1, sampler_width + 1, dtype=torch.float32).reshape(1, -1)
+        pending.enqueue_cpu_copy(
+            np.ones(1, dtype=np.int32),
+            np.zeros(1, dtype=np.int32),
+            logprobs=LogprobsTensors(
+                token_ids,
+                values,
+                torch.zeros(1, dtype=torch.int32),
+            ),
+        )
+        output = pending.process_output()
+        assert output["aux"].logprobs is not None
+        assert output["aux"].logprobs.logprob_token_ids.shape == (1, 1)
+
+    stored = decode_rows(worker._logprob_store.get_concatenated([block_keys[4]]))
+    assert stored.token_ids.shape == (2, 1)
+    np.testing.assert_array_equal(stored.positions, [18, 19])
     worker.close()
 
 
@@ -2194,10 +2240,11 @@ def test_scheduler_connector_releases_finished_logprob_fingerprint():
     )
     request.all_token_ids = list(range(request.num_tokens))
     fingerprint = connector._fingerprint(request)
-    connector.build_connector_meta(
+    scheduled_metadata = connector.build_connector_meta(
         _step_output([request.request_id], [0], [1]),
         {request.request_id: request},
     )
+    assert scheduled_metadata.logprob_widths == {request.request_id: 3}
 
     request.block_hashes.append(b"a" * 32)
     request.num_computed_tokens = _BLOCK_SIZE

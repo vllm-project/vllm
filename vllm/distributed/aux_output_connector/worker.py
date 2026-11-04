@@ -93,6 +93,7 @@ class PendingAuxOutput:
     logprobs_tensors: LogprobsTensors | None = None
     logprobs: dict[str, Any] = field(default_factory=dict)
     aux_logprobs: frozenset[str] = frozenset()
+    logprob_widths: dict[str, int] = field(default_factory=dict)
 
     def enqueue_cpu_copy(
         self,
@@ -313,6 +314,11 @@ class AuxOutputWorkerConnector:
             ),
             indexer_snapshot=snapshot,
             aux_logprobs=frozenset(self._step_metadata.logprobs),
+            logprob_widths={
+                request_id: self._step_metadata.logprob_widths[request_id]
+                for request_id in request_ids
+                if request_id in self._step_metadata.logprob_widths
+            },
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -400,9 +406,13 @@ class AuxOutputWorkerConnector:
                 # request_ids may be a filtered subset of it.
                 batch_index = int(pending.batch_indices[index])
                 offset = cu[batch_index] if cu is not None else batch_index
+                width = pending.logprob_widths[request_id]
+                assert width <= values.logprob_token_ids.shape[1], (
+                    "sampler logprob width is smaller than the request width"
+                )
                 pending.logprobs[request_id] = type(values)(
-                    values.logprob_token_ids[offset : offset + count],
-                    values.logprobs[offset : offset + count],
+                    values.logprob_token_ids[offset : offset + count, :width],
+                    values.logprobs[offset : offset + count, :width],
                     values.sampled_token_ranks[offset : offset + count],
                     None,
                 )
