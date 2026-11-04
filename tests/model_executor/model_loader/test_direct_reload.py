@@ -32,6 +32,7 @@ from vllm.model_executor.model_loader.reload import finish_reload, start_reload
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+    track_loaded_params,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -159,6 +160,7 @@ def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
     """As ``BaseModelLoader.load_model`` does."""
     with _DEVICE:
         model = _ToyModel()
+    track_loaded_params(model)
     model.load_weights(weights.items())
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
@@ -269,11 +271,36 @@ class TestReloadEqualsColdStart:
 
 
 class TestUnsent:
+    def test_missing_parameter_raises_before_post_processing(self):
+        model = _cold_start(_checkpoint())
+        before = _state(model)
+        begin_direct_reload(model)
+        for name, weight in _checkpoint(1.01).items():  # one bucket per tensor
+            if name != "engram.weight":
+                model.load_weights([(name, weight)])
+        with pytest.raises(RuntimeError, match=r"did not load 1 .*engram\.weight"):
+            finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+        assert set(_runs(model).values()) == {1}  # post-load processing not rerun
+        _reload(model, _checkpoint())  # a new full update repairs it
+        _assert_same(_state(model), before)
+
+    def test_first_update_after_dummy_start_sets_the_required_set(self):
+        with _DEVICE:
+            model = _ToyModel()
+        track_loaded_params(model)  # a dummy cold start loads nothing
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        _reload(model, _checkpoint())
+        begin_direct_reload(model)
+        model.load_weights(list(_checkpoint().items())[1:])
+        with pytest.raises(RuntimeError, match="attn.kv_b.weight"):
+            finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
+
     def test_tensor_without_post_processing_keeps_its_bytes(self):
         # a frozen table the trainer does not send (Engram, an n-gram
         # embedding): its module has no post-load processing, so a reload
         # keeps its cold-start bytes; derived tensors read them as cold start
         model = _cold_start(_checkpoint())
+        model.attn.kv_b.weight.optional_in_update = True
         old = _checkpoint()
         new = _checkpoint(1.01)
         sent = {n: t for n, t in new.items() if n != "attn.kv_b.weight"}

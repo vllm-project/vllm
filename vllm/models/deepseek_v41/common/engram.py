@@ -1124,6 +1124,9 @@ class ParallelEngramEmbedding(nn.Module):
                 {
                     "weight_loader": self._weight_loader,
                     "engram_vocab_start": row_start,
+                    # too large for weight transfer; no post-load processing, so
+                    # a direct reload that leaves it out keeps its bytes
+                    "optional_in_update": True,
                 },
             )
         if cpu_offload and not self.weight.is_meta:
