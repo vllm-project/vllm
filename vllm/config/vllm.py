@@ -39,7 +39,7 @@ from .ec_transfer import ECTransferConfig
 from .engram import EngramConfig, model_has_engram_layers
 from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
-from .kv_transfer import KVTransferConfig
+from .kv_transfer import KVTransferConfig, hisparse_host_pool_gib
 from .load import LoadConfig
 from .logging import LoggingConfig
 from .lora import LoRAConfig
@@ -55,7 +55,7 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
-from .watermarking import WatermarkConfig
+from .watermarking import WatermarkConfig, warn_watermarking_override
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -136,7 +136,9 @@ def default_breakable_cudagraph_architectures() -> frozenset[str]:
         # FULL_AND_PIECEWISE then dies at capture unless breakable CUDA
         # graphs are on. Enable this architecture so the published AMD
         # recipe can start.
-        return frozenset({"DeepseekV41ForCausalLM"})
+        # HYV4 also runs without torch.compile, preserving runtime-shape
+        # kernel selection during graph capture.
+        return frozenset({"DeepseekV41ForCausalLM", "HYV4ForCausalLM", "HYV4MTPModel"})
     if current_platform.is_cuda():
         # Qwen3.5 migrates to breakable CUDA graphs on NVIDIA only; other
         # platforms keep the torch.compile path.
@@ -398,6 +400,8 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    num_hash_lookahead_tokens: int = Field(default=0, init=False)
+    """Tokens after each block covered by its hash; zero keeps legacy hashes."""
     watermark_config: WatermarkConfig | None = None
     """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
@@ -670,19 +674,25 @@ class VllmConfig:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
-    @property
-    def num_hash_lookahead_tokens(self) -> int:
-        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
+    def _resolve_num_hash_lookahead_tokens(self) -> int:
+        """Resolve the hash lookahead after the relevant configs are finalized."""
         speculative_config = self.speculative_config
         if (
             speculative_config is None
             or not speculative_config.use_eagle_block_drop()
             or speculative_config.disable_lookahead_block_hashes
-            or not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # KV connectors, including HiSparse's, keep the legacy hashes.
-        if self.kv_transfer_config is not None:
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
+                return 0
+        elif not self.cache_config.enable_prefix_caching:
             return 0
         # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
@@ -825,31 +835,27 @@ class VllmConfig:
         return any(shape in table for shape in shapes)
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
-        if (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and self._uses_breakable_cudagraph_by_default()
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+        if "VLLM_USE_BREAKABLE_CUDAGRAPH" in os.environ:
+            enabled = envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        elif self._uses_breakable_cudagraph_by_default():
+            enabled = True
             logger.info_once(
                 "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
         elif (
-            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and envs.VLLM_BATCH_INVARIANT
+            envs.VLLM_BATCH_INVARIANT
             and self._uses_breakable_cudagraph_for_batch_invariance()
         ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            enabled = True
             logger.info_once(
                 "VLLM_BATCH_INVARIANT=1: auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
+        else:
+            enabled = False
 
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
-
-        enabled = is_breakable_cudagraph_enabled()
+        self.compilation_config.use_breakable_cudagraph = enabled
         if enabled:
             self.compilation_config.mode = CompilationMode.NONE
         return enabled
@@ -1450,7 +1456,7 @@ class VllmConfig:
             )
         if config is None:
             return True
-        if config.watermarking is False:
+        if config.watermarking is False and not watermark_config.enforce:
             return False
 
         from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -1481,6 +1487,8 @@ class VllmConfig:
                 scope="global",
             )
             return False
+        if config.watermarking is False:
+            warn_watermarking_override()
         return True
 
     def _resolve_and_verify_engram_config(self) -> None:
@@ -1540,6 +1548,7 @@ class VllmConfig:
             # with_hf_config() view: the parent config was already validated,
             # and this view's empty architecture list makes the model-dependent checks
             # below unsafe (e.g. use_mla resolves the architecture registry).
+            self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
         self._resolve_mm_encoder_only()
@@ -1953,23 +1962,6 @@ class VllmConfig:
                 raise ValueError(
                     "HiSparse is only supported for DSA models with index_topk."
                 )
-            if self.kv_transfer_config is not None and (
-                self.kv_transfer_config.kv_connector
-                not in (
-                    None,
-                    "NixlConnector",
-                    "MooncakeStoreConnector",
-                    "MultiConnector",
-                )
-            ):
-                logger.warning(
-                    "HiSparse host-resident KV is configured with connector "
-                    "%s. NixlConnector (GPU-staged host imports) and "
-                    "MooncakeStoreConnector (shared-store offload) are the "
-                    "validated paths; other connectors are treated as "
-                    "debug/fallback paths.",
-                    self.kv_transfer_config.kv_connector,
-                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
@@ -2138,6 +2130,7 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
+        self._resolve_extensible_kv_cache()
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
@@ -2214,7 +2207,7 @@ class VllmConfig:
         ):
             assert (
                 self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                or self.compilation_config.use_breakable_cudagraph
             ), (
                 "Compilation mode should be CompilationMode.VLLM_COMPILE "
                 "when cudagraph_mode piecewise cudagraphs is used, "
@@ -2264,6 +2257,15 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+        if (
+            self.attention_config.hisparse_config is not None
+            and hisparse_host_pool_gib(self.kv_transfer_config) is None
+        ):
+            raise ValueError(
+                "HiSparse requires a KV transfer config with HiSparseConnector "
+                "and host_pool_gib; to combine it with another connector, nest "
+                "both in MultiConnector instead of using --kv-offloading-size."
+            )
         self._verify_aux_output_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
@@ -2383,6 +2385,7 @@ class VllmConfig:
                 )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
+        self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the
@@ -3172,9 +3175,74 @@ class VllmConfig:
 
         return unsupported
 
+    def _resolve_extensible_kv_cache(self) -> None:
+        """Settle `enable_extensible_kv_cache`: on where supported if unset, an
+        error if explicitly requested where unsupported.
+
+        Runs once per model: configs derived for sub-models (`with_hf_config`)
+        may pick a different runner, and must not revisit the decision.
+        """
+        from vllm.platforms import current_platform
+
+        cache_config = self.cache_config
+        if cache_config._extensible_kv_cache_resolved:
+            return
+        cache_config._extensible_kv_cache_resolved = True
+        requested = cache_config.enable_extensible_kv_cache
+        unsupported = None
+        if not current_platform.is_cuda_alike():
+            unsupported = "it is only supported on CUDA and ROCm"
+        elif cache_config.kv_cache_memory_bytes is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "kv_cache_memory_bytes overrides"
+            )
+        elif cache_config.num_gpu_blocks_override is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "num_gpu_blocks_override overrides"
+            )
+        elif not self.use_v2_model_runner:
+            unsupported = "it requires the V2 model runner"
+        elif self.parallel_config.enable_elastic_ep:
+            unsupported = (
+                "elastic EP scale-up skips warmup and reuses the profiled KV "
+                "cache size, so no measurement would size the cache"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+        ):
+            unsupported = (
+                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
+                "which cannot export driver-mapped memory"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.uses_custom_mem_pool()
+        ):
+            unsupported = (
+                "custom_mem_pool allocates the KV cache from a connector's "
+                "memory pool, which a driver-mapped cache cannot use"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and current_platform.is_rocm()
+            and self.kv_transfer_config.registers_kv_cache_memory()
+        ):
+            # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
+            # hsa_amd_portable_export_dmabuf accepts VMM ranges.
+            unsupported = (
+                "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+            )
+        if requested is None:
+            cache_config.enable_extensible_kv_cache = unsupported is None
+        elif requested and unsupported is not None:
+            raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
-
         if self.attention_config.hisparse_config is not None:
             unsupported.append("HiSparse")
 
@@ -3671,11 +3739,6 @@ class VllmConfig:
         elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
-            )
-        elif self.use_v2_model_runner:
-            raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
             )
         if (
             self.kv_transfer_config is not None
