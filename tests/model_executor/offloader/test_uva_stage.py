@@ -131,6 +131,9 @@ def test_modular_kernel_reads_staged_copy(monkeypatch, workspace_init):
     from vllm.model_executor.layers.fused_moe.config import (
         FUSED_MOE_UNQUANTIZED_CONFIG,
     )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEExpertsModular,
+    )
     from vllm.model_executor.offloader import get_offloader, set_offloader
 
     E, N, K, topk, M = 8, 256, 128, 2, 256
@@ -144,6 +147,7 @@ def test_modular_kernel_reads_staged_copy(monkeypatch, workspace_init):
 
     seen: list[tuple[int, int]] = []
     experts = kernel.fused_experts
+    assert isinstance(experts, FusedMoEExpertsModular)
     original_apply = experts.apply
 
     def spy(*args, **kwargs):
