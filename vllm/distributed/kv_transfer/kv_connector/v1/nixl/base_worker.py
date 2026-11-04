@@ -1916,7 +1916,6 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        self._mixed_mem_types = len(set(region_mem_types)) > 1
         self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
@@ -2523,16 +2522,13 @@ class NixlBaseConnectorWorker:
             self._supports_pp_hma
             and self.pp_size > 1
             and (self._is_hma_required or self._has_packed_cache)
+            and remote_tp_size > transfer_topo.tp_size
+            and not self.use_mla
         ):
-            if self.block_size != nixl_agent_meta.block_size:
-                raise NotImplementedError(
-                    "Attention-HMA push requires identical P/D block sizes."
-                )
-            if remote_tp_size > transfer_topo.tp_size and not self.use_mla:
-                raise NotImplementedError(
-                    "Attention-HMA push does not support decode TP greater than "
-                    "prefill TP yet"
-                )
+            raise NotImplementedError(
+                "Attention-HMA push does not support decode TP greater than "
+                "prefill TP yet"
+            )
         if (
             self._packed_member_layouts
             and self._packed_member_layouts != nixl_agent_meta.packed_member_layouts
@@ -3021,18 +3017,20 @@ class NixlBaseConnectorWorker:
         assert self.copy_blocks is not None
 
         local_block_ids = meta.local_physical_block_ids
-        # Every KV cache group allocates from the same BlockPool, so block ids
-        # are unique across groups and the per-group copies can be issued as one.
-        block_ids = [block_id for group in local_block_ids for block_id in group]
-        # The h2d block copy below is intentionally synchronous.
+        # The h2d block copies below are intentionally synchronous.
         with gpu_sync_allowed():
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                block_ids,
-                block_ids,
-                "h2d",
-            )
+            # NIXL fills each layer's host buffer only at its own group's
+            # blocks, and layers of different groups share device tensors.
+            for group, block_ids in zip(
+                self.kv_cache_config.transfer_groups, local_block_ids
+            ):
+                self.copy_blocks(
+                    {n: self.host_xfer_buffers[n] for n in group.layer_names},
+                    {n: self.device_kv_caches[n] for n in group.layer_names},
+                    block_ids,
+                    block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"

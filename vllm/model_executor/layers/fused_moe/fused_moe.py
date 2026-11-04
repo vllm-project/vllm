@@ -817,7 +817,8 @@ def invoke_fused_moe_triton_kernel(
     C_is_sorted: bool = False,
 ):
     assert topk_weights is not None or not mul_routed_weight
-    assert topk_weights is None or topk_weights.stride(1) == 1
+    if topk_weights is not None and not topk_weights.is_contiguous():
+        raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
     assert not (A_is_sorted or C_is_sorted) or sorted_token_ids is not None
 
@@ -1011,7 +1012,8 @@ def dispatch_fused_moe_kernel(
     B_bias: torch.Tensor | None = None,
 ) -> None:
     assert topk_weights is not None or not mul_routed_weight
-    assert topk_weights is None or topk_weights.stride(1) == 1
+    if topk_weights is not None and not topk_weights.is_contiguous():
+        raise ValueError("topk_weights must be contiguous")
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
 
     M = A.size(0)
