@@ -233,6 +233,46 @@ def test_calibration_runs_on_rank0_only(monkeypatch: pytest.MonkeyPatch) -> None
     assert measured_on == [0]
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Triton swap fast path requires CUDA"
+)
+def test_worker_calibrates_its_load_handlers() -> None:
+    """With calibrate_load_path, the worker measures once and both load
+    handlers use the result."""
+    page = 4096
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((64, page), dtype=torch.int8, device="cuda"),
+                page_size_bytes=page,
+            )
+        ],
+        group_data_refs=[[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page)]],
+    )
+    results: list[dict[int, int | None]] = []
+
+    def run_calibration(calibrate):
+        results.append(calibrate())
+        return results[-1]
+
+    worker = CPUOffloadingWorker(
+        kv_caches=kv_caches,
+        blocks_per_chunk=1,
+        num_cpu_chunks=512,
+        calibrate_load_path=True,
+        run_calibration=run_calibration,
+    )
+
+    assert len(results) == 1 and page in results[0]
+    for handler in (worker._load_handler, worker._expedited_load_handler):
+        fn = handler._swap_blocks_batch
+        if results[0][page] is None:
+            assert fn is ops.swap_blocks_batch
+        else:
+            assert fn.keywords["min_n"] == results[0][page]
+    worker.shutdown()
+
+
 def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     """Both directions drain before the worker releases its shared region."""
     worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
