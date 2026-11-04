@@ -11,6 +11,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.layernorm import RMSNorm
 
 logger = init_logger(__name__)
 
@@ -79,9 +80,17 @@ class ROCmLatentMoERunner(MoERunner):
         transform = self.routed_output_transform
         assert transform is not None
 
-        latent = tensor_model_parallel_all_reduce(fused_output)
-        if transform.norm is not None:
-            latent = transform.norm(latent)
+        fused_communicator = getattr(transform, "fused_communicator", None)
+        if fused_communicator is not None and isinstance(transform.norm, RMSNorm):
+            # The latent's all-reduce and RMSNorm in one kernel.
+            latent = fused_communicator.all_reduce_add_rms_norm(
+                fused_output, transform.norm.weight, transform.norm.variance_epsilon
+            )
+            assert isinstance(latent, torch.Tensor)
+        else:
+            latent = tensor_model_parallel_all_reduce(fused_output)
+            if transform.norm is not None:
+                latent = transform.norm(latent)
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size

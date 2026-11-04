@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed import ProcessGroup
@@ -24,6 +25,11 @@ from vllm.platforms import current_platform
 from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.hip_custom_communicator import (
+        HipCustomCommunicator,
+    )
 
 logger = init_logger(__name__)
 
@@ -114,6 +120,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
+        self.hip_custom_communicator: HipCustomCommunicator | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
         self.fi_pcie_ipc_ar_comm: FlashInferPcieIpcAllReduce | None = None
@@ -136,34 +143,56 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
+        # HipCustomCommunicator is opt-in and takes the all-reduces it admits first.
         if (
-            self.use_flashinfer_pcie_ipc_allreduce
+            use_custom_allreduce
+            and register
             and self.world_size > 1
-            and self.device_group is not None
+            and current_platform.is_rocm()
+            and envs.VLLM_ROCM_USE_HIP_CUSTOM_COMMUNICATOR
         ):
-            self.fi_pcie_ipc_ar_comm = FlashInferPcieIpcAllReduce(
-                group=self.device_group,
-                tune_group=self.cpu_group,
-                device=self.device,
-            )
+            from vllm.distributed.device_communicators import hip_custom_communicator
 
-        if self.use_aiter_allreduce and self.world_size > 1:
-            self.aiter_ar_comm = AiterCustomAllreduce(
-                group=self.cpu_group,
+            communicator = hip_custom_communicator.HipCustomCommunicator(
+                cpu_group=self.cpu_group,
+                device_group=self.device_group,
                 device=self.device,
-                register_graph_buffers=register,
             )
+            if not communicator.disabled:
+                self.hip_custom_communicator = communicator
+        if self.hip_custom_communicator is None:
+            if (
+                self.use_flashinfer_pcie_ipc_allreduce
+                and self.world_size > 1
+                and self.device_group is not None
+            ):
+                self.fi_pcie_ipc_ar_comm = FlashInferPcieIpcAllReduce(
+                    group=self.device_group,
+                    tune_group=self.cpu_group,
+                    device=self.device,
+                )
 
-        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
-            # Initialize a custom fast all-reduce implementation.
-            self.ca_comm = CustomAllreduce(
-                group=self.cpu_group,
-                device=self.device,
-                symm_mem_enabled=(
-                    self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
-                ),
-                register_graph_buffers=register,
-            )
+            if self.use_aiter_allreduce and self.world_size > 1:
+                self.aiter_ar_comm = AiterCustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                    register_graph_buffers=register,
+                )
+
+            if (
+                use_custom_allreduce
+                and self.aiter_ar_comm is None
+                and self.world_size > 1
+            ):
+                self.ca_comm = CustomAllreduce(
+                    group=self.cpu_group,
+                    device=self.device,
+                    symm_mem_enabled=(
+                        self.symm_mem_comm is not None
+                        and not self.symm_mem_comm.disabled
+                    ),
+                    register_graph_buffers=register,
+                )
 
         # AITER custom all-gather/reduce-scatter DP-attention dispatch/combine.
         # AITER requires a torch.distributed-registered group and exchanges IPC
@@ -193,6 +222,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and self.world_size > 1
             and current_platform.is_rocm()
             and not envs.VLLM_BATCH_INVARIANT
+            and self.hip_custom_communicator is None
         ):
             # Initialize a custom quick all-reduce implementation for AMD.
             # Quick reduce is designed as a complement to custom allreduce
@@ -319,6 +349,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
             "NCCL_SYMM_MEM",
+            "HIP_CUSTOM_COMMUNICATOR",
             "QUICK_REDUCE",
             "AITER_CUSTOM",
             "CUSTOM",
@@ -357,6 +388,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and nccl_symm_ws_ok
         ):
             enabled_ar_backends.append("NCCL_SYMM_MEM")
+        if (
+            self.hip_custom_communicator is not None
+            and not self.hip_custom_communicator.disabled
+        ):
+            enabled_ar_backends.append("HIP_CUSTOM_COMMUNICATOR")
         if self.qr_comm is not None and not self.qr_comm.disabled:
             enabled_ar_backends.append("QUICK_REDUCE")
         if (
@@ -399,6 +435,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
+        hip_custom_communicator = self.hip_custom_communicator
+        if (
+            hip_custom_communicator is not None
+            and not hip_custom_communicator.disabled
+            and hip_custom_communicator.should_allreduce(input_)
+        ):
+            return hip_custom_communicator.all_reduce(input_)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -829,6 +872,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
+        if self.hip_custom_communicator is not None:
+            self.hip_custom_communicator.close()
+            self.hip_custom_communicator = None
+        if self.qr_comm is not None:
+            self.qr_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
         if self.aiter_ar_comm is not None:

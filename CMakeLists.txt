@@ -1721,6 +1721,55 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
+  # HipCustomCommunicator: gfx950 only. Its kernel builds come from the tuned table.
+  set(VLLM_HCC_ARCHES ${VLLM_GPU_ARCHES})
+  list(FILTER VLLM_HCC_ARCHES INCLUDE REGEX "gfx950")
+  if(VLLM_HCC_ARCHES)
+    message(STATUS "Building hip_custom_communicator for archs: ${VLLM_HCC_ARCHES}")
+    set(VLLM_HCC_TABLE
+      ${CMAKE_CURRENT_SOURCE_DIR}/vllm/distributed/device_communicators/hip_custom_communicator.json)
+    set(VLLM_HCC_BUILDS_SCRIPT
+      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm/hip_custom_communicator/builds.py)
+    set(VLLM_HCC_GENERATED ${CMAKE_CURRENT_BINARY_DIR}/hip_custom_communicator_generated)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      ${VLLM_HCC_TABLE} ${VLLM_HCC_BUILDS_SCRIPT})
+    execute_process(
+      COMMAND ${Python_EXECUTABLE} ${VLLM_HCC_BUILDS_SCRIPT} ${VLLM_HCC_TABLE}
+        ${VLLM_HCC_GENERATED}/hip_custom_communicator_builds.inc "${VLLM_HCC_ARCHES}"
+      RESULT_VARIABLE VLLM_HCC_BUILDS_RESULT)
+    if(NOT VLLM_HCC_BUILDS_RESULT EQUAL 0)
+      message(FATAL_ERROR "hip_custom_communicator: builds.py failed on ${VLLM_HCC_TABLE}")
+    endif()
+    file(STRINGS ${VLLM_HCC_GENERATED}/hip_custom_communicator_instances.txt VLLM_HCC_INSTANCE_NAMES)
+    list(TRANSFORM VLLM_HCC_INSTANCE_NAMES PREPEND ${VLLM_HCC_GENERATED}/
+      OUTPUT_VARIABLE VLLM_HCC_INSTANCES)
+    set(VLLM_HCC_SRC "csrc/rocm/hip_custom_communicator.cu")
+    hipify_sources_target(VLLM_HCC_HIP_SRCS _rocm_C_hcc "${VLLM_HCC_SRC}")
+    unset(_VLLM_LAST_HIPIFY_TARGET)
+    add_library(_rocm_C_hcc OBJECT ${VLLM_HCC_HIP_SRCS} ${VLLM_HCC_INSTANCES})
+    add_dependencies(_rocm_C_hcc hipify_all)
+    set_source_files_properties(${VLLM_HCC_HIP_SRCS} ${VLLM_HCC_INSTANCES}
+      PROPERTIES LANGUAGE ${VLLM_GPU_LANG})
+    set_target_properties(_rocm_C_hcc PROPERTIES
+      ${VLLM_GPU_LANG}_ARCHITECTURES "${VLLM_HCC_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(_rocm_C_hcc PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
+      ${VLLM_HCC_GENERATED} ${CMAKE_CURRENT_SOURCE_DIR}/csrc/rocm)
+    target_compile_options(_rocm_C_hcc PRIVATE
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+    target_compile_options(_rocm_C_hcc PRIVATE
+      "$<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:SHELL:-mllvm --amdgpu-kernarg-preload-count=32>")
+    target_compile_definitions(_rocm_C_hcc PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
+    if("$ENV{VLLM_ROCM_HIP_CUSTOM_COMMUNICATOR_DEVICE_CHECKS}" STREQUAL "1")
+      message(STATUS "hip_custom_communicator: device bounds checks compiled in")
+      target_compile_definitions(_rocm_C_hcc PRIVATE "HIP_CUSTOM_COMMUNICATOR_DEBUG=1")
+    endif()
+    target_link_libraries(_rocm_C_hcc PRIVATE torch)
+  else()
+    message(STATUS "No gfx950, skipping hip_custom_communicator")
+    list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_HIP_CUSTOM_COMMUNICATOR")
+  endif()
+
   set(VLLM_ROCM_HAS_GFX1100 OFF)
   if(VLLM_GPU_ARCHES MATCHES "gfx1100")
     set(VLLM_ROCM_HAS_GFX1100 ON)
@@ -1752,6 +1801,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
   else()
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
+  endif()
+  if(TARGET _rocm_C_hcc)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_hcc)
+  else()
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_HIP_CUSTOM_COMMUNICATOR)
   endif()
 
   # The paged attention units are identical whatever the arch list is; whether the

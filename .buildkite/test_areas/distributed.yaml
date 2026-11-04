@@ -821,3 +821,26 @@ steps:
       - vllm/model_executor/layers/fused_moe/expert_map_manager.py
       - tests/model_executor/model_loader/test_weight_cache.py
       - vllm/platforms/rocm.py
+
+- label: ":amd: (MI355) HIP Custom Communicator"
+  key: amd-hip-custom-communicator
+  dind: false
+  device: mi355_8
+  optional: true
+  timeout_in_minutes: 30
+  depends_on:
+  - image-build-amd
+  working_dir: "/vllm-workspace/"
+  num_devices: 8
+  source_file_dependencies:
+  - csrc/rocm/hip_custom_communicator/
+  - csrc/rocm/hip_custom_communicator.cu
+  - csrc/rocm/ops.h
+  - csrc/rocm/torch_bindings.cpp
+  - vllm/distributed/device_communicators/hip_custom_communicator.py
+  - vllm/distributed/device_communicators/cuda_communicator.py
+  - vllm/distributed/parallel_state.py
+  - vllm/platforms/rocm.py
+  - tests/distributed/test_hip_custom_communicator.py
+  commands:
+  - pytest -v -s tests/distributed/test_hip_custom_communicator.py
