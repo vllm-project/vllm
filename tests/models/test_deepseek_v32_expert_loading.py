@@ -21,6 +21,7 @@ from tests.kernels.moe.utils import (
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+from vllm.model_executor.models import utils as model_utils
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v32.amd import model as amd_model
 from vllm.models.deepseek_v32.amd import mtp as amd_mtp
@@ -31,7 +32,9 @@ E, H, INTER = 8, 16, 12
 
 
 @pytest.fixture(autouse=True)
-def _vllm_config():
+def _vllm_config(monkeypatch):
+    # get_pp_missing_layer_names caches by id(model); fresh per test.
+    monkeypatch.setattr(model_utils, "_model_to_pp_missing_layer_names", {})
     with set_current_vllm_config(VllmConfig()):
         yield
 
