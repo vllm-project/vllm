@@ -21,6 +21,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_pp_sdma.py
   mirror:
     amd:
       automatic_shard: true
@@ -178,10 +179,12 @@ steps:
       - vllm/v1/worker/
       - tests/compile/test_wrapper.py
       - tests/entrypoints/llm/test_collective_rpc.py
+      - tests/distributed/test_pp_sdma.py
       - vllm/platforms/rocm.py
       commands:
       - pytest -v -s entrypoints/llm/test_collective_rpc.py
       - pytest -v -s ./compile/test_wrapper.py
+      - pytest -v -s distributed/test_pp_sdma.py
 
 - label: ":nvidia: (L4) Distributed Torchrun + Shutdown"
   key: distributed-torchrun-shutdown-tests-2-gpus

@@ -55,6 +55,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
     get_world_group,
+    in_the_same_node_as,
     resume_device_comms,
     suspend_device_comms,
 )
@@ -276,6 +277,10 @@ class Worker(WorkerBase):
 
         # Device handles of the previous step's PP intermediate-tensor send.
         self._pp_send_work: list[Handle] = []
+        # PP hand-off on SDMA copy engines (parallel_config.pp_sdma_handoff).
+        self._pp_sdma = False
+        self._pp_sdma_tx = None
+        self._pp_sdma_rx = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
@@ -553,6 +558,7 @@ class Worker(WorkerBase):
                 self.local_rank,
                 current_platform.dist_backend,
             )
+            self._pp_sdma = self._use_pp_sdma()
 
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
@@ -1522,10 +1528,20 @@ class Worker(WorkerBase):
             for handle in self._pp_send_work:
                 handle.wait()
             self._pp_send_work = []
+        if self._pp_sdma_rx is not None:
+            self._pp_sdma_rx.release_previous()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+        if forward_pass and not get_pp_group().is_first_rank and self._pp_sdma:
+            if self._pp_sdma_rx is None:
+                from vllm.distributed.pp_sdma import PPSdmaReceiver
+
+                self._pp_sdma_rx = PPSdmaReceiver(get_pp_group().rank_in_group - 1)
+            intermediate_tensors = AsyncIntermediateTensors(
+                self._pp_sdma_rx.recv(get_pp_group())
+            )
+        elif forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
                     all_gather_group=get_tp_group(),
@@ -1560,18 +1576,60 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        # Non-blocking send of the intermediate tensors. The metadata handle
-        # is reaped lazily by the GroupCoordinator; the device handles are
-        # waited at the top of the next step.
-        handles = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-        )
-        self._pp_send_work = handles[1:]
+        if self._pp_sdma:
+            if self._pp_sdma_tx is None:
+                from vllm.distributed.pp_sdma import PPSdmaSender
+
+                self._pp_sdma_tx = PPSdmaSender(
+                    get_pp_group().rank_in_group + 1,
+                    self.vllm_config.scheduler_config.max_num_batched_tokens,
+                )
+            self._pp_sdma_tx.send(output.tensors, get_pp_group())
+        else:
+            # Non-blocking send of the intermediate tensors. The metadata handle
+            # is reaped lazily by the GroupCoordinator; the device handles are
+            # waited at the top of the next step.
+            handles = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+            )
+            self._pp_send_work = handles[1:]
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
         return None
+
+    def _use_pp_sdma(self) -> bool:
+        """Whether the PP hand-off goes on SDMA engines into IPC slots
+        (``parallel_config.pp_sdma_handoff``). Collective over the PP group.
+
+        Eager only: a CUDA graph replay reuses its output buffers while the copy
+        may still read them. PP2 only: a middle stage would relay tensors that
+        alias its input slots.
+        """
+        parallel_config = self.vllm_config.parallel_config
+        if not parallel_config.pp_sdma_handoff:
+            return False
+        cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+        on_gfx950 = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950 as _on_gfx950
+
+            on_gfx950 = _on_gfx950()
+        if not (
+            on_gfx950
+            and parallel_config.pipeline_parallel_size == 2
+            and parallel_config.tensor_parallel_size == 1
+            and cudagraph_mode == CUDAGraphMode.NONE
+            and all(in_the_same_node_as(get_pp_group().cpu_group, source_rank=0))
+        ):
+            raise ValueError(
+                "pp_sdma_handoff needs ROCm on gfx950, pipeline_parallel_size 2, "
+                "tensor_parallel_size 1, both PP stages on one node and "
+                f"cudagraph_mode NONE (got {cudagraph_mode})"
+            )
+        logger.info_once("PP hand-off on SDMA copy engines")
+        return True
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
