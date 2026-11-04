@@ -353,9 +353,12 @@ def test_unregister_waits_for_copies_in_flight(events):
         assert worker.submit_store(4, MagicMock(), _CPU_SPEC)
         assert client.entered.wait(10)
         unregistered = threading.Event()
-        thread = threading.Thread(
-            target=lambda: (worker.unregister_kv_caches(), unregistered.set())
-        )
+
+        def unregister() -> None:
+            worker.unregister_kv_caches()
+            unregistered.set()
+
+        thread = threading.Thread(target=unregister)
         thread.start()
         # Still blocked on the copy: the registration must not be dropped yet.
         assert not unregistered.wait(0.2)
