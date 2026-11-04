@@ -116,6 +116,11 @@ restrict the Markov projection to the union of the top-32 base-logit and
 top-32 Markov-bias candidates. This requires draft tensor parallel size 1.
 Omit the setting to use the full vocabulary.
 
+Greedy drafting selects directly from the candidates, avoiding a full-vocabulary
+scan at each Markov step. Probabilistic drafting and online acceptance estimation
+continue to use dense logits. The base LM-head projection still covers the draft
+vocabulary.
+
 At each model load, vLLM computes the Markov candidates in chunks and caches
 their IDs and bias values on the GPU. It does not retain the full transition
 matrix. The cache holds `target_vocab_size * dspark_draft_topk` entries, each

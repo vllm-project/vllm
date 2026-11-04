@@ -37,6 +37,18 @@ from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 logger = init_logger(__name__)
 
 
+def _argmax_candidates(
+    logits: torch.Tensor, candidate_ids: torch.Tensor
+) -> torch.Tensor:
+    """Match dense argmax with non-candidates masked to -inf."""
+    values = logits.gather(1, candidate_ids)
+    maximum = values.amax(dim=-1, keepdim=True)
+    winners = (values == maximum) | values.isnan()
+    # Dense argmax breaks ties by vocabulary ID, not candidate order.
+    token_ids = candidate_ids.masked_fill(~winners, logits.shape[-1]).amin(dim=-1)
+    return token_ids.masked_fill(maximum.squeeze(-1) == -torch.inf, 0)
+
+
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
@@ -255,9 +267,9 @@ class DSparkSpeculator(DFlashSpeculator):
         """Apply the Markov head to base-logit and Markov-bias top-k candidates.
 
         Base candidates are selected once for all draft positions; Markov
-        candidates depend on the previous token at each step. Their logits are
-        corrected in place and every other entry is set to ``-inf``. The normal
-        sampling and rejection paths consume that truncated distribution.
+        candidates depend on the previous token at each step. Greedy selection
+        scans only the corrected candidates. Paths requiring dense logits mask
+        every other entry to ``-inf``.
         """
         assert self._draft_topk is not None
         assert self._markov_candidate_ids is not None
@@ -272,6 +284,9 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        candidate_argmax = (
+            self.draft_logits is None and self.acceptance_estimator is None
+        )
 
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
@@ -280,7 +295,8 @@ class DSparkSpeculator(DFlashSpeculator):
             bias_indices = self._markov_candidate_ids[prev]
             logits_i = base_logits[:, i]
             bias_values = logits_i.gather(1, bias_indices)
-            logits_i.fill_(float("-inf"))
+            if not candidate_argmax:
+                logits_i.fill_(float("-inf"))
             logits_i = self.model.apply_markov_bias_gathered(
                 markov_embed,
                 logits_i,
@@ -291,9 +307,14 @@ class DSparkSpeculator(DFlashSpeculator):
             logits_i.scatter_(
                 1, bias_indices, bias_values + self._markov_candidate_biases[prev]
             )
-            draft_sampled_i = self._sample_logits(
-                logits_i, idx_map[:, i], sample_pos[:, i], i
-            )
+            if candidate_argmax:
+                candidate_ids = torch.cat((draft_indices[:, i], bias_indices), dim=-1)
+                draft_ids = _argmax_candidates(logits_i, candidate_ids)
+                draft_sampled_i = self.model.map_draft_to_target(draft_ids)
+            else:
+                draft_sampled_i = self._sample_logits(
+                    logits_i, idx_map[:, i], sample_pos[:, i], i
+                )
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 

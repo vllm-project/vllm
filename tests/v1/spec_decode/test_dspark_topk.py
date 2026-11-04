@@ -18,7 +18,32 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
+    DSparkSpeculator,
+    _argmax_candidates,
+)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_candidate_argmax_matches_dense_selection(dtype):
+    """Ignore non-candidates and preserve overwrite and vocabulary tie rules."""
+    base_ids = torch.tensor([[8, 2, 5]]).expand(4, -1)
+    bias_ids = torch.tensor([[8, 9, 1]]).expand(4, -1)
+    base_scores = torch.tensor(
+        [[9, 7, 6], [9, 7, 8], [-torch.inf] * 3, [9, torch.nan, 6]], dtype=dtype
+    )
+    bias_scores = torch.tensor(
+        [[2, 7, 7], [2, 7, 7], [-torch.inf] * 3, [torch.nan, 7, 7]], dtype=dtype
+    )
+    logits = torch.full((4, 10), 100.0, dtype=dtype)
+    reference = torch.full_like(logits, -torch.inf)
+    for scores in (logits, reference):
+        scores.scatter_(1, base_ids, base_scores)
+        scores.scatter_(1, bias_ids, bias_scores)
+
+    actual = _argmax_candidates(logits, torch.cat((base_ids, bias_ids), dim=-1))
+    torch.testing.assert_close(reference.argmax(dim=-1), torch.tensor([1, 5, 0, 2]))
+    torch.testing.assert_close(actual, reference.argmax(dim=-1))
 
 
 def _markov_head(weight: torch.Tensor) -> DSparkMarkovHead:
@@ -337,27 +362,12 @@ def _candidate_speculator(device, reduced_vocab, batch=1, topk=2):
 
 @pytest.mark.parametrize("reduced_vocab", [False, True])
 @torch.inference_mode()
-def test_markov_candidates_rescue_tokens_and_follow_target_ids(
-    monkeypatch, reduced_vocab
-):
+def test_markov_candidates_rescue_tokens_and_follow_target_ids(reduced_vocab):
     """Markov-only winners extend the chain without double-biasing overlaps."""
     spec, base, transitions, target_ids = _candidate_speculator("cpu", reduced_vocab)
-    observed = []
-
-    def sample(logits, *args):
-        observed.append(logits.clone())
-        return DSparkSpeculator._sample_logits(spec, logits, *args)
-
-    monkeypatch.setattr(spec, "_sample_logits", sample)
     spec._sample_sequential_topk(1, torch.zeros(2, 1))
 
     torch.testing.assert_close(spec.draft_tokens, target_ids[torch.tensor([[2, 3]])])
-    torch.testing.assert_close(
-        observed[0], torch.tensor([[5.0, 5.0, 10.0, -torch.inf, -torch.inf]])
-    )
-    torch.testing.assert_close(
-        observed[1], torch.tensor([[5.0, 5.0, -torch.inf, 11.0, -torch.inf]])
-    )
     torch.testing.assert_close(
         spec._markov_candidate_ids, transitions.topk(2, dim=-1).indices
     )
