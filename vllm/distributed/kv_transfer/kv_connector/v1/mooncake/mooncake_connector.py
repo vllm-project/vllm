@@ -3017,9 +3017,9 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
-                assert not send_meta.ready.is_set()
+            aborted_meta = self.reqs_need_send.pop(transfer_id, None)
+            if aborted_meta is not None:
+                assert not aborted_meta.ready.is_set()
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]

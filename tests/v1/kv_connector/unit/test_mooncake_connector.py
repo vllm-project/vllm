@@ -1327,6 +1327,69 @@ async def test_receive_kv_selects_remote_pp_workers(
         decode_worker.shutdown()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+@pytest.mark.parametrize("records", ["missing", "existing", "mixed"])
+async def test_prefill_early_abort_cleanup_is_idempotent(records):
+    """Early aborts must not strand later cleanup when a worker has no record."""
+    config = _make_worker_vllm_config(
+        "kv_producer",
+        {"bootstrap_server_address": "127.0.0.1:12345"},
+    )
+    scheduler = create_scheduler(config)
+    for index in range(2 if records == "mixed" else 1):
+        request = create_request(request_id=index + 1, do_remote_decode=True)
+        request.kv_transfer_params["transfer_id"] = request.request_id
+        scheduler.add_request(request)
+        scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    metadata = scheduler.schedule().kv_connector_metadata
+    assert isinstance(metadata, MooncakeConnectorMetadata)
+    assert not metadata.reqs_to_send
+    assert not scheduler.requests
+    transfer_ids = list(metadata.reqs_not_processed)
+    assert len(transfer_ids) == (2 if records == "mixed" else 1)
+
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies() as mocks,
+        patch("torch.accelerator.current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        try:
+            allocation = MooncakeConnectorMetadata()
+            # Use the actual set iteration order: the missing ID must precede
+            # an existing record, regardless of Python's hash seed.
+            existing_ids = []
+            if records == "existing":
+                existing_ids = transfer_ids
+            elif records == "mixed":
+                existing_ids = transfer_ids[1:]
+            for transfer_id in [*existing_ids, "unrelated"]:
+                allocation.add_new_req(
+                    request_id=transfer_id,
+                    local_block_ids=[],
+                    kv_transfer_params={"transfer_id": transfer_id},
+                    load_remote_cache=False,
+                )
+            await worker.record_send_reqs(allocation)
+            unrelated = worker.reqs_need_send["unrelated"]
+            assert all(
+                not record.ready.is_set() for record in worker.reqs_need_send.values()
+            )
+
+            for _ in range(2):
+                await worker.record_send_reqs(metadata)
+                assert worker.reqs_need_send == {"unrelated": unrelated}
+                assert not unrelated.ready.is_set()
+                assert worker.get_transfer_results().finished_sending == set()
+            assert mocks["mock_socket_object"].send.await_count == 0
+        finally:
+            worker.shutdown()
+
+
 def test_resolve_need_send_accounts_for_remote_tp_fanout():
     """Producer-side completion waits for every paired consumer TP pull."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
