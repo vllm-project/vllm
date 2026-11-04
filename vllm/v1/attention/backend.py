@@ -576,12 +576,14 @@ class AttentionCGSupport(Enum):
 
 
 def max_decode_query_len(vllm_config: "VllmConfig") -> int:
-    """Widest request a spec-as-decode builder treats as a decode.
+    """Default widest request a spec-as-decode builder treats as a decode.
 
-    On model runner V2 this is a verification request, 1 +
-    num_speculative_tokens: no V2 speculator builds a wider query. The reorder
-    threshold and the code that mirrors the builders' decode/prefill split all
-    read this, so they cannot drift apart.
+    On model runner V2 this is the target verification width, 1 +
+    num_speculative_tokens. Standalone AR drafting can widen its own eligible
+    draft builders by one token for its expanded prefill; target builders keep
+    this shared threshold. The reorder threshold and the code that mirrors the
+    target builders' decode/prefill split all read this, so they cannot drift
+    apart.
     """
     speculative_config = getattr(vllm_config, "speculative_config", None)
     if speculative_config is None or speculative_config.num_speculative_tokens is None:
@@ -627,6 +629,11 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+
+    @property
+    def supports_standalone_draft_prefill_as_decode(self) -> bool:
+        """Whether the standalone draft's expanded prefill can use decode."""
+        return False
 
     @classmethod
     def get_cudagraph_support(

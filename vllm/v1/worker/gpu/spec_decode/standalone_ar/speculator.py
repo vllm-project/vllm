@@ -93,12 +93,29 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             target_input_buffers,
             target_attn_groups,
         )
+        self._enable_decode_for_expanded_prefill()
         self.expanded_slot_mappings = torch.empty(
             block_tables.num_kv_cache_groups,
             self.max_num_tokens + self.max_num_reqs,
             dtype=torch.int64,
             device=self.device,
         )
+
+    def _enable_decode_for_expanded_prefill(self) -> None:
+        verification_query_len = self.num_speculative_steps + 1
+        expanded_prefill_query_len = verification_query_len + 1
+        for groups in self.attn_groups:
+            for group in groups:
+                for builder in group.metadata_builders:
+                    threshold = builder.reorder_batch_threshold
+                    if (
+                        builder.supports_standalone_draft_prefill_as_decode
+                        and threshold is not None
+                        and threshold >= verification_query_len
+                    ):
+                        builder.reorder_batch_threshold = max(
+                            threshold, expanded_prefill_query_len
+                        )
 
     def _prefill_capture_slot_mappings(self) -> torch.Tensor:
         return self.expanded_slot_mappings

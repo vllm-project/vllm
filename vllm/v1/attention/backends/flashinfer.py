@@ -1127,6 +1127,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
         )
 
+    @property
+    def supports_standalone_draft_prefill_as_decode(self) -> bool:
+        return (
+            not self.use_dcp
+            and self.flashinfer_trtllm_api_decode_kernel is not None
+            and (not self.attention_config.use_non_causal or self.use_xqa)
+        )
+
     def _resolve_cache_dtype(self) -> str:
         cache_dtype = self.cache_config.cache_dtype
         if cache_dtype != "auto":
