@@ -86,7 +86,7 @@ async def client_and_model(server):
 @pytest.mark.asyncio
 async def test_non_asr_model(foscolo):
     # text to text model
-    model_name = "JackFram/llama-68m"
+    model_name = "vllm-project/llama-68m"
     attention_config = _get_rocm_attention_config(model_name)
     with RemoteOpenAIServer(
         model_name, _get_server_args(attention_config)
