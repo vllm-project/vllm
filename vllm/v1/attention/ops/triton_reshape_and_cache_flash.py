@@ -16,12 +16,22 @@ FP8_MIN, FP8_MAX = get_fp8_min_max()
 _NATIVE_KV_CACHE_DTYPES = {"auto", "float16", "bfloat16", "float32", "half", "float"}
 
 
+def kv_cache_fp8_dtype(kv_cache_dtype: str) -> torch.dtype:
+    """Return the FP8 element type a quantized KV cache is stored as."""
+    if kv_cache_dtype == "fp8_e5m2" and current_platform.is_cuda():
+        return torch.float8_e5m2
+    return current_platform.fp8_dtype()
+
+
 def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     if not (
         kv_cache_dtype in _NATIVE_KV_CACHE_DTYPES
         or is_quantized_kv_cache(kv_cache_dtype)
     ):
         return False
+    if kv_cache_dtype == "fp8_e5m2":
+        # Unlike e4m3 (fp8e4nv), e5m2 converts in software from SM80.
+        return current_platform.has_device_capability(80) or current_platform.is_xpu()
     if kv_cache_dtype.startswith("fp8"):
         return current_platform.has_device_capability(89) or current_platform.is_xpu()
     if kv_cache_dtype == "bfloat16":
@@ -417,11 +427,11 @@ def triton_reshape_and_cache_flash(
 
     assert _is_supported_kv_cache_dtype(kv_cache_dtype), (
         f"Triton reshape-and-cache cannot store kv_cache_dtype={kv_cache_dtype} "
-        f"on this device: an FP8 KV cache needs native fp8e4nv (SM89+). Use "
-        f"--kv-cache-dtype bfloat16 (or float16 on SM75)."
+        f"on this device: an e4m3 FP8 KV cache needs native fp8e4nv (SM89+). Use "
+        f"--kv-cache-dtype fp8_e5m2 (SM80+) or bfloat16 (or float16 on SM75)."
     )
     kv_cache_torch_dtype = (
-        current_platform.fp8_dtype()
+        kv_cache_fp8_dtype(kv_cache_dtype)
         if is_quantized_kv_cache(kv_cache_dtype)
         else key_cache.dtype
     )

@@ -294,6 +294,7 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
         block_size=128,
         num_blocks=64,
         seq_threshold_3D=16,
+        kv_dtype=FP8_DTYPE,
     )
     assert len(reduce_grids) == 1
 
@@ -797,10 +798,12 @@ def test_triton_unified_attn(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
+# 512: Gemma 4's global layers, whose FP8 KV tiles need the narrower SM8x tile.
+@pytest.mark.parametrize("head_size", HEAD_SIZES + [512])
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
+@pytest.mark.parametrize("kv_dtype", [FP8_DTYPE, torch.float8_e5m2])
 @torch.inference_mode()
 def test_triton_unified_attn_bf16_query_fp8_kv(
     seq_lens: list[tuple[int, int]],
@@ -809,8 +812,18 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
     block_size: int,
     num_blocks: int,
     seq_threshold_3D: int,
+    kv_dtype: torch.dtype,
 ) -> None:
-    """Test bf16 Q with FP8 per-tensor KV cache (dequant via _cast_kv_tile)."""
+    """Test bf16 Q with FP8 per-tensor KV cache (dequant via _cast_kv_tile).
+
+    e5m2 needs no FP8 hardware to convert, so it runs from SM80; e4m3 (fp8e4nv)
+    needs SM89."""
+    if (
+        current_platform.is_cuda()
+        and kv_dtype != torch.float8_e5m2
+        and not current_platform.has_device_capability(89)
+    ):
+        pytest.skip("e4m3 KV needs SM89+")
     torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
 
@@ -834,8 +847,8 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     k_scale = torch.tensor(0.5, dtype=torch.float32)
     v_scale = torch.tensor(0.25, dtype=torch.float32)
-    fp8_key_cache = (key_cache / k_scale).to(FP8_DTYPE)
-    fp8_value_cache = (value_cache / v_scale).to(FP8_DTYPE)
+    fp8_key_cache = (key_cache / k_scale).to(kv_dtype)
+    fp8_value_cache = (value_cache / v_scale).to(kv_dtype)
 
     scale_shape = (num_seqs, num_kv_heads)
     k_descale = torch.full(scale_shape, k_scale.item(), dtype=torch.float32)

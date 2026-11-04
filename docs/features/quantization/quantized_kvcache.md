@@ -38,7 +38,7 @@ You can configure how the quantization scales are computed in vLLM using three d
 
 - `kv_cache_dtype="auto"`: Use the model's default data type
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
-- `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
+- `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+. On SM80–SM88 (e.g. A100, RTX A-series), it is the only FP8 KV cache the `TRITON_ATTN` backend can store, since `fp8_e4m3` needs SM89+.
 
 ### Skipping Specific Layers from KV-Cache Quantization
 
