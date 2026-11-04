@@ -12,6 +12,7 @@ import torch
 import zmq
 
 import vllm.platforms as platforms
+from vllm.config import WatchdogConfig
 from vllm.utils import torch_utils
 from vllm.v1.engine import core as core_module
 from vllm.v1.engine import utils as engine_utils
@@ -147,22 +148,35 @@ def test_engine_core_startup_threads_are_scoped_to_launch(
 
 
 @pytest.mark.parametrize(
-    ("is_rocm", "request_timeout", "manager_timeout", "process_timeout"),
+    (
+        "is_rocm",
+        "worker_timeout",
+        "request_timeout",
+        "manager_timeout",
+        "process_timeout",
+    ),
     [
-        (True, 0, 0, 15.0),
-        (True, 0, 7, 7),
-        (True, 0, None, None),
-        (False, 0, 0, 0),
-        (True, 7, 0, 0),
+        (True, None, 0, 0, 15.0),
+        (True, None, 0, 7, 7),
+        (True, None, 0, None, None),
+        (False, None, 0, 0, 0),
+        (True, None, 7, 0, 0),
+        (False, "30", 0, 0, 30.0),
+        (False, "30", 7, 0, 0),
     ],
 )
 def test_engine_core_process_shutdown_timeout(
     monkeypatch: pytest.MonkeyPatch,
     is_rocm: bool,
+    worker_timeout: str | None,
     request_timeout: float | None,
     manager_timeout: float | None,
     process_timeout: float | None,
 ):
+    if worker_timeout is None:
+        monkeypatch.delenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", worker_timeout)
     manager = object.__new__(CoreEngineProcManager)
     manager._request_shutdown_timeout = request_timeout
     manager.manager_stopped = Event()
@@ -224,11 +238,19 @@ def test_freeze_gc_after_clean_rocm_engine_core_shutdown(
     expected_calls: list[str],
 ):
     calls: list[str] = []
-    vllm_config = SimpleNamespace(shutdown_timeout=shutdown_timeout)
+    vllm_config = SimpleNamespace(
+        shutdown_timeout=shutdown_timeout,
+        # run_engine_core starts the watchdog from this field. The default
+        # config has no dump_dir, so start_watch_dog returns immediately.
+        watchdog_config=WatchdogConfig(),
+    )
     proc = SimpleNamespace(
         shutdown_state=EngineShutdownState.RUNNING,
         has_work=lambda: has_work,
         vllm_config=vllm_config,
+        # Mirrors EngineCore._send_engine_dead, which run_engine_core calls
+        # from its fatal-error handler.
+        _send_engine_dead=lambda: None,
     )
 
     def run_busy_loop():

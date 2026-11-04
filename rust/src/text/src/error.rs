@@ -13,15 +13,38 @@ pub use crate::lower::token_ids::TokenIdsError;
 pub enum Error {
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    /// No tokenizer is loaded (`--skip-tokenizer-init`), so the request's
+    /// text cannot be encoded or decoded.
+    #[error(
+        "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set"
+    )]
+    TokenizerUnavailable,
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
     #[error(
-        "this model's maximum context length is {max_model_len} tokens, \
-         but the prompt contains {prompt_len} input tokens"
+        "text request `{request_id}` stop strings require detokenization; enable it or use stop \
+         token IDs"
+    )]
+    StopStringsRequireDetokenize { request_id: String },
+    #[error(
+        "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
+         and must not contain '@', '/', '\\', or NUL."
+    )]
+    InvalidCacheSalt,
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt contains {prompt_len} input tokens, which exceeds this limit even without \
+         any output tokens. Please reduce the length of the input prompt."
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "This model's maximum context length is {max_model_len} tokens. However, your \
+         prompt fills it with {max_model_len} input tokens, leaving no room for output \
+         tokens. Please reduce the length of the input prompt."
+    )]
+    PromptFillsContext { max_model_len: u32 },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
@@ -36,10 +59,10 @@ pub enum Error {
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error(
-        "truncate_prompt_tokens={value} cannot be greater than max_model_len - \
-         max_tokens = {budget}. Please request a smaller truncation size."
+        "truncate_prompt_tokens={value} cannot be greater than max_model_len = \
+         {max_model_len}. Please request a smaller truncation size."
     )]
-    TruncatePromptTokensExceedsBudget { value: u64, budget: u32 },
+    TruncatePromptTokensExceedsMaxModelLen { value: u64, max_model_len: u32 },
     #[error("invalid truncate_prompt_tokens={value}; must be >= -1")]
     InvalidTruncatePromptTokens { value: i64 },
     #[error("truncate_prompt_tokens is not supported for multimodal requests")]
@@ -61,14 +84,18 @@ impl Error {
     pub fn is_request_validation_error(&self) -> bool {
         match self {
             Self::PromptTooLong { .. }
+            | Self::PromptFillsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::StopStringsRequireDetokenize { .. }
+            | Self::TokenizerUnavailable
+            | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
-            | Self::TruncatePromptTokensExceedsBudget { .. }
+            | Self::TruncatePromptTokensExceedsMaxModelLen { .. }
             | Self::InvalidTruncatePromptTokens { .. }
             | Self::TruncateUnsupportedWithMultimodal
             | Self::InvalidRepetitionDetection { .. }
@@ -82,10 +109,22 @@ impl Error {
             _ => false,
         }
     }
+
+    /// The request parameter a validation error refers to, reported as the
+    /// `param` of the OpenAI error object.
+    pub fn param(&self) -> Option<&'static str> {
+        match self {
+            Self::PromptTooLong { .. } | Self::PromptFillsContext { .. } => Some("input_tokens"),
+            _ => None,
+        }
+    }
 }
 
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {
-        Self::Tokenizer(error.0)
+        match error {
+            vllm_tokenizer::TokenizerError::Backend { message } => Self::Tokenizer(message),
+            vllm_tokenizer::TokenizerError::Unavailable => Self::TokenizerUnavailable,
+        }
     }
 }

@@ -27,7 +27,7 @@ use crate::parser::unified::{
     names,
 };
 use crate::parser::{ParserSelection, ToolStrictLevel};
-use crate::request::{ChatRequest, ChatTool};
+use crate::request::{ChatRequest, ChatTool, ResolvedToolContext};
 use crate::{Error, Result as ChatResult};
 
 /// Default request-scoped output processor used by Hugging Face style chat
@@ -38,7 +38,7 @@ use crate::{Error, Result as ChatResult};
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
     parser: Box<dyn UnifiedParser>,
-    parallel_tool_calls: bool,
+    max_tool_calls: Option<usize>,
     /// Request facts the initialized parser needs to build its output grammar.
     /// Absent for the plain-text-only processor, which never builds one.
     grammar_inputs: Option<GrammarInputs>,
@@ -51,6 +51,7 @@ struct GrammarInputs {
     tools: Vec<ChatTool>,
     tool_choice: ToolChoice,
     tool_strict_level: ToolStrictLevel,
+    parallel_tool_calls: bool,
     /// The request's structured-output constraint, normalized for composition
     /// into the output grammar. The original stays on the request until an
     /// output grammar replaces it.
@@ -118,16 +119,12 @@ impl DefaultChatOutputProcessor {
         )? {
             parser
         } else {
-            let tool_parsing_enabled = request.tool_parsing_enabled();
-            let tool_parser = if tool_parsing_enabled {
-                Some(Self::resolve_tool_parser(
-                    request.tools(),
-                    model_id,
-                    tool_call_parser,
-                )?)
-            } else {
-                None
-            };
+            let tool_parser = Self::resolve_tool_parser(
+                &request.tool_context,
+                tokenizer.clone(),
+                model_id,
+                tool_call_parser,
+            )?;
             let reasoning_parser =
                 Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
@@ -141,11 +138,12 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
-            parallel_tool_calls: request.parallel_tool_calls(),
+            max_tool_calls: request.max_tool_calls(),
             grammar_inputs: Some(GrammarInputs {
                 tools: request.tools().to_vec(),
                 tool_choice: request.tool_choice().into(),
                 tool_strict_level,
+                parallel_tool_calls: request.parallel_tool_calls(),
                 answer: request.sampling_params.structured_outputs.as_ref().and_then(answer_format),
             }),
         })
@@ -159,32 +157,47 @@ impl DefaultChatOutputProcessor {
     pub fn plain_text_only() -> Self {
         Self {
             parser: Box::new(CombinedParser::plain_text_only()),
-            parallel_tool_calls: true,
+            max_tool_calls: None,
             grammar_inputs: None,
         }
     }
 
+    /// Build the configured tool parser for a request with tools.
+    ///
+    /// With tool parsing off (`tool_choice=none`), a configured parser still
+    /// parses the calls so that `max_tool_calls` drops them instead of leaking
+    /// their markup into content. This holds for every parser, as for Python's
+    /// parser engines; Python's other parsers (legacy tool parsers, the HF
+    /// response-template parser, the Llama JSON parser) keep the raw call as
+    /// content instead. A missing parser is an error only when tool parsing is
+    /// on.
     fn resolve_tool_parser(
-        tools: &[ChatTool],
+        tool_context: &ResolvedToolContext,
+        tokenizer: DynTokenizer,
         model_id: &str,
         selection: &ParserSelection,
-    ) -> ChatResult<Box<dyn ToolParser>> {
-        let factory = ToolParserFactory::global();
-        let parser_name = match selection {
-            ParserSelection::Auto => selection.resolve_tool_name(model_id).ok_or_else(|| {
-                Error::ParserUnavailableForModel {
+    ) -> ChatResult<Option<Box<dyn ToolParser>>> {
+        let tools = &tool_context.effective_tools;
+        if tools.is_empty() {
+            return Ok(None);
+        }
+        let Some(parser_name) = selection.resolve_tool_name(model_id) else {
+            if !tool_context.parsing_enabled() {
+                return Ok(None);
+            }
+            return Err(match selection {
+                ParserSelection::None => Error::ParserDisabled { kind: "tool" },
+                _ => Error::ParserUnavailableForModel {
                     kind: "tool",
                     model_id: model_id.to_string(),
-                }
-            })?,
-            ParserSelection::None => return Err(Error::ParserDisabled { kind: "tool" }),
-            ParserSelection::Explicit(name) => name.as_str(),
+                },
+            });
         };
 
-        let parser = factory.create(parser_name, tools)?;
+        let parser = ToolParserFactory::global().create(parser_name, tools, tokenizer)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
-        Ok(parser)
+        Ok(Some(parser))
     }
 
     fn resolve_optional_unified_parser(
@@ -269,7 +282,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
                 tools: &inputs.tools,
                 tool_choice: &inputs.tool_choice,
                 tool_strict_level: inputs.tool_strict_level,
-                parallel_tool_calls: self.parallel_tool_calls,
+                parallel_tool_calls: inputs.parallel_tool_calls,
                 answer: inputs.answer.as_ref(),
             })
             .map_err(|error| Error::OutputGrammar {
@@ -285,7 +298,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let parsed = unified_event_stream(decoded, self.parser);
-        let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
+        let structured = structured_chat_event_stream(parsed, self.max_tool_calls);
 
         Ok(structured.boxed())
     }
@@ -295,13 +308,17 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
+    use futures::{StreamExt as _, stream};
     use thiserror_ext::AsReport as _;
     use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
     use vllm_parser::output_grammar::BuiltOutputGrammar;
+    use vllm_text::output::{DecodedTextEvent, Finished};
+    use vllm_text::{DecodedText, SampledDelta};
     use vllm_tokenizer::test_utils::TestTokenizer;
     use xgrammar_structural_tag::format::Format;
 
     use super::DefaultChatOutputProcessor;
+    use crate::event::{AssistantMessageExt as _, ChatEvent};
     use crate::output::ChatOutputProcessor;
     use crate::parser::unified::{HfTemplateError, ResponseTemplate};
     use crate::parser::{ParserSelection, ToolStrictLevel};
@@ -364,6 +381,100 @@ mod tests {
         assert!(build(ToolStrictLevel::Parameter, None, ChatToolChoice::None).is_none());
     }
 
+    #[tokio::test]
+    async fn tool_choice_none_drops_parsed_tool_calls() {
+        let tools = vec![ChatTool {
+            name: "search".to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object"}),
+            strict: None,
+            defer_loading: None,
+        }];
+        let gemma4 = ParserSelection::Explicit("gemma4".to_string());
+        let gemma4_text = "Sure.<|tool_call>call:search{query:<|\"|>vllm<|\"|>}<tool_call|>";
+        let qwen3_coder = ParserSelection::Explicit("qwen3_coder".to_string());
+        let qwen3_coder_text = "Sure.<tool_call>\n<function=search>\n<parameter=query>\nvllm\n\
+                                </parameter>\n</function>\n</tool_call>";
+        let run = async |tool_parser: &ParserSelection,
+                         reasoning_parser: &ParserSelection,
+                         text: &str,
+                         tool_choice| {
+            let mut request = ChatRequest {
+                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
+                    .unwrap(),
+                ..ChatRequest::for_test()
+            };
+            let mut processor = DefaultChatOutputProcessor::new(
+                &mut request,
+                "other-model",
+                tokenizer(),
+                tool_parser,
+                reasoning_parser,
+                None,
+            )
+            .unwrap();
+            processor.initialize(&[]).unwrap();
+            let decoded = stream::iter([Ok(DecodedTextEvent::TextDelta {
+                decoded: DecodedText::unattributed(text),
+                sampled: SampledDelta::default(),
+                finished: Some(Box::new(Finished {
+                    usage: vllm_llm::TokenUsage::default(),
+                    finish_reason: crate::FinishReason::Stop(None),
+                    kv_transfer_params: None,
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    timestamps: Default::default(),
+                })),
+            })]);
+            let events =
+                Box::new(processor).process(decoded.boxed()).unwrap().collect::<Vec<_>>().await;
+            let Some(Ok(ChatEvent::Done { message, .. })) = events.last() else {
+                panic!("expected done");
+            };
+            let names = message.tool_calls().map(|call| call.name.clone()).collect::<Vec<_>>();
+            (message.text(), names)
+        };
+
+        let none = ParserSelection::None;
+        let llama3_json = ParserSelection::Explicit("llama3_json".to_string());
+        let llama3_json_text = r#"{"name":"search","parameters":{"query":"vllm"}}"#;
+        let json_answer = r#"{"answer":42}"#;
+        let search = || vec!["search".to_string()];
+        for (tool_parser, reasoning_parser, text, auto_content, none_content) in [
+            // Python's parser engine parses a marked call and drops it: neither
+            // a tool call nor its markup reaches the response, for a unified
+            // parser and a split tool parser alike.
+            (&gemma4, &gemma4, gemma4_text, "Sure.", "Sure."),
+            (&qwen3_coder, &none, qwen3_coder_text, "Sure.", "Sure."),
+            // Rust drops a bare JSON call too, where Python's Llama parser
+            // keeps it as content.
+            (&llama3_json, &none, llama3_json_text, "", ""),
+        ] {
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, ChatToolChoice::Auto).await,
+                (auto_content.to_string(), search())
+            );
+            assert_eq!(
+                run(tool_parser, reasoning_parser, text, ChatToolChoice::None).await,
+                (none_content.to_string(), vec![])
+            );
+        }
+        // JSON that is not a call stays content either way.
+        for tool_choice in [ChatToolChoice::Auto, ChatToolChoice::None] {
+            assert_eq!(
+                run(&llama3_json, &none, json_answer, tool_choice).await,
+                (json_answer.to_string(), vec![])
+            );
+        }
+        // Without a configured tool parser, the markup stays content.
+        assert_eq!(
+            run(&none, &none, qwen3_coder_text, ChatToolChoice::None).await,
+            (qwen3_coder_text.to_string(), vec![])
+        );
+    }
+
     #[test]
     fn unset_tool_strict_level_falls_back_to_the_parser_default() {
         let build = |parser, level| search_grammar(parser, level, None, ChatToolChoice::Auto);
@@ -387,15 +498,10 @@ mod tests {
             defer_loading: None,
         }];
         let schema = serde_json::json!({"type": "object"});
-        let build = |structured_outputs| {
+        let build = |tool_choice, structured_outputs| {
             let mut request = ChatRequest {
-                tool_context: ResolvedToolContext::new(
-                    &[],
-                    tools.clone(),
-                    Some(ChatToolChoice::Auto),
-                    true,
-                )
-                .unwrap(),
+                tool_context: ResolvedToolContext::new(&[], tools.clone(), Some(tool_choice), true)
+                    .unwrap(),
                 ..ChatRequest::for_test()
             };
             request.sampling_params.structured_outputs = structured_outputs;
@@ -414,12 +520,23 @@ mod tests {
 
         // Non-strict `auto` alone needs no grammar; with an answer constraint
         // the grammar holds the answer or a call.
-        assert!(build(None).is_none());
-        let built = build(Some(StructuredOutputsParams::json(schema.clone()))).unwrap();
+        assert!(build(ChatToolChoice::Auto, None).is_none());
+        let json = || Some(StructuredOutputsParams::json(schema.clone()));
+        let built = build(ChatToolChoice::Auto, json()).unwrap();
         let Format::Or(branches) = built.format else {
             panic!("expected the calls or the answer, got {:?}", built.format);
         };
-        assert_eq!(branches.elements.last(), Some(&Format::json_schema(schema)));
+        assert_eq!(
+            branches.elements.last(),
+            Some(&Format::json_schema(schema.clone()))
+        );
+        // `none` builds no calls: the grammar is the answer alone.
+        assert_eq!(
+            build(ChatToolChoice::None, json()),
+            Some(BuiltOutputGrammar::final_output_only(Format::json_schema(
+                schema
+            )))
+        );
     }
 
     #[test]
