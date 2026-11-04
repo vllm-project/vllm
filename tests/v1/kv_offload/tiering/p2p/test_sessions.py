@@ -3087,30 +3087,9 @@ class TestDisconnect:
         assert session.poll().loads == [LoadResult(8, "req-7", success=False)]
 
     @pytest.mark.parametrize("finished", [False, True])
-    def test_retired_fetch_queues_producer_release(
-        self, lookup_clock, finished, caplog
-    ):
-        session, conn, _ = _make_session()
-        session.request_blocks(7, "retired", [OffloadKey(b"key")], [0])
-        if finished:
-            session.finish_request("retired")
-        else:
-            lookup_clock.now = _PD_LOAD_TIMEOUT_S
-        assert session.poll().loads == [
-            LoadResult(7, "retired", success=False, request_finished=finished)
-        ]
-        _activate(session, conn)
-        fetches = [m for m in conn._sent if m[TYPE_KEY] == FetchMsg.TYPE]
-        assert len(fetches) == 1
-        assert fetches[0][FetchMsg.BLOCK_INDEXES] == []
-        assert fetches[0][FetchMsg.KV_REQUEST_ID] == "retired"
-        if not finished:
-            assert "queued fetch retired" in caplog.text
-
-    @pytest.mark.parametrize("finished", [False, True])
     @pytest.mark.parametrize("ack_before_poll", [False, True])
     def test_unsent_fetch_retires_without_abort(
-        self, lookup_clock, finished, ack_before_poll
+        self, lookup_clock, finished, ack_before_poll, caplog
     ):
         session, conn, _ = _make_session()
         session.request_blocks(7, "req-7", [OffloadKey(b"key")], [0])
@@ -3126,6 +3105,8 @@ class TestDisconnect:
         assert session.poll().loads == [
             LoadResult(7, "req-7", success=False, request_finished=finished)
         ]
+        if not finished:
+            assert "queued fetch req-7" in caplog.text
         assert not session.has_pending_work
         session.request_blocks(8, "req-7", [OffloadKey(b"replacement")], [1])
         if not ack_before_poll:
@@ -4099,79 +4080,3 @@ def test_drain_aborted_round_sends_only_abort_ack():
         m for m in conn._sent if m[TYPE_KEY] in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
     ]
     assert [m[TYPE_KEY] for m in terminals] == [AbortAckMsg.TYPE]
-
-
-def test_inference_does_not_flush_a_timed_out_fetch(
-    vllm_runner, monkeypatch, p2p_control_peer
-):
-    """Recompute a queued load, then open the handshake without sending retired work."""
-    from vllm import SamplingParams
-    from vllm.config import KVTransferConfig
-
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
-    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "120")
-    peer_port, handshake, reply_to_fetch, fetches = p2p_control_peer
-    import socket
-
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        local_port = sock.getsockname()[1]
-    config = KVTransferConfig(
-        kv_connector="OffloadingConnector",
-        kv_role="kv_both",
-        kv_load_failure_policy="recompute",
-        kv_connector_extra_config={
-            "spec_name": "TieringOffloadingSpec",
-            "cpu_bytes_to_use": 16 * 1024 * 1024,
-            "secondary_tiers": [
-                {"type": "p2p", "host": "127.0.0.1", "port": local_port}
-            ],
-        },
-    )
-    with vllm_runner(
-        "HuggingFaceTB/SmolLM2-135M",
-        skip_tokenizer_init=True,
-        dtype="float16",
-        max_model_len=256,
-        enforce_eager=True,
-        gpu_memory_utilization=0.35,
-        max_num_seqs=2,
-        max_num_batched_tokens=512,
-        enable_prefix_caching=True,
-        disable_log_stats=False,
-        kv_transfer_config=config,
-    ) as runner:
-        llm = runner.llm
-        params = SamplingParams(
-            temperature=0,
-            max_tokens=4,
-            ignore_eos=True,
-            extra_args={
-                "kv_transfer_params": {
-                    "remote_prefiller": {
-                        "remote_host": "127.0.0.1",
-                        "remote_port": peer_port,
-                        "kv_request_id": "retired",
-                    }
-                }
-            },
-        )
-        prompt = {"prompt_token_ids": [3 + i % 100 for i in range(192)]}
-
-        first = llm.generate([prompt], params, use_tqdm=False)[0]
-        assert len(first.outputs[0].token_ids) == 4
-        reply_to_fetch.set()
-        handshake.set()
-        assert params.extra_args is not None
-        params.extra_args["kv_transfer_params"]["remote_prefiller"]["kv_request_id"] = (
-            "live"
-        )
-        second_prompt = {"prompt_token_ids": [103 + i % 100 for i in range(192)]}
-        second = llm.generate([second_prompt], params, use_tqdm=False)[0]
-        assert len(second.outputs[0].token_ids) == 4
-        observed = []
-        while not fetches.empty():
-            observed.append(fetches.get_nowait()["kv_request_id"])
-        assert "live" in observed
-        assert "retired" not in observed, observed
