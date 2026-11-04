@@ -566,6 +566,17 @@ def test_blocks_land_on_the_mamba_checkpoint_grid(
     assert cache_config.block_size == block_size
 
 
+def test_hisparse_sets_mamba_blocks_to_its_indexer_page(monkeypatch):
+    """HiSparse groups do not use the hybrid attention block, so align-mode
+    Mamba blocks take HiSparse's size and the attention block only pads pages."""
+    monkeypatch.setattr(
+        "vllm.v1.hisparse.binding.get_hisparse_mamba_block_size", lambda c: 64
+    )
+    cache_config = _align_qwen3_5_blocks(64)
+
+    assert (cache_config.block_size, cache_config.mamba_block_size) == (576, 64)
+
+
 def test_xpu_gdn_rounding_rejected_by_a_sibling_backend_raises(monkeypatch):
     # XPU's GDN rounding runs after super()'s check, so it must check again.
     try:

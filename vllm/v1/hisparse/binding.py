@@ -56,6 +56,67 @@ def resolve_hisparse_specs(
     }
     if not mla_specs:
         return kv_cache_spec
+    block_size, indexer_block_size = _resolve_hisparse_block_sizes(
+        mla_specs, attn_layers
+    )
+    indexer_names = [
+        name
+        for name, spec in mla_specs.items()
+        if spec.cache_role is SparseCacheRole.INDEXER
+    ]
+    resized_specs: dict[str, KVCacheSpec] = {
+        name: spec.copy_with_new_block_size(
+            indexer_block_size if name in indexer_names else block_size
+        )
+        for name, spec in mla_specs.items()
+    }
+    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
+    assert groups is not None
+    return (
+        kv_cache_spec
+        | resized_specs
+        | {
+            layer_name: group.kv_cache_spec
+            for group in groups
+            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
+            for layer_name in group.layer_names
+        }
+    )
+
+
+def get_hisparse_mamba_block_size(vllm_config: VllmConfig) -> int | None:
+    """Mamba block size under HiSparse: the indexer kernel page, which every
+    indexer block is a multiple of, so Mamba blocks never grow the scheduler
+    block past the indexer's."""
+    if getattr(vllm_config, "attention_config", None) is None:
+        return None
+    if vllm_config.attention_config.hisparse_config is None:
+        return None
+    from vllm.config.vllm import get_layers_from_vllm_config, set_current_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+    )
+    with set_current_vllm_config(vllm_config):
+        mla_specs = {
+            name: spec
+            for name, layer in attn_layers.items()
+            if isinstance(
+                spec := layer.get_kv_cache_spec(vllm_config), MLAAttentionSpec
+            )
+        }
+    if not mla_specs:
+        return None
+    return _resolve_hisparse_block_sizes(mla_specs, attn_layers)[1]
+
+
+def _resolve_hisparse_block_sizes(
+    mla_specs: dict[str, MLAAttentionSpec],
+    attn_layers: Mapping[str, "AttentionLayerBase"],
+) -> tuple[int, int]:
+    """The GPU block size of the HiSparse MLA specs and the indexer's."""
     block_sizes = {spec.block_size for spec in mla_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")
@@ -78,24 +139,7 @@ def resolve_hisparse_specs(
         [attn_layers[name].get_attn_backend() for name in indexer_names],
         [mla_specs[name] for name in indexer_names],
     )
-    resized_specs: dict[str, KVCacheSpec] = {
-        name: spec.copy_with_new_block_size(
-            indexer_block_size if name in indexer_names else block_size
-        )
-        for name, spec in mla_specs.items()
-    }
-    groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
-    assert groups is not None
-    return (
-        kv_cache_spec
-        | resized_specs
-        | {
-            layer_name: group.kv_cache_spec
-            for group in groups
-            if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
-            for layer_name in group.layer_names
-        }
-    )
+    return block_size, indexer_block_size
 
 
 def _largest_exact_kernel_block_size(
