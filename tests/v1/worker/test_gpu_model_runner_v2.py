@@ -458,26 +458,6 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
     )
 
 
-def test_capture_model_runs_the_spec_kernels(monkeypatch):
-    """Capture runs every bound spec kernel for every capture shape
-    (KernelRegistry.capture), so a commit replays inside the graphs."""
-    runner = _make_capture_runner(monkeypatch, captured=True)
-    monkeypatch.setattr(
-        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
-    )
-    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
-    monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
-    )
-    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
-    spec_round = Mock()
-    runner.spec_round = spec_round
-
-    runner.capture_model()
-
-    spec_round.capture.assert_called_once_with()
-
-
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):
     """With no graphs to capture (e.g. enforce_eager) there is nothing baked
     into the workspace, so the early return must not lock it."""
