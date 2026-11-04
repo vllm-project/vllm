@@ -783,6 +783,13 @@ Full example: [examples/generate/multimodal/openai_chat_completion_client_for_mu
 
 Instead of `image_url`, you can pass a video file via `video_url`. Here is a simple example using [LLaVA-OneVision](https://huggingface.co/llava-hf/llava-onevision-qwen2-0.5b-ov-hf).
 
+For Qwen2-VL and Qwen2.5-VL, the `qwen2_vl` video sampler requires at least
+one complete temporal patch after sampling (two frames with the default
+settings). A one-frame video or sampling settings that produce no complete
+patch are rejected with an HTTP 400 error identifying the `video` parameter.
+Check both the source video length and sampling settings; increasing
+`max_frames` cannot make a one-frame source valid.
+
 First, launch the OpenAI-compatible server:
 
 ```bash
