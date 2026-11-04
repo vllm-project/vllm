@@ -236,15 +236,14 @@ __global__ void __launch_bounds__(kThreads)
     if (lane == 31 && total != 0) warp_base = atomicAdd(&s.count, total);
     warp_base = __shfl_sync(0xffffffffu, warp_base, 31);
     int offset = warp_base + inclusive - hits;
-#pragma unroll
-    for (int j = 0; j < kItems; ++j) {
-      if (hit_mask & (1u << j)) {
-        if (offset < kCapacity) {
-          s.candidates[offset] = make_uint2(
-              base + tid * 4 + (j / 4) * kThreads * 4 + j % 4, keys[j]);
-        }
-        ++offset;
+    const int tid_base = base + (tid << 2);
+    for (uint32_t m = hit_mask; m != 0u; m &= m - 1u) {
+      const int j = __ffs(m) - 1;
+      if (offset < kCapacity) {
+        s.candidates[offset] = make_uint2(
+            tid_base + (j >> 2) * (kThreads * 4) + (j & 3), keys[j]);
       }
+      ++offset;
     }
   }
   __syncthreads();
