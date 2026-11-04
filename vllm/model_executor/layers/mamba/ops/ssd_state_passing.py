@@ -26,13 +26,21 @@ from vllm.triton_utils import tl, triton
     ],
     key=["dim"],
 )
-@triton.jit(do_not_specialize_on_alignment=["final_state_indices_ptr"])
+@triton.jit(
+    do_not_specialize_on_alignment=[
+        "final_state_indices_ptr",
+        "initial_state_indices_ptr",
+        "has_initial_state_ptr",
+    ]
+)
 def _state_passing_fwd_kernel(
     # Pointers to matrices
     states_ptr,
     out_ptr,
     dA_cs_ptr,
     initstates_ptr,
+    initial_state_indices_ptr,
+    has_initial_state_ptr,
     last_chunk_indices_ptr,
     final_states_ptr,
     final_state_indices_ptr,
@@ -56,9 +64,12 @@ def _state_passing_fwd_kernel(
     stride_final_states_head: tl.int64,
     stride_final_states_dim: tl.constexpr,
     stride_final_state_indices,
+    stride_initial_state_indices,
+    stride_has_initial_state,
     # Meta-parameters
     HAS_INITSTATES: tl.constexpr,
     HAS_FINAL_STATES: tl.constexpr,
+    INDEXED_INITIAL_STATES: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
@@ -86,13 +97,25 @@ def _state_passing_fwd_kernel(
 
     # Load initial state once — no per-chunk branching needed
     if HAS_INITSTATES:
+        initial_slot = pid_b
+        has_initial = True
+        if INDEXED_INITIAL_STATES:
+            initial_slot = tl.load(
+                initial_state_indices_ptr + pid_b * stride_initial_state_indices
+            ).to(tl.int64)
+            has_initial = tl.load(
+                has_initial_state_ptr + pid_b * stride_has_initial_state
+            ).to(tl.int1)
+            initial_slot = tl.where(has_initial, initial_slot, 0)
         initstates_ptrs = (
             initstates_ptr
-            + pid_b * stride_initstates_batch
+            + initial_slot * stride_initstates_batch
             + pid_h * stride_initstates_head
             + offs_m * stride_initstates_dim
         )
-        states = tl.load(initstates_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
+        states = tl.load(
+            initstates_ptrs, mask=(offs_m < dim) & has_initial, other=0.0
+        ).to(tl.float32)
     else:
         states = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
 
@@ -101,8 +124,12 @@ def _state_passing_fwd_kernel(
     for _ in range(nchunks_this_seq):
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
+        if INDEXED_INITIAL_STATES:
+            # Preserve the entering state before the final cache write aliases it.
+            tl.store(out_ptrs, states, mask=offs_m < dim)
         states = fast_exp(dA_cs) * states + new_states
-        tl.store(out_ptrs, states, mask=offs_m < dim)
+        if not INDEXED_INITIAL_STATES:
+            tl.store(out_ptrs, states, mask=offs_m < dim)
 
         states_ptrs += stride_states_chunk
         dA_cs_ptr += stride_dA_cs_chunk
@@ -130,6 +157,8 @@ def _state_passing_fwd(
     out_dtype=None,
     final_states=None,
     final_state_indices=None,
+    initial_state_indices=None,
+    has_initial_state=None,
 ):
     """`final_states` (num_slots, nheads, dim), if given, receives each
     sequence's final state at slot `final_state_indices[b]`."""
@@ -156,13 +185,13 @@ def _state_passing_fwd(
     )
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE"]), batch, nheads)
-    launch_autotuned(
-        _state_passing_fwd_kernel,
-        grid,
+    launch_kwargs = dict(
         states_ptr=states,
         out_ptr=out,
         dA_cs_ptr=dA_cumsum,
         initstates_ptr=initial_states,
+        initial_state_indices_ptr=initial_state_indices,
+        has_initial_state_ptr=has_initial_state,
         last_chunk_indices_ptr=last_chunk_indices,
         final_states_ptr=final_states,
         final_state_indices_ptr=final_state_indices,
@@ -188,5 +217,17 @@ def _state_passing_fwd(
         ),
         HAS_INITSTATES=initial_states is not None,
         HAS_FINAL_STATES=final_states is not None,
+        stride_initial_state_indices=(
+            initial_state_indices.stride(0) if initial_state_indices is not None else 0
+        ),
+        stride_has_initial_state=(
+            has_initial_state.stride(0) if has_initial_state is not None else 0
+        ),
+        INDEXED_INITIAL_STATES=initial_state_indices is not None,
     )
+    if initial_state_indices is not None:
+        # Autotuning would repeatedly overwrite the input cache when slots alias.
+        _state_passing_fwd_kernel.fn[grid](**launch_kwargs, BLOCK_SIZE=512)
+    else:
+        launch_autotuned(_state_passing_fwd_kernel, grid, **launch_kwargs)
     return out

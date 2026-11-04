@@ -11,6 +11,7 @@ from packaging import version
 
 from vllm.triton_utils import triton
 
+from .gather_initial_states import gather_initial_states
 from .ssd_bmm import _bmm_chunk_fwd
 from .ssd_chunk_scan import _chunk_scan_fwd
 from .ssd_chunk_state import _chunk_cumsum_fwd, _chunk_state_fwd
@@ -45,6 +46,9 @@ def _mamba_chunk_scan_combined_fwd(
     state_dtype=None,
     final_states_out=None,
     final_state_indices=None,
+    initial_state_cache=None,
+    initial_state_indices=None,
+    has_initial_state=None,
 ):
     assert is_int_pow_2(chunk_size), "chunk_size must be integer power of 2"
     seqlen, nheads, headdim = x.shape
@@ -114,9 +118,13 @@ def _mamba_chunk_scan_combined_fwd(
         states.flatten(-2),  # (nchunks, nheads, headdim*dstate)
         dA_cumsum,  # (nheads, nchunks, chunk_size)
         last_chunk_indices,
-        initial_states=initial_states.flatten(-2)
-        if initial_states is not None
+        initial_states=(
+            initial_state_cache if initial_state_cache is not None else initial_states
+        ).flatten(-2)
+        if initial_state_cache is not None or initial_states is not None
         else None,  # (batch, nheads, headdim*dstate)
+        initial_state_indices=initial_state_indices,
+        has_initial_state=has_initial_state,
         out_dtype=state_dtype if state_dtype is not None else C.dtype,
         final_states=final_states_out.flatten(-2)
         if final_states_out is not None
@@ -150,7 +158,11 @@ def _mamba_chunk_scan_combined_fwd(
         seq_idx,
         D=D,
         z=z,
-        initial_states=initial_states,
+        # Keep the initial-state dtype in the existing scan autotune key.
+        initial_states=initial_state_cache
+        if initial_state_cache is not None
+        else initial_states,
+        states_are_exclusive=initial_state_cache is not None,
     )
 
     if return_intermediate_states:
@@ -183,6 +195,9 @@ def mamba_chunk_scan_combined_varlen(
     state_dtype=None,
     final_states_out=None,
     final_state_indices=None,
+    initial_state_cache=None,
+    initial_state_indices=None,
+    has_initial_state=None,
 ):
     """Argument:
         x: (seqlen, nheads, headdim)
@@ -205,12 +220,48 @@ def mamba_chunk_scan_combined_varlen(
         state_dtype: The data type of the ssm state
         final_states_out: (num_slots, nheads, headdim, dstate) state cache
         final_state_indices: (batch,) slot receiving each final state
+        initial_state_cache: Optional GPU cache instead of dense initial_states.
+        initial_state_indices: (batch,) input cache slots; may alias output slots.
+        has_initial_state: (batch,) valid input state mask.
+
     Return:
         varlen_states: (batch, nheads, headdim, dstate), or None if written
+
     """
     assert cu_seqlens is not None, "cu_seqlens must be provided assuming varlen input"
     assert seq_idx is not None
     assert final_states_out is None or not return_intermediate_states
+
+    indexed_state_args = {}
+    if initial_state_cache is not None:
+        assert initial_states is None
+        assert initial_state_indices is not None and has_initial_state is not None
+        batch = len(cu_seqlens) - 1
+        assert initial_state_indices.shape == has_initial_state.shape == (batch,)
+        assert initial_state_cache.shape[1:] == (x.shape[1], x.shape[2], B.shape[2])
+        state_out_dtype = state_dtype if state_dtype is not None else C.dtype
+        assert initial_state_cache.dtype == state_out_dtype, (
+            "Indexed cache and state workspace must have the same dtype"
+        )
+        if batch == 1 and final_states_out is not None and current_platform.is_cuda():
+            indexed_state_args = dict(
+                initial_state_cache=initial_state_cache,
+                initial_state_indices=initial_state_indices,
+                has_initial_state=has_initial_state,
+            )
+        else:
+            # Snapshot all inputs before shared/crossed slots can be overwritten.
+            # Checkpoint consumers require the original inclusive chunk states.
+            if not current_platform.is_cuda():
+                initial_states = torch.where(
+                    has_initial_state[:, None, None, None],
+                    initial_state_cache[initial_state_indices],
+                    0,
+                )
+            else:
+                initial_states = gather_initial_states(
+                    initial_state_cache, initial_state_indices, has_initial_state
+                )
 
     varlen_states = _mamba_chunk_scan_combined_fwd(
         x,
@@ -234,6 +285,7 @@ def mamba_chunk_scan_combined_varlen(
         state_dtype=state_dtype,
         final_states_out=final_states_out,
         final_state_indices=final_state_indices,
+        **indexed_state_args,
     )
     if final_states_out is not None:
         if varlen_states is not None:
