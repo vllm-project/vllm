@@ -5,6 +5,7 @@ import contextlib
 import inspect
 import os
 import queue
+import sys
 import tempfile
 import textwrap
 import threading
@@ -22,6 +23,7 @@ import numpy as np
 import pytest
 import ray
 import torch
+from transformers import DeepseekV2Config
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from tests.v1.spec_decode.utils import fake_speculative_config
@@ -5059,15 +5061,28 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_mla_broadcast_notif_uses_remote_request_id(default_vllm_config, dist_init):
+def test_mla_broadcast_notif_uses_remote_request_id(
+    default_vllm_config, dist_init, tmp_path
+):
     """Pure MLA reads one replica but notifies every other prefill rank
     using the prefill request ID, not the local decode request ID.
     """
     decode_tp_size = 1
     prefill_tp_size = 4
     block_size = 16 if current_platform.is_cpu() else 64
+    model_path = tmp_path / "mla-model"
+    DeepseekV2Config(
+        architectures=["DeepseekV2ForCausalLM"],
+        hidden_size=2048,
+        num_attention_heads=16,
+        num_key_value_heads=16,
+        num_hidden_layers=1,
+        max_position_embeddings=16384,
+        kv_lora_rank=512,
+        q_lora_rank=None,
+    ).save_pretrained(model_path)
     vllm_config = create_vllm_config(
-        model="deepseek-ai/DeepSeek-V2-Lite",
+        model=str(model_path),
         block_size=block_size,
         attention_backend="CPU_MLA" if current_platform.is_cpu() else None,
     )
@@ -5083,7 +5098,7 @@ def test_mla_broadcast_notif_uses_remote_request_id(default_vllm_config, dist_in
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
     with contextlib.ExitStack() as cleanup:
-        if current_platform.is_cpu() and hasattr(os, "sched_getaffinity"):
+        if current_platform.is_cpu() and sys.platform == "linux":
             cleanup.callback(os.sched_setaffinity, 0, os.sched_getaffinity(0))
         worker = NixlConnectorWorker(vllm_config, "decode_engine", kv_cache_config)
         cleanup.callback(worker.shutdown)
