@@ -345,8 +345,9 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         )
         request_ids = kwargs.get("request_ids")
         assert request_ids is None or isinstance(request_ids, list)
-        attn_metadata = kwargs.get("attn_metadata")
-        assert attn_metadata is None or isinstance(attn_metadata, dict)
+        attn_metadata = kwargs.get("attn_metadata", forward_context.attn_metadata)
+        if not isinstance(attn_metadata, dict):
+            attn_metadata = None
         self.connector_worker.start_step(
             metadata,
             request_state_indices,

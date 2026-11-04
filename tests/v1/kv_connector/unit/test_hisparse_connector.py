@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import ctypes
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -160,8 +161,10 @@ def test_no_forward_enqueues_deferred_hisparse_transfers():
     connector.finish_forward.assert_called_once_with()
 
 
-def test_full_graph_step_prepares_host_mirror_outside_model():
-    """Graph replay must restore host-mirror state cleared at step start."""
+@pytest.mark.parametrize("metadata_in_kwargs", [True, False])
+def test_step_prepares_host_mirror_outside_model(metadata_in_kwargs):
+    """Host mirroring is armed at step start both for graph replay, which
+    passes the metadata, and for eager steps, which run in its context."""
     runtime = SimpleNamespace(
         is_group_leader=True,
         eager_host_mirror=True,
@@ -196,12 +199,14 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
         req_id_per_token=req_id_per_token,
     )
 
-    connector.start_load_kv(
-        SimpleNamespace(),
-        request_state_indices=None,
-        request_ids=[],
-        attn_metadata={"layer": attn_metadata},
-    )
+    kwargs: dict[str, Any] = {"request_state_indices": None, "request_ids": []}
+    forward_context = SimpleNamespace(attn_metadata=None)
+    if metadata_in_kwargs:
+        kwargs["attn_metadata"] = {"layer": attn_metadata}
+    else:
+        forward_context.attn_metadata = {"layer": attn_metadata}
+
+    connector.start_load_kv(forward_context, **kwargs)
 
     worker._enqueue_host_mirror()
 
@@ -335,7 +340,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     )
 
     connector.start_load_kv(
-        SimpleNamespace(),
+        SimpleNamespace(attn_metadata=None),
         request_state_indices=None,
         request_ids=["req"],
         num_tokens=block_size,
@@ -359,7 +364,7 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
         None, (), (), {}, True, {}
     )
     connector.start_load_kv(
-        SimpleNamespace(),
+        SimpleNamespace(attn_metadata=None),
         request_state_indices=None,
         request_ids=[],
         num_tokens=0,
