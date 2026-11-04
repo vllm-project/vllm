@@ -383,13 +383,19 @@ def get_current_attn_backends_and_specs(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     fallback: list[type[AttentionBackend]],
-) -> tuple[list[type[AttentionBackend]], list[AttentionSpec | None]]:
-    """Distinct (backend, spec) pairs of the transfer layers, else ``fallback``.
+) -> tuple[
+    list[type[AttentionBackend]], list[AttentionSpec | None], list[list[str]] | None
+]:
+    """Distinct (backend, spec, query heads) groups of the transfer layers, with
+    their layer names, else ``fallback`` with no layer names.
 
-    Compressed caches are skipped: their kernel pages never split transferred
-    blocks.
+    The layer names let kernel block selection match the model runner's, which
+    picks per attention group. Compressed caches are skipped: their kernel pages
+    never split transferred blocks.
     """
-    pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
+    groups: dict[
+        tuple[type[AttentionBackend], AttentionSpec | None, int], list[str]
+    ] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     for group in kv_cache_config.transfer_groups:
         specs = getattr(group.kv_cache_spec, "kv_cache_specs", {})
@@ -400,10 +406,15 @@ def get_current_attn_backends_and_specs(
                 continue
             if not isinstance(spec, AttentionSpec):
                 spec = None
-            pairs[layer.get_attn_backend(), spec] = None
-    if not pairs:
-        return fallback, [None] * len(fallback)
-    return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+            key = (layer.get_attn_backend(), spec, getattr(layer, "num_heads", 0))
+            groups.setdefault(key, []).append(name)
+    if not groups:
+        return fallback, [None] * len(fallback), None
+    return (
+        [backend for backend, _, _ in groups],
+        [spec for _, spec, _ in groups],
+        list(groups.values()),
+    )
 
 
 def check_compressed_kernel_split(

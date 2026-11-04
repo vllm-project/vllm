@@ -92,7 +92,6 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
             get_name=lambda name=name: name,
             customize_spec=AttentionBackend.customize_spec,
             get_supported_kernel_block_sizes=lambda _=None, sizes=sizes: sizes,
-            get_supported_kernel_block_sizes_for_layers=lambda *_, sizes=sizes: sizes,
         )
         layers[name] = SimpleNamespace(
             get_kv_cache_spec=lambda _, spec=specs[name]: spec,
@@ -114,9 +113,7 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     resolved = attn_utils.get_kv_cache_spec(config)
     assert resolved["main"].block_size == resolved["indexer"].block_size == expected
     dense_backend = layers["dense"].get_attn_backend()
-    assert resolved["dense"] == customize_attention_spec(
-        dense_backend, specs["dense"], "dense"
-    )
+    assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
 
 
@@ -127,7 +124,6 @@ def test_get_kv_cache_spec_tags_draft_layers(monkeypatch):
     backend = SimpleNamespace(
         customize_spec=AttentionBackend.customize_spec,
         get_supported_kernel_block_sizes=lambda _=None: [16],
-        get_supported_kernel_block_sizes_for_layers=lambda *_: [16],
     )
     layers = {
         name: SimpleNamespace(
@@ -1009,16 +1005,11 @@ class _DraftAwareBackend:
     """Takes 512-token kernel pages, except on the draft layer."""
 
     @staticmethod
-    def get_supported_kernel_block_sizes(kv_cache_spec=None):
-        return [64, 512]
-
-    @staticmethod
     def get_supported_kernel_block_sizes_for_layers(kv_cache_spec, layer_names):
         return [64] if "draft" in layer_names else [64, 512]
 
     get_builder_cls = staticmethod(lambda: _TableBuilder)
     get_name = staticmethod(lambda: "DRAFT_AWARE")
-    customize_spec = staticmethod(lambda spec: spec)
 
 
 def test_kernel_block_sizes_follow_each_groups_layers():
@@ -1038,9 +1029,6 @@ def test_kernel_block_sizes_follow_each_groups_layers():
 
     draft.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=512)
     assert draft.kernel_block_size == 64
-    assert customize_attention_spec(
-        _DraftAwareBackend, spec, "draft"
-    ).block_stride_alignment == MultipleOf(64)
 
 
 @pytest.mark.parametrize(
@@ -1050,7 +1038,7 @@ def test_split_blocks_align_to_kernel_blocks(block_size, page_states):
     """Backends taking only fixed kernel blocks align packed blocks to the kernel
     block the final block size is split into, and not at all when unsplit."""
     group = _packed_group(4, 132, [128, 256])
-    spec = customize_attention_spec(group.backend, group.kv_cache_spec, "layer.0")
+    spec = customize_attention_spec(group.backend, group.kv_cache_spec)
     spec = spec.copy_with_new_block_size(block_size)
     assert spec.get_block_stride_alignment() == max(page_states * 132, 1)
 

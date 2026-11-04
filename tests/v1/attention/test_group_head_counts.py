@@ -239,13 +239,17 @@ def test_flash_attention_geometry_comes_from_the_group():
     assert builder.headdim == 64
 
 
-@pytest.mark.parametrize("has_config", [False, True])
 @pytest.mark.parametrize(
-    "layer_heads,spec_kv_heads,expected",
-    [(40, 40, 64), (10, 10, 64), (24, 4, 512), (8, 4, 512), (None, 4, 512)],
+    "layer_heads,spec_kv_heads,has_config,expected",
+    [
+        pytest.param(40, 40, True, 64, id="mha-draft"),
+        pytest.param(24, 4, True, 512, id="gqa"),
+        pytest.param(None, 4, True, 512, id="no-layer"),
+        pytest.param(24, 4, False, 64, id="no-config"),
+    ],
 )
 def test_flashinfer_kernel_pages_use_layer_heads(
-    monkeypatch, layer_heads, spec_kv_heads, expected, has_config
+    monkeypatch, layer_heads, spec_kv_heads, has_config, expected
 ):
     """Kernel pages follow the layer's own head counts. The target model's 24
     query and 4 KV heads allow large pages, which an MHA draft layer cannot use.
@@ -286,7 +290,37 @@ def test_flashinfer_kernel_pages_use_layer_heads(
         selected = select_common_block_size(
             512, [backend.FlashInferBackend], [spec], [["draft"]]
         )
-    assert selected == (expected if has_config else 64)
+    assert selected == expected
+
+
+def test_connector_groups_layers_by_query_heads():
+    """P/D connectors choose the kernel block from the same groups as the model
+    runner, so a draft layer that shares the target's spec keeps its own heads."""
+    from vllm.distributed.kv_transfer.kv_connector.utils import (
+        get_current_attn_backends_and_specs,
+    )
+
+    spec = FullAttentionSpec(
+        block_size=512, num_kv_heads=4, head_size=128, dtype=torch.bfloat16
+    )
+    backend = object()
+    layers = {
+        name: SimpleNamespace(num_heads=heads, get_attn_backend=lambda: backend)
+        for name, heads in [("target.0", 24), ("draft", 4), ("target.1", 24)]
+    }
+    kv_cache_config = SimpleNamespace(
+        transfer_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=list(layers))]
+    )
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.utils.get_layers_from_vllm_config",
+        return_value=layers,
+    ):
+        backends, specs, layer_names = get_current_attn_backends_and_specs(
+            MagicMock(), kv_cache_config, []
+        )
+    assert backends == [backend, backend]
+    assert specs == [spec, spec]
+    assert layer_names == [["target.0", "target.1"], ["draft"]]
 
 
 def _triton_builder(
