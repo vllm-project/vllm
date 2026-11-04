@@ -71,6 +71,7 @@ from vllm.v1.kv_cache_interface import (
     HiSparseHotSpec,
     HiSparseResidentSpec,
     KVCacheConfig,
+    KVCacheGroupRole,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheSpecKind,
@@ -225,24 +226,57 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
-def test_hisparse_rejects_deepseek_v4():
-    full_specs = {
-        "model.layers.0.attn": MLAAttentionSpec(
+def test_hisparse_offloads_only_deepseek_v4_c4_caches():
+    """Only the indexed C4 cache goes to host, in packed pages, with its hot
+    buffer sized in compressed rows rather than tokens."""
+
+    def main_spec(compress_ratio: int, **kwargs) -> MLAAttentionSpec:
+        return MLAAttentionSpec(
             block_size=256,
             num_kv_heads=1,
             head_size=512,
             dtype=torch.uint8,
+            tokens_per_state=compress_ratio,
+            alignment=576,
             model_version="deepseek_v4",
+            state_content_bytes=584,
+            **kwargs,
         )
-    }
-    config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=HiSparseConfig()),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=512)),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
-    )
 
-    with pytest.raises(ValueError, match="does not support DeepSeek V4"):
-        get_hisparse_kv_cache_groups(config, full_specs)
+    specs: dict[str, KVCacheSpec] = {
+        "model.layers.2.attn": main_spec(4, is_index_group_leader=True),
+        "model.layers.2.attn.indexer.k_cache": MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            tokens_per_state=4,
+            alignment=576,
+            cache_role=SparseCacheRole.INDEXER,
+        ),
+        "model.layers.3.attn": main_spec(128),
+    }
+    config = VllmConfig(model_config=ModelConfig(max_model_len=4096))
+    config.attention_config.hisparse_config = HiSparseConfig()
+    config.model_config.hf_config.index_topk = 512
+
+    groups = get_hisparse_kv_cache_groups(config, specs)
+
+    assert groups is not None
+    (source,) = [group for group in groups if group.host_resident]
+    assert source.layer_names == ["model.layers.2.attn"]
+    assert source.kv_cache_spec.page_size_bytes == 64 * 584
+    (hot,) = [
+        group.kv_cache_spec
+        for group in groups
+        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+    ]
+    assert hot.blocks_per_request == 2 * 512 // 64
+    assert any(
+        "model.layers.3.attn" in group.layer_names
+        and group.role is KVCacheGroupRole.DEFAULT
+        for group in groups
+    )
 
 
 @pytest.fixture(autouse=True)

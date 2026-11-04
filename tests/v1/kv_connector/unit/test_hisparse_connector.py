@@ -266,6 +266,8 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,
             begin_forward=MagicMock(),
+            tokens_per_row=1,
+            row_value_bytes=0,
         )
         handle = HiSparseCacheHandle(runtime)
         handle.view = SimpleNamespace(
@@ -419,6 +421,8 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     worker.host_write_event = worker.host_write_events[1]
     worker._next_host_write_event = 0
     worker._slot_mapping_staging = None
+    worker._row_slot_mappings = ()
+    worker.tokens_per_row = 1
     worker.cache_handles = []
     worker._pending_invalid_block_ids = []
     for name in (
