@@ -79,8 +79,6 @@ _running_tasks: set[asyncio.Task] = set()
 
 
 class _ServingStop:
-    """Stops a core serving through its synchronous `shutdown()`."""
-
     def __init__(self, name: str, serving: Any) -> None:
         self.name = name
         self.serving = serving

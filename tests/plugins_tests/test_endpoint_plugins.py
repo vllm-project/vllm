@@ -691,8 +691,6 @@ async def test_watchdog_exit_stops_without_drain(monkeypatch: pytest.MonkeyPatch
 
 
 class _HangingDrain(DummyAdminEndpointPlugin):
-    """Records when its drain starts and when it is cancelled."""
-
     def __init__(self, events: list[str]):
         super().__init__(events)
         self.entered = asyncio.Event()
@@ -713,7 +711,7 @@ async def test_cancelled_shutdown_cancels_drains():
     state = State()
     state.started_endpoint_plugins = [plugin := _HangingDrain([])]
     task = asyncio.create_task(drain_endpoint_plugins(state, time.monotonic() + 30))
-    await plugin.entered.wait()
+    await asyncio.wait_for(plugin.entered.wait(), 10)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -733,7 +731,7 @@ async def test_watchdog_exit_during_drain_cancels_drain_before_stop(
     app, serve_task, _ = await _serve(monkeypatch, [plugin], engine)
 
     app.state.request_shutdown()
-    await plugin.entered.wait()
+    await asyncio.wait_for(plugin.entered.wait(), 10)
     engine.errored = True
     engine.is_running = False
     terminate_if_errored(app.state.server, engine)
@@ -752,7 +750,7 @@ async def test_stop_cancels_running_drain_first():
     state.shutdown_task = asyncio.create_task(
         drain_endpoint_plugins(state, time.monotonic() + 30)
     )
-    await plugin.entered.wait()
+    await asyncio.wait_for(plugin.entered.wait(), 10)
 
     await stop_endpoint_plugins(state)
 
@@ -781,9 +779,9 @@ async def test_cancelled_stop_still_stops_plugins():
     state.shutdown_task = asyncio.create_task(
         drain_endpoint_plugins(state, time.monotonic() + 30)
     )
-    await plugin.entered.wait()
+    await asyncio.wait_for(plugin.entered.wait(), 10)
     stop = asyncio.create_task(stop_endpoint_plugins(state))
-    await plugin.unwinding.wait()
+    await asyncio.wait_for(plugin.unwinding.wait(), 10)
 
     stop.cancel()
     await asyncio.sleep(0)
