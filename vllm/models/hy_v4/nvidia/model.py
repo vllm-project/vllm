@@ -27,7 +27,6 @@ import typing
 from collections.abc import Callable, Iterable, MutableSequence, Sequence
 from itertools import islice
 
-import regex as re
 import torch
 from torch import nn
 from transformers import PreTrainedConfig
@@ -37,7 +36,10 @@ from vllm.distributed import (
     get_pp_group,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -402,32 +404,6 @@ class HYV4Model(nn.Module):
 
         return self.norm(hidden_states)
 
-    def load_fused_expert_weights(
-        self,
-        name: str,
-        params_dict: dict,
-        loaded_weight: torch.Tensor,
-        shard_id: str,
-        num_experts: int,
-    ) -> bool:
-        param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        loaded_local_expert = False
-        for expert_id in range(num_experts):
-            curr_expert_weight = loaded_weight[expert_id]
-            success = weight_loader(
-                param,
-                curr_expert_weight,
-                name,
-                shard_id,
-                expert_id,
-                return_success=True,
-            )
-            if success:
-                loaded_local_expert = True
-
-        return loaded_local_expert
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FP8 indexer wk dequant buffer (weight and scale arrive separately).
         pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
@@ -439,39 +415,12 @@ class HYV4Model(nn.Module):
         # outliving this call would pin the pre-shuffle storage (OOM on large
         # MoE) and make a later reload target orphaned tensors.
         params_dict = dict(self.named_parameters())
-        # Split per-expert mapping (V3 style): experts.0.gate_proj.weight
-        split_expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
-
-        base_layer = (
-            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
-        )
-        # Fused expert mapping: experts.gate_up_proj (all experts in one tensor).
-        # The packed weights are owned by the RoutedExperts submodule, so the
-        # targets are experts.routed_experts.[base_layer.]w{13,2}_weight.
-        fused_expert_prefix = f".experts.routed_experts.{base_layer}"
-        fused_expert_params_mapping = [
-            (f"{fused_expert_prefix}w13_weight", ".experts.gate_up_proj", 0, "w1"),
-            (f"{fused_expert_prefix}w2_weight", ".experts.down_proj", 0, "w2"),
-        ]
-        num_experts = getattr(self.config, "num_experts", 0)
 
         def _should_skip_missing_param(param_name: str) -> bool:
             # Sparse checkpoints may contain indexer weights for layers that
             # fall back to dense MLA on unsupported GPUs.
             return ".indexer." in param_name
-
-        def _is_split_expert_weight(weight_name: str) -> bool:
-            """Whether this weight is in split (per-expert) format."""
-            # Split format: mlp.experts.<id>.gate_proj.weight
-            return bool(re.search(r"\.experts\.\d+\.", weight_name))
-
-        def _is_fused_expert_weight(weight_name: str) -> bool:
-            """Whether this weight is in fused (all-experts-packed) format."""
-            return ".experts.gate_up_proj" in weight_name or (
-                ".experts.down_proj" in weight_name
-                and not _is_split_expert_weight(weight_name)
-            )
 
         for name, loaded_weight in weights:
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
@@ -498,112 +447,39 @@ class HYV4Model(nn.Module):
             if name.endswith(".bias") and name not in params_dict:
                 continue
 
-            # Determine per-weight whether this is fused or split format.
-            is_fused_expert = _is_fused_expert_weight(name)
-            expert_params_mapping = (
-                fused_expert_params_mapping
-                if is_fused_expert
-                else split_expert_params_mapping
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
+                continue
+            if "gate.e_score_correction_bias" in name:
+                name = name.replace("gate.e_score_correction_bias", "expert_bias")
+            if "router.gate." in name:
+                name = name.replace("router.", "")
+            if "hc_fn" in name:
+                name = name.replace("hc_fn", "hc_fn.weight")
+            if "hc_head_fn" in name:
+                name = name.replace("hc_head_fn", "hc_head_fn.weight")
+
+            if is_pp_missing_parameter(name, self):
+                continue
+
+            if name not in params_dict:
+                if _should_skip_missing_param(name):
+                    continue
+                logger.warning_once(
+                    "Skipping unknown checkpoint weight: %s",
+                    name,
+                )
+                continue
+
+            param = params_dict[name]
+            weight_loader: Callable[..., typing.Any] = getattr(
+                param, "weight_loader", default_weight_loader
             )
-
-            is_expert_weight = False
-            loaded_expert_param_names: set[str] = set()
-            for mapping in expert_params_mapping:
-                param_name, weight_name, expert_id, shard_id = mapping
-                if weight_name not in name:
-                    continue
-
-                # This is an expert weight and must not be attempted as any
-                # other kind of weight later on.
-                is_expert_weight = True
-
-                # Do not modify `name`: the loop may continue past this point.
-                name_mapped = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
-                if is_fused_expert:
-                    if "experts.gate_up_proj" in name:
-                        chunks = loaded_weight.chunk(2, dim=-2)
-                        success_w1 = self.load_fused_expert_weights(
-                            name_mapped, params_dict, chunks[0], "w1", num_experts
-                        )
-                        success_w3 = self.load_fused_expert_weights(
-                            name_mapped, params_dict, chunks[1], "w3", num_experts
-                        )
-                        success = success_w1 and success_w3
-                    else:
-                        success = self.load_fused_expert_weights(
-                            name_mapped,
-                            params_dict,
-                            loaded_weight,
-                            shard_id,
-                            num_experts,
-                        )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    # Split per-expert format (V3 style).
-                    if name_mapped not in params_dict:
-                        if _should_skip_missing_param(name_mapped):
-                            continue
-                        logger.warning_once(
-                            "Skipping unknown checkpoint weight: %s",
-                            name_mapped,
-                        )
-                        continue
-                    param = params_dict[name_mapped]
-                    # Ask the weight loader whether it succeeded, otherwise we
-                    # may skip experts that have other available replicas.
-                    weight_loader: Callable[..., typing.Any] = param.weight_loader
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                if success:
-                    if not is_fused_expert:
-                        loaded_expert_param_names.add(name_mapped)
-                        continue
-                    name = name_mapped
-                    break
+            if stacked_shard_id is None:
+                weight_loader(param, loaded_weight)
             else:
-                if loaded_expert_param_names:
-                    loaded_params.update(loaded_expert_param_names)
-                    continue
-                if is_expert_weight:
-                    # An expert weight that is not mapped to this rank.
-                    continue
-                if "gate.e_score_correction_bias" in name:
-                    name = name.replace("gate.e_score_correction_bias", "expert_bias")
-                if "router.gate." in name:
-                    name = name.replace("router.", "")
-                if "hc_fn" in name:
-                    name = name.replace("hc_fn", "hc_fn.weight")
-                if "hc_head_fn" in name:
-                    name = name.replace("hc_head_fn", "hc_head_fn.weight")
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                if name not in params_dict:
-                    if _should_skip_missing_param(name):
-                        continue
-                    logger.warning_once(
-                        "Skipping unknown checkpoint weight: %s",
-                        name,
-                    )
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if stacked_shard_id is None:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, stacked_shard_id)
+                weight_loader(param, loaded_weight, stacked_shard_id)
             loaded_params.add(name)
 
         return loaded_params

@@ -3,8 +3,7 @@
 """Multi-token prediction (MTP) head for HY V4 (NVIDIA)."""
 
 import copy
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -12,7 +11,7 @@ from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -80,41 +79,6 @@ def _should_skip_missing_mtp_scale_param(
     return quant_config is None and any(
         scale_name in name for scale_name in _MTP_SCALE_ONLY_PARAM_SUBSTRINGS
     )
-
-
-def _resolve_fused_expert_param(
-    param_base: str,
-    ckpt_suffix: str,
-    params_dict: dict,
-) -> str | None:
-    """Map a fused expert checkpoint suffix onto a draft parameter name.
-
-    Fused checkpoints pack every expert into one tensor and name the companion
-    scales by suffixing the projection (``experts.gate_up_proj_scale_inv``),
-    while the draft model owns ``experts.routed_experts.w13_weight`` plus a
-    separate ``..._scale_inv`` parameter. Dropping the suffix would push the
-    scale into the weight parameter and leave the scale at its sentinel init.
-
-    Args:
-        param_base: Draft parameter holding the packed weight.
-        ckpt_suffix: Checkpoint text following the projection name.
-        params_dict: The draft model's named parameters.
-
-    Returns:
-        The matching draft parameter name, or None when there is none.
-
-    """
-    if not ckpt_suffix:
-        return param_base if param_base in params_dict else None
-    tail = ckpt_suffix.lstrip(".").removeprefix("weight_")
-    for candidate in (
-        f"{param_base}_{tail}",
-        f"{param_base}_scale_inv",
-        f"{param_base}_scale",
-    ):
-        if candidate in params_dict:
-            return candidate
-    return None
 
 
 def _prepare_mtp_fp8_expert_scale(
@@ -618,116 +582,6 @@ class HYV4MTP(nn.Module):
             )
         return name
 
-    def _load_fused_expert_weights(
-        self,
-        name: str,
-        params_dict: dict,
-        loaded_weight: torch.Tensor,
-        shard_id: str,
-        num_experts: int,
-    ) -> bool:
-        if name not in params_dict:
-            return False
-        param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        loaded_local_expert = False
-        for expert_id in range(num_experts):
-            curr_expert_weight = loaded_weight[expert_id]
-            success = weight_loader(
-                param,
-                curr_expert_weight,
-                name,
-                shard_id,
-                expert_id,
-                return_success=True,
-            )
-            if success:
-                loaded_local_expert = True
-        return loaded_local_expert
-
-    def _load_expert_weight(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
-        params_dict: dict,
-        loaded_params: set[str],
-        split_expert_params_mapping: list[tuple[str, str, int, str]],
-        fused_expert_param_names: dict[tuple[str, str], str],
-        num_experts: int,
-    ) -> bool:
-        """Load one routed-expert weight in either checkpoint layout.
-
-        Args:
-            name: Weight name already rewritten to draft-module naming.
-            loaded_weight: The checkpoint tensor.
-            params_dict: The draft model's named parameters.
-            loaded_params: Set updated with the parameters that received a value.
-            split_expert_params_mapping: Mapping for the per-expert layout.
-            fused_expert_param_names: ``(mlp_prefix, tag) -> param name`` for the
-                all-experts-packed layout.
-            num_experts: Total number of routed experts.
-
-        Returns:
-            True when the weight was consumed (even if this rank holds none of
-            the addressed experts).
-
-        """
-        base = name.split(".experts.")[0]
-        for ckpt_proj, tag in (
-            (".experts.gate_up_proj", "w13_weight"),
-            (".experts.down_proj", "w2_weight"),
-        ):
-            if ckpt_proj not in name:
-                continue
-            param_base = fused_expert_param_names.get((base, tag))
-            if param_base is None:
-                return False
-            # Keep the checkpoint suffix (e.g. `_scale_inv`) so block-scale
-            # tensors land in the scale parameter, not in the weight.
-            target = _resolve_fused_expert_param(
-                param_base, name.split(ckpt_proj, 1)[1], params_dict
-            )
-            if target is None:
-                return False
-            if tag == "w13_weight":
-                chunks = loaded_weight.chunk(2, dim=-2)
-                loaded_w1 = self._load_fused_expert_weights(
-                    target, params_dict, chunks[0], "w1", num_experts
-                )
-                loaded_w3 = self._load_fused_expert_weights(
-                    target, params_dict, chunks[1], "w3", num_experts
-                )
-                loaded = loaded_w1 and loaded_w3
-            else:
-                loaded = self._load_fused_expert_weights(
-                    target, params_dict, loaded_weight, "w2", num_experts
-                )
-            if loaded:
-                loaded_params.add(target)
-            # The weight belongs to the experts either way; never fall through.
-            return True
-
-        consumed = False
-        for param_name, weight_name, expert_id, shard_id in split_expert_params_mapping:
-            if weight_name not in name:
-                continue
-            consumed = True
-            name_mapped = name.replace(weight_name, param_name)
-            if name_mapped not in params_dict:
-                continue
-            param = params_dict[name_mapped]
-            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-            if weight_loader(
-                param,
-                loaded_weight,
-                name_mapped,
-                shard_id=shard_id,
-                expert_id=expert_id,
-                return_success=True,
-            ):
-                loaded_params.add(name_mapped)
-        return consumed
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -739,27 +593,6 @@ class HYV4MTP(nn.Module):
             "lm_head.weight": f"model.layers.{mtp_start}.shared_head.head.weight",
         }
 
-        num_experts = getattr(self.config, "n_routed_experts", 0)
-
-        # Routed-expert weights come in two checkpoint layouts:
-        #   split: mlp.experts.<id>.gate_proj.weight
-        #   fused: mlp.experts.gate_up_proj (all experts in one tensor)
-        # The split layout is resolved through the shared EPLB helper so the
-        # target param names stay in sync with the RoutedExperts module layout;
-        # the fused layout is resolved from the live parameter names.
-        split_expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
-        )
-        fused_expert_param_names: dict[tuple[str, str], str] = {}
-        for param_name in params_dict:
-            for tag in ("w13_weight", "w2_weight"):
-                if param_name.endswith(tag) and ".experts." in param_name:
-                    base = param_name.split(".experts.")[0]
-                    fused_expert_param_names[base, tag] = param_name
         stacked_mapping = [
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
@@ -860,18 +693,15 @@ class HYV4MTP(nn.Module):
             if is_loaded:
                 continue
 
-            is_loaded = False
-            if ".experts." in name:
-                is_loaded = self._load_expert_weight(
-                    name,
-                    loaded_weight,
-                    params_dict,
-                    loaded_params,
-                    split_expert_params_mapping,
-                    fused_expert_param_names,
-                    num_experts,
-                )
-            if is_loaded:
+            # Routed experts, per expert or fused. An unquantized draft has no
+            # expert scale parameters, so it skips the checkpoint's scales.
+            if ".experts." in name and _should_skip_missing_mtp_scale_param(
+                self.quant_config, name
+            ):
+                continue
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
                 continue
 
             remapped_name = maybe_remap_kv_scale_name(name, params_dict)
