@@ -564,6 +564,13 @@ def dummy_hf_overrides(
     if indexer_types := getattr(text_config, "indexer_types", None):
         text_config.update({"indexer_types": indexer_types[:num_hidden_layers]})
 
+    if (
+        sparse := getattr(hf_config, "sparse_attention_config", None)
+    ) and "sparse_attention_freq" in sparse:
+        sparse["sparse_attention_freq"] = sparse["sparse_attention_freq"][
+            :num_hidden_layers
+        ]
+
     # Update n_layers and moe configs for Moondream3 model
     if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
         text_config.update(

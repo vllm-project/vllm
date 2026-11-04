@@ -28,6 +28,7 @@ from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
 from vllm.parser.step3p5 import Step3p5Parser
+from vllm.parser.zaya import ZayaParser
 
 (
     DeepSeekV32ParserReasoningAdapter,
@@ -88,6 +89,11 @@ from vllm.parser.step3p5 import Step3p5Parser
     Qwen3ParserReasoningAdapter,
     Qwen3ParserToolAdapter,
 ) = make_adapters(Qwen3Parser)
+
+(
+    ZayaParserReasoningAdapter,
+    ZayaParserToolAdapter,
+) = make_adapters(ZayaParser)
 
 (
     MiMoParserReasoningAdapter,
