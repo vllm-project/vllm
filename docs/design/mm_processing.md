@@ -119,4 +119,4 @@ vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
     --trust-remote-code --mm-processor-kwargs '{"device_resize": true}'
 ```
 
-The API server then sends the decoded `uint8` pixels at their source resolution, and the model resizes them in fp32 (bicubic, antialiased, as the CPU path does without `mm_device_do_normalize`) before `FusedMMInputNorm`. This covers dynamic-resolution images and video frames, and requires `mm_device_do_normalize` and CV-CUDA (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).
+The API server then sends the decoded `uint8` pixels at their source resolution. On the GPU, CV-CUDA resizes them (bicubic, antialiased, `uint8` in and out) and reformats them to NCHW; `FusedMMInputNorm` then casts, rescales and normalizes them exactly as it does for the CPU path. This covers dynamic-resolution images and video frames, and requires `mm_device_do_normalize` and CV-CUDA (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).

@@ -98,37 +98,42 @@ def cvcuda_bicubic_resize(
     device: torch.device,
     max_chunk_bytes: int = 256 * 1024 * 1024,
 ) -> torch.Tensor:
-    """GPU counterpart of `_bicubic_resize_and_normalize`'s FP32 resize.
+    """GPU counterpart of `_bicubic_resize_and_normalize` with
+    ``do_cpu_normalize=False``.
 
     Resizes uint8 NHWC RGB *frames* to *size* ``(H, W)`` on *device* with
-    CV-CUDA and returns an NCHW view of float32 pixels in [0, 255] plus the
-    bicubic overshoot; rescaling and normalization stay with the model's input
-    norm. Frames are uploaded in chunks that keep the FP32 copy of the source
-    below *max_chunk_bytes*.
+    CV-CUDA and returns uint8 NCHW pixels; the cast to float, rescaling and
+    normalization stay with the model's input norm. Frames are uploaded in
+    chunks of at most *max_chunk_bytes*.
     """
     import cvcuda
 
     num_frames, height, width, _ = frames.shape
-    out = torch.empty((num_frames, *size, 3), dtype=torch.float32, device=device)
+    out = torch.empty((num_frames, 3, *size), dtype=torch.uint8, device=device)
     stream = cvcuda.as_stream(torch.cuda.current_stream(device))
-    step = max(1, max_chunk_bytes // (height * width * 3 * 4))
+    step = max(1, max_chunk_bytes // (height * width * 3))
     for start in range(0, num_frames, step):
-        src = frames[start : start + step].to(device, non_blocking=True).float()
-        dst = out[start : start + step]
-        if (height, width) == tuple(size):
-            dst.copy_(src)
-            continue
-        cvcuda.tvresize_into(
-            cvcuda.as_tensor(dst, "NHWC"),
+        src = frames[start : start + step].to(device, non_blocking=True)
+        if (height, width) != tuple(size):
+            # The destination's shape sets the output size.
+            resized = src.new_empty((src.shape[0], *size, 3))
+            cvcuda.tvresize_into(
+                cvcuda.as_tensor(resized, "NHWC"),
+                cvcuda.as_tensor(src, "NHWC"),
+                interp=cvcuda.Interp.CUBIC,
+                antialias=True,
+                stream=stream,
+            )
+            src = resized
+        cvcuda.reformat_into(
+            cvcuda.as_tensor(out[start : start + step], "NCHW"),
             cvcuda.as_tensor(src, "NHWC"),
-            interp=cvcuda.Interp.CUBIC,
-            antialias=True,
             stream=stream,
         )
     # CV-CUDA caches the torch buffers it last wrapped; release them. Queued
     # work is safe: it runs on the current stream, which orders reuse.
     cvcuda.clear_cache()
-    return out.permute(0, 3, 1, 2)
+    return out
 
 
 def _pil_to_nhwc_tensor(image: Image.Image) -> torch.Tensor:

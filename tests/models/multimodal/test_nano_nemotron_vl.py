@@ -310,7 +310,7 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
 @pytest.mark.parametrize("modality", ["image", "video"])
-def test_nemotron_device_resize_matches_fp32_cpu_preprocessing(
+def test_nemotron_device_resize_rounds_fp32_resize_once(
     modality: str, default_vllm_config
 ):
     pytest.importorskip("cvcuda")
@@ -318,16 +318,24 @@ def test_nemotron_device_resize_matches_fp32_cpu_preprocessing(
         mm_device_do_normalize=True
     ).merge_mm_processor_kwargs({})
     sources = _sources(modality)
-    # Reference: the original CPU path, FP32 resize + normalization.
-    _, expected_inputs = _preprocess(_make_processor(), modality, sources)
     _, raw_inputs = _preprocess(
         _make_processor(**device_kwargs, device_resize=True), modality, sources
     )
 
+    def fp32_resize_rounded(source: np.ndarray, size) -> torch.Tensor:
+        pixels = torch.from_numpy(source).reshape(-1, *source.shape[-3:])
+        resized = torch.nn.functional.interpolate(
+            pixels.permute(0, 3, 1, 2).float(),
+            size=tuple(size),
+            mode="bicubic",
+            align_corners=False,
+            antialias=True,
+        )
+        return resized.round().clamp(0, 255).to(torch.uint8)
+
     model = _uninitialized_model()
     nn.Module.__init__(model)
     model.input_norm = FusedMMInputNorm(_NORM_MEAN, _NORM_STD, 1.0 / 255.0).to(_DEVICE)
-    model.llm_dtype = torch.bfloat16
     model.patch_size = 4
     model.dynamic_resolution = True
     if modality == "video":
@@ -338,31 +346,45 @@ def test_nemotron_device_resize_matches_fp32_cpu_preprocessing(
         assert isinstance(images, NanoNemotronVLImagePixelInputsDynamic)
         pixels = images.pixel_values_flat
         expected = DynamicResolutionImageTiler.stack(
-            expected_inputs["pixel_values_flat"], 4
+            [
+                fp32_resize_rounded(source, size)[0]
+                for source, size in zip(sources, raw_inputs["imgs_sizes"])
+            ],
+            4,
         )
     else:
         videos = parsed["videos"]
         assert isinstance(videos, NanoNemotronVLVideoPixelInputs)
         pixels = videos["pixel_values_flat"]
-        expected = expected_inputs["pixel_values_flat_video"]
-        # Chunked uploads give the same pixels as one upload.
-        frames, size = raw_inputs["pixel_values_raw_video"][0], (32, 40)
+        expected = fp32_resize_rounded(
+            sources[0], raw_inputs["video_frame_sizes"][0].tolist()
+        )
+        # Chunked uploads give the same pixels as one upload, also without a
+        # resize (reformat only).
+        frames = raw_inputs["pixel_values_raw_video"][0]
+        for size in ((32, 40), tuple(frames.shape[1:3])):
+            torch.testing.assert_close(
+                cvcuda_bicubic_resize(frames, size, _DEVICE, max_chunk_bytes=1),
+                cvcuda_bicubic_resize(frames, size, _DEVICE),
+                rtol=0,
+                atol=0,
+            )
         torch.testing.assert_close(
-            cvcuda_bicubic_resize(frames, size, _DEVICE, max_chunk_bytes=1),
-            cvcuda_bicubic_resize(frames, size, _DEVICE),
+            cvcuda_bicubic_resize(frames, frames.shape[1:3], _DEVICE).cpu(),
+            frames.permute(0, 3, 1, 2),
             rtol=0,
             atol=0,
         )
-    actual = model._normalize_pixel_values(pixels).cpu()
 
-    # Same FP32 math as the CPU reference: the bf16 results differ by at most
-    # one rounding step, in a few elements. (The uint8 CPU resize changes most
-    # elements of this noise input, some by several steps.)
-    assert actual.dtype == expected.dtype == torch.bfloat16
+    # uint8 NCHW, like the CPU path, for FusedMMInputNorm to cast and normalize.
+    # CV-CUDA rounds and clips the FP32 resize once: at most one level off it.
+    # (torch's uint8 CPU resize can be tens of levels off it on upscales.)
+    actual = pixels.cpu()
+    assert actual.dtype == torch.uint8
     assert actual.shape == expected.shape
-    diff = (actual.float() - expected.float()).abs()
-    assert diff.max() <= 2**-6
-    assert (diff > 0).float().mean() < 1e-2
+    diff = (actual.int() - expected.int()).abs()
+    assert diff.max() <= 1
+    assert (diff > 0).float().mean() < 1e-3
 
 
 def _uninitialized_model() -> NemotronH_Nano_VL_V2:
