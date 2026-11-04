@@ -120,8 +120,9 @@ class LoadConfig:
     which can help with load balancing and improve weight loading speed in
     startup scenarios. This reduces I/O contention by ensuring different ranks
     load different files in a randomized order.
-    Set to True to enable shuffling. Default is False (load files in sorted order).
+    Set to True to enable shuffling. Default is False.
     """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

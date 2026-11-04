@@ -8,8 +8,8 @@ import fnmatch
 import glob
 import hashlib
 import json
-import random
 import os
+import random
 import tempfile
 import threading
 import time
@@ -152,18 +152,14 @@ def _natural_sort_key(filepath: str) -> list:
     ]
 
 
-def _shuffle_files(files: list[str], shuffle: bool) -> None:
-    """Shuffle *files* in place with a rank-dependent seed when *shuffle* is set."""
-    if not shuffle:
-        return
+def _shuffle_files(files: list[str]) -> list[str]:
+    """Return *files* shuffled with a rank-dependent seed."""
     rank = get_world_group().rank
-    random.Random(42 + rank).shuffle(files)
-    logger.info(
-        "Shuffled %d safetensors files with seed %d (rank=%d)",
-        len(files),
-        42 + rank,
-        rank,
-    )
+    # Sort first so the permutation does not depend on the input order
+    shuffled = sorted(files, key=_natural_sort_key)
+    random.Random(rank).shuffle(shuffled)
+    logger.info("Shuffled %d safetensors files with seed %d", len(shuffled), rank)
+    return shuffled
 
 
 def maybe_download_from_modelscope(
@@ -938,7 +934,8 @@ def safetensors_weights_iterator(
             block_size=safetensors_prefetch_block_size,
         )
 
-    _shuffle_files(sorted_files, shuffle_safetensors_files)
+    if shuffle_safetensors_files:
+        sorted_files = _shuffle_files(sorted_files)
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
     for st_file in tqdm(
@@ -1004,18 +1001,16 @@ def multi_thread_safetensors_weights_iterator(
         result = load_file(st_file, device="cpu")
         return result
 
-    sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
-    _shuffle_files(sorted_files, shuffle_safetensors_files)
+    if shuffle_safetensors_files:
+        hf_weights_files = _shuffle_files(hf_weights_files)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Note to use generator here so we do not store all the loaded files in memory
         # at the same time, which can cause OOM for large models.
-        futures = (
-            executor.submit(_load_file, st_file) for st_file in sorted_files
-        )
+        futures = (executor.submit(_load_file, st_file) for st_file in hf_weights_files)
         futures_iter = tqdm(
             concurrent.futures.as_completed(futures),
-            total=len(sorted_files),
+            total=len(hf_weights_files),
             desc="Multi-thread loading shards",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
