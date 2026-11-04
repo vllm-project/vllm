@@ -37,6 +37,17 @@ def _on_gfx950() -> bool:
         return False
 
 
+def _on_cdna3() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import get_cdna_version
+
+        return get_cdna_version() == 3
+    except ImportError:
+        return False
+
+
 # The flash-decode split-K decode path is only tuned for AMD gfx942/gfx950; other
 # architectures take the fallback decode kernel, so its tests are skipped there.
 requires_split_decode_arch = pytest.mark.skipif(
@@ -46,6 +57,10 @@ requires_split_decode_arch = pytest.mark.skipif(
 requires_gfx950 = pytest.mark.skipif(
     not _on_gfx950(),
     reason="optimized sparse decode partial is gfx950-only",
+)
+requires_cdna3 = pytest.mark.skipif(
+    not _on_cdna3(),
+    reason="the BF16 mega-attention prefill is CDNA3-only",
 )
 
 NOPE_HEAD_DIM = 448
@@ -1572,26 +1587,19 @@ def test_hip_mega_prefill_mxfp8_output(
     assert torch.all(scale[:, width // 32 :] == 17)
 
 
-@requires_gfx950
-@pytest.mark.parametrize("heads", [8, 32])
-@pytest.mark.parametrize("request_repeats", [1, 103])
-@pytest.mark.parametrize("cache_padding", [0, 2])
-@pytest.mark.parametrize("with_extra", [False, True])
-@pytest.mark.parametrize("main_use_fnuz", [False, True])
-@pytest.mark.parametrize("with_sink", [False, True])
-@torch.inference_mode()
-def test_hip_mega_paged_prefill_mxfp8_output(
+def _mega_paged_prefill_case(
     heads: int,
     request_repeats: int,
     cache_padding: int,
     with_extra: bool,
     main_use_fnuz: bool,
     with_sink: bool,
-) -> None:
-    """Fused prefill respects request boundaries, causal top-k and SWA replay."""
+) -> SimpleNamespace:
+    """Paged prefill inputs with request boundaries, causal top-k and SWA
+    replay, plus the inverse-RoPE'd reference rows."""
     device = torch.device("cuda")
     torch.manual_seed(23)
-    tokens, width = 5, heads * HEAD_DIM
+    tokens = 5
     q = torch.randn(tokens, heads, HEAD_DIM + 16, device=device).bfloat16()
     q = q[..., :HEAD_DIM]
     main = _pack_fp8_ds_mla_cache(
@@ -1700,6 +1708,59 @@ def test_hip_mega_paged_prefill_mxfp8_output(
     )
     seq_lens = torch.tensor(lengths, device=device, dtype=torch.int32)
     gather_lens = torch.tensor(gathers, device=device, dtype=torch.int32)
+    args = (
+        q,
+        padded_cache[::2],
+        tables,
+        extra,
+        extra_table,
+        topk,
+        starts,
+        seq_lens,
+        gather_lens,
+        4,
+        2 if with_extra else 0,
+        sink,
+        HEAD_DIM**-0.5,
+        positions,
+        cos_sin,
+        main_use_fnuz,
+    )
+    return SimpleNamespace(
+        args=args, ref=ref, tokens=tokens, gather_lens=gather_lens, topk=topk
+    )
+
+
+_MEGA_PAGED_PREFILL_CASES = pytest.mark.parametrize(
+    "heads,request_repeats,cache_padding,with_extra,main_use_fnuz,with_sink",
+    [
+        (heads, repeats, padding, extra, fnuz, sink)
+        for heads in (8, 32)
+        for repeats in (1, 103)
+        for padding in (0, 2)
+        for extra in (False, True)
+        for fnuz in (False, True)
+        for sink in (False, True)
+    ],
+)
+
+
+@requires_gfx950
+@_MEGA_PAGED_PREFILL_CASES
+@torch.inference_mode()
+def test_hip_mega_paged_prefill_mxfp8_output(
+    heads: int,
+    request_repeats: int,
+    cache_padding: int,
+    with_extra: bool,
+    main_use_fnuz: bool,
+    with_sink: bool,
+) -> None:
+    """Fused prefill respects request boundaries, causal top-k and SWA replay."""
+    case = _mega_paged_prefill_case(
+        heads, request_repeats, cache_padding, with_extra, main_use_fnuz, with_sink
+    )
+    device, tokens, width = case.ref.device, case.tokens, heads * HEAD_DIM
     data = torch.full(
         (tokens + 2, width + 16), 1.0, dtype=torch.float8_e4m3fn, device=device
     )
@@ -1710,39 +1771,140 @@ def test_hip_mega_paged_prefill_mxfp8_output(
 
     def run():
         torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(
-            q,
-            padded_cache[::2],
-            tables,
-            extra,
-            extra_table,
-            topk,
-            starts,
-            seq_lens,
-            gather_lens,
-            4,
-            2 if with_extra else 0,
-            sink,
-            HEAD_DIM**-0.5,
-            positions,
-            cos_sin,
-            main_use_fnuz,
-            out,
-            out_scale,
+            *case.args, out, out_scale
         )
 
     run()
     torch.testing.assert_close(
-        _mxfp8_dequant(out, out_scale), ref.flatten(1), atol=3e-3, rtol=0.08
+        _mxfp8_dequant(out, out_scale), case.ref.flatten(1), atol=3e-3, rtol=0.08
     )
     # A shorter SWA span must not retain a previous invocation's KV.
-    gather_lens.zero_()
-    topk.fill_(-1)
+    case.gather_lens.zero_()
+    case.topk.fill_(-1)
     run()
     assert torch.count_nonzero(out.float()) == 0
     assert torch.all(data[[0, -1]].float() == 1)
     assert torch.all(data[:, width:].float() == 1)
     assert torch.all(scales[[0, -1]] == 17)
     assert torch.all(scales[:, width // 32 :] == 17)
+
+
+@requires_cdna3
+@_MEGA_PAGED_PREFILL_CASES
+@torch.inference_mode()
+def test_hip_mega_paged_prefill_bf16_output(
+    heads: int,
+    request_repeats: int,
+    cache_padding: int,
+    with_extra: bool,
+    main_use_fnuz: bool,
+    with_sink: bool,
+) -> None:
+    """The CDNA3 fused prefill stores BF16 rows with inverse RoPE applied."""
+    case = _mega_paged_prefill_case(
+        heads, request_repeats, cache_padding, with_extra, main_use_fnuz, with_sink
+    )
+    device, tokens = case.ref.device, case.tokens
+    # Pad heads and rows so out-of-view writes show up.
+    buffer = torch.full(
+        (tokens + 2, heads + 1, HEAD_DIM + 16),
+        3.0,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    out = buffer[1:-1, :heads, :HEAD_DIM]
+
+    def run():
+        torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(*case.args, out)
+
+    run()
+    torch.testing.assert_close(out.float(), case.ref, atol=3e-3, rtol=0.02)
+    case.gather_lens.zero_()
+    case.topk.fill_(-1)
+    run()
+    assert torch.count_nonzero(out.float()) == 0
+    assert torch.all(buffer[[0, -1]].float() == 3)
+    assert torch.all(buffer[:, heads:].float() == 3)
+    assert torch.all(buffer[..., HEAD_DIM:].float() == 3)
+
+
+@requires_cdna3
+@torch.inference_mode()
+def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
+    """A chunk with the model's window and top-k, whose key magnitudes grow
+    along the sequence so the running max keeps rising across many steps."""
+    device = torch.device("cuda")
+    torch.manual_seed(29)
+    heads, window, ratio, topk_len, block = 16, 128, 2, 512, 64
+    seq_len, tokens = 2048, 640
+    ramp = torch.linspace(0.1, 6.0, seq_len, device=device)[:, None]
+    main = _pack_fp8_ds_mla_cache(
+        (torch.randn(seq_len, HEAD_DIM, device=device) * ramp).bfloat16(), block, False
+    )
+    extra_rows = seq_len // ratio
+    extra = _pack_fp8_ds_mla_cache(
+        (torch.randn(extra_rows, HEAD_DIM, device=device) * ramp[::ratio]).bfloat16(),
+        block,
+        False,
+    )
+    q = torch.randn(tokens, heads, HEAD_DIM, device=device).bfloat16()
+    positions = torch.arange(seq_len - tokens, seq_len, device=device)
+    # Distinct causal top-k rows in random order.
+    order = torch.rand(tokens, extra_rows, device=device)
+    order.masked_fill_(
+        torch.arange(extra_rows, device=device) >= (positions[:, None] + 1) // ratio, 2
+    )
+    topk = order.argsort(1)[:, :topk_len].int()
+    sink = torch.linspace(-1, 1, heads, device=device)
+    cos_sin = _random_cos_sin_cache(seq_len, device)
+    scale = HEAD_DIM**-0.5
+
+    main_kv = _read_fp8_ds_mla_cache_rows(
+        main, torch.arange(seq_len, device=device), block, False
+    )
+    extra_kv = _read_fp8_ds_mla_cache_rows(
+        extra, torch.arange(extra_rows, device=device), block, False
+    )
+    window_rows = positions[:, None] - window + 1 + torch.arange(window, device=device)
+    ref = torch.empty(tokens, heads, HEAD_DIM, device=device)
+    mag = torch.empty(tokens, device=device)
+    for s in range(0, tokens, 128):
+        kv = torch.cat(
+            [main_kv[window_rows[s : s + 128]], extra_kv[topk[s : s + 128]]], 1
+        )
+        mag[s : s + 128] = kv.abs().amax((1, 2))
+        scores = torch.einsum("thd,tkd->thk", q[s : s + 128].float(), kv) * scale
+        scores = torch.cat([scores, sink[None, :, None].expand(len(kv), -1, 1)], -1)
+        probs = torch.softmax(scores, -1)[..., :-1]
+        ref[s : s + 128] = torch.einsum("thk,tkd->thd", probs, kv)
+    ref = ref.bfloat16().float()
+    cos, sin = cos_sin[positions, None].chunk(2, dim=-1)
+    even, odd = ref[..., 448::2].clone(), ref[..., 449::2].clone()
+    ref[..., 448::2] = even * cos + odd * sin
+    ref[..., 449::2] = odd * cos - even * sin
+
+    out = torch.empty(tokens, heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(
+        q,
+        main,
+        torch.arange(seq_len // block, device=device, dtype=torch.int32)[None],
+        extra,
+        torch.arange(extra_rows // block, device=device, dtype=torch.int32)[None],
+        topk,
+        torch.tensor([0, tokens], device=device, dtype=torch.int32),
+        torch.tensor([seq_len], device=device, dtype=torch.int32),
+        torch.tensor([seq_len], device=device, dtype=torch.int32),
+        window,
+        ratio,
+        sink,
+        scale,
+        positions,
+        cos_sin,
+        False,
+        out,
+    )
+    mag = mag[:, None, None]
+    torch.testing.assert_close(out.float() / mag, ref / mag, atol=3e-3, rtol=0.02)
 
 
 @requires_gfx950

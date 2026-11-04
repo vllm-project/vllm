@@ -548,6 +548,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV41ROCMAiterMLASparseBackend
     swa_backend_cls = DeepseekV41ROCMAiterSparseSWABackend
+    # Whether _forward_prefill stores bf16 rows already inverse-RoPE'd.
+    _prefill_rotates_bf16 = False
 
     def _indexer_cls(
         self, k_cache: DeepseekV4IndexerCache | None
@@ -1064,7 +1066,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         # standalone pass. Settle that here rather than in _o_proj: the split
         # is batch-dependent and _o_proj runs compiled, where such a value
         # freezes at its trace-time value.
-        end = num_decode_tokens if self._use_aiter_sparse_mla else output.shape[0]
+        end = (
+            num_decode_tokens
+            if self._use_aiter_sparse_mla or self._prefill_rotates_bf16
+            else output.shape[0]
+        )
         rocm_inverse_rope_rows_(
             output[rotated:end, : self.n_local_heads, :],
             positions[rotated:end],

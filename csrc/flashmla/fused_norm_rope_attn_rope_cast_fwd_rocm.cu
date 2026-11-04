@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string_view>
 
 #include "rocm/ops.h"
 
@@ -423,6 +424,8 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
     const float* cos_sin, c10::Float8_e4m3fn* out, uint8_t* out_scale,
     int64_t q_stride_t, int64_t q_stride_h, int64_t out_stride,
     int64_t scale_stride, int64_t num_positions, int heads, float sm_scale) {
+  // kStageBytes only fits gfx950's 160 KiB LDS.
+#if defined(__gfx950__)
   constexpr float kLog2e = 1.4426950408889634f;
   const int tid = threadIdx.x, lane = tid % 64, wave = tid / 64;
   const int lr = lane % 16, lg = lane / 16;
@@ -679,6 +682,426 @@ __global__ __launch_bounds__(kWaves * 64) void fused_paged_attn_kernel(
       out_scale[token * scale_stride + (hbase + h) * (kHeadDim / 32) +
                 dim / 32] = bits;
   }
+#endif
+}
+
+// gfx942 has 64 KiB of LDS and no transposed LDS read, scaled FP8 convert or
+// K=32 BF16 MFMA. paged_attn_bf16_kernel gives each query two waves that keep
+// the NoPE keys in FP8 and run FP8 MFMAs on them.
+namespace gfx942 {
+
+using F2 = float __attribute__((ext_vector_type(2)));
+
+// gfx942 converts FNUZ only. An OCP byte is twice the FNUZ value of the same
+// bits, except 0x80 (OCP -0, FNUZ NaN), which is cleared first.
+__device__ __forceinline__ uint32_t ocp_as_fnuz(uint32_t bits) {
+  const uint32_t nonzero = ((bits & 0x7f7f7f7fu) + 0x7f7f7f7fu) & 0x80808080u;
+  return bits & (nonzero | 0x7f7f7f7fu);
+}
+
+// Two waves per CTA own 16 heads: wave h takes QK steps 16 h + [0, 16), i.e.
+// FP8 scale groups 0-3, or groups 4-6 plus RoPE, which keeps each wave under
+// 256 registers so two waves share a SIMD. Lane (lr, lg) loads the 16-dim
+// chunks 4 m + lg of key lr. QK step 4 m + s contracts dims
+// 64 m + 16 lg + 4 s + [0, 4) of K and Q.
+constexpr int kDimSteps = kHeadDim / 16;
+constexpr int kNopeChunks = (kHeadDim - kRopeDim) / 64;
+
+__device__ __forceinline__ int wave_dim(int lg, int i) {
+  return 64 * (i / 4) + 16 * lg + 4 * (i % 4);
+}
+
+// page << 8 | offset, or -1. Block sizes are powers of two up to 256.
+__device__ __forceinline__ int wave_lookup(const PagedCache& c, int request,
+                                           int logical) {
+  const int shift = __builtin_ctz(c.block_size);
+  const int index = logical >> shift;
+  const int block = c.table[int64_t(request) * c.table_stride +
+                            max(0, min(index, c.table_width - 1))];
+  return logical < 0 || index >= c.table_width || block < 0 || block >= c.blocks
+             ? -1
+             : block << 8 | (logical & (c.block_size - 1));
+}
+
+__device__ __forceinline__ F4 mfma_fp8(long a, long b, F4 c) {
+  return __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(a, b, c, 0, 0, 0);
+}
+
+__device__ __forceinline__ uint32_t pack_bf16(float lo, float hi) {
+  return __builtin_amdgcn_perm(__float_as_uint(hi), __float_as_uint(lo),
+                               0x07060302u);
+}
+
+template <typename Position, typename Source, bool Aligned>
+__global__ __launch_bounds__(128) void paged_attn_bf16_kernel(
+    const __bf16* q, Source src, const float* sink, const Position* positions,
+    const float* cos_sin, __bf16* out, int64_t q_stride_t, int64_t q_stride_h,
+    int64_t out_stride_t, int64_t out_stride_h, int64_t num_positions,
+    int heads, float sm_scale) {
+#if defined(__gfx942__)
+  __shared__ F4 exchange[2][2][64];
+  const int half = __builtin_amdgcn_readfirstlane(threadIdx.x / 64);
+  auto body = [&](auto half_c) {
+    constexpr int kHalf = decltype(half_c)::value;
+    constexpr int kSteps2 = kDimSteps / 2;
+    constexpr int kFirst = kHalf * kSteps2;
+    // Scale groups held as FP8: 4 for wave 0, 3 for wave 1 (plus RoPE).
+    constexpr int kGroups = kHalf == 0 ? 4 : kNopeChunks - 4;
+    constexpr float kLog2e = 1.4426950408889634f;
+    const int lane = threadIdx.x % 64, lr = lane % 16, lg = lane / 16;
+    const int64_t token = blockIdx.x;
+    const int head = blockIdx.y * 16 + lr;
+    const int64_t rope_pos = positions[token];
+    const bool valid_pos = rope_pos >= 0 && rope_pos < num_positions;
+
+    BF16x8 qv[kSteps2 / 2];
+#pragma unroll
+    for (int i = 0; i < kSteps2 / 2; ++i)
+      qv[i] = head < heads ? *(Global<BF16x8>)(q + token * q_stride_t +
+                                               head * q_stride_h +
+                                               wave_dim(lg, kFirst + 2 * i))
+                           : BF16x8{};
+
+    const KeySpan span = src.span(token);
+    const int length = valid_pos ? span.length : 0;
+    const int steps = (length + kTileKeys - 1) / kTileKeys;
+    const float scale_log2 = sm_scale * kLog2e;
+
+    // Keys resolve three steps ahead: the top-k read, the block table, then
+    // the record, so each wave's shorter step still covers the load latency.
+    auto index_of = [&](int step) {
+      return src.prefetch(token, step * kTileKeys + lr);
+    };
+    auto slot_of = [&](int step, int index) {
+      const int key = step * kTileKeys + lr;
+      if (key >= length) return -1;
+      const int logical = src.logical(token, span, key, index);
+      return wave_lookup(key < span.split ? src.first : src.second,
+                         span.request, logical);
+    };
+    // This wave's share of a 584-byte record: its FP8 scale groups, RoPE on
+    // wave 1, and the wave's four E8M0 scale bytes.
+    struct Frag {
+      U32x4 nope[kGroups] = {};
+      U32x4 rope[2] = {};
+      uint32_t scales = 0;
+      bool fnuz = false;
+    };
+    auto fetch = [&](int step, int slot) {
+      const PagedCache& cache =
+          step * kTileKeys + lr < span.split ? src.first : src.second;
+      Frag f;
+      const bool valid = slot >= 0;
+      const uint8_t* page =
+          cache.data + int64_t(valid ? slot >> 8 : 0) * cache.block_stride;
+      const int offset = valid ? slot & 255 : 0;
+      const uint8_t* row = valid ? page + offset * 576 : kZeroRecord;
+      const uint8_t* scales = valid ? page + cache.block_size * 576 + offset * 8
+                                    : kZeroRecord + 576;
+#pragma unroll
+      for (int m = 0; m < kGroups; ++m)
+        f.nope[m] =
+            load_global<Aligned, U32x4>(row + 64 * (4 * kHalf + m) + 16 * lg);
+      if constexpr (kHalf == 1) {
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+          f.rope[h] = load_global<Aligned, U32x4>(row + 448 + 32 * lg + 16 * h);
+      }
+      f.scales = load_global<Aligned, uint32_t>(scales + 4 * kHalf);
+      f.fnuz = cache.fnuz;
+      return f;
+    };
+
+    int slot_cur = slot_of(0, index_of(0));
+    int slot_next = slot_of(1, index_of(1));
+    int slot_next2 = slot_of(2, index_of(2));
+    int index_next3 = index_of(3);
+    Frag frag_a = fetch(0, slot_cur), frag_b = fetch(1, slot_next), frag_c;
+
+    // NoPE Q as FNUZ hi + lo of q / q_scale, q_scale a power of two per head
+    // and wave with max |q| / q_scale < 128. The max runs on the BF16 bit
+    // patterns with the sign cleared.
+    using U16x2 = uint16_t __attribute__((ext_vector_type(2)));
+    U16x2 q_bits = {};
+#pragma unroll
+    for (int i = 0; i < 2 * kGroups; ++i)
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        q_bits = __builtin_elementwise_max(
+            q_bits,
+            __builtin_bit_cast(
+                U16x2, __builtin_bit_cast(U32x4, qv[i])[j] & 0x7fff7fffu));
+    uint32_t q_amax_bits = max(q_bits.x, q_bits.y);
+    q_amax_bits = max(q_amax_bits, uint32_t(__shfl_xor(int(q_amax_bits), 16)));
+    q_amax_bits = max(q_amax_bits, uint32_t(__shfl_xor(int(q_amax_bits), 32)));
+    const float q_amax = __uint_as_float(q_amax_bits << 16);
+    const int q_exp = max(__builtin_amdgcn_frexp_expf(q_amax), -100);
+    const float q_inv = __builtin_ldexpf(1.0f, 7 - q_exp);
+    const float q_scale = __builtin_ldexpf(1.0f, q_exp - 7);
+    long qhi[kGroups][2], qlo[kGroups][2];
+#pragma unroll
+    for (int m = 0; m < kGroups; ++m)
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        uint32_t hw[2], lw[2];
+        const U32x4 qw = __builtin_bit_cast(U32x4, qv[2 * m + h]);
+#pragma unroll
+        for (int w = 0; w < 2; ++w) {
+          const uint32_t w0 = qw[2 * w], w1 = qw[2 * w + 1];
+          const F2 x0 = F2{__uint_as_float(w0 << 16),
+                           __uint_as_float(w0 & 0xffff0000u)} * q_inv;
+          const F2 x1 = F2{__uint_as_float(w1 << 16),
+                           __uint_as_float(w1 & 0xffff0000u)} * q_inv;
+          int hb = __builtin_amdgcn_cvt_pk_fp8_f32(x0.x, x0.y, int(w0), false);
+          hb = __builtin_amdgcn_cvt_pk_fp8_f32(x1.x, x1.y, hb, true);
+          const F2 r0 = x0 - __builtin_amdgcn_cvt_pk_f32_fp8(hb, false);
+          const F2 r1 = x1 - __builtin_amdgcn_cvt_pk_f32_fp8(hb, true);
+          int lb = __builtin_amdgcn_cvt_pk_fp8_f32(r0.x, r0.y, int(w1), false);
+          lb = __builtin_amdgcn_cvt_pk_fp8_f32(r1.x, r1.y, lb, true);
+          hw[w] = uint32_t(hb);
+          lw[w] = uint32_t(lb);
+        }
+        qhi[m][h] = __builtin_bit_cast(long, U32x2{hw[0], hw[1]});
+        qlo[m][h] = __builtin_bit_cast(long, U32x2{lw[0], lw[1]});
+      }
+    BF16x4 qr[4] = {};
+    if constexpr (kHalf == 1) {
+#pragma unroll
+      for (int i = 0; i < 2; ++i) {
+        qr[2 * i] = qv[2 * kGroups + i].lo;
+        qr[2 * i + 1] = qv[2 * kGroups + i].hi;
+      }
+    }
+
+    F4 acc[kSteps2];
+#pragma unroll
+    for (int d = 0; d < kSteps2; ++d) acc[d] = F4{};
+    float row_max = -INFINITY, row_sum = 0.0f;
+
+    BF16x4 identity;
+#pragma unroll
+    for (int e = 0; e < 4; ++e)
+      identity[e] = static_cast<__bf16>(4 * lg + e == lr ? 1.0f : 0.0f);
+    // FNUZ selection: K (16 keys x 32 dims) times sel[par] hands lane (lr, lg)
+    // dim 16 (lr / 4) + 4 par + lr % 4 of the 8-byte half, keys 4 lg + [0, 4).
+    long sel[2];
+#pragma unroll
+    for (int par = 0; par < 2; ++par)
+      sel[par] = lg == lr / 4 ? long(0x40ull << (8 * (4 * par + lr % 4))) : 0l;
+
+    // Three rotating fragments so the in-flight loads never alias the
+    // fragment being read.
+    auto run_step = [&](int step, Frag& frag, Frag& next) {
+      const uint32_t valid_keys = uint32_t(__ballot(slot_cur >= 0)) & 0xffffu;
+
+      // NoPE K stays FP8 and the MFMAs read it as FNUZ: an OCP byte is half
+      // its value there, so its scale byte gets +1, and OCP -0 is cleared.
+      const uint64_t fnuz_lanes = __ballot(frag.fnuz);
+      auto fix = [&](auto fnuz) {
+#pragma unroll
+        for (int m = 0; m < kGroups; ++m)
+#pragma unroll
+          for (int t = 0; t < 4; ++t)
+            if (!fnuz) frag.nope[m][t] = ocp_as_fnuz(frag.nope[m][t]);
+        if (!fnuz) frag.scales += 0x01010101u;
+      };
+      if (fnuz_lanes == ~0ull)
+        fix(std::true_type{});
+      else if (fnuz_lanes == 0)
+        fix(std::false_type{});
+      else
+        fix(frag.fnuz);
+      auto kfp8 = [&](int m, int h) {
+        return __builtin_bit_cast(
+            long, U32x2{frag.nope[m][2 * h], frag.nope[m][2 * h + 1]});
+      };
+      BF16x4 kr[4] = {};
+      if constexpr (kHalf == 1) {
+#pragma unroll
+        for (int t = 0; t < 4; ++t)
+          kr[t] = __builtin_bit_cast(
+              BF16x4, t % 2 ? frag.rope[t / 2].zw : frag.rope[t / 2].xy);
+      }
+      // Scale words of keys 4 lg + e: the keys of this lane's S^T and P.
+      uint32_t ws[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e) ws[e] = __shfl(frag.scales, 4 * lg + e);
+      auto kscale = [&](int m, int e) {
+        return __uint_as_float((ws[e] >> (8 * m) & 0xffu) << 23);
+      };
+
+      const int slot_next3 = slot_of(step + 3, index_next3);
+      index_next3 = index_of(step + 4);
+      next = fetch(step + 2, slot_next2);
+
+      F4 nope = {};
+#pragma unroll
+      for (int m = 0; m < kGroups; ++m) {
+        F4 c = {};
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          c = mfma_fp8(kfp8(m, h), qhi[m][h], c);
+          c = mfma_fp8(kfp8(m, h), qlo[m][h], c);
+        }
+#pragma unroll
+        for (int e = 0; e < 4; ++e) nope[e] = fmaf(c[e], kscale(m, e), nope[e]);
+      }
+      F4 part;
+      if constexpr (kHalf == 1) {
+        F4 sr[2] = {};
+#pragma unroll
+        for (int t = 0; t < 4; ++t)
+          sr[t % 2] = mfma_k16(kr[t], qr[t], sr[t % 2]);
+#pragma unroll
+        for (int e = 0; e < 4; ++e)
+          part[e] = fmaf(nope[e], q_scale, sr[0][e] + sr[1][e]);
+      } else {
+#pragma unroll
+        for (int e = 0; e < 4; ++e) part[e] = nope[e] * q_scale;
+      }
+      // Both waves add the halves in the same order, so they see the same
+      // scores and take the same softmax branches. Alternating buffers need
+      // only one barrier per step.
+      exchange[step % 2][kHalf][lane] = part;
+      __syncthreads();
+      const F4 score =
+          exchange[step % 2][0][lane] + exchange[step % 2][1][lane];
+
+      // This lane holds S^T for keys 4*lg + [0, 4) of head lr.
+      float logit[4], local_max = -INFINITY;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const int key = 4 * lg + e;
+        logit[e] = valid_keys >> key & 1 ? score[e] * scale_log2 : -INFINITY;
+        local_max = fmaxf(local_max, logit[e]);
+      }
+      // The running max only moves when a key beats it by 2^8; until then P
+      // stays <= 256, which BF16 and the f32 sums absorb, and the step needs
+      // no cross-lane max. row_sum stays per lane until the epilogue. P at the
+      // max is then not exactly 1, so row_sum adds the rounded P the PV MFMA
+      // sees.
+      if (__any(local_max > row_max + 8.0f)) {
+        float step_max = fmaxf(local_max, __shfl_xor(local_max, 16));
+        step_max = fmaxf(step_max, __shfl_xor(step_max, 32));
+        const float next_max = step_max > row_max + 8.0f ? step_max : row_max;
+        const float alpha = __builtin_amdgcn_exp2f(
+            row_max - (next_max == -INFINITY ? 0.0f : next_max));
+        row_sum *= alpha;
+        row_max = next_max;
+#pragma unroll
+        for (int d = 0; d < kSteps2; ++d) acc[d] *= alpha;
+      }
+      const float base = row_max == -INFINITY ? 0.0f : row_max;
+      BF16x4 p;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        p[e] = static_cast<__bf16>(__builtin_amdgcn_exp2f(logit[e] - base));
+        row_sum += float(p[e]);
+      }
+
+      // K sel (FP8) or K I (RoPE) hands lane (lr, lg) keys 4 lg + [0, 4) of
+      // QK step d's dim lr, unscaled; group m's per-key scales ride on P.
+      constexpr int kBatch = 4;
+#pragma unroll
+      for (int m = 0; m < kSteps2 / kBatch; ++m) {
+        F4 t[kBatch];
+        BF16x4 pm;
+        if (m < kGroups) {
+#pragma unroll
+          for (int d = 0; d < kBatch; ++d)
+            t[d] = mfma_fp8(kfp8(m, d / 2), sel[d % 2], F4{});
+          pm = __builtin_bit_cast(
+              BF16x4,
+              (U32x2{pack_bf16(float(p[0]) * kscale(m, 0),
+                               float(p[1]) * kscale(m, 1)),
+                     pack_bf16(float(p[2]) * kscale(m, 2),
+                               float(p[3]) * kscale(m, 3))}));
+        } else {
+#pragma unroll
+          for (int d = 0; d < kBatch; ++d)
+            t[d] = mfma_k16(kr[d], identity, F4{});
+          pm = p;
+        }
+#pragma unroll
+        for (int d = 0; d < kBatch; ++d) {
+          const BF16x4 v = __builtin_bit_cast(
+              BF16x4, (U32x2{pack_bf16(t[d][0], t[d][1]),
+                             pack_bf16(t[d][2], t[d][3])}));
+          acc[kBatch * m + d] = mfma_k16(v, pm, acc[kBatch * m + d]);
+        }
+        __builtin_amdgcn_sched_group_barrier(0x008, kBatch, 0);
+        __builtin_amdgcn_sched_group_barrier(0x002, 2 * kBatch, 0);
+        __builtin_amdgcn_sched_group_barrier(0x008, kBatch, 0);
+      }
+
+      slot_cur = slot_next;
+      slot_next = slot_next2;
+      slot_next2 = slot_next3;
+    };
+    for (int step = 0; step < steps; step += 3) {
+      run_step(step, frag_a, frag_c);
+      if (step + 1 == steps) break;
+      run_step(step + 1, frag_b, frag_a);
+      if (step + 2 == steps) break;
+      run_step(step + 2, frag_c, frag_b);
+    }
+
+    row_sum += __shfl_xor(row_sum, 16);
+    row_sum += __shfl_xor(row_sum, 32);
+    const float sink_log2 =
+        sink && head < heads ? sink[head] * kLog2e : -INFINITY;
+    const float final_max = fmaxf(row_max, sink_log2);
+    const float total =
+        (row_max == -INFINITY
+             ? 0.0f
+             : row_sum * __builtin_amdgcn_exp2f(row_max - final_max)) +
+        (isfinite(sink_log2) ? __builtin_amdgcn_exp2f(sink_log2 - final_max)
+                             : 0.0f);
+    const float factor =
+        row_max == -INFINITY || total <= 0.0f
+            ? 0.0f
+            : __builtin_amdgcn_exp2f(row_max - final_max) / total;
+    if (head >= heads) return;
+
+    // acc[d] holds dims wave_dim(lg, kFirst + d) + [0, 4) of head lr: two
+    // RoPE pairs.
+    __bf16* row = out + token * out_stride_t + head * out_stride_h;
+#pragma unroll
+    for (int d = 0; d < kSteps2; ++d) {
+      const int dim = wave_dim(lg, kFirst + d);
+      float o[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e)
+        o[e] = float(static_cast<__bf16>(acc[d][e] * factor));
+      if (dim >= kHeadDim - kRopeDim && valid_pos) {
+#pragma unroll
+        for (int e = 0; e < 4; e += 2) {
+          const int pair = (dim + e - (kHeadDim - kRopeDim)) / 2;
+          const float cos = cos_sin[rope_pos * kRopeDim + pair];
+          const float sin = cos_sin[rope_pos * kRopeDim + kRopeDim / 2 + pair];
+          const float a = o[e], b = o[e + 1];
+          o[e] = a * cos + b * sin;
+          o[e + 1] = b * cos - a * sin;
+        }
+      }
+      BF16x4 r;
+#pragma unroll
+      for (int e = 0; e < 4; ++e) r[e] = static_cast<__bf16>(o[e]);
+      *reinterpret_cast<BF16x4*>(row + dim) = r;
+    }
+  };
+  if (half == 0)
+    body(std::integral_constant<int, 0>{});
+  else
+    body(std::integral_constant<int, 1>{});
+#endif
+}
+
+}  // namespace gfx942
+
+bool on_arch(const at::Tensor& t, std::string_view arch) {
+  const auto* props = at::cuda::getDeviceProperties(t.device().index());
+  return std::string_view(props->gcnArchName).substr(0, arch.size()) == arch;
 }
 
 PagedCache paged_cache(const at::Tensor& q, const at::Tensor& cache,
@@ -711,6 +1134,8 @@ void launch_paged_attn(const at::Tensor& q, const Source& src,
                        const at::Tensor& cos_sin_cache, at::Tensor& out,
                        at::Tensor& out_scale) {
   if (q.size(0) == 0) return;
+  TORCH_CHECK(on_arch(q, "gfx950"),
+              "the paged MXFP8 mega-attention kernel is gfx950-only");
   TORCH_CHECK(q.stride(0) % 8 == 0 && q.stride(1) % 8 == 0 &&
                   reinterpret_cast<uintptr_t>(q.data_ptr()) % 16 == 0,
               "q rows must be 16-byte aligned");
@@ -755,11 +1180,58 @@ void launch_paged_attn(const at::Tensor& q, const Source& src,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void check_query_output(const at::Tensor& q,
+template <typename Source>
+void launch_paged_attn_bf16(const at::Tensor& q, const Source& src,
+                            const std::optional<at::Tensor>& attn_sink,
+                            double sm_scale, const at::Tensor& positions,
+                            const at::Tensor& cos_sin_cache, at::Tensor& out) {
+  if (q.size(0) == 0) return;
+  TORCH_CHECK(q.stride(0) % 8 == 0 && q.stride(1) % 8 == 0 &&
+                  reinterpret_cast<uintptr_t>(q.data_ptr()) % 16 == 0,
+              "q rows must be 16-byte aligned");
+  const c10::cuda::CUDAGuard guard(q.device());
+  const auto stream = at::cuda::getCurrentCUDAStream();
+  for (const PagedCache* cache : {&src.first, &src.second})
+    TORCH_CHECK(
+        !cache->data || (cache->block_size <= 256 &&
+                         (cache->block_size & (cache->block_size - 1)) == 0 &&
+                         cache->blocks < (1 << 23)),
+        "the CDNA3 kernel needs a power-of-two block_size <= 256 "
+        "and < 2^23 blocks");
+  const dim3 grid(q.size(0), (q.size(1) + 15) / 16);
+  const bool aligned = aligned_cache(src.first) && aligned_cache(src.second);
+#define ARGS(POSITION_TYPE)                                                  \
+  reinterpret_cast<const __bf16*>(q.data_ptr<c10::BFloat16>()), src,         \
+      attn_sink ? attn_sink->data_ptr<float>() : nullptr,                    \
+      positions.data_ptr<POSITION_TYPE>(), cos_sin_cache.data_ptr<float>(),  \
+      reinterpret_cast<__bf16*>(out.data_ptr<c10::BFloat16>()), q.stride(0), \
+      q.stride(1), out.stride(0), out.stride(1), cos_sin_cache.size(0),      \
+      int(q.size(1)), sm_scale
+#define LAUNCH(POSITION_TYPE, ALIGNED)                           \
+  gfx942::paged_attn_bf16_kernel<POSITION_TYPE, Source, ALIGNED> \
+      <<<grid, 128, 0, stream>>>(ARGS(POSITION_TYPE))
+  if (positions.scalar_type() == at::kInt) {
+    if (aligned) {
+      LAUNCH(int32_t, true);
+    } else {
+      LAUNCH(int32_t, false);
+    }
+  } else {
+    if (aligned) {
+      LAUNCH(int64_t, true);
+    } else {
+      LAUNCH(int64_t, false);
+    }
+  }
+#undef LAUNCH
+#undef ARGS
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void check_query_inputs(const at::Tensor& q,
                         const std::optional<at::Tensor>& attn_sink,
                         double sm_scale, const at::Tensor& positions,
-                        const at::Tensor& cos_sin_cache, double rms_norm_eps,
-                        const at::Tensor& out, const at::Tensor& out_scale) {
+                        const at::Tensor& cos_sin_cache, double rms_norm_eps) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 3 && q.scalar_type() == at::kBFloat16,
               "q must be a GPU BF16 tensor [tokens, heads, 512]");
   const auto tokens = q.size(0), heads = q.size(1);
@@ -776,8 +1248,6 @@ void check_query_output(const at::Tensor& q,
   };
   check_tensor(q, at::kBFloat16, "q");
   check_tensor(cos_sin_cache, at::kFloat, "cos_sin_cache");
-  check_tensor(out, at::kFloat8_e4m3fn, "out");
-  check_tensor(out_scale, at::kByte, "out_scale");
   TORCH_CHECK(cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == kRopeDim &&
                   cos_sin_cache.is_contiguous(),
               "cos_sin_cache must be contiguous [num_positions, 64]");
@@ -787,6 +1257,30 @@ void check_query_output(const at::Tensor& q,
           (positions.scalar_type() == at::kInt ||
            positions.scalar_type() == at::kLong),
       "positions must be a contiguous int32/int64 vector of token positions");
+  if (attn_sink) {
+    check_tensor(*attn_sink, at::kFloat, "attn_sink");
+    TORCH_CHECK(attn_sink->dim() == 1 && attn_sink->size(0) == heads,
+                "attn_sink must have one float32 logit per head");
+  }
+  TORCH_CHECK(std::isfinite(sm_scale) && std::isfinite(rms_norm_eps) &&
+                  rms_norm_eps >= 0.0,
+              "scale and epsilon must be finite; epsilon must be nonnegative");
+}
+
+void check_query_output(const at::Tensor& q,
+                        const std::optional<at::Tensor>& attn_sink,
+                        double sm_scale, const at::Tensor& positions,
+                        const at::Tensor& cos_sin_cache, double rms_norm_eps,
+                        const at::Tensor& out, const at::Tensor& out_scale) {
+  check_query_inputs(q, attn_sink, sm_scale, positions, cos_sin_cache,
+                     rms_norm_eps);
+  const auto tokens = q.size(0), heads = q.size(1);
+  TORCH_CHECK(out.device() == q.device() &&
+                  out.scalar_type() == at::kFloat8_e4m3fn && out.dim() > 0 &&
+                  out.stride(-1) == 1 && out_scale.device() == q.device() &&
+                  out_scale.scalar_type() == at::kByte &&
+                  out_scale.dim() > 0 && out_scale.stride(-1) == 1,
+              "out and out_scale have an incorrect device, dtype or stride");
   TORCH_CHECK(out.dim() == 2 && out.size(0) == tokens &&
                   out.size(1) == heads * kHeadDim && out_scale.dim() == 2 &&
                   out_scale.size(0) == tokens &&
@@ -796,14 +1290,82 @@ void check_query_output(const at::Tensor& q,
   TORCH_CHECK(
       out.stride(0) >= out.size(1) && out_scale.stride(0) >= out_scale.size(1),
       "output rows must not overlap");
-  if (attn_sink) {
-    check_tensor(*attn_sink, at::kFloat, "attn_sink");
-    TORCH_CHECK(attn_sink->dim() == 1 && attn_sink->size(0) == heads,
-                "attn_sink must have one float32 logit per head");
+}
+
+void check_bf16_output(const at::Tensor& q, const at::Tensor& out) {
+  TORCH_CHECK(out.device() == q.device() &&
+                  out.scalar_type() == at::kBFloat16 && out.dim() == 3 &&
+                  out.size(0) == q.size(0) && out.size(1) == q.size(1) &&
+                  out.size(2) == kHeadDim && out.stride(2) == 1,
+              "out must be a BF16 tensor [tokens, heads, 512]");
+  TORCH_CHECK(out.stride(1) >= kHeadDim &&
+                  out.stride(0) >= out.size(1) * out.stride(1),
+              "output rows must not overlap");
+  TORCH_CHECK(out.stride(0) % 4 == 0 && out.stride(1) % 4 == 0 &&
+                  reinterpret_cast<uintptr_t>(out.data_ptr()) % 8 == 0,
+              "out rows must be 8-byte aligned");
+}
+
+PrefillSource prefill_source(
+    const at::Tensor& q, const at::Tensor& main_cache,
+    const at::Tensor& main_table, const std::optional<at::Tensor>& extra_cache,
+    const std::optional<at::Tensor>& extra_table, const at::Tensor& topk,
+    const at::Tensor& query_start_loc, const at::Tensor& seq_lens,
+    const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
+    bool main_use_fnuz) {
+  const auto requests = seq_lens.numel();
+  TORCH_CHECK(window_size > 0 &&
+                  window_size <= std::numeric_limits<int>::max() &&
+                  compress_ratio >= 0 &&
+                  compress_ratio <= std::numeric_limits<int>::max(),
+              "invalid window_size or compress_ratio");
+  TORCH_CHECK(extra_cache.has_value() == extra_table.has_value() &&
+                  extra_cache.has_value() == (compress_ratio > 0),
+              "compressed cache and table are required iff compress_ratio > 0");
+  for (const auto& tensor : {query_start_loc, seq_lens, gather_lens}) {
+    TORCH_CHECK(tensor.device() == q.device() &&
+                    tensor.scalar_type() == at::kInt && tensor.dim() == 1 &&
+                    tensor.is_contiguous(),
+                "prefill metadata must be contiguous GPU int32 vectors");
   }
-  TORCH_CHECK(std::isfinite(sm_scale) && std::isfinite(rms_norm_eps) &&
-                  rms_norm_eps >= 0.0,
-              "scale and epsilon must be finite; epsilon must be nonnegative");
+  TORCH_CHECK(query_start_loc.numel() == requests + 1 &&
+                  gather_lens.numel() == requests &&
+                  requests <= std::numeric_limits<int>::max(),
+              "inconsistent prefill request metadata");
+  TORCH_CHECK(topk.device() == q.device() && topk.scalar_type() == at::kInt &&
+                  topk.dim() == 2 && topk.size(0) == q.size(0) &&
+                  topk.stride(1) == 1 &&
+                  topk.size(1) <= std::numeric_limits<int>::max(),
+              "topk must be GPU int32 [tokens, topk_width]");
+  auto paged_table = [&](const at::Tensor& cache, const at::Tensor& table,
+                         bool fnuz) {
+    TORCH_CHECK(table.device() == q.device() &&
+                    table.scalar_type() == at::kInt && table.dim() == 2 &&
+                    table.size(0) == requests && table.stride(1) == 1 &&
+                    table.size(1) > 0 &&
+                    table.size(1) <= std::numeric_limits<int>::max(),
+                "block table must be GPU int32 [requests, max_blocks]");
+    PagedCache result = paged_cache(q, cache, fnuz);
+    result.table = table.data_ptr<int32_t>();
+    result.table_stride = table.stride(0);
+    result.table_width = int(table.size(1));
+    return result;
+  };
+  PrefillSource src;
+  src.second = paged_table(main_cache, main_table, main_use_fnuz);
+  if (extra_cache) src.first = paged_table(*extra_cache, *extra_table, false);
+  if (q.size(0) == 0) return src;
+  TORCH_CHECK(requests > 0, "nonempty prefill requires request metadata");
+  src.topk = topk.data_ptr<int32_t>();
+  src.starts = query_start_loc.data_ptr<int32_t>();
+  src.seq_lens = seq_lens.data_ptr<int32_t>();
+  src.gather_lens = gather_lens.data_ptr<int32_t>();
+  src.topk_stride = topk.stride(0);
+  src.requests = int(requests);
+  src.topk_width = int(topk.size(1));
+  src.window = int(window_size);
+  src.compress_ratio = int(compress_ratio);
+  return src;
 }
 
 }  // namespace
@@ -929,58 +1491,31 @@ void fused_norm_rope_attn_rope_cast_prefill_rocm(
     bool main_use_fnuz, at::Tensor& out, at::Tensor& out_scale) {
   check_query_output(q, attn_sink, sm_scale, positions, cos_sin_cache, 0.0, out,
                      out_scale);
-  const auto requests = seq_lens.numel();
-  TORCH_CHECK(window_size > 0 &&
-                  window_size <= std::numeric_limits<int>::max() &&
-                  compress_ratio >= 0 &&
-                  compress_ratio <= std::numeric_limits<int>::max(),
-              "invalid window_size or compress_ratio");
-  TORCH_CHECK(extra_cache.has_value() == extra_table.has_value() &&
-                  extra_cache.has_value() == (compress_ratio > 0),
-              "compressed cache and table are required iff compress_ratio > 0");
-  for (const auto& tensor : {query_start_loc, seq_lens, gather_lens}) {
-    TORCH_CHECK(tensor.device() == q.device() &&
-                    tensor.scalar_type() == at::kInt && tensor.dim() == 1 &&
-                    tensor.is_contiguous(),
-                "prefill metadata must be contiguous GPU int32 vectors");
-  }
-  TORCH_CHECK(query_start_loc.numel() == requests + 1 &&
-                  gather_lens.numel() == requests &&
-                  requests <= std::numeric_limits<int>::max(),
-              "inconsistent prefill request metadata");
-  TORCH_CHECK(topk.device() == q.device() && topk.scalar_type() == at::kInt &&
-                  topk.dim() == 2 && topk.size(0) == q.size(0) &&
-                  topk.stride(1) == 1 &&
-                  topk.size(1) <= std::numeric_limits<int>::max(),
-              "topk must be GPU int32 [tokens, topk_width]");
-  auto paged_table = [&](const at::Tensor& cache, const at::Tensor& table,
-                         bool fnuz) {
-    TORCH_CHECK(table.device() == q.device() &&
-                    table.scalar_type() == at::kInt && table.dim() == 2 &&
-                    table.size(0) == requests && table.stride(1) == 1 &&
-                    table.size(1) > 0 &&
-                    table.size(1) <= std::numeric_limits<int>::max(),
-                "block table must be GPU int32 [requests, max_blocks]");
-    PagedCache result = paged_cache(q, cache, fnuz);
-    result.table = table.data_ptr<int32_t>();
-    result.table_stride = table.stride(0);
-    result.table_width = int(table.size(1));
-    return result;
-  };
-  PrefillSource src;
-  src.second = paged_table(main_cache, main_table, main_use_fnuz);
-  if (extra_cache) src.first = paged_table(*extra_cache, *extra_table, false);
-  if (q.size(0) == 0) return;
-  TORCH_CHECK(requests > 0, "nonempty prefill requires request metadata");
-  src.topk = topk.data_ptr<int32_t>();
-  src.starts = query_start_loc.data_ptr<int32_t>();
-  src.seq_lens = seq_lens.data_ptr<int32_t>();
-  src.gather_lens = gather_lens.data_ptr<int32_t>();
-  src.topk_stride = topk.stride(0);
-  src.requests = int(requests);
-  src.topk_width = int(topk.size(1));
-  src.window = int(window_size);
-  src.compress_ratio = int(compress_ratio);
+  const PrefillSource src = prefill_source(
+      q, main_cache, main_table, extra_cache, extra_table, topk,
+      query_start_loc, seq_lens, gather_lens, window_size, compress_ratio,
+      main_use_fnuz);
   launch_paged_attn<true>(q, src, attn_sink, sm_scale, positions, cos_sin_cache,
                           out, out_scale);
+}
+
+void fused_norm_rope_attn_rope_prefill_bf16_rocm(
+    const at::Tensor& q, const at::Tensor& main_cache,
+    const at::Tensor& main_table, const std::optional<at::Tensor>& extra_cache,
+    const std::optional<at::Tensor>& extra_table, const at::Tensor& topk,
+    const at::Tensor& query_start_loc, const at::Tensor& seq_lens,
+    const at::Tensor& gather_lens, int64_t window_size, int64_t compress_ratio,
+    const std::optional<at::Tensor>& attn_sink, double sm_scale,
+    const at::Tensor& positions, const at::Tensor& cos_sin_cache,
+    bool main_use_fnuz, at::Tensor& out) {
+  check_query_inputs(q, attn_sink, sm_scale, positions, cos_sin_cache, 0.0);
+  check_bf16_output(q, out);
+  TORCH_CHECK(on_arch(q, "gfx942"),
+              "the BF16 mega-attention prefill is gfx942-only");
+  const PrefillSource src = prefill_source(
+      q, main_cache, main_table, extra_cache, extra_table, topk,
+      query_start_loc, seq_lens, gather_lens, window_size, compress_ratio,
+      main_use_fnuz);
+  launch_paged_attn_bf16(q, src, attn_sink, sm_scale, positions, cos_sin_cache,
+                         out);
 }

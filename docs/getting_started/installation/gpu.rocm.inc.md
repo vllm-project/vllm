@@ -10,7 +10,8 @@ with head dimension 512 and RoPE dimension 64, and the KV cache dtype is
 window, TP-divisible head and output-group counts with whole heads per local
 group, no KV connector, and context parallel sizes of one. Other configurations
 use the ordinary ROCm sparse attention path. Decode continues to use ordinary
-ROCm sparse attention in all cases.
+ROCm sparse attention in all cases. MI300X and MI325X (gfx942) select the same
+way, using a separate kernel that writes BF16 attention output.
 
 #### Prebuilt Wheels
 

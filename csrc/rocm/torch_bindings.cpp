@@ -102,6 +102,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
                 &fused_norm_rope_attn_rope_cast_prefill_rocm);
 
   rocm_ops.def(
+      "fused_norm_rope_attn_rope_prefill_bf16(Tensor q, Tensor main_cache, "
+      "Tensor main_table, Tensor? extra_cache, Tensor? extra_table, Tensor "
+      "topk, "
+      "Tensor query_start_loc, Tensor seq_lens, Tensor gather_lens, "
+      "int window_size, int compress_ratio, Tensor? attn_sink, float sm_scale, "
+      "Tensor positions, Tensor cos_sin_cache, bool main_use_fnuz, "
+      "Tensor(a!) out) -> ()");
+  rocm_ops.impl("fused_norm_rope_attn_rope_prefill_bf16", torch::kCUDA,
+                &fused_norm_rope_attn_rope_prefill_bf16_rocm);
+
+  rocm_ops.def(
       "fused_norm_rope_attn_rope_cast_decode(Tensor q, Tensor main_cache, "
       "Tensor main_indices, Tensor main_indptr, Tensor? extra_cache, "
       "Tensor? extra_indices, Tensor? extra_indptr, Tensor? attn_sink, "

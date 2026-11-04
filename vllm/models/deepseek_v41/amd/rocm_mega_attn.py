@@ -12,7 +12,7 @@ from vllm.models.deepseek_v41.amd.rocm import (
 )
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import get_cdna_version
 
 
 class DeepseekV41ROCMAiterMLAMegaAttnBackend(DeepseekV41ROCMAiterMLASparseBackend):
@@ -26,18 +26,26 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
 
     Q preparation still applies RoPE and uses the ordinary head-major layout.
     Prefill reads ROCm's paged 584-byte cache records directly and fuses
-    sparse attention with inverse RoPE and MXFP8 output. Decode uses the
-    ordinary ROCm sparse attention path.
+    sparse attention with inverse RoPE: MXFP8 output on gfx950, BF16 output
+    on gfx942. Decode uses the ordinary ROCm sparse attention path.
     """
 
     backend_cls = DeepseekV41ROCMAiterMLAMegaAttnBackend
+    _prefill_rotates_bf16 = True
 
     @classmethod
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
-        """Conservatively select the prefill kernel on MI355X."""
-        if not current_platform.is_rocm() or not on_gfx950():
+        """Conservatively select the prefill kernel on CDNA4 and CDNA3."""
+        if not current_platform.is_rocm():
             return False
-        if not hasattr(torch.ops._rocm_C, "fused_norm_rope_attn_rope_cast_prefill"):
+        cdna = get_cdna_version()
+        if cdna == 4:
+            op = "fused_norm_rope_attn_rope_cast_prefill"
+        elif cdna == 3:
+            op = "fused_norm_rope_attn_rope_prefill_bf16"
+        else:
+            return False
+        if not hasattr(torch.ops._rocm_C, op):
             return False
         if vllm_config.model_config.dtype != torch.bfloat16:
             return False
@@ -82,7 +90,8 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
-        """Resolve paged KV and fuse dequantization, attention and MXFP8 output."""
+        """Resolve paged KV and fuse dequantization, attention and the output
+        store: MXFP8 on gfx950, inverse-RoPE'd BF16 rows on gfx942."""
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
         first = swa_metadata.num_decode_tokens
@@ -92,14 +101,13 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
         starts = swa_metadata.query_start_loc
         assert seq_lens is not None and gather_lens is not None and starts is not None
         assert self.topk_indices_buffer is not None
-        assert mxfp8_out
         extra_table = None
         if self.compress_ratio:
             assert attn_metadata is not None and compressed_k_cache is not None
             extra_table = attn_metadata.block_table[
                 num_decodes : num_decodes + num_prefills
             ]
-        torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(
+        args = (
             q[:tokens],
             swa_k_cache,
             swa_metadata.block_table[num_decodes : num_decodes + num_prefills],
@@ -116,6 +124,19 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
             positions[:tokens],
             self.rotary_emb.cos_sin_cache,
             current_platform.is_fp8_fnuz(),
-            mxfp8_out[0][:tokens],
-            mxfp8_out[1][:tokens],
         )
+        if mxfp8_out is None:
+            assert output is not None
+            torch.ops._rocm_C.fused_norm_rope_attn_rope_prefill_bf16(
+                *args, output[:tokens]
+            )
+        else:
+            torch.ops._rocm_C.fused_norm_rope_attn_rope_cast_prefill(
+                *args, mxfp8_out[0][:tokens], mxfp8_out[1][:tokens]
+            )
+
+    def _reserve_prefill_workspace(self, q: torch.Tensor) -> None:
+        # The CDNA3 prefill reads the caches in place and stores into the
+        # layer output, so it needs no gather workspace.
+        if get_cdna_version() != 3:
+            super()._reserve_prefill_workspace(q)

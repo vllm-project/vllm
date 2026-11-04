@@ -4,6 +4,7 @@
 import argparse
 import math
 import statistics
+import types
 from types import SimpleNamespace
 
 import torch
@@ -15,6 +16,7 @@ from vllm.models.deepseek_v41.amd.rocm_mega_attn import (
 )
 from vllm.models.deepseek_v41.common.ops import quantize_and_insert_k_cache
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import get_cdna_version
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
 )
@@ -68,7 +70,14 @@ def decode_cache_reference(cache, use_fnuz=False):
     return torch.cat((nope, rope), dim=-1)
 
 
+def output_buffers(out):
+    return (out,) if isinstance(out, torch.Tensor) else (out.data, out.scale)
+
+
 def dequant_output(out):
+    # CDNA3 stores BF16 [tokens, heads, 512]; CDNA4 stores MXFP8 rows.
+    if isinstance(out, torch.Tensor):
+        return out.float()
     scales = torch.exp2(out.scale.float() - 127).repeat_interleave(32, dim=-1)
     return (out.data.float() * scales).reshape(-1, out.data.shape[1] // HEAD_DIM, HEAD_DIM)
 
@@ -76,17 +85,17 @@ def dequant_output(out):
 class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
     """Construct only the attention state; skip model projections and weights."""
 
-    def __init__(self, heads, n_decode, n_prefill, topk, device):
+    def __init__(self, heads, n_decode, n_prefill, topk, ratio, device):
         torch.nn.Module.__init__(self)
         n_tokens = n_decode + n_prefill
-        seq_len = max(WINDOW, 4 * topk) + max(n_prefill, 1)
+        seq_len = max(WINDOW, ratio * topk) + max(n_prefill, 1)
         self.prefill_start = seq_len - n_prefill
         self.n_local_heads = self.padded_heads = heads
         self.head_dim, self.rope_head_dim = HEAD_DIM, ROPE_DIM
         self.nope_head_dim = HEAD_DIM - ROPE_DIM
         self.scale = HEAD_DIM**-0.5
         self.window_size = WINDOW
-        self.compress_ratio = 4 if topk else 0
+        self.compress_ratio = ratio if topk else 0
         self.max_model_len = seq_len
         self.max_num_batched_tokens = n_tokens
         self.PREFILL_CHUNK_SIZE = 1
@@ -98,7 +107,7 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
             prefix="swa",
             kv_cache=make_cache(seq_len, device, current_platform.is_fp8_fnuz()),
         )
-        self.extra_cache = make_cache(seq_len // 4, device) if topk else None
+        self.extra_cache = make_cache(seq_len // ratio, device) if topk else None
         self.rotary_emb = SimpleNamespace(
             cos_sin_cache=make_cos_sin_cache(seq_len + 16, device)
         )
@@ -108,7 +117,7 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
         self._topk_ragged_cache = {}
         self.topk_indices_buffer = torch.randint(
             0,
-            (seq_len - n_prefill) // 4,
+            (seq_len - n_prefill) // ratio,
             (n_tokens, topk),
             device=device,
             dtype=torch.int32,
@@ -138,7 +147,7 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
         ).repeat(n_reqs, 1)
         seq_lens = torch.tensor([seq_len], device=device, dtype=torch.int32)
         gather_len = WINDOW + n_prefill
-        compressed_rows = seq_len // 4 if topk else 0
+        compressed_rows = seq_len // ratio if topk else 0
         self.metadata = SimpleNamespace(
             num_decodes=n_decode,
             num_decode_tokens=n_decode,
@@ -188,6 +197,23 @@ class BenchmarkAttention(DeepseekV41ROCMAiterMegaAttnAttention):
         return self.extra_cache
 
 
+def baseline_forward_mqa(layer, *args):
+    # forward_mqa dispatches through self, so the mega overrides must be
+    # shadowed for the baseline arm to take the ordinary prefill path.
+    base = DeepseekV41ROCMAiterMLAAttention
+    layer._prefill_rotates_bf16 = base._prefill_rotates_bf16
+    layer._forward_prefill = types.MethodType(base._forward_prefill, layer)
+    layer._reserve_prefill_workspace = types.MethodType(
+        base._reserve_prefill_workspace, layer
+    )
+    try:
+        base.forward_mqa(layer, *args)
+    finally:
+        del layer._prefill_rotates_bf16
+        del layer._forward_prefill
+        del layer._reserve_prefill_workspace
+
+
 def attention_reference(layer, q, positions):
     swa = decode_cache_reference(
         layer.swa_cache_layer.kv_cache, current_platform.is_fp8_fnuz()
@@ -207,7 +233,8 @@ def attention_reference(layer, q, positions):
         else:
             pos = layer.prefill_start + row - meta.num_decode_tokens
             slots = list(range(max(0, pos - WINDOW + 1), pos + 1))
-            candidates = topk_rows[row][: min((pos + 1) // 4, len(topk_rows[row]))]
+            limit = (pos + 1) // max(layer.compress_ratio, 1)
+            candidates = topk_rows[row][: min(limit, len(topk_rows[row]))]
         selected = [swa[slots]]
         if extra is not None:
             selected.append(extra[[i for i in candidates if i >= 0]])
@@ -249,7 +276,12 @@ def bench_case(n_decode, n_prefill, args, device):
     checks = []
     for _ in range(args.rotating_slots):
         layer = BenchmarkAttention(
-            args.local_heads, n_decode, n_prefill, args.topk_extra, device
+            args.local_heads,
+            n_decode,
+            n_prefill,
+            args.topk_extra,
+            args.compress_ratio,
+            device,
         )
         n_tokens = n_decode + n_prefill
         q = torch.randn(
@@ -271,13 +303,10 @@ def bench_case(n_decode, n_prefill, args, device):
         outputs = [layer._alloc_attn_out(n_tokens, q) for _ in range(2)]
         expected = attention_reference(layer, q, positions)
         for arm, method in enumerate(
-            (
-                DeepseekV41ROCMAiterMegaAttnAttention.forward_mqa,
-                DeepseekV41ROCMAiterMLAAttention.forward_mqa,
-            )
+            (DeepseekV41ROCMAiterMegaAttnAttention.forward_mqa, baseline_forward_mqa)
         ):
             output = outputs[arm]
-            buffers = (output.data, output.scale)
+            buffers = output_buffers(output)
             dummy = ForwardContext(
                 no_compile_layers={}, attn_metadata=None, slot_mapping={}
             )
@@ -323,6 +352,7 @@ def main():
         "--mixed", nargs=2, type=int, default=[4, 16], metavar=("DECODE", "PREFILL")
     )
     parser.add_argument("--topk-extra", type=int, default=512)
+    parser.add_argument("--compress-ratio", type=int, default=4)
     parser.add_argument("--local-heads", type=int, choices=[8, 16, 32, 64], default=16)
     parser.add_argument(
         "--rotating-slots",
@@ -339,9 +369,12 @@ def main():
     args = parser.parse_args()
     if not current_platform.is_rocm() or not torch.cuda.is_available():
         parser.error("a ROCm GPU is required")
-    if not current_platform.is_device_capability(95):
-        parser.error("MXFP8 attention output requires gfx950")
-    if min(args.rotating_slots, args.iters, args.rounds) <= 0 or args.topk_extra < 0:
+    if get_cdna_version() not in (3, 4):
+        parser.error("mega attention prefill requires CDNA3 or CDNA4")
+    if (
+        min(args.rotating_slots, args.iters, args.rounds, args.compress_ratio) <= 0
+        or args.topk_extra < 0
+    ):
         parser.error("slots/iters/rounds must be positive and topk-extra nonnegative")
     cases = [(n, 0) for n in args.decode_s_q] + [(0, n) for n in args.prefill_s_q]
     cases.append(tuple(args.mixed))
@@ -351,6 +384,7 @@ def main():
     print(
         f"GPU={torch.cuda.get_device_name()} torch={torch.__version__} "
         f"HIP={torch.version.hip} heads={args.local_heads} topk={args.topk_extra} "
+        f"ratio={args.compress_ratio} "
         f"atol={args.atol} rtol={args.rtol} "
         f"slots={args.rotating_slots}; mega uses sparse fallback"
     )
