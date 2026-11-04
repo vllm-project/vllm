@@ -8,8 +8,8 @@ use expect_test::expect;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
-    ParserSelection, ReasoningEffort, RendererSelection, SystemFingerprintMode,
+    Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -1208,7 +1208,7 @@ fn fingerprint_flags_select_system_fingerprint_mode() {
             panic!("expected serve args");
         };
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
-            .system_fingerprint_mode
+            .fingerprint_mode
     };
     let frontend = |args_json: &str| {
         let cli = Cli::try_parse_from([
@@ -1227,17 +1227,17 @@ fn fingerprint_flags_select_system_fingerprint_mode() {
         let Command::Frontend(args) = cli.command else {
             panic!("expected frontend args");
         };
-        args.into_config().system_fingerprint_mode
+        args.into_config().fingerprint_mode
     };
 
-    assert_eq!(serve(&[]), SystemFingerprintMode::Full);
+    assert_eq!(serve(&[]), FingerprintMode::Full);
     assert_eq!(
         serve(&["--fingerprint-mode", "hash"]),
-        SystemFingerprintMode::Hash
+        FingerprintMode::Hash
     );
     assert_eq!(
         serve(&["--fingerprint-mode", "none"]),
-        SystemFingerprintMode::None
+        FingerprintMode::None
     );
     assert_eq!(
         serve(&[
@@ -1246,23 +1246,23 @@ fn fingerprint_flags_select_system_fingerprint_mode() {
             "--fingerprint-value",
             "fp-1"
         ]),
-        SystemFingerprintMode::Custom("fp-1".to_string())
+        FingerprintMode::Custom("fp-1".to_string())
     );
     // Like Python, `custom` without a value reports no fingerprint.
     assert_eq!(
         serve(&["--fingerprint-mode", "custom"]),
-        SystemFingerprintMode::None
+        FingerprintMode::None
     );
     // Python ignores the value in other modes.
     assert_eq!(
         serve(&["--fingerprint-value", "fp-1"]),
-        SystemFingerprintMode::Full
+        FingerprintMode::Full
     );
     assert_eq!(
         frontend(
             r#"{"model_tag":"Qwen/Qwen3-0.6B","fingerprint_mode":"custom","fingerprint_value":"fp-1"}"#
         ),
-        SystemFingerprintMode::Custom("fp-1".to_string())
+        FingerprintMode::Custom("fp-1".to_string())
     );
 }
 
@@ -3124,7 +3124,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     33554432,
                 ),
             },
-            system_fingerprint_mode: Full,
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3253,7 +3253,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     33554432,
                 ),
             },
-            system_fingerprint_mode: Full,
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3495,7 +3495,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     33554432,
                 ),
             },
-            system_fingerprint_mode: Full,
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [

@@ -35,7 +35,7 @@ pub use config::{
     DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL, DEFAULT_REQUEST_BODY_LIMIT_BYTES,
     HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging, TlsConfig,
 };
-pub use fingerprint::SystemFingerprintMode;
+pub use fingerprint::FingerprintMode;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -139,7 +139,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, &client);
     let system_fingerprint = config
-        .system_fingerprint_mode
+        .fingerprint_mode
         .fingerprint(&client.ready_responses(), client.data_parallel_size());
 
     let llm = Llm::new(client)

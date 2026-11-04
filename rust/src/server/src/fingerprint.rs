@@ -10,7 +10,7 @@ use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
 ///
 /// Original Python definition: `vllm/entrypoints/serve/utils/fingerprint.py`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub enum SystemFingerprintMode {
+pub enum FingerprintMode {
     /// `vllm-<version>[-tpN][-ppN][-dpN][-ep]-<hash8>`: the server version,
     /// any non-trivial parallelism, and a prefix of the engine config hash.
     #[default]
@@ -23,7 +23,7 @@ pub enum SystemFingerprintMode {
     None,
 }
 
-impl SystemFingerprintMode {
+impl FingerprintMode {
     /// Build the fingerprint from the engines' ready responses and the
     /// deployment-wide data-parallel size, like Python's
     /// `build_system_fingerprint`.
@@ -89,16 +89,12 @@ mod tests {
             ..ready.clone()
         };
         let rows = [
-            (SystemFingerprintMode::Full, vec![&ready], 4),
-            (SystemFingerprintMode::Full, vec![&ready], 1),
-            (SystemFingerprintMode::Full, vec![&unhashed], 1),
-            (SystemFingerprintMode::Hash, vec![&ready], 4),
-            (
-                SystemFingerprintMode::Custom("fp-1".to_string()),
-                vec![&ready],
-                4,
-            ),
-            (SystemFingerprintMode::None, vec![&ready], 4),
+            (FingerprintMode::Full, vec![&ready], 4),
+            (FingerprintMode::Full, vec![&ready], 1),
+            (FingerprintMode::Full, vec![&unhashed], 1),
+            (FingerprintMode::Hash, vec![&ready], 4),
+            (FingerprintMode::Custom("fp-1".to_string()), vec![&ready], 4),
+            (FingerprintMode::None, vec![&ready], 4),
         ];
         let fingerprints = rows.map(|(mode, engines, dp)| {
             format!("{mode:?} dp{dp}: {:?}", mode.fingerprint(&engines, dp))
@@ -124,7 +120,7 @@ mod tests {
             ..default_ready_response()
         };
         let engines = [engine(8192, "cf9be74a00"), engine(4096, "e380051600")];
-        let fingerprint = SystemFingerprintMode::Hash.fingerprint(&[&engines[0], &engines[1]], 2);
+        let fingerprint = FingerprintMode::Hash.fingerprint(&[&engines[0], &engines[1]], 2);
         assert_eq!(fingerprint.as_deref(), Some("vllm-0.33.0-e3800516"));
     }
 }
