@@ -384,7 +384,11 @@ class _PromotingTier(_FakeTier):
         self.promoted = threading.Event()
 
     def _promote(self, parent: ParentManager) -> None:
-        parent.lookup(OffloadKey(b"\x07" * 8), ReqContext(req_id="peer"))
+        # Mirror the p2p server role: open per-request bookkeeping before the
+        # first lookup (server.py's _resolve_lookup does the same).
+        ctx = ReqContext(req_id="peer")
+        parent.on_new_request(ctx)
+        parent.lookup(OffloadKey(b"\x07" * 8), ctx)
         self.promoted.set()
 
 

@@ -625,11 +625,13 @@ class TestPromotionLatency:
             tiering_manager._metrics.on_promotion_allocated(0, 1)
             return (list(keys), np.array([0]))
 
+        ctx = _req_context(_remote_prefiller_kv_params())
+        tiering_manager.on_new_request(ctx)
         job = TieringTransferJob(
             job_id=42,
             keys=[OffloadKey(b"key1")],
             is_promotion=True,
-            req_context=_req_context(_remote_prefiller_kv_params()),
+            req_context=ctx,
             alloc_fn=primary_alloc_fn,
         )
         tiering_manager._register_job(job, tier_idx=0)
@@ -703,6 +705,7 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch, manager_lock):
 
     key = OffloadKey(b"remote-block")
     ctx = _req_context(_remote_prefiller_kv_params())
+    tiering.on_new_request(ctx)
     prepared = primary.prepare_write([key], ctx)
     assert prepared is not None
     assert isinstance(prepared.store_spec, CPULoadStoreSpec)

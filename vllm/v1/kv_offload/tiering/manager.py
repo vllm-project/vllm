@@ -102,6 +102,7 @@ class RequestState:
     is_finished: bool = False
     request_level_tiers: set[int] | None = None
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
+    promotion_job_ids: set[JobId] = field(default_factory=set)
 
 
 PrimaryAllocFn = Callable[
@@ -610,10 +611,18 @@ class TieringOffloadingManager(OffloadingManager):
     def _register_job(self, transfer_job: TieringTransferJob, tier_idx: int) -> None:
         job_metadata = JobMetadata(transfer_job, tier_idx)
         self._jobs[transfer_job.job_id] = job_metadata
+        if transfer_job.is_promotion:
+            state = self._req_state[transfer_job.req_context.req_id]
+            state.promotion_job_ids.add(transfer_job.job_id)
         self._metrics.on_job_registered(job_metadata)
 
     def _pop_job(self, job_id: JobId) -> JobMetadata | None:
-        return self._jobs.pop(job_id, None)
+        job_metadata = self._jobs.pop(job_id, None)
+        if job_metadata is not None and job_metadata.transfer_job.is_promotion:
+            state = self._req_state.get(job_metadata.transfer_job.req_context.req_id)
+            if state is not None:
+                state.promotion_job_ids.discard(job_id)
+        return job_metadata
 
     def _maybe_process_finished_jobs(self):
         """Poll secondary tiers for completed jobs (at most once per step).
@@ -1277,9 +1286,9 @@ class TieringOffloadingManager(OffloadingManager):
                 self._inflight_promotion_keys.difference_update(entry.keys)
             if not pending_by_ctx:
                 del self._pending_load_submissions[tier_idx]
-        for job_metadata in self._jobs.values():
-            if job_metadata.transfer_job.req_context.req_id == req_id:
-                job_metadata.transfer_job.cancel()
+        state = self._req_state[req_id]
+        for job_id in state.promotion_job_ids:
+            self._jobs[job_id].transfer_job.cancel()
 
     def _maybe_finalize_request(
         self,

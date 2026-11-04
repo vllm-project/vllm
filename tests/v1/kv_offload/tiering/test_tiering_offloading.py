@@ -665,6 +665,8 @@ class TestTieringOffloadingManager:
 
         self.secondary_tier1.submit_load = submit_load  # type: ignore[method-assign]
 
+        self._start_request()
+
         # Lookup each chunk to initiate promotion for all of them
         for chunk in chunks:
             result = self.manager.lookup(chunk, _CTX)
@@ -794,6 +796,7 @@ class TestTieringOffloadingManager:
 
         monkeypatch.setattr(self.secondary_tier1, "submit_load", submit_partial)
 
+        self._start_request()
         for chunk in chunks:
             assert self.manager.lookup(chunk, _CTX) is LookupResult.HIT_PENDING
 
@@ -1233,6 +1236,8 @@ class TestTieringOffloadingManager:
 
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
+        self._start_request(ctx_a)
+        self._start_request(ctx_b)
 
         # All lookups return HIT_PENDING: secondary hit triggers promotion
         assert self.manager.lookup(chunks[0], ctx_a) is LookupResult.HIT_PENDING
@@ -1272,6 +1277,8 @@ class TestTieringOffloadingManager:
 
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
+        self._start_request(ctx_a)
+        self._start_request(ctx_b)
 
         result_a = self.manager.lookup(shared_chunk, ctx_a)
         result_b = self.manager.lookup(shared_chunk, ctx_b)
@@ -1872,11 +1879,13 @@ class TestTieringOffloadingManager:
 
         # req1 looks up key1
         ctx1 = ReqContext(req_id="r1")
+        self._start_request(ctx1)
         assert self.manager.lookup(key1, ctx1) is LookupResult.HIT_PENDING
         assert key1 in self.manager._inflight_promotion_keys
 
         # req2 looks up key2 — both keys now in _promoting_keys
         ctx2 = ReqContext(req_id="r2")
+        self._start_request(ctx2)
         assert self.manager.lookup(key2, ctx2) is LookupResult.HIT_PENDING
         assert key1 in self.manager._inflight_promotion_keys
         assert key2 in self.manager._inflight_promotion_keys
@@ -1892,6 +1901,7 @@ class TestTieringOffloadingManager:
         # Lookup key3 without flushing → pending but not yet a registered job
         self.secondary_tier1.chunks[key3] = True
         ctx3 = ReqContext(req_id="r3")
+        self._start_request(ctx3)
         assert self.manager.lookup(key3, ctx3) is LookupResult.HIT_PENDING
         assert key3 in self.manager._inflight_promotion_keys
         assert self.manager._pending_load_submissions
@@ -2385,6 +2395,7 @@ class TestTieringOffloadingManagerWithFsTier:
         self._write_keys_to_fs(fs_tier, keys)
 
         req_ctx = ReqContext(req_id="r1")
+        manager.on_new_request(req_ctx)
         for k in keys:
             r = manager.lookup(k, req_ctx)
             assert r == LookupResult.RETRY, "Lookups are submit now"
@@ -2428,6 +2439,7 @@ class TestTieringOffloadingManagerWithFsTier:
         self._write_keys_to_fs(fs_tier1, keys1)
 
         req_ctx = ReqContext(req_id="r2")
+        manager.on_new_request(req_ctx)
         for k in keys0 + keys1:
             assert manager.lookup(k, req_ctx) == LookupResult.RETRY, (
                 "Lookups submit now"
