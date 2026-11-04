@@ -102,7 +102,7 @@ impl IntoResponse for ApiError {
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
+        return invalid_request!(param = error.param(), "{}", error.as_report());
     }
     server_error!("{}: {}", context, error.to_report_string())
 }
@@ -111,7 +111,7 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// errors.
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
     if error.is_request_validation_error() {
-        return invalid_request!(param = error.param(), "{error}");
+        return invalid_request!(param = error.param(), "{}", error.as_report());
     }
     server_error!("{}: {}", context, error.to_report_string())
 }

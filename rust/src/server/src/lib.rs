@@ -41,6 +41,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
+use thiserror_ext::AsReport as _;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -455,7 +456,7 @@ where
 
         tokio::spawn(async move {
             if let Err(err) = connection.await {
-                trace!(error = %err, "failed to serve connection");
+                trace!(error = %err.as_report(), "failed to serve connection");
             }
         });
     }
