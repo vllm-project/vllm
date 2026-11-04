@@ -223,6 +223,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None

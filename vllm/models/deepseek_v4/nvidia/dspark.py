@@ -356,6 +356,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV4MixtureOfExperts):
     # Full-vocab draft: draft ids are target ids, no remapping needed.
     draft_id_to_target_id = None
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
