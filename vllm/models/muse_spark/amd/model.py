@@ -296,7 +296,6 @@ class MuseSpark1xMoE(nn.Module):
             self._router_multiplier_folded = True
             self.moe_router.router_output_multiplier = None
         weight = self.router.weight.data
-        # Configs are tuned and validated on gfx950 only.
         if (
             _supports_router_bf16x3_device()
             and weight.dtype == torch.float32
