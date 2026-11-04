@@ -119,6 +119,7 @@ from vllm.utils.torch_utils import (
     PIN_MEMORY,
     async_tensor_h2d,
     kv_cache_dtype_str_to_dtype,
+    xpu_forward_debug,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -1172,6 +1173,7 @@ class GPUModelRunner(
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
 
+    @xpu_forward_debug("mrv1._update_states")
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1920,6 +1922,7 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    @xpu_forward_debug("mrv1._prepare_inputs")
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3247,6 +3250,7 @@ class GPUModelRunner(
         inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
         return input_ids, inputs_embeds
 
+    @xpu_forward_debug("mrv1._preprocess")
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3575,6 +3579,7 @@ class GPUModelRunner(
         finally:
             self.prepare_inputs_event.record()
 
+    @xpu_forward_debug("mrv1._model_forward")
     def _model_forward(
         self,
         input_ids: torch.Tensor | None = None,
@@ -3895,6 +3900,7 @@ class GPUModelRunner(
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
     @torch.inference_mode()
+    @xpu_forward_debug("mrv1.execute_model")
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4249,6 +4255,7 @@ class GPUModelRunner(
         )
 
     @torch.inference_mode
+    @xpu_forward_debug("mrv1.sample_tokens")
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
@@ -4946,6 +4953,7 @@ class GPUModelRunner(
         return draft_token_ids
 
     @instrument(span_name="Loading (GPU)")
+    @xpu_forward_debug("mrv1.load_model")
     def load_model(
         self,
         load_dummy_weights: bool = False,
@@ -5426,6 +5434,7 @@ class GPUModelRunner(
         )
 
     @torch.inference_mode()
+    @xpu_forward_debug("mrv1._dummy_run")
     def _dummy_run(
         self,
         num_tokens: int,
@@ -5746,6 +5755,7 @@ class GPUModelRunner(
                     num_tokens_across_dp[:] = num_tokens_padded
 
             with (
+                xpu_forward_debug("mrv1.forward.dummy"),
                 self.maybe_randomize_inputs(
                     input_ids, inputs_embeds, randomize_inputs=randomize_inputs
                 ),
@@ -6051,6 +6061,7 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
+    @xpu_forward_debug("mrv1.profile_run")
     def profile_run(self, randomize_inputs: bool = False) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:

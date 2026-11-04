@@ -98,7 +98,11 @@ from vllm.utils.mem_utils import (
     format_gib,
     memory_profiling,
 )
-from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
+from vllm.utils.torch_utils import (
+    set_random_seed,
+    set_torch_threads_for_runtime,
+    xpu_forward_debug,
+)
 from vllm.utils.vmm_driver import vmm_unavailable_reason
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -643,6 +647,7 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
+    @xpu_forward_debug("worker.load_model")
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
@@ -713,6 +718,7 @@ class Worker(WorkerBase):
         self._kv_cache_reclaimable = reclaimable
 
     @torch.inference_mode()
+    @xpu_forward_debug("worker.determine_available_memory")
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
@@ -934,6 +940,7 @@ class Worker(WorkerBase):
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     @instrument(span_name="Allocate KV cache")
+    @xpu_forward_debug("worker.initialize_from_config")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         # Update local config with adjusted num blocks after profiling,
@@ -1051,6 +1058,7 @@ class Worker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_blocks
 
     @instrument(span_name="Warmup (GPU)")
+    @xpu_forward_debug("worker.compile_or_warm_up_model")
     def compile_or_warm_up_model(self) -> CompilationTimes:
         if not self.use_v2_model_runner:
             return self._compile_or_warm_up_model()
@@ -1505,6 +1513,7 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
+    @xpu_forward_debug("worker.sample_tokens")
     @with_gpu_sync_check
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -1512,6 +1521,7 @@ class Worker(WorkerBase):
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
+    @xpu_forward_debug("worker.execute_model")
     @with_gpu_sync_check
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
