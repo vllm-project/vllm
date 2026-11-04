@@ -2963,13 +2963,13 @@
       },
       "detection": {
         "is_watermarked": true,
-        "num_scored_tokens": 52,
-        "p_value": 2.775031740611356e-13,
-        "p_value_ratio": 2.775031740611356e-11,
+        "num_scored_tokens": 53,
+        "p_value": 1.2315047954983677e-12,
+        "p_value_ratio": 1.2315047954983676e-10,
         "score": 52.0
       },
       "generation": [
-        7,
+        46,
         42,
         45,
         126,
@@ -3024,7 +3024,7 @@
         100,
         96,
         7,
-        88,
+        3,
         45,
         80,
         76,
@@ -3066,7 +3066,7 @@
         "dedup_skips": 12,
         "key_b_effective": null,
         "key_b_routed": null,
-        "partial_context_skips": 0,
+        "partial_context_skips": 1,
         "routing_draws": 0
       }
     },
@@ -3099,14 +3099,14 @@
       "detection": {
         "is_watermarked": true,
         "num_scored_tokens": 64,
-        "p_value": 6.220960574271819e-16,
-        "p_value_ratio": 6.220960574271819e-14,
-        "score": 64.0
+        "p_value": 4.594627435778603e-15,
+        "p_value_ratio": 4.594627435778603e-13,
+        "score": 63.0
       },
       "generation": [
-        7,
+        46,
         42,
-        84,
+        38,
         34,
         30,
         26,
@@ -3198,10 +3198,10 @@
         }
       },
       "trace": {
-        "dedup_skips": 0,
+        "dedup_skips": 4,
         "key_b_effective": null,
         "key_b_routed": null,
-        "partial_context_skips": 0,
+        "partial_context_skips": 4,
         "routing_draws": 0
       }
     },
@@ -3234,14 +3234,14 @@
       "detection": {
         "is_watermarked": false,
         "num_scored_tokens": 64,
-        "p_value": 0.9599408431361829,
-        "p_value_ratio": 95.99408431361829,
-        "score": 25.0
+        "p_value": 0.9772498680518208,
+        "p_value_ratio": 97.72498680518208,
+        "score": 24.0
       },
       "generation": [
-        7,
+        46,
         42,
-        84,
+        38,
         34,
         30,
         26,
@@ -3333,10 +3333,10 @@
         }
       },
       "trace": {
-        "dedup_skips": 0,
+        "dedup_skips": 4,
         "key_b_effective": null,
         "key_b_routed": null,
-        "partial_context_skips": 0,
+        "partial_context_skips": 4,
         "routing_draws": 0
       }
     },
@@ -3452,10 +3452,10 @@
         }
       },
       "trace": {
-        "dedup_skips": 23,
+        "dedup_skips": 27,
         "key_b_effective": null,
         "key_b_routed": null,
-        "partial_context_skips": 0,
+        "partial_context_skips": 4,
         "routing_draws": 0
       }
     }
