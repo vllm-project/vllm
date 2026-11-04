@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
@@ -66,8 +67,7 @@ def _get_tuned_standalone_max_size(
     max_size_mb = FI_MNNVL_ALLREDUCE_MAX_SIZE_MB.get(
         (capability.to_int(), world_size, _node_count(group))
     )
-    # Tuned cutoffs are exclusive; store the largest accepted size.
-    return None if max_size_mb is None else int(max_size_mb * MiB) - 1
+    return None if max_size_mb is None else int(max_size_mb * MiB)
 
 
 def _create_workspace(
@@ -155,11 +155,29 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
         return backend, False
 
     node_count = _node_count(group)
+    config = get_current_vllm_config_or_none()
+    # TODO: drop once FlashInfer ships flashinfer-ai/flashinfer#7782.
+    if config is not None and config.attention_config.hisparse_config is not None:
+        if node_count == 1:
+            logger.info_once(
+                "Using flashinfer allreduce backend trtllm: the mnnvl fused "
+                "all-reduce + RMSNorm can crash with HiSparse (vllm#64327)."
+            )
+            return "trtllm", False
+        logger.warning_once(
+            "FlashInfer allreduce is disabled: the mnnvl fused all-reduce "
+            "+ RMSNorm can crash with HiSparse (vllm#64327), and trtllm does not "
+            "support multi-node process groups."
+        )
+        return None, False
+
     if node_count == 1:
-        # TRTLLM supports single-node allreduce on Hopper and Blackwell. Do not
-        # create an MNNVL workspace when the process group is node-local.
-        backend = "trtllm"
-        allow_trtllm_fallback = False
+        # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
+        # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
+        # TRTLLM where the node lacks NVSwitch multicast and MNNVL cannot
+        # create its workspace.
+        backend = "mnnvl"
+        allow_trtllm_fallback = True
     elif current_platform.has_device_capability(100):
         # MNNVL requires Blackwell-class GPUs and is the only supported
         # FlashInfer backend for a multi-node allreduce process group.
@@ -488,8 +506,14 @@ class FlashInferAllReduce:
             return False
 
         num_tokens, hidden_dim = input_tensor.shape
+        element_size = input_tensor.element_size()
+
+        # The fusion kernels load each token row as float4, so a row must be a
+        # whole number of 16-byte vectors. MNNVL asserts on this.
+        if hidden_dim * element_size % 16 != 0:
+            return False
+
         if not self.max_num_tokens:
-            element_size = torch.tensor([], dtype=input_tensor.dtype).element_size()
             self.max_num_tokens = self.max_workspace_size // (hidden_dim * element_size)
 
         if num_tokens > self.max_num_tokens:

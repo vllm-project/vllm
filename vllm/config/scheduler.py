@@ -76,12 +76,25 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
+    max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
+    """Maximum number of requests holding KV blocks for an async KV connector
+    load (e.g. a P/D NIXL pull) before they run: loads in progress, or finished
+    and waiting for a running slot.
+
+    Setting it also lets requests the connector may load asynchronously
+    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    requests) start their loads while the running batch is full, so they are
+    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    and loads start only when a running slot is free.
+    """
+
     max_async_kv_loads_per_step: int | None = Field(default=None, ge=1)
-    """Maximum number of waiting requests that start an asynchronous KV load
-    from a KV connector (e.g. a P/D decode instance) in one scheduling step.
-    These requests do not take a running slot, so without a limit one step can
-    allocate KV blocks for the whole waiting queue. None (default) means no
-    limit."""
+    """Maximum number of async KV connector loads (e.g. a P/D NIXL pull) that
+    start in one scheduling step. Each start allocates KV blocks for the whole
+    prompt on the main thread, and with data parallelism every rank waits for the
+    slowest step. ``max_num_inflight_kv_loads`` bounds how many loads are held;
+    this bounds how fast they start. ``None`` (default) means no limit.
+    """
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
@@ -208,9 +221,12 @@ class SchedulerConfig:
     (the default) disables the watermark."""
 
     prefill_schedule_interval: int = Field(default=1, ge=1)
-    """For data-parallel deployments, only admit new prefill requests
-    once every N engine steps, aligned across DP ranks, to better balance
-    per-step forward-pass times."""
+    """Only admit prefill once every N engine steps, leaving the steps in
+    between to decode alone. 1 (the default) admits prefill on every step.
+
+    A deferred step carries no prefill at all, including chunks of an
+    already-admitted prompt, so a long prompt can take up to N times as many
+    steps to finish prefilling."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to

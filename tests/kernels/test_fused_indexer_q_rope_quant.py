@@ -216,6 +216,7 @@ def test_fused_indexer_q_rope_quant_matches_unfused(
         )
 
     # fp8 tensors aren't directly comparable via torch.equal — reinterpret as int8.
+    assert isinstance(q_quant_fused, torch.Tensor)
     ref_bits = q_quant_ref.view(torch.int8)
     fused_bits = q_quant_fused.view(torch.int8)
     assert torch.equal(ref_bits, fused_bits), (
