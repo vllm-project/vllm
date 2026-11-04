@@ -60,26 +60,44 @@ def test_footprint_above_reservation_asks_for_a_larger_reservation(monkeypatch):
 
 
 def test_short_node_memory_suggests_a_reservation_that_fits(monkeypatch):
-    # The default reservation on a busy machine: 1 GiB in use plus 2 GiB free
-    # can back at most 3/8 of the node, so 0.37 is the largest fraction to try.
+    # The default reservation on a busy machine: 1 GiB in use plus 2 GiB free,
+    # less 1 GiB of headroom, backs 2/8 of the node.
     worker = _worker(monkeypatch, reserved=6 * GiB, rss=1 * GiB, available=2 * GiB)
     with pytest.raises(ValueError) as exc:
         worker.determine_available_memory()
     msg = str(exc.value)
-    assert "decrease `--gpu-memory-utilization` to at most 0.37" in msg
+    assert "decrease `--gpu-memory-utilization` to 0.25 or lower" in msg
     assert "--kv-cache-memory-bytes" in msg
     assert "reduce CPU memory used by other processes" in msg
 
 
-def test_nearly_full_node_only_asks_to_free_memory(monkeypatch):
-    # With almost nothing free, no smaller reservation leaves room for KV.
+def test_suggestion_leaves_headroom_below_the_boundary(monkeypatch):
+    # Reported on a 7.76 GiB node: the exact boundary (0.63) passed this check
+    # and the worker was then OOM-killed, while 0.50 ran.
+    total = int(7.76 * GiB)
+    available = int(3.79 * GiB)
     worker = _worker(
-        monkeypatch, reserved=6 * GiB, rss=1 * GiB, available=int(0.01 * GiB)
+        monkeypatch,
+        reserved=int(0.92 * total),
+        rss=int(0.63 * total) - available,
+        total=total,
+        available=available,
     )
     with pytest.raises(ValueError) as exc:
         worker.determine_available_memory()
+    assert "decrease `--gpu-memory-utilization` to 0.50 or lower" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "available", [int(0.01 * GiB), int(0.9 * GiB)], ids=["0.01GiB", "0.9GiB"]
+)
+def test_nearly_full_node_only_asks_to_free_memory(monkeypatch, available):
+    # Once the headroom is set aside, no smaller reservation leaves room for KV.
+    worker = _worker(monkeypatch, reserved=6 * GiB, rss=1 * GiB, available=available)
+    with pytest.raises(ValueError) as exc:
+        worker.determine_available_memory()
     msg = str(exc.value)
-    assert "--gpu-memory-utilization` to at most" not in msg
+    assert "decrease `--gpu-memory-utilization`" not in msg
     assert "To resolve: reduce CPU memory used by other processes" in msg
 
 
