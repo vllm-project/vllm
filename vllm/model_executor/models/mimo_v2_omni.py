@@ -991,7 +991,13 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                     else:
                         frames = frames.float()
                     T = frames.shape[0]
-                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    input_fps = float(hf_kwargs.get("fps") or getattr(vid, "fps", None) or self._INPUT_FPS)
+                    if hasattr(vid, "timestamps") and isinstance(vid.timestamps, torch.Tensor):
+                        timestamps = vid.timestamps.float()
+                    elif hasattr(vid, "frames_indices") and vid.frames_indices is not None:
+                        timestamps = torch.tensor(vid.frames_indices, dtype=torch.float32) / input_fps
+                    else:
+                        timestamps = torch.arange(T, dtype=torch.float32) / input_fps
                     va_converted.append(
                         VideoAudioInput(
                             video=(frames, timestamps),
@@ -1029,7 +1035,13 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
                         frames = frames.float()
 
                     T = frames.shape[0]
-                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    input_fps = float(hf_kwargs.get("fps") or getattr(video, "fps", None) or self._INPUT_FPS)
+                    if hasattr(video, "timestamps") and isinstance(video.timestamps, torch.Tensor):
+                        timestamps = video.timestamps.float()
+                    elif hasattr(video, "frames_indices") and video.frames_indices is not None:
+                        timestamps = torch.tensor(video.frames_indices, dtype=torch.float32) / input_fps
+                    else:
+                        timestamps = torch.arange(T, dtype=torch.float32) / input_fps
                     converted.append((frames, timestamps))
 
             mm_data["videos"] = converted
