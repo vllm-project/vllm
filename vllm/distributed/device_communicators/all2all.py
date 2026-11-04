@@ -1219,6 +1219,7 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         num_topk: int,
         use_fp8_dispatch: bool,
     ) -> dict:
+        allow_hybrid_mode = envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE
         return dict(
             group=self._device_group
             if self._device_group is not None
@@ -1227,7 +1228,9 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             hidden=hidden,
             num_topk=num_topk,
             use_fp8_dispatch=use_fp8_dispatch,
-            allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
+            allow_hybrid_mode=allow_hybrid_mode,
+            # Direct-mode automatic selection uses at most nine QPs.
+            num_allocated_qps=0 if allow_hybrid_mode else 9,
             prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
             allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),
             explicitly_destroy=True,
