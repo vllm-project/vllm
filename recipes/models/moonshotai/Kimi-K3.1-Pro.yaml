@@ -9,7 +9,7 @@ meta:
   tasks:
     - multimodal
     - text
-  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint"
+  performance_headline: "TP8 on two GB300 trays or one B300 node, or one MI355X node, for the MXFP4 checkpoint; TP32 on a 4-host TPU slice"
   related_recipes:
     - "moonshotai/Kimi-K3"
   default_hardware: gb300
@@ -18,6 +18,7 @@ meta:
     vr200: supported
     810e: verified
     m890: verified
+    ironwood: supported
 
 model:
   model_id: "moonshotai/Kimi-K3.1-Pro"
@@ -68,6 +69,12 @@ features:
           - "fp8"
           - "--speculative-config"
           - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":5,"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8","draft_sample_method":"probabilistic"}'
+      # TPU: 7 draft tokens, and DSpark does not support DCP on TPU. With
+      # --async-scheduling it also needs vllm-project/vllm-torchtpu#2770.
+      ironwood:
+        args:
+          - "--speculative-config"
+          - '{"model":"Inferact/Kimi-K3.1-Pro-DSpark-preview","num_speculative_tokens":7,"method":"dspark"}'
   text_only:
     description: "Skip the vision encoder for text-only workloads; frees its memory for KV cache."
     args:
@@ -81,6 +88,8 @@ features:
       - multi_node_tp
     hardware:
       ppu: unsupported
+      # The fused CuTe DSL decode path is CUDA-only.
+      ironwood: unsupported
     args:
       - "--additional-config"
       - '{"decode_backend":"latency_specialized"}'
@@ -89,6 +98,8 @@ features:
     description: "Store the MLA latent in NVFP4 instead of FP8 for about 1.5x the KV cache tokens; the indexer keys stay FP8."
     hardware:
       ppu: unsupported
+      # NVFP4 is a Blackwell format; TPU serves with FP8 KV cache.
+      ironwood: unsupported
     args:
       - "--kv-cache-dtype"
       - "nvfp4_ds_mla"
@@ -104,7 +115,7 @@ variants:
     precision: mxfp4
     # 1561 GB of safetensors x 1.2.
     vram_minimum_gb: 1874
-    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890]
+    supported_hardware: [b300, gb300, vr200, mi355x, 810e, m890, ironwood]
     description: "MXFP4 routed-expert weights (~1.56 TB on disk); attention, shared experts and the vision tower stay in BF16."
     hardware_overrides:
       810e:
@@ -121,6 +132,36 @@ variants:
       vr200:
         docker_image: "vllm/vllm-openai:kimi-k31-cu134"
         install: { pip: false }
+      # TPU serving runs through vllm-torchtpu (vllm-project/vllm-torchtpu).
+      # K3.1 support is in #2775, not yet in a release or published image, so
+      # hide both install tabs; the guide's TPU section has the source install.
+      # The TPU path is text-only (the vision tower is not loaded) and was
+      # validated at TP32 / EP32 on a 2x2x4 TPU v7x slice (4 hosts, 16 chips,
+      # 32 devices).
+      ironwood:
+        install: { pip: false, docker: false }
+        extra_env:
+          TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL: "1"
+          TPU_MOE_HIERARCHICAL_EP: "1"
+        extra_args:
+          - "--language-model-only"
+          - "--limit-mm-per-prompt"
+          - '{"image":0,"video":0}'
+          - "--enable-ep-weight-filter"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--async-scheduling"
+          - "--enable-prefix-caching"
+          - "--compilation-config"
+          - '{"compile_sizes":[1,8,16,8192]}'
+          - "--max-model-len"
+          - "10240"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--max-num-seqs"
+          - "16"
+          - "--gpu-memory-utilization"
+          - "0.82"
 
 compatible_strategies:
   - single_node_tp
@@ -132,6 +173,8 @@ strategy_hardware:
   multi_node_tep:
     810e: supported
     m890: supported
+    # The validated TPU layout is TP32 with expert parallelism (EP32).
+    ironwood: supported
   single_node_tp:
     810e: unsupported
     m890: unsupported
@@ -141,9 +184,15 @@ strategy_hardware:
   multi_node_tp:
     810e: unsupported
     m890: unsupported
+    # TPU offers only TP+EP (the validated layout); plain multi-node TP is
+    # not offered there.
+    ironwood: unsupported
+  # PD disaggregation has not been validated on TPU, and the default NIXL
+  # connector is CUDA-oriented.
   pd_cluster:
     810e: unsupported
     m890: unsupported
+    ironwood: unsupported
 
 # One B300 or MI355X node (8 GPUs) or two GB300 / VR200 trays (2 x 4 GPUs) hold the checkpoint.
 strategy_min_gpus:
@@ -152,6 +201,8 @@ strategy_min_gpus:
   multi_node_tp: 8
   810e: 32
   m890: 32
+  # The validated TPU layout spans a 2x2x4 slice: TP32 over 4 hosts of 8 chips.
+  ironwood: 32
 
 default_strategy: single_node_tp
 
@@ -391,6 +442,10 @@ guide: |
   On 810E, `ppu_deep_gemm_w4a16` loads the checkpoint with a W4A16 compute path.
   Use the PPU image specified for each hardware configuration.
 
+  On TPU, the model is served by [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu),
+  text-only: the vision tower is not loaded. The validated layout is TP32 with expert
+  parallelism on a 2x2x4 TPU v7x slice (16 chips, 32 devices, on 4 hosts). See [TPU serving](#tpu-serving).
+
   ## Tensor + expert parallelism
 
   On one B300 node, the **Tensor + Expert Parallel** strategy keeps attention at TP8 and runs
@@ -421,6 +476,29 @@ guide: |
   instead of 576) and holds about 1.5x the KV cache tokens of FP8. The indexer keys stay FP8,
   so the top-2048 token selection is unchanged. GSM8K matched FP8 on 8x GB300 (96.1% vs 96.2%);
   long-context accuracy has not been measured yet.
+
+  ## TPU serving
+
+  TPU serving runs through [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu) and
+  is text-only. K3.1 support lands with
+  [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775); until that is in
+  a release, install it from source at the PR head (`pip install git+https://github.com/vllm-project/vllm-torchtpu.git@refs/pull/2775/head`).
+  No published image or wheel carries it yet, so the Install tabs are hidden on TPU.
+
+  The generated command uses vllm-torchtpu's default multiprocessing multi-host backend: run the
+  head command on the slice's first host and the worker commands on the remaining hosts (the
+  builder renders both). The **Multi-Node TEP** strategy at 4 nodes reproduces the validated
+  TP32 / EP32 configuration, which [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775)
+  ran over the Ray backend (`TPU_MULTIHOST_BACKEND=ray`) on a 2x2x4 TPU v7x slice with an FP8
+  latent KV cache, the unified block pool and prefix caching: the complete GSM8K split scored
+  97.50% (TP32) and 97.42% (TP32 + DCP8), prefix-cache hits returned identical tokens and
+  logprobs, and the BEAM-1M long-context benchmark matched the GPU reference. A TP32 + DCP8
+  layout (DCP8 with a KV interleave of 4, compile sizes [8, 16, 8192]) was validated alongside;
+  pick it when KV capacity, not decode speed, is the limit.
+
+  The **Spec decoding** feature runs the K3.1 DSpark draft with 7 draft tokens on TPU. DSpark
+  does not support DCP on TPU, and with `--async-scheduling` it additionally needs
+  [vllm-torchtpu#2770](https://github.com/vllm-project/vllm-torchtpu/pull/2770).
 
   ## Prefill/decode disaggregation
 
