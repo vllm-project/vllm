@@ -161,7 +161,7 @@ CUDA graph capture fails for forward passes that do not mark them, such as
 draft models. With unquantized decode and NVFP4 prefill, `max_decode_tokens`
 must be at least the largest CUDA graph capture size. NVFP4 phases do not
 support data parallelism, encoder CUDA graphs or `VLLM_BATCH_INVARIANT`.
-No phase supports `compile_mm_encoder` with `VLLM_USE_LAYERNAME=0`.
+Phases need `VLLM_USE_LAYERNAME=1`, the default on torch 2.11 and later.
 MXFP8 activations have per-block scales, so padding rows cannot affect other
 rows; a split still depends on the rows in a step and is not supported with
 `VLLM_BATCH_INVARIANT`.

@@ -288,22 +288,16 @@ def test_phase_split_keeps_layer_name_after_reload(vllm_config) -> None:
     assert [n for n in phase_split_mod._LAYERS if n.startswith("proj")] == ["proj#1"]
 
 
-def test_phase_split_rejects_string_names_with_compiled_encoders(
+def test_phase_split_requires_layer_name_inputs(
     vllm_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without LayerName the layer name is baked into the graph, and vLLM reuses
-    one compiled encoder block for every block."""
+    """Without LayerName the layer name is baked into the graph, so a compiled
+    graph that vLLM reuses for other layers would resolve the wrong ones."""
     from vllm.utils import torch_utils
 
     monkeypatch.setattr(torch_utils, "_USE_LAYERNAME", False)
-    vllm_config.compilation_config.compile_mm_encoder = True
     with pytest.raises(ValueError, match="requires LayerName"):
         maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
-    vllm_config.compilation_config.compile_mm_encoder = False
-    assert isinstance(
-        maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4"),
-        PhaseSplitLinearKernel,
-    )
 
 
 def test_phase_split_rejects_kernel_without_both_modes(vllm_config) -> None:

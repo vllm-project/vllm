@@ -110,11 +110,12 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
             "supported with VLLM_BATCH_INVARIANT"
         )
     config = get_current_vllm_config()
-    if not torch_utils._USE_LAYERNAME and config.compilation_config.compile_mm_encoder:
-        # A plain-string layer name is baked into the graph, and vLLM reuses
-        # one compiled encoder block for every block.
+    if not torch_utils._USE_LAYERNAME:
+        # A plain-string layer name is baked into the graph, so a compiled
+        # graph reused for other layers (encoder blocks, or another engine's
+        # model loaded from the compile cache) would resolve the wrong ones.
         raise ValueError(
-            f"{name} with compile_mm_encoder requires LayerName layer names "
+            f"{name} requires LayerName layer names "
             "(VLLM_USE_LAYERNAME=1, the default on torch >= 2.11)"
         )
     if not shares_scale:
