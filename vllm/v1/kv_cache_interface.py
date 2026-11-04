@@ -487,7 +487,7 @@ class HiSparseHotSpec(KVCacheSpec):
         return self.page_size
 
     def get_block_stride_alignment(self) -> int:
-        return self.page_size
+        return math.lcm(self.page_size, super().get_block_stride_alignment())
 
     @property
     def block_table_token_alignment(self) -> int | None:

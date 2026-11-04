@@ -1232,6 +1232,16 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     assert mixed.supports_divergent_local_hybrid_hits is False
 
 
+def test_reads_released_blocks_if_any_connector_does():
+    mc = _make_multi_connector(["MockConnector", "MockConnector"])
+    for connector in mc._connectors:
+        connector.reads_released_blocks = False
+    assert mc.reads_released_blocks is False
+
+    mc._connectors[1].reads_released_blocks = True
+    assert mc.reads_released_blocks is True
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )

@@ -208,8 +208,8 @@ class KVConnectorBase_V1(ABC):
 
     @property
     def reads_released_blocks(self) -> bool:
-        """Whether a block the scheduler frees may still be read until the
-        pool reuses it.
+        """Whether this connector may read a block's contents after the
+        scheduler frees it, until the block is reallocated.
 
         If True and block frees are deferred for overlapping batches, an async
         load is also held until in-flight steps finish, since it may target a

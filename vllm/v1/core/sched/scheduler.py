@@ -3104,6 +3104,8 @@ class Scheduler(SchedulerInterface):
         num_queries: int,
         num_hits: int,
     ) -> None:
+        """Report the allocation to the connector and record its prefix-cache
+        stats."""
         assert self.connector is not None
         self.connector.update_state_after_alloc(
             request,
