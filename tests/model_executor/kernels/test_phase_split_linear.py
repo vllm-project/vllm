@@ -270,6 +270,42 @@ def test_phase_split_compiled_region_serves_several_layers(vllm_config) -> None:
     assert counter.frame_count == 1
 
 
+@torch.inference_mode()
+def test_phase_split_keeps_layer_name_after_reload(vllm_config) -> None:
+    """A layer keeps its name across reloads even once the layer that held the
+    base name is gone, so the registry does not grow."""
+    import gc
+
+    kernel = maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
+    first, second = _layer(prefix="proj"), _layer(prefix="proj")
+    kernel.process_weights_after_loading(first)
+    kernel.process_weights_after_loading(second)
+    assert second.phase_split_layer_name == "proj#1"
+    del first
+    gc.collect()
+    kernel.process_weights_after_loading(second)
+    assert second.phase_split_layer_name == "proj#1"
+    assert [n for n in phase_split_mod._LAYERS if n.startswith("proj")] == ["proj#1"]
+
+
+def test_phase_split_rejects_string_names_with_compiled_encoders(
+    vllm_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without LayerName the layer name is baked into the graph, and vLLM reuses
+    one compiled encoder block for every block."""
+    from vllm.utils import torch_utils
+
+    monkeypatch.setattr(torch_utils, "_USE_LAYERNAME", False)
+    vllm_config.compilation_config.compile_mm_encoder = True
+    with pytest.raises(ValueError, match="requires LayerName"):
+        maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
+    vllm_config.compilation_config.compile_mm_encoder = False
+    assert isinstance(
+        maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4"),
+        PhaseSplitLinearKernel,
+    )
+
+
 def test_phase_split_rejects_kernel_without_both_modes(vllm_config) -> None:
     class _A16OnlyKernel(_DualKernel):
         @classmethod

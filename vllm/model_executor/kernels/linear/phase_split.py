@@ -27,6 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicTensor,
 )
 from vllm.platforms import current_platform
+from vllm.utils import torch_utils
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -53,6 +54,9 @@ def _register_layer(layer: torch.nn.Module) -> str:
     """Name ``layer`` uniquely among live phase-split layers: its prefix, or
     its class name without one, plus the first free ``#n`` suffix when another
     live layer holds that name."""
+    name = layer.__dict__.get("phase_split_layer_name")
+    if name is not None and _LAYERS.get(name) is layer:
+        return name
     base = getattr(layer, "prefix", "") or type(layer).__name__
     name, n = base, 0
     while _LAYERS.get(name, layer) is not layer:
@@ -105,9 +109,16 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
             f"{name} makes outputs depend on the rows in a step and is not "
             "supported with VLLM_BATCH_INVARIANT"
         )
+    config = get_current_vllm_config()
+    if not torch_utils._USE_LAYERNAME and config.compilation_config.compile_mm_encoder:
+        # A plain-string layer name is baked into the graph, and vLLM reuses
+        # one compiled encoder block for every block.
+        raise ValueError(
+            f"{name} with compile_mm_encoder requires LayerName layer names "
+            "(VLLM_USE_LAYERNAME=1, the default on torch >= 2.11)"
+        )
     if not shares_scale:
         return
-    config = get_current_vllm_config()
     max_capture_size = max(config.compilation_config.cudagraph_capture_sizes or [0])
     if decode != prefill and prefill == kNvfp4DynamicTensor:
         assert phase.max_decode_tokens is not None
