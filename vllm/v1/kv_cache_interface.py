@@ -199,9 +199,12 @@ class KVCacheSpec:
     block_stride_alignment: int | MultipleOf | None = field(default=None, kw_only=True)
     """Required byte alignment between physical blocks, including packed layers.
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
-    blocks of up to ``n`` tokens. An int also certifies that the kernels accept
-    kernel blocks at any multiple of that byte stride, so packed blocks split into
-    kernel blocks need not be whole kernel blocks apart."""
+    blocks of up to ``n`` tokens."""
+
+    kernel_block_alignment: int | None = field(default=None, kw_only=True)
+    """Byte alignment at which this cache's kernels accept kernel blocks. Lets
+    packed blocks that are not a whole number of kernel blocks apart be split
+    into kernel blocks; ``None`` requires whole kernel blocks."""
 
     is_draft: bool = field(default=False, kw_only=True, compare=False)
     """Whether a draft model owns this layer; excluded from equality so it never
@@ -754,6 +757,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_role_set = {spec.cache_role for spec in specs}
         index_group_leader_set = {spec.is_index_group_leader for spec in specs}
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kernel_block_alignment_set = {spec.kernel_block_alignment for spec in specs}
         assert (
             len(cache_dtype_str_set) == 1
             and len(topk_buffer_width_set) == 1
@@ -762,11 +766,12 @@ class MLAAttentionSpec(FullAttentionSpec):
             and len(cache_role_set) == 1
             and len(index_group_leader_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kernel_block_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, top-k buffer width, tokens per state, "
             "model version, cache role, "
-            "index-sharing role, and block stride alignment."
+            "index-sharing role, and block and kernel block alignments."
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
@@ -787,6 +792,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             cache_role=cache_role_set.pop(),
             is_index_group_leader=index_group_leader_set.pop(),
             block_stride_alignment=block_stride_alignment_set.pop(),
+            kernel_block_alignment=kernel_block_alignment_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
             ),

@@ -34,7 +34,7 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
-_INDEXER_BLOCK_STRIDE_ALIGNMENT = 16
+_INDEXER_BLOCK_ALIGNMENT = 16
 
 
 @dataclass(frozen=True)
@@ -148,7 +148,8 @@ def _lay_out_hisparse_groups(
         {
             name: replace(
                 spec.copy_with_new_block_size(spec.block_size * pages_per_block),
-                block_stride_alignment=_INDEXER_BLOCK_STRIDE_ALIGNMENT,
+                block_stride_alignment=_INDEXER_BLOCK_ALIGNMENT,
+                kernel_block_alignment=_INDEXER_BLOCK_ALIGNMENT,
             )
             for name, spec in indexer_specs.items()
         }
