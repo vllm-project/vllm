@@ -181,7 +181,7 @@ class FP8PrefillContext:
             key = (q.data_ptr(), tuple(q.shape), tuple(q.stride()))
             cached = self.queries.get(key)
             if cached is None:
-                # Quantize each distinct slice independently, as in the prototype.
+                # Quantize each distinct slice independently.
                 quant = fused_qkv_per_tensor_quant(q, q[:0], q[:0, :, :128])
                 cached = quant[0], quant[3]
                 self.queries[key] = cached

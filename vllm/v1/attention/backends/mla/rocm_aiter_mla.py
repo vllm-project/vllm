@@ -2500,10 +2500,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 "512/128/64/128; batch invariance is unsupported."
             )
 
-        from inspect import signature
-
         from aiter.ops.flydsl import flydsl_flash_attn_fp8_supported
-        from aiter.ops.flydsl.gather_kv_b_proj import gather_kv_b_proj_flydsl
 
         params = projection_weight(self.kv_b_proj, self.num_heads)
         if not flydsl_flash_attn_fp8_supported(
@@ -2514,10 +2511,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             128,
         ):
             raise ValueError("AITER FlyDSL FP8 FMHA does not support this layer.")
-        if not {"k_out_scale", "v_out_scale", "weight_preshuffle"}.issubset(
-            signature(gather_kv_b_proj_flydsl).parameters
-        ):
-            raise ValueError("AITER must provide direct FP8 projection output.")
         self._flydsl_fp8_projection = params
 
     def _concat_k_nope_k_pe(
@@ -2680,7 +2673,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         attn_metadata = cast(AiterMLAMetadata, attn_metadata)
         assert attn_metadata.prefill is not None
         prefill = attn_metadata.prefill
-        if envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN:
+        if self._use_flydsl_fp8_prefill:
             backend = prefill.prefill_backend
             if (
                 isinstance(backend, AiterFlashAttnPrefillBackend)
