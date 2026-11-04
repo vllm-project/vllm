@@ -5,10 +5,25 @@
 from dataclasses import dataclass
 
 import torch
+from transformers import Qwen4ExpTextConfig
 
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+
+
+def ple_conv_state_shape(
+    config: Qwen4ExpTextConfig, num_spec: int
+) -> tuple[tuple[int, int]]:
+    """TP-replicated dilated short-conv window over the HC-expanded stream."""
+    conv_state_len = (config.ple_conv_kernel_size - 1) * config.ngram_size
+    return MambaStateShapeCalculator.short_conv_state_shape(
+        tp_world_size=1,
+        intermediate_size=config.hidden_size * config.hc_count,
+        conv_kernel=conv_state_len + 1,
+        num_spec=num_spec,
+    )
 
 
 @dataclass(frozen=True)

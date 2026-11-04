@@ -64,7 +64,7 @@ if TYPE_CHECKING:
     from vllm.tasks import ScoreType
     from vllm.tokenizers import TokenizerLike
     from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec, MambaSpec
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
@@ -1014,6 +1014,48 @@ class IsHybrid(Protocol):
 
         """
         ...
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, ...]:
+        """Calculate dtypes for Mamba's convolutional and state caches.
+
+        Args:
+            vllm_config: vLLM config
+
+        Returns:
+            Dtypes for each state cache used by the model.
+
+        """
+        ...
+
+    @classmethod
+    def get_mamba_specs_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple["MambaSpec", ...]:
+        """Return one spec per distinct Mamba state layout in the model.
+
+        Models whose Mamba layers use different layouts override this.
+
+        Args:
+            vllm_config: vLLM config
+
+        Returns:
+            Block-size-agnostic specs for every Mamba state layout.
+
+        """
+        from vllm.v1.kv_cache_interface import MambaSpec
+
+        return (
+            MambaSpec(
+                shapes=cls.get_mamba_state_shape_from_config(vllm_config),
+                dtypes=cls.get_mamba_state_dtype_from_config(vllm_config),
+                block_size=-1,
+            ),
+        )
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:

@@ -16,7 +16,6 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
     is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.quantization.base_config import (
@@ -44,6 +43,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
+from ..common.ple import ple_conv_state_shape
 
 logger = init_logger(__name__)
 
@@ -511,11 +511,8 @@ class Qwen4ExpPLELayer(nn.Module, MambaBase):
         )
 
     def get_state_shape(self) -> Sequence[tuple[int, ...]]:
-        return MambaStateShapeCalculator.short_conv_state_shape(
-            tp_world_size=1,
-            intermediate_size=self.hc_hidden_size,
-            conv_kernel=self.conv_state_len + 1,
-            num_spec=self.num_spec_tokens,
+        return ple_conv_state_shape(
+            self.model_config.hf_text_config, self.num_spec_tokens
         )
 
     def _short_conv_dilated_dispatch(

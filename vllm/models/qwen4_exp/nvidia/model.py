@@ -82,6 +82,7 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
+from ..common.ple import ple_conv_state_shape
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
@@ -814,28 +815,6 @@ class Qwen4ExpForCausalLM(
         )
 
     @classmethod
-    def get_ple_mamba_state_shape_from_config(
-        cls, vllm_config: VllmConfig
-    ) -> tuple[tuple[int, int]]:
-        hf_config = vllm_config.model_config.hf_text_config
-        conv_kernel_size = hf_config.ple_conv_kernel_size
-        short_conv_dilation = hf_config.ngram_size
-        conv_state_len = (conv_kernel_size - 1) * short_conv_dilation
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-        hc_count = hf_config.hc_count
-        hc_hidden_size = hf_config.hidden_size * hc_count
-        return MambaStateShapeCalculator.short_conv_state_shape(
-            tp_world_size=1,
-            intermediate_size=hc_hidden_size,
-            conv_kernel=conv_state_len + 1,
-            num_spec=num_spec,
-        )
-
-    @classmethod
     def get_gdn_mamba_state_dtype_from_config(
         cls, vllm_config: VllmConfig
     ) -> tuple[torch.dtype, torch.dtype]:
@@ -919,7 +898,10 @@ class Qwen4ExpForCausalLM(
                 block_size=-1,
             ),
             MambaSpec(
-                shapes=cls.get_ple_mamba_state_shape_from_config(vllm_config),
+                shapes=ple_conv_state_shape(
+                    vllm_config.model_config.hf_text_config,
+                    vllm_config.num_speculative_tokens,
+                ),
                 dtypes=cls.get_ple_mamba_state_dtype_from_config(vllm_config),
                 block_size=-1,
                 tp_replicated=True,
