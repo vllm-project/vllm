@@ -577,6 +577,34 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_developer_system_empty_content(cls, data: Any) -> Any:
+        """Reject developer/system messages with empty or missing content.
+
+        Empty string content passes Pydantic's ``str`` validation but
+        crashes downstream renderers with a 500 (and can leak internal
+        state in the error body). Rejecting at the protocol layer gives
+        clients a clean 400, consistent with the ``null`` content case
+        which Pydantic already rejects.
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return data
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("role") in ("system", "developer"):
+                content = msg.get("content")
+                if content is not None and isinstance(content, str) and not content.strip():
+                    raise ValueError(
+                        f"Message with role '{msg['role']}' has empty content. "
+                        "System/developer messages require non-empty content."
+                    )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def _normalize_messages_before(cls, data: Any) -> Any:
         """Pre-process message dicts before Pydantic field validation.
 
