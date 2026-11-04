@@ -514,7 +514,9 @@ def _up_unit(
 def combine(g, xch, state, inj, rrms, rows: int, eps: float):
     """``state[b, s] = bf16(state + y[b] inj[b, s])`` and its ``rrms``, a wave a
     (row, stream); ``y`` is the ranks' partials from the exchange ``xch``,
-    added in rank order and rounded to bf16."""
+    added in rank order and rounded to bf16. A lane's pieces are disjoint, so
+    every piece's loads (the ranks' lines, then the state) are issued before
+    the first piece's store, rather than a round trip a piece."""
     lpg = ex_.lines_per_group(rows)
     reps = HIDDEN // 512  # a lane's 8-column pieces
     for unit in range(g.bid * WAVES + g.wave, rows * HC, BLOCKS * WAVES):
@@ -523,19 +525,29 @@ def combine(g, xch, state, inj, rrms, rows: int, eps: float):
         lines = [grp * lpg + b // ex_.TOKENS for grp in groups]
         gates = ex_.wait_lines(g, xch, lines)
         scale = ld(inj, unit, fx.Float32, cm=CM_DEV)
+        seg = g.lane % 8
+        ats = [unit * HIDDEN + (i * 64 + g.lane) * 8 for i in range(reps)]
+        loaded = [
+            (
+                [
+                    xch.get(src, groups[i], b, seg, gates[i * xch.tp + src])
+                    for src in range(xch.tp)
+                ],
+                ld_i32x4(state, ats[i] // 2, CM_DEV),
+            )
+            for i in range(reps)
+        ]
         sq = fx.Float32(0.0)
         for i in range_constexpr(reps):
-            seg = g.lane % 8
-            y = xch.get(0, groups[i], b, seg, gates[i * xch.tp])
+            ys, xw = loaded[i]
+            y = ys[0]
             for src in range_constexpr(1, xch.tp):
-                more = xch.get(src, groups[i], b, seg, gates[i * xch.tp + src])
-                y = [y[e] + more[e] for e in range(8)]
-            at = unit * HIDDEN + (i * 64 + g.lane) * 8
-            x = unpack_bf16x8(ld_i32x4(state, at // 2, CM_DEV))
+                y = [y[e] + ys[src][e] for e in range(8)]
+            x = unpack_bf16x8(xw)
             out = [bf16_round(x[e] + bf16_round(y[e]) * scale) for e in range(8)]
             for e in range_constexpr(8):
                 sq = sq + out[e] * out[e]
-            st(state, at // 2, pack_bf16x8(out), CM_DEV)
+            st(state, ats[i] // 2, pack_bf16x8(out), CM_DEV)
         tot = wave_sum(sq)
         if g.lane == 0:
             st(rrms, unit, rsqrt(tot / fx.Float32(HIDDEN) + fx.Float32(eps)), CM_DEV)
