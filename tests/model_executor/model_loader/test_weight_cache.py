@@ -1164,12 +1164,12 @@ def test_daemon_releases_cublas_workspaces():
 def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
     """Only the failed role's charge is reported, at most once."""
     from vllm.model_executor.model_loader.weight_cache.utils import (
-        ExternalWeightMemory,
+        ExternalWeightCharges,
         record_external_weight_charge,
         record_external_weight_fallback,
     )
 
-    accounting = ExternalWeightMemory()
+    accounting = ExternalWeightCharges()
     with accounting.track():
         record_external_weight_charge("target.sock", False, 8)
         record_external_weight_charge("draft.sock", True, 4)

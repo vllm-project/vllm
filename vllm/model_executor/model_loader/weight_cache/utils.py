@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class ExternalWeightMemory:
+class ExternalWeightCharges:
     """Track a worker's external weight charges and those freed by disk fallback."""
 
     fallback_bytes: int = field(default=0, init=False)
@@ -33,27 +33,27 @@ class ExternalWeightMemory:
 
     @contextmanager
     def track(self) -> Generator[None, None, None]:
-        token = _active_external_weights.set(self)
+        token = _active_external_weight_charges.set(self)
         try:
             yield
         finally:
-            _active_external_weights.reset(token)
+            _active_external_weight_charges.reset(token)
 
 
-_active_external_weights: ContextVar[ExternalWeightMemory | None] = ContextVar(
-    "active_external_weights", default=None
+_active_external_weight_charges: ContextVar[ExternalWeightCharges | None] = ContextVar(
+    "active_external_weight_charges", default=None
 )
 
 
 def record_external_weight_charge(
     socket_path: str, is_draft: bool, memory_bytes: int
 ) -> None:
-    if accounting := _active_external_weights.get():
+    if accounting := _active_external_weight_charges.get():
         accounting._charges[socket_path, is_draft] = memory_bytes
 
 
 def record_external_weight_fallback(socket_path: str, is_draft: bool) -> None:
-    if accounting := _active_external_weights.get():
+    if accounting := _active_external_weight_charges.get():
         accounting.fallback_bytes += accounting._charges.pop((socket_path, is_draft), 0)
 
 

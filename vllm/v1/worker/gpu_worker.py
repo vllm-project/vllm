@@ -71,7 +71,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
-from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightMemory
+from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightCharges
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -240,7 +240,7 @@ class Worker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-        self._external_weights = ExternalWeightMemory()
+        self._external_weight_charges = ExternalWeightCharges()
 
         # configure float32 matmul precision according to vLLM env.
         precision = envs.VLLM_FLOAT32_MATMUL_PRECISION
@@ -587,7 +587,7 @@ class Worker(WorkerBase):
             torch.accelerator.empty_cache()
 
             # Weights from external model loader process
-            with self._external_weights.track():
+            with self._external_weight_charges.track():
                 self.external_weight_memory = get_model_loader(
                     self.load_config
                 ).get_external_weight_memory(self.vllm_config)
@@ -652,11 +652,11 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
-            self._external_weights.track(),
+            self._external_weight_charges.track(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
-        if self._external_weights.fallback_bytes:
+        if self._external_weight_charges.fallback_bytes:
             self.requested_memory = self._resolve_requested_memory()
             logger.info(
                 "Updated engine memory budget after disk fallback: %s GiB",
@@ -1051,12 +1051,10 @@ class Worker(WorkerBase):
         self.requested_memory = self._resolve_requested_memory()
 
     def _resolve_requested_memory(self) -> int:
-        external_weight_memory = (
-            self.external_weight_memory - self._external_weights.fallback_bytes
+        charged_bytes = (
+            self.external_weight_memory - self._external_weight_charges.fallback_bytes
         )
-        return request_memory(
-            self.init_snapshot, self.cache_config, external_weight_memory
-        )
+        return request_memory(self.init_snapshot, self.cache_config, charged_bytes)
 
     def _v2_model_runner(self) -> "GPUModelRunnerV2":
         assert self.use_v2_model_runner

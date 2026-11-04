@@ -51,7 +51,7 @@ def test_disabling_extensible_cache_keeps_fallback_budget(fallback, requested):
         total_memory=100, free_memory=100, device="cpu", auto_measure=False
     )
     worker.external_weight_memory = 20
-    with worker._external_weights.track():
+    with worker._external_weight_charges.track():
         record_external_weight_charge("weights.sock", False, 20)
         if fallback:
             record_external_weight_fallback("weights.sock", False)
@@ -105,7 +105,9 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
 
-    from vllm.model_executor.model_loader.weight_cache.utils import ExternalWeightMemory
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+    )
 
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
@@ -120,7 +122,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
-        _external_weights=ExternalWeightMemory(),
+        _external_weight_charges=ExternalWeightCharges(),
     )
     original_threads = torch.get_num_threads()
     try:
