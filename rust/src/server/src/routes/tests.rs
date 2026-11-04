@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -50,7 +51,7 @@ use vllm_engine_core_client::test_utils::{
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
-use vllm_llm::EngineCoreLlm;
+use vllm_llm::{BoxGenerateOutputStream, EngineCoreLlm, GenerateRequest, Llm, LlmInfo};
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend, TextLlm, TextRequestProcessor};
@@ -9019,6 +9020,148 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
     }
+
+    engine_task.abort_and_join().await;
+}
+
+/// An `Llm` without an engine-core client, standing in for a remote engine
+/// that cannot take requests right now.
+struct UnavailableLlm {
+    info: LlmInfo,
+    health: tokio::sync::watch::Sender<bool>,
+    readiness: tokio::sync::watch::Sender<bool>,
+}
+
+impl UnavailableLlm {
+    fn new() -> Self {
+        Self {
+            info: LlmInfo {
+                max_model_len: 4096,
+                model_dtype: None,
+                supports_lora: true,
+                vllm_version: "test".to_string(),
+            },
+            health: tokio::sync::watch::channel(true).0,
+            readiness: tokio::sync::watch::channel(false).0,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Llm for UnavailableLlm {
+    fn info(&self) -> &LlmInfo {
+        &self.info
+    }
+
+    fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.health.subscribe()
+    }
+
+    fn subscribe_readiness(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.readiness.subscribe()
+    }
+
+    async fn generate_n(
+        &self,
+        _request: GenerateRequest,
+        _n: NonZeroU32,
+    ) -> vllm_llm::Result<Vec<BoxGenerateOutputStream>> {
+        Err(vllm_llm::Error::Unavailable {
+            message: "no engine can take the request".to_string(),
+        })
+    }
+
+    async fn abort(&self, _external_ids: &[String]) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+
+    async fn shutdown(self: Box<Self>) -> vllm_llm::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn llm_without_engine_core_serves_generation_routes_only() {
+    let chat =
+        ChatLlm::from_shared_backend(UnavailableLlm::new(), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["test-model".to_string()], chat)),
+        RouteGates {
+            dev_mode: true,
+            runtime_lora_updating: true,
+            ..RouteGates::default()
+        },
+    );
+
+    // Routes that drive the engine-core client are not registered, even with
+    // dev mode and runtime LoRA updating enabled.
+    for (method, uri) in [
+        ("POST", "/sleep"),
+        ("POST", "/reset_prefix_cache"),
+        ("POST", "/v1/load_lora_adapter"),
+        ("GET", "/kv_event_sources"),
+    ] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    let response = app
+        .clone()
+        .call(Request::builder().uri("/health").body(Body::empty()).expect("build request"))
+        .await
+        .expect("call app");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Generation goes through the `Llm`, and its unavailability maps to 503.
+    let (status, body) = post_json(
+        &mut app,
+        "/v1/completions",
+        json!({ "model": "test-model", "prompt": "hello" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn provided_engine_core_llm_is_rejected() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        b"engine-provided",
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    // An `EngineCoreLlm` has to come through `LlmSource::EngineCore`; any other
+    // `Llm` may be provided.
+    let error = crate::reject_engine_core_llm(&test_llm(client)).unwrap_err();
+    assert!(
+        error.to_string().contains("LlmSource::EngineCore"),
+        "{error}"
+    );
+    assert!(crate::reject_engine_core_llm(&UnavailableLlm::new()).is_ok());
 
     engine_task.abort_and_join().await;
 }
