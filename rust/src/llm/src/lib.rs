@@ -42,6 +42,7 @@ use crate::request_metrics::{
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
+    trust_remote_prefill_cached_tokens: bool,
     stream_interval: NonZeroU32,
     stats_logger: Option<StatsLogger>,
     inflight: InflightRequests,
@@ -69,6 +70,10 @@ impl Llm {
         Self {
             client,
             randomize_request_id: true,
+            trust_remote_prefill_cached_tokens: std::env::var(
+                "VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS",
+            )
+            .is_ok_and(|v| v == "1"),
             stream_interval: NonZeroU32::MIN,
             stats_logger: None,
             inflight: InflightRequests::new(),
@@ -93,6 +98,13 @@ impl Llm {
     /// engine-core.
     pub fn with_request_id_randomization(mut self, enabled: bool) -> Self {
         self.randomize_request_id = enabled;
+        self
+    }
+
+    /// Trust cache accounting supplied by a P/D proxy. Only enable when
+    /// untrusted clients cannot supply metadata to this backend.
+    pub fn with_remote_prefill_cache_usage_trust(mut self, trusted: bool) -> Self {
+        self.trust_remote_prefill_cached_tokens = trusted;
         self
     }
 
@@ -123,7 +135,8 @@ impl Llm {
             (stream_interval > NonZeroU32::MIN).then_some(stream_interval);
 
         let prepared = req.prepare(self.randomize_request_id)?;
-        let remote_prefill_cached_tokens = prepared.remote_prefill_cached_tokens();
+        let remote_prefill_cached_tokens =
+            prepared.remote_prefill_cached_tokens(self.trust_remote_prefill_cached_tokens)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();
         let external_request_id = prepared
             .engine_request

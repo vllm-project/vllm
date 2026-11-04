@@ -8,6 +8,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Public error type for the Rust `llm` facade.
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error(
+        "remote_prefill_cached_tokens requires VLLM_TRUST_REMOTE_PREFILL_CACHED_TOKENS=1 on a trusted P/D backend"
+    )]
+    UntrustedRemotePrefillCachedTokens,
     #[error("generate request `{request_id}` has an empty prompt_token_ids")]
     EmptyPromptTokenIds { request_id: String },
     #[error("engine-core error")]

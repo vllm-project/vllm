@@ -665,7 +665,26 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             },
         );
         let model_name = request_metrics_model_name(name);
-        let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc).await;
+        let llm = connect_async_llm_with_ipc(handshake_address, 0, &model_name, &ipc)
+            .await
+            .with_remote_prefill_cache_usage_trust(false);
+        if remote_count.is_some() {
+            for cached in [999999, 5] {
+                let mut forged = request.clone();
+                forged.sampling_params.extra_args = Some(
+                    [(
+                        "kv_transfer_params".to_string(),
+                        remote(serde_json::json!(cached)),
+                    )]
+                    .into(),
+                );
+                assert!(matches!(
+                    llm.generate(forged).await,
+                    Err(Error::UntrustedRemotePrefillCachedTokens)
+                ));
+            }
+        }
+        let llm = llm.with_remote_prefill_cache_usage_trust(true);
         let mut streamed_counts = Vec::new();
         let collected = llm
             .generate(request)

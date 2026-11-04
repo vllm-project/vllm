@@ -149,15 +149,21 @@ impl PreparedGenerateRequest {
     /// Return the prefiller's cache hits when this is the decode side of a
     /// P/D request, so response usage reports them instead of the transferred
     /// KV that the decoder counts as cached.
-    pub fn remote_prefill_cached_tokens(&self) -> Option<usize> {
-        let params = (self.engine_request.sampling_params.as_ref()?.extra_args.as_ref()?)
-            .get("kv_transfer_params")?;
-        let params = RemotePrefillParams::deserialize(params).ok()?;
-        if params.do_remote_prefill {
-            params.remote_prefill_cached_tokens
-        } else {
-            None
+    pub fn remote_prefill_cached_tokens(&self, trusted: bool) -> Result<Option<usize>> {
+        let params = self
+            .engine_request
+            .sampling_params
+            .as_ref()
+            .and_then(|p| p.extra_args.as_ref())
+            .and_then(|args| args.get("kv_transfer_params"));
+        if !trusted && params.is_some_and(|p| p.get("remote_prefill_cached_tokens").is_some()) {
+            return Err(Error::UntrustedRemotePrefillCachedTokens);
         }
+        let cached = params
+            .and_then(|p| RemotePrefillParams::deserialize(p).ok())
+            .filter(|p| trusted && p.do_remote_prefill)
+            .and_then(|p| p.remote_prefill_cached_tokens);
+        Ok(cached)
     }
 
     /// Return the original prompt token IDs copied into the raw engine request.
@@ -323,8 +329,44 @@ mod tests {
             let mut request = sample_request();
             request.sampling_params.extra_args = kv_transfer_params
                 .map(|params| [("kv_transfer_params".to_string(), params)].into());
-            let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            let prepared = request.prepare(false).unwrap();
+            let actual = prepared.remote_prefill_cached_tokens(true).unwrap();
             assert_eq!(actual, expected, "{name}");
+            let untrusted = prepared.remote_prefill_cached_tokens(false);
+            if name != "missing_count" && name != "no_kv_transfer_params" {
+                assert!(matches!(
+                    untrusted,
+                    Err(Error::UntrustedRemotePrefillCachedTokens)
+                ));
+            } else {
+                assert_eq!(untrusted.unwrap(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn remote_cache_accounting_rejects_untrusted_values() {
+        for cached in [
+            json!(999999),
+            json!(3),
+            json!(0),
+            json!(-1),
+            json!(null),
+            json!(true),
+            json!("5"),
+        ] {
+            let mut request = sample_request();
+            request.sampling_params.extra_args = Some(
+                [(
+                    "kv_transfer_params".to_string(),
+                    json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": cached}),
+                )]
+                .into(),
+            );
+            assert!(matches!(
+                request.prepare(false).unwrap().remote_prefill_cached_tokens(false),
+                Err(Error::UntrustedRemotePrefillCachedTokens)
+            ));
         }
     }
 }
