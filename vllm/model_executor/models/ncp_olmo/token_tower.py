@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
 
@@ -179,7 +179,6 @@ class ConceptLMOlmo3Attention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Run one cached OLMo3 self-attention layer."""
-
         mixed_qkv, _ = self.linear_qkv(hidden_states)
         query, key, value = mixed_qkv.split(
             [self.query_size, self.key_value_size, self.key_value_size],
@@ -234,12 +233,10 @@ class ConceptLMOlmo3MLP(nn.Module):
 
     def stage_trace(self) -> dict[str, torch.Tensor]:
         """Return the latest MLP vectors used by the parity harness."""
-
         return dict(self._latest_stage_trace)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Run the fused SwiGLU MLP."""
-
         gate_and_up, _ = self.linear_fc1(hidden_states)
         self._record_stage("fc1", gate_and_up)
         hidden_states = self.activation(gate_and_up)
@@ -289,7 +286,6 @@ class ConceptLMOlmo3Layer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Apply post-attention and post-MLP RMSNorm residual blocks."""
-
         residual = hidden_states
         hidden_states = self.self_attention(positions, hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -344,7 +340,6 @@ class ConceptLMOlmo3Tower(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """Run all local layers and the optional decoder final norm."""
-
         for layer in self.layers:
             hidden_states = layer(positions, hidden_states)
         if self.final_layernorm is not None:
@@ -365,7 +360,6 @@ class ConceptLMEmbedding(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Embed token IDs."""
-
         return self.word_embeddings(input_ids)
 
 
@@ -414,12 +408,10 @@ class ConceptLMTokenBackbone(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Apply NCP-ArchPreview token embeddings."""
-
         return self.embedding(input_ids)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         """Project token-decoder states to vocabulary logits."""
-
         return self.logits_processor(self.output_layer, hidden_states)
 
     def load_weights(
@@ -427,7 +419,6 @@ class ConceptLMTokenBackbone(nn.Module):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         """Load token parameters from pure-HF checkpoint keys."""
-
         params = dict(self.named_parameters(remove_duplicate=False))
         parameter_names = frozenset(params)
         loaded_targets: dict[str, set[str | int | None]] = {}
@@ -451,7 +442,7 @@ class ConceptLMTokenBackbone(nn.Module):
                     f"{target.parameter_name}"
                 )
             parameter = params[target.parameter_name]
-            weight_loader = getattr(
+            weight_loader: Callable[..., None] = getattr(
                 parameter,
                 "weight_loader",
                 default_weight_loader,

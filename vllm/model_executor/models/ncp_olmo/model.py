@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +51,6 @@ def _chunk_mean(values: torch.Tensor, chunk_size: int) -> torch.Tensor:
     activations, so pooling must return to the input dtype before LayerNorm and
     QKV projections.
     """
-
     hidden_size = int(values.shape[-1])
     pooled = values.reshape(-1, chunk_size, hidden_size).mean(dim=1)
     return pooled.to(values.dtype)
@@ -128,14 +127,12 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
     @staticmethod
     def get_model_state_cls() -> type[Any]:
         """Return the V2 runner adapter for request-scoped HLM state."""
-
         from .model_state import NCPOlmoModelState
 
         return NCPOlmoModelState
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Apply token embeddings."""
-
         return self.token_backbone.embed_input_ids(input_ids)
 
     def _advance_completed_chunks(
@@ -240,7 +237,6 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
         advances: Sequence[_HLMAdvance],
     ) -> None:
         """Advance one-chunk HLM updates, batching only when permitted."""
-
         batches: dict[int, list[_HLMAdvance]] = {}
         for advance in advances:
             concept_position = advance[0].predicted_concepts.length
@@ -360,7 +356,6 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
         request_segments: Sequence[ScheduledRequestSegment] = (),
     ) -> torch.Tensor:
         """Run token encoder, chunk HLM, fusion, and routed token decoder."""
-
         if intermediate_tensors is not None:
             raise NotImplementedError("the first ConceptLM backend requires PP=1")
         hidden_states = (
@@ -469,7 +464,6 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         """Project decoder states to vocabulary logits."""
-
         logits = self.token_backbone.compute_logits(hidden_states)
         if (
             logits is not None
@@ -491,7 +485,6 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         """Load every parameter from pure-HF SafeTensors keys."""
-
         params: dict[str, tuple[str, nn.Parameter]] = {}
         for module_name, module in (
             ("token_backbone", self.token_backbone),
@@ -551,7 +544,7 @@ class NCPOlmo3ForCausalLM(nn.Module, HasInnerState):
                     f"{target.parameter_name}"
                 )
             _, parameter = params[target.parameter_name]
-            weight_loader = getattr(
+            weight_loader: Callable[..., None] = getattr(
                 parameter,
                 "weight_loader",
                 default_weight_loader,

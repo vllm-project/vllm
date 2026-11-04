@@ -134,7 +134,6 @@ class NCPOlmo3Routes(nn.Module):
         history_states: torch.Tensor,
     ) -> torch.Tensor:
         """Apply encoder self-DD after saving the raw layer output."""
-
         return self.dd_encoder_self_dd.depth_dds[layer_index](
             raw_output,
             history_states,
@@ -146,7 +145,6 @@ class NCPOlmo3Routes(nn.Module):
         predicted_concepts: torch.Tensor,
     ) -> torch.Tensor:
         """Apply the trained normed-add fusion."""
-
         return apply_ncp_layer_norm(
             self.fusion_tok_norm,
             encoder_hidden,
@@ -167,7 +165,6 @@ class NCPOlmo3Routes(nn.Module):
         gate: torch.Tensor,
     ) -> torch.Tensor:
         """Apply decoder DD, concept route, and both residual-flow reads."""
-
         hidden_states = self.dd_two_route_add.decoder_dds[layer_index](
             raw_output,
             history_states,
@@ -190,7 +187,6 @@ class NCPOlmo3Routes(nn.Module):
 
     def decoder_gates(self) -> torch.Tensor:
         """Compute all two-way decoder gates in one softmax launch."""
-
         return self.final_read_concept_gate_logits.float().softmax(dim=-1)
 
     def normalize_decoder_sources(
@@ -199,7 +195,6 @@ class NCPOlmo3Routes(nn.Module):
         concept_raw_layers: Sequence[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Stack and normalize route sources once before all decoder layers."""
-
         encoder_sources = apply_ncp_layer_norm(
             self.decoder_read_encoder_shared_source_norm,
             torch.stack(tuple(encoder_raw_layers), dim=-2),
@@ -215,7 +210,6 @@ class NCPOlmo3Routes(nn.Module):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         """Load all NCP-ArchPreview route and fusion parameters."""
-
         params = dict(self.named_parameters(remove_duplicate=False))
         loaded: set[str] = set()
         parameter_names = frozenset(params)

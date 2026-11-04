@@ -16,7 +16,6 @@ from vllm.model_executor.models.ncp_olmo.contract import (
 
 def valid_config() -> dict[str, object]:
     """Return a minimal NCP-ArchPreview inference contract."""
-
     return {
         "architectures": ["NCPOlmo3ForCausalLM"],
         "model_type": "ncp_olmo3",

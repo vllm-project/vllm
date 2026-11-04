@@ -61,14 +61,12 @@ class CheckpointWeightTarget:
 
 def _checkpoint_name_suffixes(name: str) -> tuple[str, ...]:
     """Return all dotted suffixes, longest first, for wrapper-prefix matching."""
-
     parts = name.split(".")
     return tuple(".".join(parts[index:]) for index in range(len(parts)))
 
 
 def _is_legacy_megatron_key(name: str) -> bool:
     """Return whether a key uses the retired native Megatron token layout."""
-
     return name in _LEGACY_MEGATRON_ROOT_KEYS or name.endswith(
         _LEGACY_MEGATRON_SUFFIXES
     )
@@ -86,7 +84,6 @@ def resolve_checkpoint_weight(
     parameter set keeps wrapper prefixes flexible while rejecting the retired
     native Megatron state-dict layout.
     """
-
     parameters = (
         parameter_names
         if isinstance(parameter_names, (set, frozenset))
@@ -112,7 +109,6 @@ def resolve_checkpoint_weight(
 
 def required_checkpoint_shards(parameter_name: str) -> frozenset[str | int] | None:
     """Return the complete shard set when an HF key splits one model tensor."""
-
     if parameter_name.endswith(_FUSED_QKV_PARAMETER_SUFFIX):
         return frozenset(("q", "k", "v"))
     if parameter_name.endswith(".mlp.linear_fc1.weight"):
@@ -151,7 +147,6 @@ class TokenWeightConfig:
 
         Explicit layer overrides are useful for isolated shape-contract tests.
         """
-
         hidden_size = _positive_int(config, "hidden_size")
         num_attention_heads = _positive_int(config, "num_attention_heads")
         num_key_value_heads = _positive_int(config, "num_query_groups")
@@ -205,7 +200,6 @@ class TokenWeightAudit:
     @property
     def ok(self) -> bool:
         """Return whether every expected token parameter has the exact global shape."""
-
         return not (
             self.missing_parameters
             or self.unexpected_token_tensors
@@ -214,7 +208,6 @@ class TokenWeightAudit:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable report."""
-
         result = asdict(self)
         result["ok"] = self.ok
         return result
@@ -232,7 +225,6 @@ class NCPOlmo3WeightConfig:
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> NCPOlmo3WeightConfig:
         """Validate the route layout that determines all non-token shapes."""
-
         exact_values = {
             "conceptlm_v21_dd_self_dd_mode": "dd",
             "conceptlm_v21_dd_encoder_self_dd": True,
@@ -302,14 +294,12 @@ class FullWeightAudit:
     @property
     def ok(self) -> bool:
         """Return whether every model parameter has the exact global shape."""
-
         return not (
             self.missing_parameters or self.unexpected_tensors or self.shape_mismatches
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable report."""
-
         result = asdict(self)
         result["ok"] = self.ok
         return result
@@ -319,7 +309,6 @@ def expected_token_weight_shapes(
     config: TokenWeightConfig,
 ) -> dict[str, tuple[int, ...]]:
     """Return the exact global checkpoint shape for each token-tower parameter."""
-
     hidden_size = config.hidden_size
     head_dim = hidden_size // config.num_attention_heads
     if hidden_size % config.num_attention_heads:
@@ -337,7 +326,7 @@ def expected_token_weight_shapes(
         "fc2": (hidden_size, config.intermediate_size),
         "hidden": (hidden_size,),
     }
-    result = {
+    result: dict[str, tuple[int, ...]] = {
         "embedding.word_embeddings.weight": (config.vocab_size, hidden_size),
         "output_layer.weight": (config.vocab_size, hidden_size),
     }
@@ -388,7 +377,6 @@ def expected_ncp_olmo3_weight_shapes(
     config: NCPOlmo3WeightConfig,
 ) -> dict[str, tuple[int, ...]]:
     """Return exact global shapes for the selected NCP-ArchPreview route graph."""
-
     result = expected_token_weight_shapes(config.token)
     hidden_size = config.token.hidden_size
     head_dim = hidden_size // config.token.num_attention_heads
@@ -493,7 +481,6 @@ def _checkpoint_component_shape(
     config: TokenWeightConfig,
 ) -> tuple[int, ...]:
     """Return the expected external shape for a resolved full tensor or shard."""
-
     if target.shard_id is None:
         return expected_shape
     hidden_size = config.hidden_size
@@ -522,7 +509,6 @@ def _audit_resolved_shapes(
     config: TokenWeightConfig,
 ) -> _ResolvedShapeAudit:
     """Resolve external names, then validate every full tensor or split shard."""
-
     expected_names = frozenset(expected)
     ignored = []
     unexpected = []
@@ -610,7 +596,6 @@ def audit_token_weight_shapes(
     tensor_shapes: Mapping[str, Sequence[int]], config: TokenWeightConfig
 ) -> TokenWeightAudit:
     """Compare one pure-HF SafeTensors manifest with the token contract."""
-
     expected = expected_token_weight_shapes(config)
     expected_names = frozenset(expected)
     token_manifest: dict[str, Sequence[int]] = {}
@@ -643,7 +628,6 @@ def audit_ncp_olmo3_weight_shapes(
     tensor_shapes: Mapping[str, Sequence[int]], config: NCPOlmo3WeightConfig
 ) -> FullWeightAudit:
     """Compare a SafeTensors manifest with the complete NCP-ArchPreview contract."""
-
     expected = expected_ncp_olmo3_weight_shapes(config)
     resolved = _audit_resolved_shapes(tensor_shapes, expected, config.token)
     missing = sorted(set(expected) - resolved.addressed_parameters)
@@ -660,7 +644,6 @@ def audit_ncp_olmo3_weight_shapes(
 
 def read_safetensors_shapes(model_dir: Path) -> dict[str, tuple[int, ...]]:
     """Read all tensor shapes from a sharded SafeTensors export without loading data."""
-
     try:
         from safetensors import safe_open
     except ImportError as error:
@@ -702,7 +685,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the offline full-model pure-HF SafeTensors audit."""
-
     args = _parse_args(argv)
     raw_config = json.loads((args.model_dir / "config.json").read_text())
     tensor_shapes = read_safetensors_shapes(args.model_dir)

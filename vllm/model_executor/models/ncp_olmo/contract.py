@@ -59,7 +59,6 @@ class NCPOlmo3BackendConfig:
     @classmethod
     def from_mapping(cls, config: Mapping[str, Any]) -> NCPOlmo3BackendConfig:
         """Validate and normalize one exported `config.json` mapping."""
-
         architectures = _required(config, "architectures")
         model_type = _required(config, "model_type")
         supported_identity = (
@@ -194,5 +193,4 @@ class NCPOlmo3BackendConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Return the normalized contract as JSON-serializable data."""
-
         return asdict(self)

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 import torch
@@ -46,7 +46,6 @@ def apply_ncp_layer_norm(
     dtype error.  Keep the normalization in FP32 and restore the activation
     dtype at the boundary, matching the mixed-precision LayerNorm contract.
     """
-
     if not envs.VLLM_BATCH_INVARIANT:
         return layer_norm(hidden_states)
 
@@ -85,7 +84,6 @@ def apply_ncp_linear(
     cuBLASLt path because the global aten linear override is intentionally not
     installed. Route them through the same invariant implementation explicitly.
     """
-
     if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
         return linear_batch_invariant(
             hidden_states,
@@ -116,7 +114,6 @@ def _causal_prefill_attention(
     K/V prefix. The legacy comparison path and host-only unit tests retain
     PyTorch SDPA.
     """
-
     query_length = int(query.shape[1])
     key_length = int(key.shape[1])
     if key_length != prefix_length + query_length:
@@ -147,7 +144,7 @@ def _causal_prefill_attention(
             )
         else:
             cu_seqlens_k[1] = key_length
-        window_size = (-1, -1) if sliding_window is None else (int(sliding_window), 0)
+        window_size = [-1, -1] if sliding_window is None else [int(sliding_window), 0]
         output = flash_attn_varlen_func(
             q=query.transpose(0, 1).contiguous(),
             k=key.transpose(0, 1).contiguous(),
@@ -215,7 +212,6 @@ def _legacy_decode_attention(
     output_dtype: torch.dtype,
 ) -> torch.Tensor:
     """Run the checkpoint-compatible FP32 HLM decode attention math."""
-
     scores = torch.matmul(
         query.float(),
         cached_key.float().transpose(-1, -2),
@@ -230,7 +226,6 @@ def _append_hlm_kv(
     value: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Append HLM K/V into geometrically growing request-owned storage."""
-
     if key.shape != value.shape or key.ndim != 3:
         raise ValueError("HLM key and value must have the same 3D shape")
     num_tokens = int(key.shape[1])
@@ -257,6 +252,7 @@ def _append_hlm_kv(
             value.shape[2],
         )
     else:
+        assert kv_state.value is not None
         if (
             kv_state.key.shape[0] != key.shape[0]
             or kv_state.key.shape[2] != key.shape[2]
@@ -316,7 +312,6 @@ class ConceptLMDepthDD(nn.Module):
         history_states: torch.Tensor,
     ) -> torch.Tensor:
         """Apply the checkpoint's DD weighted sum over a stacked history."""
-
         if history_states.ndim < 2 or history_states.shape[-2] != self.static_a.numel():
             raise ValueError(
                 f"DD expected {self.static_a.numel()} history states, "
@@ -364,7 +359,6 @@ class ConceptLMDiagResidualRoute(nn.Module):
         residual_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Read a stacked normalized source tensor and add its projection."""
-
         if (
             normalized_sources.ndim < 2
             or normalized_sources.shape[-2] != self.w2.out_features
@@ -481,7 +475,6 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
         kv_state: HLMKVState,
     ) -> torch.Tensor:
         """Append one concept token and attend to this request's HLM history."""
-
         mixed_qkv, _ = self.linear_qkv(hidden_states)
         query, key, value = mixed_qkv.split(
             [self.query_size, self.key_value_size, self.key_value_size],
@@ -541,7 +534,6 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
         kv_states: Sequence[HLMKVState],
     ) -> torch.Tensor:
         """Advance equal-length request caches with one batched HLM decode."""
-
         batch_size = int(hidden_states.shape[0])
         if batch_size <= 1 or len(kv_states) != batch_size:
             raise ValueError(
@@ -635,7 +627,6 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
         kv_state: HLMKVState,
     ) -> torch.Tensor:
         """Append and process multiple concept tokens in one causal attention call."""
-
         num_tokens = int(hidden_states.shape[0])
         if num_tokens <= 1:
             raise ValueError("HLM batched prefill requires at least two tokens")
@@ -746,7 +737,6 @@ class ConceptLMHLMIncrementalLayer(nn.Module):
 
     def stage_trace(self) -> dict[str, torch.Tensor]:
         """Return the latest sublayer vectors used by the parity harness."""
-
         trace = dict(self._latest_stage_trace)
         trace.update(self.mlp.stage_trace())
         return trace
@@ -782,7 +772,6 @@ class ConceptLMHLMIncrementalLayer(nn.Module):
         kv_state: HLMKVState,
     ) -> torch.Tensor:
         """Run one HLM layer over a multi-concept causal prefill."""
-
         residual = hidden_states
         hidden_states = self.self_attention.prefill(
             position_start,
@@ -811,7 +800,6 @@ class ConceptLMHLMIncrementalLayer(nn.Module):
         kv_states: Sequence[HLMKVState],
     ) -> torch.Tensor:
         """Run one HLM layer for multiple equal-position requests."""
-
         residual = hidden_states
         hidden_states = self.self_attention.forward_batch(
             position,
@@ -935,7 +923,6 @@ class ConceptLMProductCodebook(nn.Module):
 
     def stacked(self) -> torch.Tensor:
         """Return [num_codebooks, codebook_size, head_dim]."""
-
         return torch.stack(tuple(self.codebook), dim=0)
 
 
@@ -981,7 +968,6 @@ class ConceptLMHighLevelBranch(nn.Module):
 
     def stage_trace(self) -> dict[str, torch.Tensor]:
         """Return the latest HLM vectors used by the parity harness."""
-
         trace = dict(self._latest_stage_trace)
         for layer in self.concept_predictor.hlm_block.layers:
             trace.update(layer.stage_trace())
@@ -995,7 +981,6 @@ class ConceptLMHighLevelBranch(nn.Module):
         history_states: torch.Tensor,
     ) -> torch.Tensor:
         """Apply the checkpoint's depth-dynamic mixer."""
-
         route = self.concept_predictor.concept_self_dd
         return route.depth_dds[layer_index](raw_output, history_states)
 
@@ -1006,7 +991,6 @@ class ConceptLMHighLevelBranch(nn.Module):
         encoder_layer_chunks: Sequence[torch.Tensor],
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Advance the HLM by one completed token chunk."""
-
         if len(encoder_layer_chunks) != self.backend_config.encoder_layers:
             raise ValueError(
                 f"expected {self.backend_config.encoder_layers} encoder layers, "
@@ -1090,7 +1074,6 @@ class ConceptLMHighLevelBranch(nn.Module):
         encoder_layer_chunks: Sequence[torch.Tensor],
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Advance equal-position requests through one batched HLM decode."""
-
         batch_size = len(request_states)
         if batch_size <= 1 or int(encoder_chunks.shape[0]) != batch_size:
             raise ValueError(
@@ -1189,7 +1172,6 @@ class ConceptLMHighLevelBranch(nn.Module):
         encoder_layer_chunks: Sequence[torch.Tensor],
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
         """Advance a request over multiple completed chunks in parallel."""
-
         num_chunks = int(encoder_chunks.shape[0])
         if num_chunks <= 1:
             raise ValueError("HLM batched prefill requires at least two chunks")
@@ -1274,7 +1256,6 @@ class ConceptLMHighLevelBranch(nn.Module):
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         """Load HLM parameters from pure-HF checkpoint keys."""
-
         params = dict(self.named_parameters(remove_duplicate=False))
         parameter_names = frozenset(params)
         loaded_targets: dict[str, set[str | int | None]] = {}
@@ -1297,7 +1278,7 @@ class ConceptLMHighLevelBranch(nn.Module):
                     f"cannot mix full and split HLM tensors for {target.parameter_name}"
                 )
             parameter = params[target.parameter_name]
-            weight_loader = getattr(
+            weight_loader: Callable[..., None] = getattr(
                 parameter,
                 "weight_loader",
                 default_weight_loader,

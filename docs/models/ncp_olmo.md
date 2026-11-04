@@ -86,8 +86,11 @@ until their fused weight mappings and numerical parity are validated.
 
 ## Offline inference
 
+Pass a public model ID or a local checkpoint directory to the example:
+
 ```bash
-python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
+.venv/bin/python examples/offline_inference/ncp_olmo.py \
+  ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1 \
   --prompt "The capital of France is" \
   --max-tokens 32
 ```
@@ -95,14 +98,14 @@ python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
 To use FlashInfer sampling while keeping vLLM's default attention selection:
 
 ```bash
-python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
+.venv/bin/python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
   --flashinfer-sampler
 ```
 
 To test the mixed FlashAttention/FlashInfer attention configuration:
 
 ```bash
-python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
+.venv/bin/python examples/offline_inference/ncp_olmo.py /path/to/pure-hf-model \
   --attention-mode mixed-flashinfer \
   --flashinfer-sampler
 ```
@@ -114,6 +117,18 @@ CUDA graph capture will be enabled only after request-scoped HLM state has an
 explicit graph-safe contract.
 
 ## Validation before upstream review
+
+The NCP-OLMo correctness CI step runs the real-layer unit tests and the
+generation suite on one H200 GPU. The generation suite defaults to the public
+Stage 2 v1 model; `NCP_OLMO_TEST_MODEL` can select another compatible checkpoint.
+It enables `VLLM_BATCH_INVARIANT=1` for exact sequential/batched comparisons.
+
+```bash
+NCP_OLMO_TEST_MODEL=ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage1 \
+  .venv/bin/python -m pytest -v \
+  tests/models/ncp_olmo \
+  tests/models/language/generation/test_ncp_olmo.py
+```
 
 The registry test uses the public Stage 2 v1 checkpoint with small dummy-weight
 overrides. Before opening a pull request, run:

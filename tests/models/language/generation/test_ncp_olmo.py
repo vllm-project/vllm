@@ -11,7 +11,10 @@ from vllm import SamplingParams
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
-MODEL = os.environ.get("NCP_OLMO_TEST_MODEL", "")
+MODEL = os.environ.get(
+    "NCP_OLMO_TEST_MODEL",
+    "ArchSpace-Collection/NCP_ArchPreview_dolma3_8.9B_Stage2_v1",
+)
 PROMPTS = [
     "A short request checks the model state.",
     "A longer request checks that batching preserves the request-local HLM state. " * 8,
@@ -25,10 +28,11 @@ PRESSURE_PROMPTS = [
     "In one word, the capital of France is ",
 ] + [f"Tell me about the number {index}: " for index in range(32)]
 
-pytestmark = pytest.mark.skipif(
-    not MODEL,
-    reason="NCP_OLMO_TEST_MODEL must point to a pure-HF NCP-OLMo checkpoint",
-)
+
+@pytest.fixture(autouse=True)
+def ncp_runner_environment(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
 
 
 def _check_exact_vllm_outputs(
@@ -39,7 +43,6 @@ def _check_exact_vllm_outputs(
     candidate_name: str,
 ) -> None:
     """Require exact tokens/text and matching top-k choices."""
-
     check_outputs_equal(
         outputs_0_lst=[(output[0], output[1]) for output in reference],
         outputs_1_lst=[(output[0], output[1]) for output in candidate],
@@ -141,6 +144,10 @@ def test_greedy_logprobs(
             num_logprobs,
         )
 
+    assert all(output[0] for output in hf_outputs)
+    assert [output[0] for output in hf_outputs] == [
+        output[0] for output in vllm_outputs
+    ]
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
@@ -195,7 +202,6 @@ def test_chunked_prefill_preemption_and_refill_match_sequential(
     num_logprobs: int,
 ) -> None:
     """Preserve request-local HLM state across scheduler pressure."""
-
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=max_tokens,

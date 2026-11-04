@@ -3,33 +3,56 @@
 
 """Tests for request-scoped HLM state under the V2 runner batch contract."""
 
-from types import SimpleNamespace
+from dataclasses import replace
 
 import numpy as np
 import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.model_executor.models.ncp_olmo.model import NCPOlmo3ForCausalLM
 from vllm.model_executor.models.ncp_olmo.model_state import NCPOlmoModelState
 from vllm.model_executor.models.ncp_olmo.state import (
     ConceptRequestStateStore,
     RequestStateError,
+    active_tensor_buffer,
 )
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def make_input_batch(
     req_ids: list[str],
     scheduled_tokens: list[int],
     computed_tokens: list[int],
-) -> SimpleNamespace:
+) -> InputBatch:
     """Build the CPU metadata consumed from a V2 ``InputBatch``."""
-
-    return SimpleNamespace(
+    batch = InputBatch.make_dummy(
+        len(req_ids),
+        sum(scheduled_tokens),
+        InputBuffers(len(req_ids), sum(scheduled_tokens), torch.device("cpu")),
+    )
+    scheduled = np.asarray(scheduled_tokens, dtype=np.int32)
+    computed = np.asarray(computed_tokens, dtype=np.int32)
+    query_start_loc = np.concatenate(
+        (np.zeros(1, dtype=np.int32), scheduled.cumsum(dtype=np.int32))
+    )
+    seq_lens = torch.from_numpy(computed + scheduled)
+    return replace(
+        batch,
         req_ids=req_ids,
-        num_scheduled_tokens=np.asarray(scheduled_tokens, dtype=np.int32),
-        num_computed_tokens_np=np.asarray(computed_tokens, dtype=np.int32),
+        num_scheduled_tokens=scheduled,
+        num_computed_tokens_np=computed,
         num_tokens=sum(scheduled_tokens),
+        query_start_loc=torch.from_numpy(query_start_loc),
+        query_start_loc_np=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        positions=torch.cat(
+            [
+                torch.arange(start, start + count)
+                for start, count in zip(computed_tokens, scheduled_tokens)
+            ]
+        ),
     )
 
 
@@ -62,7 +85,6 @@ def test_segments_follow_v2_batch_order_across_chunked_prefill() -> None:
 
 def test_finished_slot_is_refilled_and_reordered_without_state_leakage() -> None:
     """Exercise a continuous batch that finishes, refills, and reorders a slot."""
-
     store = make_store()
     store.add_request("long", computed_tokens=0)
     store.add_request("short", computed_tokens=0)
@@ -90,117 +112,99 @@ def test_finished_slot_is_refilled_and_reordered_without_state_leakage() -> None
     ]
 
 
-def test_batch_invariant_hlm_advances_requests_individually(monkeypatch) -> None:
+def test_batch_invariant_hlm_advances_requests_individually(
+    ncp_model, monkeypatch
+) -> None:
     """Keep HLM arithmetic independent of incidental scheduler batching."""
-
-    calls = []
-
-    class RecordingHighLevel:
-        def advance(self, state, encoder_chunk, layer_chunks) -> None:
-            calls.append((state.req_id, encoder_chunk.item(), layer_chunks[0].item()))
-
-        def advance_batch(self, *args, **kwargs) -> None:
-            raise AssertionError("batch-invariant HLM must not use advance_batch")
-
-    states = [
-        SimpleNamespace(req_id="first", predicted_concepts=SimpleNamespace(length=0)),
-        SimpleNamespace(req_id="second", predicted_concepts=SimpleNamespace(length=0)),
-    ]
-    advances = [
-        (states[0], torch.tensor(1.0), (torch.tensor(2.0),)),
-        (states[1], torch.tensor(3.0), (torch.tensor(4.0),)),
-    ]
-    model = SimpleNamespace(highlevel=RecordingHighLevel())
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-
-    NCPOlmo3ForCausalLM._advance_hlm_batches(model, advances)
-
-    assert calls == [("first", 1.0, 2.0), ("second", 3.0, 4.0)]
+    _check_hlm_batch(ncp_model, exact=True)
 
 
 def test_batch_invariant_multichunk_prefill_advances_in_fixed_order(
+    ncp_model,
     monkeypatch,
 ) -> None:
     """Make HLM results independent of chunked-prefill partitioning."""
-
-    calls = []
-
-    class RecordingHighLevel:
-        def advance(self, state, encoder_chunk, layer_chunks) -> None:
-            calls.append(
-                (
-                    state.req_id,
-                    encoder_chunk.item(),
-                    tuple(value.item() for value in layer_chunks),
-                )
-            )
-
-        def prefill(self, *args, **kwargs) -> None:
-            raise AssertionError("batch-invariant HLM must not use multi-chunk prefill")
-
-    store = make_store()
+    config = ncp_model.backend_config
+    store = ncp_model.request_states
     store.add_request("request", computed_tokens=0)
-    segment = store.resolve_segments(make_input_batch(["request"], [4], [0]))[0]
-    model = SimpleNamespace(
-        backend_config=SimpleNamespace(chunk_size=2),
-        highlevel=RecordingHighLevel(),
+    store.add_request("reference", computed_tokens=0)
+    num_tokens = 2 * config.chunk_size
+    segment = store.resolve_segments(make_input_batch(["request"], [num_tokens], [0]))[
+        0
+    ]
+    torch.manual_seed(42)
+    encoder_hidden = torch.randn(
+        num_tokens, config.hidden_size, device="cuda", dtype=torch.bfloat16
     )
-    encoder_hidden = torch.tensor([[1.0], [3.0], [5.0], [7.0]])
     encoder_raw_layers = (
-        torch.tensor([[2.0], [4.0], [6.0], [8.0]]),
-        torch.tensor([[10.0], [12.0], [14.0], [16.0]]),
+        encoder_hidden + 1,
+        encoder_hidden + 2,
     )
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
 
-    advance = NCPOlmo3ForCausalLM._advance_completed_chunks(
-        model,
-        segment,
-        encoder_hidden,
-        encoder_raw_layers,
-    )
-
-    assert advance is None
-    assert calls == [
-        ("request", 2.0, (3.0, 11.0)),
-        ("request", 6.0, (7.0, 15.0)),
-    ]
-
-
-def test_normal_hlm_path_batches_equal_position_requests(monkeypatch) -> None:
-    """Retain the throughput path when exact batch invariance is disabled."""
-
-    calls = []
-
-    class RecordingHighLevel:
-        def advance(self, *args, **kwargs) -> None:
-            raise AssertionError("normal HLM path should batch equal-position requests")
-
-        def advance_batch(self, states, encoder_chunks, layer_chunks) -> None:
-            calls.append(
-                (
-                    [state.req_id for state in states],
-                    encoder_chunks.tolist(),
-                    layer_chunks[0].tolist(),
-                )
+    with torch.inference_mode():
+        advance = ncp_model._advance_completed_chunks(
+            segment, encoder_hidden, encoder_raw_layers
+        )
+        for start in range(0, num_tokens, config.chunk_size):
+            chunk = slice(start, start + config.chunk_size)
+            ncp_model.highlevel.advance(
+                store.states["reference"],
+                encoder_hidden[chunk].mean(dim=0).to(encoder_hidden.dtype),
+                tuple(
+                    layer[chunk].mean(dim=0).to(layer.dtype)
+                    for layer in encoder_raw_layers
+                ),
             )
-
-    states = [
-        SimpleNamespace(req_id="first", predicted_concepts=SimpleNamespace(length=0)),
-        SimpleNamespace(req_id="second", predicted_concepts=SimpleNamespace(length=0)),
-    ]
-    advances = [
-        (states[0], torch.tensor(1.0), (torch.tensor(2.0),)),
-        (states[1], torch.tensor(3.0), (torch.tensor(4.0),)),
-    ]
-    model = SimpleNamespace(
-        highlevel=RecordingHighLevel(),
-        backend_config=SimpleNamespace(encoder_layers=1),
+    assert advance is None
+    assert store.states["request"].predicted_concepts.length == 2
+    assert torch.equal(
+        active_tensor_buffer(store.states["request"].predicted_concepts),
+        active_tensor_buffer(store.states["reference"].predicted_concepts),
     )
+
+
+def test_normal_hlm_path_batches_equal_position_requests(
+    ncp_model, monkeypatch
+) -> None:
+    """Retain the throughput path when exact batch invariance is disabled."""
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    _check_hlm_batch(ncp_model, exact=False)
 
-    NCPOlmo3ForCausalLM._advance_hlm_batches(model, advances)
 
-    assert calls == [(["first", "second"], [1.0, 3.0], [2.0, 4.0])]
+def _check_hlm_batch(model, *, exact: bool) -> None:
+    store = model.request_states
+    for req_id in ("first", "second", "ref-first", "ref-second"):
+        store.add_request(req_id)
+    torch.manual_seed(42)
+    chunks = torch.randn(
+        2, model.backend_config.hidden_size, device="cuda", dtype=torch.bfloat16
+    )
+    layers = (chunks + 1, chunks + 2)
+    with torch.inference_mode():
+        model._advance_hlm_batches(
+            [
+                (store.states[req_id], chunks[i], tuple(layer[i] for layer in layers))
+                for i, req_id in enumerate(("first", "second"))
+            ]
+        )
+        for i, req_id in enumerate(("first", "second")):
+            model.highlevel.advance(
+                store.states[f"ref-{req_id}"],
+                chunks[i],
+                tuple(layer[i] for layer in layers),
+            )
+            actual = active_tensor_buffer(store.states[req_id].predicted_concepts)
+            expected = active_tensor_buffer(
+                store.states[f"ref-{req_id}"].predicted_concepts
+            )
+            assert store.states[req_id].predicted_concepts.length == 1
+            assert torch.isfinite(actual).all()
+            if exact:
+                assert torch.equal(actual, expected)
+            else:
+                torch.testing.assert_close(actual, expected)
 
 
 def test_remove_request_releases_state_and_requires_readmission() -> None:
@@ -272,40 +276,42 @@ def test_segment_total_must_match_v2_input_batch() -> None:
         store.resolve_segments(input_batch)
 
 
-def make_model_state() -> NCPOlmoModelState:
-    """Construct the adapter without allocating runner device buffers."""
-
-    model_state = object.__new__(NCPOlmoModelState)
-    model_state.request_states = make_store()
-    model_state.rope_state = None
-    model_state.prompt_embeds_state = None
-    return model_state
+@pytest.fixture
+def model_state(ncp_config, ncp_model):
+    return NCPOlmoModelState(ncp_config, ncp_model, None, torch.device("cuda"))
 
 
-def test_model_state_distinguishes_dummy_profile_batch() -> None:
-    model_state = make_model_state()
+@pytest.fixture
+def runner_state():
+    return RequestState(4, 128, 128, 0, 128, torch.device("cuda"))
+
+
+def test_model_state_distinguishes_dummy_profile_batch(
+    model_state, runner_state
+) -> None:
     input_batch = make_input_batch(["profile-only"], [4], [0])
-    runner_state = SimpleNamespace(req_id_to_index={})
 
     prepared = model_state.prepare_inputs(input_batch, runner_state)
 
     assert prepared["request_segments"] == ()
 
 
-def test_model_state_does_not_hide_missing_real_hlm_state() -> None:
-    model_state = make_model_state()
+def test_model_state_does_not_hide_missing_real_hlm_state(
+    model_state, runner_state
+) -> None:
     input_batch = make_input_batch(["real"], [2], [0])
-    runner_state = SimpleNamespace(req_id_to_index={"real": 0})
+    runner_state.add_request("real", 2, [1, 2], 0, 4)
 
     with pytest.raises(RequestStateError, match="was not admitted"):
         model_state.prepare_inputs(input_batch, runner_state)
 
 
-def test_model_state_rejects_mixed_real_and_dummy_batch() -> None:
-    model_state = make_model_state()
+def test_model_state_rejects_mixed_real_and_dummy_batch(
+    model_state, runner_state
+) -> None:
     model_state.request_states.add_request("real", computed_tokens=0)
     input_batch = make_input_batch(["real", "profile-only"], [1, 1], [0, 0])
-    runner_state = SimpleNamespace(req_id_to_index={"real": 0})
+    runner_state.add_request("real", 1, [1], 0, 4)
 
     with pytest.raises(RuntimeError, match="mixed real/dummy"):
         model_state.prepare_inputs(input_batch, runner_state)

@@ -33,7 +33,6 @@ class TensorBuffer:
 
 def active_tensor_buffer(buffer: TensorBuffer) -> Any | None:
     """Return the active prefix without exposing unused capacity."""
-
     if buffer.length == 0:
         return None
     if buffer.data is None or buffer.length > int(buffer.data.shape[0]):
@@ -48,7 +47,6 @@ def append_tensor_buffer(
     minimum_capacity: int = 1,
 ) -> Any:
     """Append one or more leading-dimension values without Python tensor lists."""
-
     if values.ndim == 0:
         raise ValueError("tensor buffer values require a leading dimension")
     num_values = int(values.shape[0])
@@ -86,7 +84,6 @@ def append_tensor_buffer(
 
 def clear_tensor_buffer(buffer: TensorBuffer) -> None:
     """Clear the active prefix while retaining device storage."""
-
     buffer.length = 0
 
 
@@ -111,7 +108,6 @@ class ConceptRequestState:
         hlm_layers: int,
     ) -> ConceptRequestState:
         """Allocate empty per-layer containers without allocating tensors."""
-
         return cls(
             req_id=req_id,
             pending_encoder_layers=[TensorBuffer() for _ in range(encoder_layers)],
@@ -143,7 +139,6 @@ class ConceptRequestStateStore:
     @property
     def states(self) -> Mapping[str, ConceptRequestState]:
         """Expose a read-only mapping view for diagnostics."""
-
         return self._states
 
     def _new_state(self, req_id: str) -> ConceptRequestState:
@@ -162,7 +157,6 @@ class ConceptRequestStateStore:
         them with a full replay from token position zero. Replacing an existing
         entry here is therefore intentional.
         """
-
         req_id = str(req_id)
         if computed_tokens != 0:
             raise RequestStateError(
@@ -174,12 +168,10 @@ class ConceptRequestStateStore:
 
     def remove_request(self, req_id: str) -> None:
         """Release all dense HLM tensors owned by a finished request."""
-
         self._states.pop(str(req_id), None)
 
     def resolve_segments(self, input_batch: Any) -> tuple[ScheduledRequestSegment, ...]:
         """Resolve request segments from a V2 runner ``InputBatch``."""
-
         req_ids = tuple(str(req_id) for req_id in input_batch.req_ids)
         scheduled_counts = input_batch.num_scheduled_tokens
         computed_positions = input_batch.num_computed_tokens_np
@@ -250,7 +242,6 @@ class ConceptRequestStateStore:
     @staticmethod
     def commit(segment: ScheduledRequestSegment) -> None:
         """Commit one successfully processed request segment."""
-
         if segment.state.next_token_position != segment.position_start:
             raise RequestStateError(
                 f"request {segment.req_id!r} state changed before commit"
