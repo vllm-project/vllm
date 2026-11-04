@@ -9,7 +9,7 @@ import torch
 from tests.models.utils import softmax
 from vllm import LLM, PoolingParams
 
-MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
+MODEL_NAME = "vllm-project/Qwen3-Reranker-0.6B-seq-cls"
 PROMPT = "The chef prepared a delicious meal."
 TEXTS_1 = [
     "What is the capital of France?",
