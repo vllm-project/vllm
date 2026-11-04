@@ -201,12 +201,13 @@ def test_branching_tree_matches_plain_decode():
 @pytest.mark.parametrize("tp", [1, 2])
 def test_tree_speculator_on_hybrid_runs_chains(tp, capfd):
     """Without a recurrent tree kernel the hybrid lowers the tree to chains: it
-    starts, logs why once per worker, drafts and decodes like no speculation."""
+    starts, logs why once (the engine core logs the reduced limits of all
+    workers), drafts and decodes like no speculation."""
     _skip_if_insufficient_gpus_for_tp(tp)
     config = {"method": "test_ngram_tree", **NGRAM}
     got, drafted, _ = _run(HYBRID, config, tensor_parallel_size=tp)
     out, err = capfd.readouterr()
-    assert (out + err).count(LOWERED) == tp
+    assert (out + err).count(LOWERED) == 1
     assert drafted > 0
     _check(HYBRID, got, "tree_on_hybrid", tensor_parallel_size=tp)
 
