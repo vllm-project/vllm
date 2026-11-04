@@ -272,18 +272,25 @@ class HiSparseCoordinator:
         """
         if not self.copies:
             return
+        copies: dict[int, tuple[KVCacheBlock, ...]] = {}
         for host_idx, host_block in enumerate(host_blocks):
             if host_block.is_null or host_block.block_hash is None:
                 continue
             blocks = self.copies.get(host_block.block_hash)
-            if blocks is None:
-                continue
-            for manager, block in zip(self.resident_managers, blocks):
-                if manager.adopt_resident_page(request_id, host_idx, block):
-                    manager.block_pool.touch([block])
-                    state.pinned_clean.add(host_idx)
-                    if host_idx < state.synced_pages:
-                        state.stale_pages.add(host_idx)
+            if blocks is not None:
+                copies[host_idx] = blocks
+        if not copies:
+            return
+        assert self.gpu_pool is not None
+        adopted: list[KVCacheBlock] = []
+        for slot, manager in enumerate(self.resident_managers):
+            pages = {host_idx: blocks[slot] for host_idx, blocks in copies.items()}
+            for host_idx in manager.adopt_resident_pages(request_id, pages):
+                adopted.append(pages[host_idx])
+                state.pinned_clean.add(host_idx)
+                if host_idx < state.synced_pages:
+                    state.stale_pages.add(host_idx)
+        self.gpu_pool.touch(adopted)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -351,44 +358,49 @@ class HiSparseCoordinator:
             for manager in self.resident_managers
         )
 
-    def _resident_page_blocks(
-        self, request_id: str, page_idx: int
-    ) -> list[KVCacheBlock] | None:
-        blocks: list[KVCacheBlock] = []
-        for manager in self.resident_managers:
-            num_pages = len(manager.req_to_blocks.get(request_id, ()))
-            block = manager.get_resident_page(request_id, page_idx)
-            if page_idx >= num_pages - ACTIVE_TAIL_PAGES or block is None:
-                return None
-            blocks.append(block)
-        return blocks
-
-    def _unpin_page(
-        self, request_id: str, state: _HiSparseRequestState, page_idx: int
-    ) -> bool:
-        if page_idx in state.pending_pages or page_idx not in state.valid_pages:
-            return False
-        blocks = self._resident_page_blocks(request_id, page_idx)
-        if blocks is None:
-            return False
-        for manager, block in zip(self.resident_managers, blocks):
-            self._owners.setdefault(block.block_id, set()).add((request_id, page_idx))
-            manager.block_pool.unpin_blocks([block], self._on_block_reused)
-        state.pinned_clean.discard(page_idx)
-        state.unpinned_pages.add(page_idx)
-        return True
+    def _unpin_pages(
+        self,
+        request_id: str,
+        state: _HiSparseRequestState,
+        page_indices: Iterable[int],
+    ) -> None:
+        """Release the pages' resident blocks to the pool, in the given order."""
+        rows = [
+            manager.get_residency_row(request_id) for manager in self.resident_managers
+        ]
+        num_unpinnable = min(map(len, rows), default=0) - ACTIVE_TAIL_PAGES
+        released: list[KVCacheBlock] = []
+        for page_idx in page_indices:
+            if (
+                page_idx >= num_unpinnable
+                or page_idx in state.pending_pages
+                or page_idx not in state.valid_pages
+            ):
+                continue
+            blocks = [row[page_idx] for row in rows]
+            if any(block.is_null for block in blocks):
+                continue
+            for block in blocks:
+                self._owners.setdefault(block.block_id, set()).add(
+                    (request_id, page_idx)
+                )
+            released.extend(blocks)
+            state.pinned_clean.discard(page_idx)
+            state.unpinned_pages.add(page_idx)
+        if released:
+            assert self.gpu_pool is not None
+            self.gpu_pool.unpin_blocks(released, self._on_block_reused)
 
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
-        for page_idx in sorted(state.pinned_clean, reverse=True):
-            self._unpin_page(request_id, state, page_idx)
+        self._unpin_pages(request_id, state, sorted(state.pinned_clean, reverse=True))
 
     def _page_became_clean(
         self, request_id: str, state: _HiSparseRequestState, page_idx: int
     ) -> None:
         state.pinned_clean.add(page_idx)
         if self._can_read_from_host(request_id):
-            self._unpin_page(request_id, state, page_idx)
+            self._unpin_pages(request_id, state, (page_idx,))
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
         host_hash = self._copy_by_block.get(block.block_id)

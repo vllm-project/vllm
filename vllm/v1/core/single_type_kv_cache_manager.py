@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -2581,17 +2581,17 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         super().pop_blocks_for_free(request_id)
         return trim_null_head(blocks)
 
-    def adopt_resident_page(
-        self, request_id: str, block_idx: int, block: KVCacheBlock
-    ) -> bool:
-        """Point a null prefix page at a pinned GPU copy of its contents."""
-        blocks = self.req_to_blocks.get(request_id)
-        if blocks is None or block_idx >= len(blocks):
-            return False
-        if self.get_resident_page(request_id, block_idx) is not None:
-            return False
-        self.residency_changes.setdefault(request_id, {})[block_idx] = block
-        return True
+    def adopt_resident_pages(
+        self, request_id: str, pages: Mapping[int, KVCacheBlock]
+    ) -> list[int]:
+        """Point null prefix pages at pinned GPU copies; return the adopted pages."""
+        row = self.get_residency_row(request_id)
+        adopted = [idx for idx in pages if idx < len(row) and row[idx].is_null]
+        if adopted:
+            changes = self.residency_changes.setdefault(request_id, {})
+            for idx in adopted:
+                changes[idx] = pages[idx]
+        return adopted
 
     def drop_resident_page(
         self, request_id: str, block_idx: int
