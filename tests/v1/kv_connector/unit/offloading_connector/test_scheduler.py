@@ -3426,6 +3426,123 @@ def test_lazy_load_target_is_flushed_before_load(
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_lazy_offers_loaded_chunks_at_overwrite(request_runner, async_scheduling: bool):
+    """The CPU can evict a loaded chunk while HBM holds it, so HBM must offer it."""
+    runner, offers, _ = _make_lazy_runner(
+        request_runner, async_scheduling, num_gpu_blocks=5 if async_scheduling else 4
+    )
+    loaded_keys: list = []
+    prepare_load = runner.manager.prepare_load
+
+    def record_prepare_load(keys, req_context):
+        loaded_keys.extend(keys)
+        return prepare_load(keys, req_context)
+
+    runner.manager.prepare_load = record_prepare_load
+    scheduler = runner.connector_scheduler
+    scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.new_request(token_ids=list(range(12)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+    assert len(loaded_keys) == 2
+
+    del scheduler._maximal_prefix_lookup
+    offers.clear()
+    # All the free blocks belong to the first request.
+    runner.new_request(token_ids=list(range(100, 112)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    assert set(loaded_keys) <= set(_offered_keys(offers, StoreTrigger.ON_OVERWRITE))
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_a_failed_load_is_not_offered_at_overwrite(
+    request_runner, async_scheduling: bool
+):
+    """A failed load never wrote the blocks, so they hold no chunk to store."""
+    runner, offers, _ = _make_lazy_runner(
+        request_runner, async_scheduling, num_gpu_blocks=5 if async_scheduling else 4
+    )
+    loaded_keys: list = []
+    prepare_load = runner.manager.prepare_load
+
+    def record_prepare_load(keys, req_context):
+        loaded_keys.extend(keys)
+        return prepare_load(keys, req_context)
+
+    runner.manager.prepare_load = record_prepare_load
+    runner.offloading_spec.handler.fail_loads = True
+    scheduler = runner.connector_scheduler
+    scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.new_request(token_ids=list(range(12)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+    assert loaded_keys
+    # The load failed: its chunks did not go in the map, and none is pending.
+    assert _on_overwrite(scheduler)._pending_loads == {}
+
+    del scheduler._maximal_prefix_lookup
+    offers.clear()
+    runner.new_request(token_ids=list(range(100, 112)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+
+    assert not set(loaded_keys) & set(_offered_keys(offers, StoreTrigger.ON_OVERWRITE))
+
+
+def _offers_per_trigger(
+    request_runner, store_triggers: list[str], async_scheduling: bool
+) -> dict[StoreTrigger, list[tuple[tuple, bool]]]:
+    """Run loads, compute stores and overwrites, and record each offer.
+
+    The manager accepts every offered key, so each handler sees the same
+    manager answers with or without the other handlers.
+    """
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=8,
+        async_scheduling=async_scheduling,
+        extra_config_overrides={
+            "store_triggers": store_triggers,
+            "self_describing_kv_events": False,
+        },
+    )
+    offers: dict[StoreTrigger, list[tuple[tuple, bool]]] = {}
+
+    def prepare_store(keys, req_context, trigger):
+        offers.setdefault(trigger, []).append((tuple(keys), req_context is None))
+        return generate_store_output(keys)
+
+    runner.manager.prepare_store.side_effect = prepare_store
+    scheduler = runner.connector_scheduler
+    scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 2
+    runner.new_request(token_ids=list(range(12)))
+    runner._run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=True)
+    del scheduler._maximal_prefix_lookup
+    for start in (100, 200):
+        runner.new_request(token_ids=list(range(start, start + 20)))
+        runner._run(decoded_tokens=[1, EOS_TOKEN_ID], complete_transfers=True)
+    return offers
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_handlers_do_not_depend_on_each_other(
+    request_runner, async_scheduling: bool
+):
+    """Each handler makes the same offers alone, with the other handler, and
+    in either order."""
+    alone = {
+        trigger: _offers_per_trigger(request_runner, [trigger.name], async_scheduling)
+        for trigger in (StoreTrigger.ON_COMPUTE, StoreTrigger.ON_OVERWRITE)
+    }
+    for order in (
+        ["ON_COMPUTE", "ON_OVERWRITE"],
+        ["ON_OVERWRITE", "ON_COMPUTE"],
+    ):
+        together = _offers_per_trigger(request_runner, order, async_scheduling)
+        for trigger, offers in alone.items():
+            assert offers[trigger]
+            assert together[trigger] == offers[trigger], (order, trigger)
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_on_request_finished_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
 ):
