@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import io
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import SingletonPrompt
 from vllm.renderers import TokenizeParams
@@ -44,6 +47,7 @@ class MockModelConfig:
     renderer_num_workers: int = 1
     hidden_size: int = 768
     dtype: torch.dtype = torch.float32
+    max_model_len: int = 100
 
     def get_hidden_size(self) -> int:
         return self.hidden_size
@@ -132,7 +136,7 @@ class TestValidatePrompt:
     def test_empty_input(self):
         renderer = _build_renderer(MockModelConfig())
 
-        with pytest.raises(ValueError, match="at least one prompt"):
+        with pytest.raises(VLLMValidationError, match="at least one prompt"):
             renderer.render_prompts(_preprocess_prompt(renderer.model_config, []))
 
     def test_invalid_type(self):
@@ -376,6 +380,32 @@ class TestRenderPrompt:
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
 
+    @pytest.mark.parametrize(
+        ("truncation_side", "expected"),
+        [("left", [106, 107, 108, 109]), ("right", [100, 101, 102, 103])],
+    )
+    def test_detokenization_matches_truncated_tokens(self, truncation_side, expected):
+        """Echoed prompt text must match the truncated tokens sent to the engine."""
+        renderer = _build_renderer(MockModelConfig())
+        params = TokenizeParams(
+            max_total_tokens=100,
+            truncate_prompt_tokens=4,
+            truncation_side=truncation_side,
+            needs_detokenization=True,
+        )
+
+        def render():
+            return renderer.render_prompts(
+                _preprocess_prompt(renderer.model_config, list(range(100, 110)))
+            )
+
+        results = renderer.tokenize_prompts(render(), params)
+        async_results = asyncio.run(renderer.tokenize_prompts_async(render(), params))
+
+        for result in (*results, *async_results):
+            assert result["prompt_token_ids"] == expected
+            assert result["prompt"] == str(expected)
+
     def test_explicit_side_tokenizer_unbounded(self):
         renderer = _build_renderer(MockModelConfig())
 
@@ -546,8 +576,13 @@ class TestMaxTokensNotReservation:
                 TokenizeParams(max_total_tokens=100, max_output_tokens=0),
             )
 
-    def test_negative_truncation_uses_max_total(self):
-        """truncate_prompt_tokens=-1 reserves one output token."""
+    @pytest.mark.parametrize(
+        "max_output_tokens,expected_length", [(None, 99), (0, 100), (40, 99)]
+    )
+    def test_auto_truncation_reserves_space_only_for_generation(
+        self, max_output_tokens, expected_length
+    ):
+        """Generation needs one output token; pooling can use the full context."""
         renderer = _build_renderer(MockModelConfig())
 
         prompts = renderer.render_prompts(
@@ -557,13 +592,32 @@ class TestMaxTokensNotReservation:
             prompts,
             TokenizeParams(
                 max_total_tokens=100,
-                max_output_tokens=40,
+                max_output_tokens=max_output_tokens,
                 truncate_prompt_tokens=-1,
             ),
         )
-        # -1 maps to max_total_tokens (100) rather than the old
-        # max_total - max_output (60), minus the one token held back so
-        # truncation cannot leave a zero-token output budget.
+        assert len(results[0]["prompt_token_ids"]) == expected_length
+
+    @pytest.mark.parametrize("request_cls", [ChatCompletionRequest, ResponsesRequest])
+    @pytest.mark.parametrize("token_prompt", [False, True])
+    def test_auto_truncation_leaves_room_without_output_limit(
+        self, request_cls, token_prompt
+    ):
+        """Omitting an output limit must not make automatic truncation fail."""
+        model_config = MockModelConfig(max_model_len=100)
+        renderer = _build_renderer(model_config)
+        if request_cls is ChatCompletionRequest:
+            request = request_cls(
+                messages=[{"role": "user", "content": "hi"}],
+                truncate_prompt_tokens=-1,
+            )
+        else:
+            request = request_cls(input="hi", truncation="auto")
+        prompt = list(range(200)) if token_prompt else "x" * 200
+        prompts = renderer.render_prompts(_preprocess_prompt(model_config, prompt))
+        results = renderer.tokenize_prompts(
+            prompts, request.build_tok_params(model_config)
+        )
         assert len(results[0]["prompt_token_ids"]) == 99
 
     def test_negative_pad_uses_max_total(self):

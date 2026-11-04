@@ -3,9 +3,16 @@
 
 """Tests for KV cache offloading configuration."""
 
+import sys
+
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 pytestmark = pytest.mark.cpu_test
@@ -80,6 +87,7 @@ def test_kv_connector(
         return
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
 
     assert kv_transfer_config.kv_connector == expected_backend
@@ -160,7 +168,8 @@ def test_kv_connector_allows_expandable_segments_with_cumem_allocator(
 @pytest.mark.parametrize(
     ("kv_connector", "extra_config", "env"),
     [
-        ("NixlConnector", {}, None),
+        ("NixlConnector", {"backends": ["LIBFABRIC"]}, None),
+        ("NixlPushConnector", {}, None),
         ("MooncakeConnector", {"mooncake_protocol": "tcp"}, None),
         ("MooncakeConnector", {}, "MC_USE_TENT"),
     ],
@@ -176,6 +185,22 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
             kv_connector_extra_config=extra_config,
             enable_sleep_mode=True,
         )
+
+
+def test_mooncake_store_supports_sleep_with_explicit_rdma(monkeypatch, tmp_path):
+    """Disabling auto-discovery keeps explicit RDMA despite NVLink overrides."""
+    monkeypatch.setitem(sys.modules, "mooncake", None)
+    config_path = tmp_path / "mooncake.json"
+    config_path.write_text('{"protocol": "rdma", "device_name": "mlx5_0"}')
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("MC_MS_AUTO_DISC", "0")
+    monkeypatch.delenv("MC_USE_TENT", raising=False)
+    monkeypatch.delenv("MC_USE_TEV1", raising=False)
+    monkeypatch.setenv("MC_FORCE_MNNVL", "1")
+    monkeypatch.setenv("MC_INTRANODE_NVLINK", "1")
+    config = KVTransferConfig(kv_connector="MooncakeStoreConnector", kv_role="kv_both")
+    connector_cls = KVConnectorFactory.get_connector_class(config)
+    assert connector_cls.supports_sleep_mode(config)
 
 
 def test_kv_connector_allows_other_alloc_conf(monkeypatch):
@@ -203,7 +228,26 @@ def test_kv_offloading_size_only_uses_native_default():
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
+    assert kv_transfer_config is not None
     kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [(None, "NixlPullConnector"), ("push", "NixlPushConnector"), ("Push", None)],
+)
+def test_nixl_connector_transfer_mode(mode, expected):
+    """Frameworks that only accept "NixlConnector" select push via extra config."""
+    ktc = KVTransferConfig(
+        kv_connector="NixlConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={} if mode is None else {"transfer_mode": mode},
+    )
+    if expected is None:
+        with pytest.raises(ValueError, match="transfer_mode"):
+            KVConnectorFactory.get_connector_class(ktc)
+    else:
+        assert KVConnectorFactory.get_connector_class(ktc).__name__ == expected
