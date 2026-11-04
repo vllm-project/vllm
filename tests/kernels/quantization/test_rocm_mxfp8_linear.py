@@ -165,10 +165,10 @@ def test_rocm_mxfp8_linear_m31_tp4_tiles_are_valid(n, k):
         (6144, 768, (16, 32, 256, 4, 3)),
     ],
 )
-def test_rocm_mxfp8_linear_preserves_non_cdna_tiles(monkeypatch, n, k, fallback):
+def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback):
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
-    monkeypatch.setattr(rocm_native, "_ON_CDNA", False)
+    monkeypatch.setattr(rocm_native, "_ON_CDNA4", False)
     for num_tokens in (1, 8, 16, 17):
         assert rocm_native._select_cfg(num_tokens, n, k) == fallback
 

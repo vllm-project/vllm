@@ -258,12 +258,12 @@ def _mxfp8_dot_scaled_gemm(
 # room for num_stages=3 at BLOCK_K=256; use 2 there.
 _BK256_STAGES = 3
 _ON_GFX950 = False
-_ON_CDNA = False
+_ON_CDNA4 = False
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_cdna, on_gfx950
+    from vllm.platforms.rocm import get_cdna_version, on_gfx950
 
     _ON_GFX950 = on_gfx950()
-    _ON_CDNA = on_cdna()
+    _ON_CDNA4 = get_cdna_version() == 4
     if _ON_GFX950:
         _BK256_STAGES = 2
 
@@ -344,7 +344,7 @@ def _select_cfg(M, N, K):
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
     """
-    if _ON_CDNA:
+    if _ON_CDNA4:
         cfg = _select_m31_tp4_cfg(M, N, K)
         if cfg is not None:
             return cfg
