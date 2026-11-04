@@ -36,13 +36,9 @@ logger = init_logger(__name__)
 NUM_INDEX_HEADS = (1, 2, 4)
 # Decode CP: rows per request (DSpark 3); DSpark 7 splits each request in two.
 CP_QUERY_LEN = 4
-# DSpark 7 steps with fewer requests than this score locally. CP's two
-# cross-rank hops cost a fixed ~13 us a layer; the single-head scorer is faster
-# below it (MI355X, TP4, per layer, single-head vs CP: 1 request 6.4 vs 14.4 us
-# at 150K and 9.2 vs 14.5 us at 400K; 2 requests 9.0 vs 14.5 us and 13.2 vs
-# 14.6 us). At 3 requests it is 11.4 vs 14.7 us at 150K but 17.6 vs 15.4 us at
-# 400K, so the gate stops at 2 (the batch's context is not known when the CUDA
-# graph is captured). Not measured for DSpark 3, which keeps CP at any batch size.
+# DSpark 7 steps with fewer requests than this score locally: CP's cross-rank
+# hops cost a fixed ~13 us a layer, more than the single-head scorer below it.
+# The batch's context is unknown at CUDA graph capture, so the gate is by count.
 CP_MIN_REQS = 3
 
 

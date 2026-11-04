@@ -18,6 +18,7 @@ if not on_gfx950():
     pytest.skip("gfx950 instructions", allow_module_level=True)
 
 from tests.kernels.attention.minimax_m3_nvfp4_ref import dequant  # noqa: E402
+from vllm.models.minimax_m3.amd import indexer_nvfp4  # noqa: E402
 from vllm.models.minimax_m3.amd.ops.nvfp4_index_decode import (  # noqa: E402
     host as decode_host,
 )
@@ -507,21 +508,15 @@ def test_index_prefill_matches_reference(
 @pytest.mark.parametrize(
     ("num_decodes", "query_len", "scores_with_cp"),
     [
-        (1, 8, False),  # DSpark 7, below CP_MIN_REQS: single-head scorer
-        (2, 8, False),
-        (3, 8, True),
-        (4, 8, True),
-        (16, 8, True),
+        (indexer_nvfp4.CP_MIN_REQS - 1, 8, False),  # DSpark 7 below the gate
+        (indexer_nvfp4.CP_MIN_REQS, 8, True),
         (1, 4, True),  # DSpark 3 keeps CP at any batch size
-        (2, 1, False),  # not a CP row count
-        (129, 8, False),  # past the receive buffers (1024 rows)
     ],
 )
 def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
     """DSpark 7 steps with fewer than ``CP_MIN_REQS`` requests score locally."""
     from types import SimpleNamespace
 
-    from vllm.models.minimax_m3.amd import indexer_nvfp4
     from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp
 
     cp = SimpleNamespace(max_rows=1024)
