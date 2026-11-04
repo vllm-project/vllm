@@ -1012,6 +1012,58 @@ def test_online_fp8_moe_logprobs_bitwise_bs1_vs_bsN():
         )
 
 
+@skip_if_not_cuda
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@pytest.mark.timeout(600)
+def test_sliding_window_logprobs_bitwise_alone_vs_mixed_batch(backend):
+    """A sliding-window request decoding next to other requests' prefill chunks
+    must match the same request run alone.
+
+    Guards against FlashAttention dropping a sliding window that covers the
+    batch's max_seqlen_k (issue #65587). With max_model_len above the window,
+    decode steps replayed from FULL CUDA graphs keep the window, while mixed
+    prefill/decode steps run attention eagerly with shorter sequences and drop
+    it, which on Hopper switches Gemma-2's head-dim-256 layers to a kernel with
+    a different KV tile.
+    """
+    random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
+    targets = [_random_prompt(10, 50) for _ in range(4)]
+    fillers = [_random_prompt(1024, 2048) for _ in range(4)]
+    sp = SamplingParams(temperature=0.0, max_tokens=16, logprobs=1)
+
+    llm = LLM(
+        model="google/gemma-2-2b-it",
+        attention_config={"backend": backend},
+        # Must exceed Gemma-2's 4096-token sliding window.
+        max_model_len=8192,
+        # Chunks the fillers' prefill so the targets decode in mixed batches.
+        max_num_batched_tokens=256,
+        max_num_seqs=8,
+        gpu_memory_utilization=0.4,
+        enable_prefix_caching=False,
+    )
+    try:
+        alone = [
+            _extract_step_logprobs(llm.generate([p], sp, use_tqdm=False)[0])
+            for p in targets
+        ]
+        outputs = llm.generate(targets + fillers, sp, use_tqdm=False)
+        batched = [_extract_step_logprobs(o) for o in outputs[: len(targets)]]
+    finally:
+        with contextlib.suppress(Exception):
+            llm.llm_engine.engine_core.shutdown()
+
+    for i, ((lp1, tok1), (lpN, tokN)) in enumerate(zip(alone, batched)):
+        assert lp1 is not None and lpN is not None
+        assert tok1 == tokN, (
+            f"Prompt {i}: tokens differ alone vs batched: {tok1} vs {tokN}"
+        )
+        assert torch.equal(lp1, lpN), (
+            f"Prompt {i}: logprobs are not bitwise equal alone vs batched; "
+            f"max abs diff {(lp1 - lpN).abs().max():.3e}"
+        )
+
+
 def LLM_with_max_seqs(
     model: str,
     max_num_seqs: int,
