@@ -262,7 +262,7 @@ class MiniMaxM3DSparkMLP(nn.Module):
         self.act_fn = SiluAndMulWithClamp(
             swiglu_limit=config.swiglu_limit,
             alpha=config.swiglu_alpha,
-            beta=config.swiglu_beta,
+            beta=1.0,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

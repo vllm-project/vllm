@@ -634,7 +634,7 @@ class MiniMaxM3MoE(nn.Module):
                 "swiglu",
                 clamp=config.swiglu_limit,
                 alpha=config.swiglu_alpha,
-                beta=config.swiglu_beta,
+                beta=1.0,
             ),
             weight_format=MEGA_MOE_NVFP4,
             shared_experts=shared_experts,

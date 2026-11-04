@@ -128,7 +128,6 @@ def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=2
         hidden_act="swigluoai",
         swiglu_limit=7.0,
         swiglu_alpha=1.702,
-        swiglu_beta=1.0,
     )
     quant_config = ModelOptMxFp8Config(
         is_checkpoint_mxfp8_serialized=True,
