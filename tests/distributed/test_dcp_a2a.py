@@ -389,14 +389,31 @@ class TestPackedA2AKernels:
             cp_attn_out,
             cp_attn_lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            D,
-            lse_pack_dim,
+            None,
+            None,
+            has_mask=False,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual = _dcp_a2a_unpack_combine(
-            send_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        # The send buffer stands in for the all-to-all receive buffer.
+        out = torch.empty((B, h_per_rank, D), device=device, dtype=dtype)
+        out_lse = torch.empty(
+            (B, h_per_rank) if return_lse else (1, 1),
+            device=device,
+            dtype=torch.float32 if return_lse else dtype,
         )
+        _dcp_a2a_unpack_combine(
+            send_buffer,
+            out,
+            out_lse,
+            head_dim=D,
+            lse_pack_dim=lse_pack_dim,
+            return_lse=return_lse,
+            is_lse_base_on_e=is_lse_base_on_e,
+        )
+        actual = (out, out_lse) if return_lse else out
         expected_out, expected_lse = _packed_a2a_reference(
             cp_attn_out, cp_attn_lse, world_size, h_per_rank, is_lse_base_on_e
         )
@@ -448,17 +465,26 @@ class TestPackedA2AKernels:
             output,
             lse,
             send_buffer,
-            world_size,
-            h_per_rank,
-            head_dim,
-            lse_pack_dim,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
+            seq_lens,
+            query_start_loc,
+            has_mask=True,
+            world_size=world_size,
+            h_per_rank=h_per_rank,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
         )
-        actual_output, actual_lse = _dcp_a2a_unpack_combine(
+        actual_output = torch.empty(
+            (num_tokens, h_per_rank, head_dim), device=device, dtype=output.dtype
+        )
+        actual_lse = torch.empty(
+            (num_tokens, h_per_rank), device=device, dtype=torch.float32
+        )
+        _dcp_a2a_unpack_combine(
             send_buffer,
-            head_dim,
-            lse_pack_dim,
+            actual_output,
+            actual_lse,
+            head_dim=head_dim,
+            lse_pack_dim=lse_pack_dim,
             return_lse=True,
             is_lse_base_on_e=True,
         )

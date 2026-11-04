@@ -487,7 +487,7 @@ def test_m1a_single_gpu_matches_vllm_ops(S: int, qbf16: bool) -> None:
 
 
 def _a2a_combine(o, lse, seq_lens, qsl, q: int):
-    """``_dcp_a2a_pack_send`` + ``_dcp_a2a_unpack_combine`` for one rank's heads,
+    """``dcp_a2a_lse_reduce``'s pack + unpack-combine for one rank's heads,
     every rank's partials stacked: o [R, S, 12, 512], lse [R, S, 12], each
     sender's local KV lengths seq_lens [R, requests]."""
     S = o.size(1)
