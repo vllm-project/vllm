@@ -74,6 +74,20 @@ logger = init_logger(__name__)
 # batch mode (#1).
 MIN_HEADS_FOR_BF16_PREFILL = 32
 
+_fp8_q_padded_buffers: dict[tuple[int, int, int], torch.Tensor] = {}
+
+
+def _shared_fp8_q_padded(
+    max_tokens: int, num_heads: int, head_size: int
+) -> torch.Tensor:
+    key = (max_tokens, num_heads, head_size)
+    if key not in _fp8_q_padded_buffers:
+        _fp8_q_padded_buffers[key] = torch.zeros(
+            key, dtype=torch.bfloat16, device=current_platform.device_type
+        )
+    return _fp8_q_padded_buffers[key]
+
+
 # Under DCP each rank owns ~1/dcp of the top-k slots. From this many tokens on,
 # compacting them to the row front and bounding the kernel with `topk_length`
 # saves more than the per-call tile-scheduler rebuild it requires (the shared
@@ -854,6 +868,41 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # from being released when another layer grows the shared workspace.
         current_workspace_manager().get_simultaneous(*self.workspace_specs)
 
+        # When this rank has fewer query heads than the FP8 decode kernel
+        # supports, the query must be head-padded.
+        # Instead of a fresh zero-filled tensor and a copy on every call, the
+        # mixed-batch path writes the real heads straight into this buffer,
+        # zero-filled once and shared by all layers; the padding heads are never
+        # written, so they stay zero. It holds the largest decode step that runs
+        # in a CUDA graph; larger steps, and runs without CUDA graphs, take the
+        # per-call padding path. Microbatches running concurrently on separate
+        # streams would overwrite each other's query, hence no ubatching.
+        self.fp8_q_padded: torch.Tensor | None = None
+        speculative_config = vllm_config.speculative_config
+        tokens_per_request = 1
+        if speculative_config is not None:
+            tokens_per_request += speculative_config.num_speculative_tokens or 0
+        max_decode_tokens = min(
+            max_tokens,
+            vllm_config.compilation_config.max_cudagraph_capture_size or 0,
+            vllm_config.scheduler_config.max_num_seqs * tokens_per_request,
+        )
+        if (
+            max_decode_tokens > 0
+            and kv_cache_dtype in QUANTIZED_DS_MLA_CACHE_FORMATS
+            and num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            and vllm_config.attention_config.hisparse_config is None
+            and self.dcp_world_size == 1
+            and not vllm_config.parallel_config.use_ubatching
+            and type(self)._fp8_flash_mla_kernel
+            is FlashMLASparseImpl._fp8_flash_mla_kernel
+        ):
+            self.fp8_q_padded = _shared_fp8_q_padded(
+                max_decode_tokens,
+                self.fp8_decode_padded_heads,
+                self.q_head_size,
+            )
+
     def _forward_bf16_kv(
         self,
         q: torch.Tensor,
@@ -1240,12 +1289,16 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
         kernel_metadata: "FlashMLASparseMetadata.FP8KernelMetadata | None" = None,
+        num_heads: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Mixed batch FP8 forward path that treats all tokens as one batch.
 
         This is equivalent to main branch's approach and avoids the BF16
         prefill kernel which has head padding overhead when num_heads is small.
         Used when use_mixed_batch is True.
+
+        ``num_heads`` is the real head count when ``q`` is already head-padded;
+        the output keeps only those heads.
 
         The lse is only returned when DCP needs it, otherwise None.
         """
@@ -1323,12 +1376,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
         # Output is (1, T, H, D_v), squeeze back to (T, H, D_v)
         out = _attn_out.squeeze(0)
+        if num_heads is not None:
+            out = out[:, :num_heads]
 
         if not self.need_to_return_lse_for_decode:
             return out, None
 
         # Kernel LSE is (1, H, T); the DCP merge consumes (T, H).
-        lse = _lse.squeeze(0).transpose(0, 1)
+        lse = _lse.squeeze(0)[:num_heads].transpose(0, 1)
         # Rows where this rank owns none of the selected tokens have undefined
         # out/lse; (0, -inf) drops this rank from their cross-rank LSE merge.
         neutralize_dcp_empty_rows_(out, lse, topk_indices)
@@ -1501,18 +1556,28 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         actual_num_heads = self.num_heads
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            q_concat_buffer, *_ = current_workspace_manager().get_simultaneous(
-                *self.workspace_specs
-            )
-            q = q_concat_buffer[: ql_nope.shape[0]]
-            if q_pe.size(-1) == 0:
-                # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
-                # copy directly into the head-padded buffer instead.
-                q[:, : ql_nope.shape[1], : self.kv_lora_rank].copy_(ql_nope)
-                if self.q_head_size > self.kv_lora_rank:
-                    q[..., self.kv_lora_rank :].zero_()
+            num_tokens = ql_nope.shape[0]
+            if (
+                self.fp8_q_padded is not None
+                and attn_metadata.fp8_use_mixed_batch
+                and q_pe.size(-1) != 0
+                and num_tokens <= self.fp8_q_padded.shape[0]
+            ):
+                q = self.fp8_q_padded[:num_tokens]
+                ops.concat_mla_q(ql_nope, q_pe, q[:, : ql_nope.shape[1]])
             else:
-                ops.concat_mla_q(ql_nope, q_pe, q)
+                q_concat_buffer, *_ = current_workspace_manager().get_simultaneous(
+                    *self.workspace_specs
+                )
+                q = q_concat_buffer[:num_tokens]
+                if q_pe.size(-1) == 0:
+                    # NoPE (GLM5Next): concat_mla_q requires rope_dim == 64,
+                    # copy directly into the head-padded buffer instead.
+                    q[:, : ql_nope.shape[1], : self.kv_lora_rank].copy_(ql_nope)
+                    if self.q_head_size > self.kv_lora_rank:
+                        q[..., self.kv_lora_rank :].zero_()
+                else:
+                    ops.concat_mla_q(ql_nope, q_pe, q)
         else:
             actual_num_heads = q.shape[1]
             if q.shape[-1] < self.q_head_size:
@@ -1544,7 +1609,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 lse = bf16_lse
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out, lse = self._forward_fp8_kv_mixed_batch(
-                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+                q,
+                kv_c_and_k_pe_cache,
+                topk_indices,
+                attn_metadata,
+                num_heads=actual_num_heads,
             )
         else:
             attn_out, lse = self._forward_fp8_kv_separate_prefill_decode(
