@@ -18,7 +18,7 @@ from ..utils import assert_request_outputs_match
 
 LORA_TEST_PROMPT_MAP: dict[str, str] = {}
 
-LORA_TEST_PROMPT_MAP["premjatin/qwen-linear-algebra-coder"] = """
+LORA_TEST_PROMPT_MAP["vllm-project/qwen-linear-algebra-coder"] = """
 ### INSTRUCTION:
 You are an AI assistant that generates Python code to solve linear
 algebra problems.
@@ -45,7 +45,7 @@ SEED = 42
             "eagle3",
             "Qwen/Qwen3-1.7B",
             "AngelSlim/Qwen3-1.7B_eagle3",
-            "premjatin/qwen-linear-algebra-coder",
+            "vllm-project/qwen-linear-algebra-coder",
             1,
         )
     ],

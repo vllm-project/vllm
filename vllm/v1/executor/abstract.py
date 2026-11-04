@@ -130,7 +130,7 @@ class Executor(ABC):
         """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
 
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> list[CompilationTimes]:
         """Compile/warm up the model and capture cudagraphs on workers."""
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
@@ -146,6 +146,32 @@ class Executor(ABC):
             self.vllm_config.compilation_config.encoder_compilation_time = max(
                 t.encoder for t in compilation_times
             )
+        return compilation_times
+
+    def extensible_kv_cache_unsupported_reason(
+        self, kv_cache_specs: list[dict[str, KVCacheSpec]]
+    ) -> str | None:
+        """Why the extensible KV cache cannot be used on some worker, if so."""
+        if not any(kv_cache_specs):
+            return "the model has no KV cache"
+        unsupported: list[str | None] = self.collective_rpc(
+            "extensible_kv_cache_unsupported_reason"
+        )
+        return next((r for r in unsupported if r), None)
+
+    def disable_extensible_kv_cache(self, reason: str) -> None:
+        """Turn the extensible KV cache off here and on every worker."""
+        logger.warning(
+            "Disabling the extensible KV cache: %s. The KV cache will be sized "
+            "from profiling estimates instead of measured memory.",
+            reason,
+        )
+        self.vllm_config.cache_config.enable_extensible_kv_cache = False
+        self.collective_rpc("disable_extensible_kv_cache")
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache on the workers."""
+        self.collective_rpc("extend_kv_cache", args=(num_blocks,))
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """Register a function to be called if the executor enters a permanent
@@ -180,9 +206,13 @@ class Executor(ABC):
         """Layouts each worker's backends support, most preferred first."""
         return self.collective_rpc("get_supported_kv_cache_layouts")
 
-    def set_kv_cache_layout(self, layout_name: str) -> None:
-        """Publish the resolved KV cache layout to the workers."""
-        self.collective_rpc("set_kv_cache_layout", args=(layout_name,))
+    def set_kv_cache_layout(
+        self, layout_name: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Publish the resolved KV cache layout and CP interleave size."""
+        self.collective_rpc(
+            "set_kv_cache_layout", args=(layout_name, cp_kv_cache_interleave_size)
+        )
 
     @overload
     def collective_rpc(

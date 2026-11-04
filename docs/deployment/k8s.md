@@ -431,6 +431,43 @@ You can also verify the health service manually with `grpcurl`:
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 ```
 
+### Rust frontend gRPC health checks
+
+The Rust frontend is a separate server from `--grpc` above. Start it with `VLLM_USE_RUST_FRONTEND=1 vllm serve <model> --grpc-port 50051` or `vllm-rs serve <model> --grpc-port 50051`. Its gRPC port serves `grpc.health.v1.Health` and reports engine liveness and inference readiness under separate service names, so a paused engine can leave the load balancer without being restarted:
+
+| Service | Reports `NOT_SERVING` when |
+| --- | --- |
+| `liveness` | The engine has failed. Pause, sleep, weight updates, and orderly shutdown do not affect it until the listener closes. |
+| `readiness` and `vllm.Inference` | The engine has failed, shutdown has started, the engine is paused (including for a process checkpoint), asleep, or partially awake, or a weight update has not finished successfully. |
+| `vllm.Control` and `""` | The engine has failed or shutdown has started. |
+
+Point the startup and liveness probes at `liveness` and the readiness probe at `readiness`. A liveness probe on `readiness` or `vllm.Inference` restarts an engine that stays paused longer than the probe's failure threshold. The listener stops accepting connections when shutdown starts, so probes see the endpoint as unavailable while `--shutdown-timeout` drains in-flight requests.
+
+```yaml
+startupProbe:
+  grpc:
+    port: 50051
+    service: liveness
+  periodSeconds: 10
+  failureThreshold: 120 # Allow for model loading.
+livenessProbe:
+  grpc:
+    port: 50051
+    service: liveness
+readinessProbe:
+  grpc:
+    port: 50051
+    service: readiness
+```
+
+A paused or sleeping pod leaves the endpoints of its Services, so send resume, wake-up, and weight-update calls to the pod directly, for example through a headless Service with `publishNotReadyAddresses: true`. After a process checkpoint fails, the engine stays paused and `liveness` stays `SERVING`, so whatever drives the checkpoint must restart the pod when `/checkpoint/status` reports the failure.
+
+This server does not enable gRPC reflection, so check a service manually with [`grpc_health_probe`](https://github.com/grpc-ecosystem/grpc-health-probe):
+
+```bash
+grpc_health_probe -addr=localhost:50051 -service=readiness
+```
+
 ## Troubleshooting
 
 ### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"

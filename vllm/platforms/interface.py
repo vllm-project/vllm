@@ -196,6 +196,11 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        return None
+
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 
@@ -1224,9 +1229,9 @@ class Platform:
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
 
     @classmethod
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         """Returns whether the GPU is an integrated (UMA) device that shares
-        system memory with the CPU.
+        system memory with the CPU. device_id None means the current device.
 
         On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
         cudaMemGetInfo may underreport free memory because it does not
@@ -1353,6 +1358,12 @@ class Platform:
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         """Returns if the hybrid kv cache is supported by the current platform."""
+        return False
+
+    @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        """Returns if Model Runner V2 runs as the standalone (no-Triton) CPU
+        runner instead of the Triton-based one."""
         return False
 
     @classmethod
