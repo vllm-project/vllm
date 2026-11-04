@@ -426,6 +426,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     sampled.set_result(None if encoder_only else output)
     core.model_executor.execute_model.return_value = executed
     core.model_executor.sample_tokens.return_value = sampled
+    core._wait_for_output.side_effect = lambda future: future.result()
 
     EngineCore.step_with_batch_queue(core)
     if core.batch_queue:
