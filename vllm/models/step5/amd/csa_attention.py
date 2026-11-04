@@ -11,6 +11,7 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.models.step5.amd.csa_cache import Step5CSAMetadata
 from vllm.models.step5.amd.ops.csa_paged import sparse_attention_paged
+from vllm.models.step5.amd.ops.indexer_scores import paged_mqa_logits
 from vllm.models.step5.common.ops.sparse_decode_attention import (
     sparse_decode_attention,
     sparse_decode_splits,
@@ -20,10 +21,7 @@ from vllm.models.step5.common.ops.sparse_indexer import (
     select_all_regions,
     select_regions,
 )
-from vllm.models.step5.common.ops.sparse_indexer_scores import (
-    decode_summary_scores,
-    paged_mqa_logits_sm90,
-)
+from vllm.models.step5.common.ops.sparse_indexer_scores import decode_summary_scores
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     LayerNameType,
@@ -154,7 +152,7 @@ def step5_csa_attention(
         for chunk in md.prefill_indexer:
             end = start + chunk.current.numel()
             for g in range(groups):
-                scores = paged_mqa_logits_sm90(
+                scores = paged_mqa_logits(
                     q=q8[start:end, g].unsqueeze(1),
                     kv_fused=packed,
                     weights=w[start:end, g],
