@@ -12,6 +12,17 @@ _TOPK = 6
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/jit_kernel/moe_fused_gate.py
 
 
+def dsv4_topk_platform_supported() -> bool:
+    """CUDA, and on ROCm only gfx950, the one ROCm arch it is validated on."""
+    if current_platform.is_cuda():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+    return False
+
+
 def can_use_dsv4_topk(
     gating_output: torch.Tensor,
     correction_bias: torch.Tensor | None,
@@ -20,7 +31,7 @@ def can_use_dsv4_topk(
     indices_dtype: torch.dtype,
 ) -> bool:
     return (
-        current_platform.is_cuda()
+        dsv4_topk_platform_supported()
         and gating_output.dtype == torch.float32
         and gating_output.ndim == 2
         and gating_output.shape[1] in (256, 384)
@@ -35,7 +46,9 @@ def can_use_dsv4_topk(
     )
 
 
-if current_platform.is_cuda():
+# The PDL intrinsics below sit behind a constexpr that is_arch_support_pdl()
+# leaves false off CUDA, so they compile out on ROCm.
+if dsv4_topk_platform_supported():
 
     @triton.jit
     def _dsv4_topk_kernel(
