@@ -693,9 +693,11 @@ def make_routed_experts(
     layer_name: str = "model.layers.0.mlp.experts",
     activation: MoEActivation = MoEActivation.SILU,
     ckpt_names: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
+    num_fused_shared_experts: int = 0,
 ):
     """An unquantized CPU `RoutedExperts` whose parallel config fakes the
-    (size, rank) of expert TP and EP; needs a current vLLM config."""
+    (size, rank) of expert TP and EP; needs a current vLLM config. Fused
+    shared experts take the slots after the routed ones."""
     enable_eplb = num_redundant_experts > 0
     parallel_config = FusedMoEParallelConfig(
         tp_size=tp[0],
@@ -720,6 +722,7 @@ def make_routed_experts(
         moe_parallel_config=parallel_config,
         placement_strategy=placement,
         enable_eplb=enable_eplb,
+        num_fused_shared_experts=num_fused_shared_experts,
     )
     moe_config = FusedMoEConfig(
         num_experts=num_experts + num_redundant_experts,
