@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -2587,22 +2587,23 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         return trim_null_head(blocks)
 
     def adopt_resident_pages(
-        self, request_id: str, pages: Mapping[int, KVCacheBlock]
-    ) -> list[int]:
-        """Point null prefix pages at pinned GPU copies; return the adopted pages."""
+        self,
+        request_id: str,
+        block_indices: Sequence[int],
+        blocks: Sequence[KVCacheBlock],
+    ) -> list[tuple[int, KVCacheBlock]]:
+        """Point null prefix pages at pinned GPU copies; return the adopted
+        ``(page, block)`` pairs."""
         num_pages = len(self.req_to_blocks.get(request_id, ()))
-        indices = [idx for idx in pages if idx < num_pages]
+        candidates = [
+            (idx, block) for idx, block in zip(block_indices, blocks) if idx < num_pages
+        ]
+        current = self.get_residency_pages(request_id, [idx for idx, _ in candidates])
         adopted = [
-            idx
-            for idx, block in zip(
-                indices, self.get_residency_pages(request_id, indices)
-            )
-            if block.is_null
+            candidate for candidate, block in zip(candidates, current) if block.is_null
         ]
         if adopted:
-            changes = self.residency_changes.setdefault(request_id, {})
-            for idx in adopted:
-                changes[idx] = pages[idx]
+            self.residency_changes.setdefault(request_id, {}).update(adopted)
         return adopted
 
     def drop_resident_page(
@@ -2611,14 +2612,14 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         """Stop reading a page from the GPU; return the block it was read from."""
         block = self.get_resident_page(request_id, block_idx)
         if block is not None:
-            changes = self.residency_changes.setdefault(request_id, {})
-            changes[block_idx] = self._null_block
+            self.drop_resident_pages(request_id, (block_idx,))
         return block
 
     def drop_resident_pages(
         self, request_id: str, block_indices: Sequence[int]
     ) -> None:
-        """Stop reading resident pages from the GPU."""
+        """Stop reading pages from the GPU. Every index must be a resident page
+        within the request's row."""
         if not block_indices:
             return
         changes = self.residency_changes.setdefault(request_id, {})
