@@ -4,6 +4,8 @@
 use thiserror::Error;
 use thiserror_ext::{AsReport as _, Macro};
 
+use crate::RendererSelection;
+
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug, Error, Macro)]
@@ -30,10 +32,21 @@ pub enum Error {
          Refused request with untrusted chat template."
     )]
     UntrustedRequestChatTemplate,
+    #[error("chat_template is not supported by this chat renderer")]
+    UnsupportedRequestChatTemplate,
+    #[error(
+        "--chat-template is not supported by the `{renderer}` renderer; use --tokenizer-mode hf to render a Jinja chat template"
+    )]
+    UnsupportedChatTemplateOption { renderer: RendererSelection },
     #[error("multimodal input is not supported by this chat renderer")]
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error(
+        "multimodal content in a non-leading system or developer message is not supported \
+         when the chat template does not support the `developer` role"
+    )]
+    UnsupportedMultimodalSystemFallback,
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -120,10 +133,13 @@ impl Error {
             | Self::ToolChoiceRequiresTools
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::UnsupportedChatRole { .. }
-            | Self::UntrustedRequestChatTemplate => true,
+            | Self::UntrustedRequestChatTemplate
+            | Self::UnsupportedRequestChatTemplate
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedMultimodalSystemFallback
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
@@ -137,6 +153,7 @@ impl Error {
     pub fn param(&self) -> Option<&'static str> {
         match self {
             Self::Text(error) => error.param(),
+            Self::UnsupportedRequestChatTemplate => Some("chat_template"),
             _ => None,
         }
     }
