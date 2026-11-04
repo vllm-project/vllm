@@ -141,3 +141,18 @@ The coordinator process also runs in this scenario, co-located with the DP rank 
 </figure>
 
 In the above diagram, each of the dotted boxes corresponds to a separate launch of `vllm serve` - these could be separate Kubernetes pods, for example.
+
+## Prefill Scheduling Across DP Ranks
+
+With MoE data parallelism the ranks step in lockstep, so a step in which any rank runs prefill is a long step for every rank, and the decodes on all ranks wait for it. Under prefill-heavy traffic (long prompts, multi-turn agentic sessions) some rank prefills on most steps unless the ranks coordinate. `--prefill-schedule-policy` selects how they do:
+
+- `cadence` (default): prefill is admitted only on every `--prefill-schedule-interval`-th step (default 1, i.e. every step). Each rank prefills whatever it has on those steps.
+- `delayer`: once per step the ranks exchange their prefill state (a few integers added to the existing DP state all-reduce, which then runs every step) and take the same decision. Prefill is held while the ranks decode until every rank has prefill to run and the pending prompt tokens fill most of the prefilling ranks' `--max-num-batched-tokens`, then released on all ranks in the same step. Holds are bounded in steps, and also release when no rank decodes, when a rank's KV cache is nearly full, or when the group's work stops changing. `--prefill-schedule-interval N` sets the minimum spacing of prefill steps: the `N - 1` steps after a prefill decode only.
+
+```bash
+vllm serve deepseek-ai/DeepSeek-V3 --data-parallel-size 8 --enable-expert-parallel \
+    --prefill-schedule-policy delayer --prefill-schedule-interval 10 \
+    --prefill-max-wait-ms 5000
+```
+
+The delayer trades time to first token for fewer, fuller prefill steps and longer uninterrupted decode, so it suits high-concurrency serving; at low concurrency the ranks rarely align and prompts wait longer. `--prefill-max-wait-ms` releases held prefill once the oldest waiting request has queued that long since arrival. It is not a hard TTFT limit: queueing under load and the protected decode steps add to it. The `delayer` policy applies only to MoE data parallelism (other engines use `cadence`) and does not support elastic EP, `--enable-fault-tolerance` or a custom `--scheduler-cls`.

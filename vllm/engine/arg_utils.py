@@ -114,7 +114,7 @@ from vllm.config.parallel import (
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
-from vllm.config.scheduler import SchedulerPolicy
+from vllm.config.scheduler import PrefillSchedulePolicy, SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.config.watermarking import WatermarkConfig
@@ -716,6 +716,10 @@ class EngineArgs:
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+    prefill_schedule_policy: PrefillSchedulePolicy = (
+        SchedulerConfig.prefill_schedule_policy
+    )
+    prefill_max_wait_ms: float | None = SchedulerConfig.prefill_max_wait_ms
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1818,6 +1822,13 @@ class EngineArgs:
             **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
+            "--prefill-schedule-policy",
+            **scheduler_kwargs["prefill_schedule_policy"],
+        )
+        scheduler_group.add_argument(
+            "--prefill-max-wait-ms", **scheduler_kwargs["prefill_max_wait_ms"]
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2694,6 +2705,8 @@ class EngineArgs:
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
+            prefill_schedule_policy=self.prefill_schedule_policy,
+            prefill_max_wait_ms=self.prefill_max_wait_ms,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import msgspec
 import pydantic
@@ -73,6 +73,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.prefill_delayer import PrefillDelayer
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
@@ -116,6 +117,9 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.scheduler import Scheduler
 
 logger = init_logger(__name__)
 
@@ -2460,6 +2464,10 @@ class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
     in a data parallel context."""
 
+    # Set with prefill_schedule_policy="delayer".
+    prefill_delayer: PrefillDelayer | None = None
+    hold_prefills = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -2477,6 +2485,21 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
         self.dp_sync_interval = vllm_config.parallel_config.dp_sync_interval
+        if scheduler_config.prefill_schedule_policy == "delayer":
+            parallel_config = vllm_config.parallel_config
+            # Both can change the DP size at runtime; the delayer counts on it.
+            if parallel_config.enable_elastic_ep or (
+                parallel_config.enable_fault_tolerance
+            ):
+                raise ValueError(
+                    "prefill_schedule_policy='delayer' does not support elastic "
+                    "EP or fault tolerance."
+                )
+            self.prefill_delayer = PrefillDelayer(
+                parallel_config.data_parallel_size,
+                scheduler_config.max_num_batched_tokens,
+                scheduler_config.prefill_schedule_interval,
+            )
 
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
@@ -2507,6 +2530,13 @@ class DPEngineCoreProc(EngineCoreProc):
             engine_index=dp_rank,
             tensor_queue=tensor_queue,
         )
+        if self.prefill_delayer is not None:
+            from vllm.v1.core.sched.scheduler import Scheduler
+
+            if not isinstance(self.scheduler, Scheduler):
+                raise ValueError(
+                    "prefill_schedule_policy='delayer' requires the built-in scheduler."
+                )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
@@ -2635,6 +2665,8 @@ class DPEngineCoreProc(EngineCoreProc):
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
     def _should_throttle_prefills(self) -> bool:
+        if self.prefill_delayer is not None:
+            return self.hold_prefills
         # Throttle new prefills to cadence-aligned steps for DP balancing.
         # step_counter is identical across DP ranks. On a fresh wave the
         # counter is 0, so prefills are admitted immediately after idle.
@@ -2717,6 +2749,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+                if self.prefill_delayer is not None:
+                    self.prefill_delayer.reset()
+                    self.hold_prefills = False
             elif (
                 not was_running
                 and self.has_coordinator
@@ -2736,15 +2771,34 @@ class DPEngineCoreProc(EngineCoreProc):
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Sync step 1 too: an idle pause needs one dummy batch, not a full interval.
         self.step_counter += 1
-        if self.step_counter != 1 and self.step_counter % self.dp_sync_interval != 0:
+        delayer = self.prefill_delayer
+        if (
+            delayer is None
+            and self.step_counter != 1
+            and self.step_counter % self.dp_sync_interval != 0
+        ):
             return True
 
         parallel_config = self.vllm_config.parallel_config
-        has_unfinished, pause_consensus = parallel_config.sync_dp_state(
-            self.dp_group,
-            has_unfinished=local_unfinished,
-            pending_pause=self.pending_pause,
-        )
+        if delayer is None:
+            has_unfinished, pause_consensus = parallel_config.sync_dp_state(
+                self.dp_group,
+                has_unfinished=local_unfinished,
+                pending_pause=self.pending_pause,
+            )
+        else:
+            # The delayer's per-step exchange rides on this sync, which every
+            # rank reaches on every step, so no rank can skip it.
+            scheduler = cast("Scheduler", self.scheduler)
+            has_unfinished, pause_consensus = parallel_config.sync_dp_state(
+                self.dp_group,
+                has_unfinished=local_unfinished,
+                pending_pause=self.pending_pause,
+                extra=delayer.load(
+                    scheduler.prefill_delayer_state(delayer.hold_budget)
+                ),
+            )
+            self.hold_prefills = not delayer.step()
 
         if pause_consensus:
             self.ignore_start_dp_wave = True

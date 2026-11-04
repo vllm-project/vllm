@@ -49,6 +49,10 @@ from vllm.v1.core.sched.output import (
     ScheduledEncoderInputStats,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.prefill_delayer import (
+    KV_HIGH_USAGE,
+    PrefillDelayerState,
+)
 from vllm.v1.core.sched.request_queue import (
     RequestQueue,
     SchedulingPolicy,
@@ -422,6 +426,24 @@ class Scheduler(SchedulerInterface):
             )
         # A full interval back, so the first step is never gated.
         self.last_prefill_step = -self.local_prefill_interval
+        # The cross-DP prefill delayer (driven by the DP engine core) needs DP
+        # peers; without them the policy falls back to the cadence above.
+        self.prefill_delayer_enabled = (
+            self.scheduler_config.prefill_schedule_policy == "delayer"
+            and self.parallel_config.data_parallel_size > 1
+        )
+        if (
+            self.scheduler_config.prefill_schedule_policy == "delayer"
+            and not self.prefill_delayer_enabled
+        ):
+            logger.info_once(
+                "prefill_schedule_policy='delayer' needs MoE data parallelism; "
+                "using the 'cadence' policy instead."
+            )
+        # Reported to the delayer, then cleared: whether a step scheduled
+        # prefill, and how many requests were added.
+        self.delayer_prefill_ran = False
+        self.delayer_arrived = 0
         # Steps that actually scheduled tokens. `current_step` counts every
         # schedule() call including empty ones, so it would expire the hold
         # early; it keeps its own meaning (next_decode_eligible_step).
@@ -753,9 +775,12 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.new_step_starts()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
-        # all prefill compute unless saturated.
+        # all prefill compute unless saturated; the delayer bounds its own holds.
+        # Only a rank with a decode to run defers: a rank left with an empty
+        # batch while its DP peers step can hang the engine.
         defer_prefills = (
-            throttle_prefills and not self.prefill_capacity_bound
+            throttle_prefills
+            and (self.prefill_delayer_enabled or not self.prefill_capacity_bound)
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # `long_prefill_token_threshold` exists to stop a long prefill from
@@ -1669,6 +1694,8 @@ class Scheduler(SchedulerInterface):
         # whether a new admission or a running chunk.
         if self.local_prefill_interval > 1 and (prefill_scheduled or prefill_admitted):
             self.last_prefill_step = self.num_executed_steps
+        if self.prefill_delayer_enabled and (prefill_scheduled or prefill_admitted):
+            self.delayer_prefill_ran = True
 
         assert token_budget >= 0
         assert input_budget >= 0
@@ -3001,6 +3028,71 @@ class Scheduler(SchedulerInterface):
             + len(self.async_kv_waiting)
         )
 
+    def prefill_delayer_state(self, hold_budget: int) -> PrefillDelayerState:
+        """This rank's report to the cross-DP prefill delayer. `hold_budget`
+        is the number of steps left before the current hold is released."""
+        token_budget = self.scheduler_config.max_num_batched_tokens
+        pending = decodes = partial = 0
+        for request in self.running:
+            if request.is_prefill_chunk:
+                partial = 1
+                pending += max(request.num_tokens - request.num_computed_tokens, 0)
+            else:
+                decodes += 1
+
+        kv_usage = self.kv_cache_manager.usage
+        can_admit = (
+            len(self.running) < self.max_num_running_reqs and kv_usage < KV_HIGH_USAGE
+        )
+        max_wait_ms = self.scheduler_config.prefill_max_wait_ms
+        oldest_arrival = float("inf")
+        has_waiting = False
+        for request in itertools.chain(
+            self.kv_holding_waiting, self.async_kv_waiting, self.waiting
+        ):
+            if request in self.deferred_waiting:
+                continue
+            has_waiting = True
+            if max_wait_ms is not None:
+                oldest_arrival = min(oldest_arrival, request.arrival_time)
+            elif not can_admit or pending >= token_budget:
+                break
+            if can_admit and pending < token_budget:
+                pending += max(request.num_tokens - request.num_computed_tokens, 0)
+
+        prefillable = bool(partial) or (has_waiting and can_admit)
+        blocked = not prefillable and (has_waiting or bool(self.deferred_waiting))
+        unreachable = False
+        if not prefillable and not blocked:
+            # Steps until a decode reaches max_tokens if every draft is accepted
+            # (EOS may come sooner).
+            tokens_per_step = 1 + self.num_spec_tokens
+            unreachable = all(
+                cdiv(r.max_tokens - r.num_output_tokens, tokens_per_step) > hold_budget
+                for r in self.running
+                if not r.is_prefill_chunk
+            )
+        queue_hot = (
+            prefillable
+            and max_wait_ms is not None
+            and (time.time() - oldest_arrival) * 1000 >= max_wait_ms
+        )
+        state = PrefillDelayerState(
+            prefillable=int(prefillable),
+            blocked=int(blocked),
+            unreachable=int(unreachable),
+            pending_tokens=min(pending, token_budget) if prefillable else 0,
+            decodes=decodes,
+            kv_high=int(prefillable and kv_usage >= KV_HIGH_USAGE),
+            partial=partial,
+            queue_hot=int(queue_hot),
+            prefill_ran=int(self.delayer_prefill_ran),
+            arrived=self.delayer_arrived,
+        )
+        self.delayer_prefill_ran = False
+        self.delayer_arrived = 0
+        return state
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
@@ -3030,6 +3122,8 @@ class Scheduler(SchedulerInterface):
                 self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            if self.prefill_delayer_enabled:
+                self.delayer_arrived += 1
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
