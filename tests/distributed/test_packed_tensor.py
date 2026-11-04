@@ -154,7 +154,8 @@ class TestPackedBroadcastRoundtrip:
         monkeypatch.setattr(torch.Tensor, "record_stream", spy)
         # Create params with mixed dtypes
         params = [
-            # Odd-sized, so every later entry is misaligned for its dtype.
+            # Odd-sized, so layer1.weight is a copy; layer2.weight stays a view
+            # at a non-zero offset.
             ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
             ("layer1.weight", torch.randn(10, 20, dtype=torch.float32).cuda()),
             ("layer1.bias", torch.randn(10, dtype=torch.float16).cuda()),
@@ -198,7 +199,8 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.shape == original_tensor.shape
             assert unpacked.dtype == original_tensor.dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
-        assert recorded
+        # 2 packs and 1 copy, each recorded on 2 slot streams + the caller's.
+        assert len(recorded) == 3 * 3
         assert all(t.storage_offset() == 0 for t in recorded)
 
     @pytest.mark.parametrize("target_size", [100, 100000])
