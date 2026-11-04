@@ -11,25 +11,32 @@
 //! `tokenizer.json` is also loaded with the corpus' truncation and padding blocks added, which
 //! the Python frontend ignores.
 //!
-//! A divergence present on main is listed in [`EXPECTED_DIVERGENCES`] with its cause. The test
-//! fails on any divergence not listed there, and on a listed one that no longer reproduces.
+//! A divergence present on main is listed in [`EXPECTED_DIVERGENCES`] with its cause and the
+//! exact Rust outcome. The test fails on any other difference from the Python ids, on a listed
+//! case whose outcome changes or matches Python again, and on an entry that names a tokenizer,
+//! backend or case the test doesn't check.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::api::tokio::{Api, ApiBuilder};
 use hf_hub::{Repo, RepoType};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use serial_test::file_serial;
+use sha2::{Digest as _, Sha256};
 use thiserror_ext::AsReport as _;
 use vllm_tokenizer::{HuggingFaceTokenizer, TiktokenTokenizer, Tokenizer};
 
 const SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/python_parity");
+const HF_TOKEN_ENV: &str = "HF_TOKEN";
 
 #[derive(Deserialize)]
 struct Corpus {
+    /// SHA-256 of `corpus.json`, which every snapshot records.
+    #[serde(skip)]
+    sha256: String,
     special_token_placeholder: String,
     tokenizer_json_overrides: Map<String, Value>,
     prefixes: BTreeMap<String, Prefix>,
@@ -52,8 +59,10 @@ struct Case {
 
 impl Corpus {
     fn load() -> Self {
-        let text = fs::read_to_string(Path::new(SNAPSHOT_DIR).join("corpus.json")).unwrap();
-        serde_json::from_str(&text).unwrap()
+        let bytes = fs::read(Path::new(SNAPSHOT_DIR).join("corpus.json")).unwrap();
+        let mut corpus: Self = serde_json::from_slice(&bytes).unwrap();
+        corpus.sha256 = Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect();
+        corpus
     }
 
     /// Build one case's text, as `python_parity.py` does.
@@ -71,21 +80,36 @@ struct Snapshot {
     revision: String,
     /// Files to download; the first one is the tokenizer itself.
     files: Vec<String>,
+    corpus_sha256: String,
     special_token: String,
     ids: BTreeMap<String, Vec<u32>>,
 }
 
 impl Snapshot {
-    fn load(key: &str) -> Self {
+    fn load(key: &str, corpus: &Corpus) -> Self {
         let text = fs::read_to_string(Path::new(SNAPSHOT_DIR).join(format!("{key}.json")))
             .unwrap_or_else(|error| panic!("no snapshot for {key}: {}", error.as_report()));
-        serde_json::from_str(&text).unwrap()
+        let snapshot: Self = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            snapshot.corpus_sha256, corpus.sha256,
+            "{key}.json was generated from a different corpus.json; \
+             rerun `python rust/src/tokenizer/tests/python_parity.py {key}`"
+        );
+        snapshot
+    }
+
+    fn python_ids(&self, key: &str, case: &str) -> &[u32] {
+        self.ids.get(case).unwrap_or_else(|| {
+            panic!(
+                "{key}.json has no ids for case {case}; \
+                 rerun `python rust/src/tokenizer/tests/python_parity.py {key}`"
+            )
+        })
     }
 
     /// Download the snapshot's files and return the tokenizer file's path.
     async fn download(&self) -> PathBuf {
-        let api = ApiBuilder::from_env().with_progress(false).build().unwrap();
-        let repo = api.repo(Repo::with_revision(
+        let repo = hub_api().repo(Repo::with_revision(
             self.model.clone(),
             RepoType::Model,
             self.revision.clone(),
@@ -99,6 +123,17 @@ impl Snapshot {
         }
         paths.swap_remove(0)
     }
+}
+
+/// Build the Hub client as `vllm-text` does: `ApiBuilder::from_env` doesn't read `HF_TOKEN`.
+fn hub_api() -> Api {
+    let mut builder = ApiBuilder::from_env().with_progress(false);
+    if let Ok(token) = std::env::var(HF_TOKEN_ENV)
+        && !token.is_empty()
+    {
+        builder = builder.with_token(Some(token));
+    }
+    builder.build().unwrap()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,15 +152,44 @@ enum Variant {
 
 type LoadedBackend = (Backend, Variant, Box<dyn Tokenizer>);
 
-/// A Rust vs Python divergence present on main, in every variant its backend loads. Once a fix
-/// lands, the test fails until the entry is removed.
+/// The result of one Rust encode, with the error rendered as its report.
+type Outcome = Result<Vec<u32>, String>;
+
+/// What a listed divergence produces on the Rust side.
+enum Observed {
+    /// Encoding fails with an error whose report contains this text.
+    Error(&'static str),
+    /// Encoding returns exactly these ids.
+    Ids(&'static [u32]),
+}
+
+impl Observed {
+    fn matches(&self, rust: &Outcome) -> bool {
+        match (self, rust) {
+            (Self::Error(text), Err(report)) => report.contains(text),
+            (Self::Ids(expected), Ok(ids)) => ids == expected,
+            _ => false,
+        }
+    }
+}
+
+/// A Rust vs Python divergence present on main, pinned to the outcome its backend produces in
+/// every variant it loads. Once a fix lands, the test fails until the entry is removed.
 struct ExpectedDivergence {
     name: &'static str,
     tokenizer: &'static str,
     backend: Backend,
-    cases: &'static [&'static str],
+    cases: &'static [(&'static str, Observed)],
     cause: &'static str,
 }
+
+impl ExpectedDivergence {
+    fn observed(&self, case: &str) -> Option<&Observed> {
+        self.cases.iter().find(|(name, _)| *name == case).map(|(_, observed)| observed)
+    }
+}
+
+const HY3_CARRIAGE_RETURN: Observed = Observed::Error("byte 0x0d has no token in vocabulary");
 
 const EXPECTED_DIVERGENCES: &[ExpectedDivergence] = &[
     ExpectedDivergence {
@@ -133,12 +197,12 @@ const EXPECTED_DIVERGENCES: &[ExpectedDivergence] = &[
         tokenizer: "hy_v3",
         backend: Backend::Fastokens,
         cases: &[
-            "whitespace_runs",
-            "crlf_lines",
-            "lone_cr",
-            "cjk_digits_spaces",
-            "spaces_then_crlf",
-            "prose_crlf",
+            ("whitespace_runs", HY3_CARRIAGE_RETURN),
+            ("crlf_lines", HY3_CARRIAGE_RETURN),
+            ("lone_cr", HY3_CARRIAGE_RETURN),
+            ("cjk_digits_spaces", HY3_CARRIAGE_RETURN),
+            ("spaces_then_crlf", HY3_CARRIAGE_RETURN),
+            ("prose_crlf", HY3_CARRIAGE_RETURN),
         ],
         cause: "fastokens: Hy3's vocabulary has no token for byte 0x0d, so fastokens fails to \
                 encode any text with a carriage return, where Hugging Face tokenizers drops it \
@@ -149,13 +213,62 @@ const EXPECTED_DIVERGENCES: &[ExpectedDivergence] = &[
         tokenizer: "kimi_k3",
         backend: Backend::Riptoken,
         cases: &[
-            "spaces_then_x",
-            "spaces_then_newline",
-            "spaces_then_tab",
-            "spaces_then_crlf",
-            "spaces_longer_then_x",
-            "spaces_only",
-            "spaces_then_special",
+            (
+                "spaces_then_x",
+                Observed::Ids(&[
+                    337, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 1288,
+                ]),
+            ),
+            (
+                "spaces_then_newline",
+                Observed::Ids(&[
+                    282, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 198,
+                ]),
+            ),
+            (
+                "spaces_then_tab",
+                Observed::Ids(&[
+                    282, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 197,
+                ]),
+            ),
+            (
+                "spaces_then_crlf",
+                Observed::Ids(&[
+                    282, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 462,
+                ]),
+            ),
+            (
+                "spaces_longer_then_x",
+                Observed::Ids(&[
+                    3755, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 1288,
+                ]),
+            ),
+            (
+                "spaces_only",
+                Observed::Ids(&[
+                    282, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994,
+                ]),
+            ),
+            (
+                "spaces_then_special",
+                Observed::Ids(&[
+                    282, 54447, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994, 160994,
+                    160994, 163585,
+                ]),
+            ),
         ],
         cause: "riptoken: splits a long run of spaces into different BPE tokens from tiktoken, \
                 sometimes one more; tiktoken-rs loaded from the same file matches Python",
@@ -215,103 +328,123 @@ fn write_with_overrides(path: &Path, overrides: &Map<String, Value>, dir: &Path)
     target
 }
 
-/// Describe how the Rust result differs from the Python ids, or `None` when they match.
-fn describe_divergence(rust: vllm_tokenizer::Result<Vec<u32>>, python: &[u32]) -> Option<String> {
+/// Describe how a Rust outcome differs from the Python ids.
+fn describe_divergence(rust: &Outcome, python: &[u32]) -> String {
     let ids = match rust {
-        Ok(ids) if ids == python => return None,
         Ok(ids) => ids,
-        Err(error) => return Some(format!("error: {}", error.as_report())),
+        Err(report) => return format!("error: {report}"),
     };
     let first = ids.iter().zip(python).take_while(|(a, b)| a == b).count();
-    Some(format!(
+    format!(
         "{} ids vs Python's {}, first difference at index {first}: {:?} vs {:?}",
         ids.len(),
         python.len(),
         &ids[first..ids.len().min(first + 4)],
         &python[first..python.len().min(first + 4)],
-    ))
+    )
 }
 
-type DivergenceKey = (Backend, Variant, String);
+/// Check one Rust outcome against the Python ids and the divergence listed for its case, if
+/// any, and describe the failure.
+fn check_outcome(
+    listed: Option<(&ExpectedDivergence, &Observed)>,
+    rust: &Outcome,
+    python: &[u32],
+) -> Option<String> {
+    let matches_python = rust.as_ref().is_ok_and(|ids| ids == python);
+    match listed {
+        None => (!matches_python).then(|| describe_divergence(rust, python)),
+        Some((entry, observed)) => check_listed(entry, observed, rust, matches_python),
+    }
+}
 
-/// Encode the corpus with every backend and collect each case that differs from Python.
-fn find_divergences(
+/// Check that a listed case still produces exactly the outcome its entry pins.
+fn check_listed(
+    entry: &ExpectedDivergence,
+    observed: &Observed,
+    rust: &Outcome,
+    matches_python: bool,
+) -> Option<String> {
+    if matches_python {
+        return Some(format!(
+            "matches Python now; remove it from {} ({})",
+            entry.name, entry.cause
+        ));
+    }
+    (!observed.matches(rust)).then(|| {
+        format!(
+            "differs from Python other than {} pins: {rust:?}",
+            entry.name
+        )
+    })
+}
+
+/// Describe each of `entries` that names a backend `backends` doesn't load or a case the corpus
+/// doesn't have.
+fn stale_entries(
+    entries: &[&ExpectedDivergence],
+    backends: &[LoadedBackend],
     corpus: &Corpus,
-    snapshot: &Snapshot,
-    backends: &[LoadedBackend],
-) -> BTreeMap<DivergenceKey, String> {
-    let mut divergences = BTreeMap::new();
-    for (backend, variant, tokenizer) in backends {
-        for case in &corpus.cases {
-            let text = corpus.text(case, &snapshot.special_token);
-            let python = &snapshot.ids[&case.name];
-            let rust = tokenizer.encode(&text, case.add_special_tokens);
-            if let Some(detail) = describe_divergence(rust, python) {
-                divergences.insert((*backend, *variant, case.name.clone()), detail);
-            }
+) -> Vec<String> {
+    let loaded: BTreeSet<_> = backends.iter().map(|(backend, _, _)| *backend).collect();
+    let cases: BTreeSet<_> = corpus.cases.iter().map(|case| case.name.as_str()).collect();
+    let mut stale = Vec::new();
+    for entry in entries {
+        if !loaded.contains(&entry.backend) {
+            stale.push(format!(
+                "{} names {:?}, which is not loaded",
+                entry.name, entry.backend
+            ));
+        }
+        for (case, _) in entry.cases.iter().filter(|(case, _)| !cases.contains(case)) {
+            stale.push(format!(
+                "{} names case {case}, which the corpus lacks",
+                entry.name
+            ));
         }
     }
-    divergences
-}
-
-/// The divergences [`EXPECTED_DIVERGENCES`] lists for `key`, in every variant `backends` loads,
-/// each with the entry that lists it.
-fn expected_divergences(
-    key: &str,
-    backends: &[LoadedBackend],
-) -> BTreeMap<DivergenceKey, &'static ExpectedDivergence> {
-    let loaded: BTreeSet<_> =
-        backends.iter().map(|(backend, variant, _)| (*backend, *variant)).collect();
-    let mut expected = BTreeMap::new();
-    for entry in EXPECTED_DIVERGENCES.iter().filter(|entry| entry.tokenizer == key) {
-        for (backend, variant) in loaded.iter().filter(|(backend, _)| *backend == entry.backend) {
-            for case in entry.cases {
-                expected.insert((*backend, *variant, (*case).to_owned()), entry);
-            }
-        }
-    }
-    expected
+    stale
 }
 
 async fn check(key: &str) {
     let corpus = Corpus::load();
-    let snapshot = Snapshot::load(key);
+    let snapshot = Snapshot::load(key, &corpus);
     let path = snapshot.download().await;
     let dir = tempfile::tempdir().unwrap();
     let backends = load_backends(&path, &corpus, dir.path());
+    let entries: Vec<_> =
+        EXPECTED_DIVERGENCES.iter().filter(|entry| entry.tokenizer == key).collect();
 
-    let found = find_divergences(&corpus, &snapshot, &backends);
-    let expected = expected_divergences(key, &backends);
-    let unexpected: Vec<_> = found
-        .iter()
-        .filter(|(divergence, _)| !expected.contains_key(*divergence))
-        .map(|((backend, variant, case), detail)| {
-            format!("{backend:?} {variant:?} {case}: {detail}")
-        })
-        .collect();
-    let resolved: Vec<_> = expected
-        .iter()
-        .filter(|(divergence, _)| !found.contains_key(*divergence))
-        .map(|((backend, variant, case), entry)| {
-            format!(
-                "{} ({}): {backend:?} {variant:?} {case}",
-                entry.name, entry.cause
-            )
-        })
-        .collect();
+    let mut failures = stale_entries(&entries, &backends, &corpus);
+    for (backend, variant, tokenizer) in &backends {
+        for case in &corpus.cases {
+            let text = corpus.text(case, &snapshot.special_token);
+            let rust = tokenizer
+                .encode(&text, case.add_special_tokens)
+                .map_err(|error| error.to_report_string());
+            let listed = entries
+                .iter()
+                .filter(|entry| entry.backend == *backend)
+                .find_map(|entry| entry.observed(&case.name).map(|observed| (*entry, observed)));
+            let python = snapshot.python_ids(key, &case.name);
+            if let Some(failure) = check_outcome(listed, &rust, python) {
+                failures.push(format!("{backend:?} {variant:?} {}: {failure}", case.name));
+            }
+        }
+    }
     assert!(
-        unexpected.is_empty() && resolved.is_empty(),
-        "{key} ({}@{}):\nids that differ from the Python frontend:\n{}\n\
-         expected divergences that no longer reproduce; remove them from EXPECTED_DIVERGENCES:\n{}",
+        failures.is_empty(),
+        "{key} ({}@{}) breaks its contract with the Python frontend:\n{}",
         snapshot.model,
         snapshot.revision,
-        unexpected.join("\n"),
-        resolved.join("\n"),
+        failures.join("\n"),
     );
 }
 
 macro_rules! python_parity_tests {
     ($($key:ident),+ $(,)?) => {
+        const TOKENIZER_KEYS: &[&str] = &[$(stringify!($key)),+];
+
         paste::paste! {
             $(
                 // Shares the Hub cache lock key with `vllm-chat`'s roundtrip tests.
@@ -334,4 +467,16 @@ python_parity_tests! {
     kimi_k3,
     muse_spark,
     deepseek_r1_truncation,
+}
+
+#[test]
+fn expected_divergences_name_tested_tokenizers() {
+    for entry in EXPECTED_DIVERGENCES {
+        assert!(
+            TOKENIZER_KEYS.contains(&entry.tokenizer),
+            "{} names tokenizer {}, which no test checks",
+            entry.name,
+            entry.tokenizer
+        );
+    }
 }

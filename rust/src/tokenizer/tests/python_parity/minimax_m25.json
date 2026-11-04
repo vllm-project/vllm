@@ -3,8 +3,10 @@
   "revision": "f710177d938eff80b684d42c5aa84b382612f21f",
   "files": ["tokenizer.json", "tokenizer_config.json"],
   "tokenizer_mode": "auto",
+  "trust_remote_code": true,
   "transformers": "5.19.0",
   "tokenizers": "0.23.3",
+  "corpus_sha256": "eb621bacec73bb5dd1648229a66b60e3a2c83e2fb1ae0eef2a7a21b001ecedf7",
   "special_token": "[e~[",
   "ids": {
     "whitespace_runs": [32, 53343, 32, 2035, 24361, 2535],

@@ -3,8 +3,10 @@
   "revision": "f831ab66814297da540d832a5235f8e904f29d06",
   "files": ["tiktoken.model", "tokenizer_config.json", "config.json"],
   "tokenizer_mode": "auto",
+  "trust_remote_code": true,
   "transformers": "5.19.0",
   "tokenizers": "0.23.3",
+  "corpus_sha256": "eb621bacec73bb5dd1648229a66b60e3a2c83e2fb1ae0eef2a7a21b001ecedf7",
   "special_token": "[EOS]",
   "ids": {
     "whitespace_runs": [220, 40493, 220, 2695, 220, 17355],

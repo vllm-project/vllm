@@ -28,6 +28,7 @@ hf-hub.workspace = true
 paste.workspace = true
 reqwest.workspace = true
 serial_test.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 
