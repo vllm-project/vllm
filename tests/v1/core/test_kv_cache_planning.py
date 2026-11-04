@@ -125,6 +125,17 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
     assert cache_config.hisparse_shared_host_pool is shared_host_pool
+    (resident_group_id,) = (
+        group_id
+        for group_id, group in enumerate(cache_config.kv_cache_groups)
+        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
+    )
+    assert cache_config.transfer_aliases == {
+        "model.layers.0.self_attn": (
+            "model.layers.0.self_attn.hisparse_resident",
+            resident_group_id,
+        )
+    }
     host_page = host_group.kv_cache_spec.page_size_bytes
     alignment = mmap.PAGESIZE if shared_host_pool else 1
     expected_host_stride = (host_page + alignment - 1) // alignment * alignment

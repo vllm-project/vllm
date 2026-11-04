@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
+from vllm.v1.hisparse.landing import HiSparseImportLanding
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiSparseHotSpec,
@@ -721,7 +722,7 @@ def make_nixl_hisparse_scheduler(manager: KVCacheManager):
 
     config = create_vllm_config(block_size=HISPARSE_BLOCK_SIZE)
     connector = NixlPullConnectorScheduler(config, "test", manager.kv_cache_config)
-    connector.hisparse = get_hisparse_coordinator(manager)
+    connector.landing = HiSparseImportLanding(manager)
     return connector
 
 

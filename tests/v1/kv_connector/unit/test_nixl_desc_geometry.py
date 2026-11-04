@@ -455,7 +455,6 @@ def _register_overlaid_mla_worker(
     worker._logical_num_blocks = num_blocks
     worker.region_mem_types = []
     worker.region_group_ids = []
-    worker._transfer_aliases = {}
     worker._mixed_mem_types = False
     worker.region_names = []
     worker.region_num_blocks = []

@@ -83,7 +83,6 @@ from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.hisparse.layout import get_hisparse_resident_aliases
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CircularBufferSpec,
@@ -720,7 +719,6 @@ class NixlBaseConnectorWorker:
         )
 
         self.kv_cache_config = kv_cache_config
-        self._transfer_aliases = get_hisparse_resident_aliases(kv_cache_config)
         self._region_aliases: dict[int, _RegionAlias] = {}
         transfer_block_sizes = [
             group.kv_cache_spec.block_size
@@ -3249,7 +3247,8 @@ class NixlBaseConnectorWorker:
         """Register device views that may receive a transfer region's pages."""
         aliases: dict[int, _RegionAlias] = {}
         num_blocks = self.num_blocks
-        for layer_name, (alias_name, group_id) in self._transfer_aliases.items():
+        transfer_aliases = self.kv_cache_config.transfer_aliases
+        for layer_name, (alias_name, group_id) in transfer_aliases.items():
             if layer_name not in xfer_buffers:
                 continue
             if (

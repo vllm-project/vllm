@@ -19,6 +19,7 @@ import torch
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
+    get_kv_import_landing,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
@@ -144,13 +145,9 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker: NixlBaseConnectorWorker | None = None
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
-        if self.kv_cache_config.hisparse_host_num_blocks is not None:
-            from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
-
-            assert self.connector_scheduler is not None
-            self.connector_scheduler.hisparse = get_hisparse_coordinator(
-                kv_cache_manager
-            )
+        super().bind_kv_cache_manager(kv_cache_manager)
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.landing = get_kv_import_landing(kv_cache_manager)
 
     ############################################################
     # Class Methods

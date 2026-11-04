@@ -389,7 +389,7 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
     scheduler = object.__new__(NixlPullConnectorScheduler)
-    scheduler.hisparse = None
+    scheduler.landing = None
     scheduler._reqs_in_batch = set()
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_recv = {}
@@ -444,7 +444,7 @@ def test_full_local_hit_is_not_awaited_by_the_scheduler():
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
     scheduler = object.__new__(NixlPullConnectorScheduler)
-    scheduler.hisparse = None
+    scheduler.landing = None
     scheduler._reqs_in_batch = set()
     scheduler._reqs_need_save = {}
     scheduler._reqs_need_recv = {}
@@ -2251,6 +2251,7 @@ def test_nixl_hisparse_gpu_import_pulls_into_resident_pages():
     kv_cache_config = KVCacheConfig(
         num_blocks=gpu_num_blocks,
         hisparse_host_num_blocks=host_num_blocks,
+        transfer_aliases={"mla": ("mla.hisparse_resident", 1)},
         kv_cache_tensors=[
             KVCacheTensor(
                 size=host_num_blocks * page,
