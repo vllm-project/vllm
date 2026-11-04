@@ -7,6 +7,7 @@ import hashlib
 import math
 import os
 import weakref
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -256,6 +257,8 @@ def trim_null_head(blocks: _BlockSeq) -> _BlockSeq:
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int
+    # Block IDs are per device pool; see KVCacheGroupSpec.pool_id.
+    pool_id: int = 0
 
 
 class FreeKVCacheBlockQueue:
@@ -1096,10 +1099,12 @@ def get_max_concurrency_for_kv_cache_config(
     a representative per-layer spec (scheduler config), so both capacity
     call sites agree.
 
-    Host groups use a separate pool; the smaller concurrency limit applies.
+    Host groups and groups with a private device pool (``pool_id``) are
+    bounded separately; the smallest concurrency limit applies.
     """
     num_blocks_per_request = 0
     host_blocks_per_request = 0
+    pool_blocks_per_request: defaultdict[int, int] = defaultdict(int)
     for group in kv_cache_config.kv_cache_groups:
         required = cdiv(
             group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
@@ -1107,9 +1112,15 @@ def get_max_concurrency_for_kv_cache_config(
         )
         if group.host_resident:
             host_blocks_per_request += required
+        elif group.pool_id:
+            pool_blocks_per_request[group.pool_id] += required
         else:
             num_blocks_per_request += required
     limits = [kv_cache_config.num_blocks / num_blocks_per_request]
+    limits.extend(
+        kv_cache_config.num_blocks_of_pool(pool_id) / required
+        for pool_id, required in pool_blocks_per_request.items()
+    )
     if host_blocks_per_request:
         assert kv_cache_config.hisparse_host_num_blocks is not None
         limits.append(
@@ -1127,6 +1138,10 @@ def generate_scheduler_kv_cache_config(
     )
     assert all(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
+        for cfg in kv_cache_configs
+    )
+    assert all(
+        cfg.pool_num_blocks == kv_cache_configs[0].pool_num_blocks
         for cfg in kv_cache_configs
     )
     # Worker configs share scheduler geometry and the resolved zeroing

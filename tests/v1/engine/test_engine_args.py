@@ -382,11 +382,18 @@ def test_all_reduce_int(monkeypatch):
     assert seen == [(dist.ReduceOp.MIN, group), (dist.ReduceOp.MAX, group)]
 
 
+@pytest.mark.parametrize(
+    ("elastic_ep", "draft_kv_pool", "match"),
+    [(True, False, "elastic EP"), (False, True, "draft-kv-pool")],
+    ids=["elastic_ep", "draft_kv_pool"],
+)
 @pytest.mark.parametrize("requested", [None, True])
-def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
-    """Elastic EP scale-up skips warmup and reuses the profiled KV cache size,
-    so nothing would measure an extensible cache: it stays off by default and an
-    explicit request is an error."""
+def test_extensible_kv_cache_off_with_fixed_kv_cache_size(
+    monkeypatch, requested, elastic_ep, draft_kv_pool, match
+):
+    """Elastic EP scale-up reuses the profiled KV cache size, and --draft-kv-pool
+    lays its pool out at an offset fixed when the KV cache is planned, so an
+    extensible cache stays off by default and an explicit request is an error."""
     from types import SimpleNamespace
 
     import vllm.platforms
@@ -401,14 +408,15 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=draft_kv_pool,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
-        parallel_config=SimpleNamespace(enable_elastic_ep=True),
+        parallel_config=SimpleNamespace(enable_elastic_ep=elastic_ep),
         kv_transfer_config=None,
     )
     if requested:
-        with pytest.raises(ValueError, match="elastic EP"):
+        with pytest.raises(ValueError, match=match):
             VllmConfig._resolve_extensible_kv_cache(config)
     else:
         VllmConfig._resolve_extensible_kv_cache(config)
@@ -481,6 +489,7 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=False,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -529,6 +538,7 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=False,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
