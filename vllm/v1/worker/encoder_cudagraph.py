@@ -296,6 +296,18 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
+    def supports_batch(self, modality: str, mm_kwargs: dict[str, Any]) -> bool:
+        """Check if a batch can run through the captured encoder graphs.
+
+        Precomputed embeddings (`<modality>_embeds`) do not run the encoder,
+        so the caller must send them to `embed_multimodal` instead. A batch
+        never mixes them with pixel inputs: `group_and_batch_mm_kwargs` only
+        batches items that have the same keys.
+        """
+        return (
+            self.supports_modality(modality) and f"{modality}_embeds" not in mm_kwargs
+        )
+
     def is_captured(self) -> bool:
         """Return whether a CUDA graph pool is active."""
         return self.graph_pool is not None
