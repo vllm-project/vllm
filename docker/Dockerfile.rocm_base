@@ -10,7 +10,7 @@ ARG TRITON_VERSION=3.8.0+git669b31ac
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.26"
+ARG AITER_BRANCH="v0.1.27"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.2.3.post1"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -165,6 +165,11 @@ RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
 ### MORI Build
 ###
 FROM base AS build_mori
+# mori silently builds without UMBP when gRPC or Protobuf is missing.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgrpc++-dev libprotobuf-dev \
+       protobuf-compiler protobuf-compiler-grpc \
+    && rm -rf /var/lib/apt/lists/*
 ARG MORI_BRANCH
 ARG MORI_REPO
 RUN git clone ${MORI_REPO}
@@ -174,7 +179,9 @@ RUN --mount=type=cache,target=/root/.cache/pip cd mori \
     && ln -sfn ${ROCM_PATH} /opt/rocm \
     && pip install "setuptools_scm>=6.2" \
     && CMAKE_PREFIX_PATH="${ROCM_PATH}:${ROCM_PATH}/lib/rocm_sysdeps" \
-       python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl
+       python3 setup.py bdist_wheel --dist-dir=dist \
+    && grep -qx 'BUILD_UMBP:BOOL=ON' build/CMakeCache.txt \
+    && ls /app/mori/dist/*.whl
 RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 
 ###
@@ -357,6 +364,11 @@ RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
     && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
 
+# Runtime libraries of mori's UMBP extension.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgrpc++1 libprotobuf23 \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
     --mount=type=bind,from=build_fa,src=/app/install,target=/i/fa \
     --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
@@ -374,6 +386,7 @@ RUN --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
     && grep -q '^pybind11==3\.0\.' /etc/rocm-constraints.txt \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
+    && python3 -c "from mori.cpp import UMBPClient" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
 # Fail if a pip call above ran without the cache mount and left its downloads in the image.
