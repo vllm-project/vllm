@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from typing import Any, Literal, get_args
 
 import jinja2
@@ -1321,7 +1322,14 @@ class AnthropicServingMessages(OpenAIServingChat):
             merge_inline_system=self._merge_inline_system,
             disabled_thinking_effort=disabled_thinking_effort,
         )
-        result = await self.render_chat_request(chat_req)
+        # Count prompts longer than max_model_len instead of rejecting them,
+        # as /tokenize does.
+        result = await self.render_chat_request(
+            chat_req,
+            tok_params=replace(
+                chat_req.build_tok_params(self.model_config), max_total_tokens=None
+            ),
+        )
         if isinstance(result, ErrorResponse):
             return result
 
