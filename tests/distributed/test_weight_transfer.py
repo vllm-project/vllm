@@ -1835,52 +1835,7 @@ def test_ipc_trainer_init_ships_packed_to_worker():
     assert engine.is_sender is True
     assert engine.packed is True
     assert client.order == ["init"]
-    # The vLLM trainer opts packed transfers into the aligned layout.
-    assert client.last_init_info == {"packed": True, "packed_alignment": 16}
-
-
-@pytest.mark.parametrize("alignment", [0, 3, -16])
-def test_init_infos_reject_bad_packed_alignment(alignment):
-    """`packed_alignment` must be a positive power of two on every side."""
-    for make in (
-        lambda: IPCWeightTransferInitInfo(packed_alignment=alignment),
-        lambda: IPCTrainerInitInfo(rank=0, packed_alignment=alignment),
-        lambda: NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1",
-            master_port=29500,
-            rank_offset=1,
-            world_size=2,
-            packed_alignment=alignment,
-        ),
-        lambda: NCCLTrainerInitInfo(
-            master_address="127.0.0.1",
-            master_port=29500,
-            world_size=2,
-            rank=0,
-            packed_alignment=alignment,
-        ),
-    ):
-        with pytest.raises(ValueError, match="packed_alignment"):
-            make()
-
-
-def test_worker_init_infos_default_to_the_unpadded_layout():
-    """Producers that do not send `packed_alignment` keep the original layout,
-    while vLLM's trainer engines default to the aligned one."""
-    assert IPCWeightTransferInitInfo().packed_alignment == 1
-    assert (
-        NCCLWeightTransferInitInfo(
-            master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
-        ).packed_alignment
-        == 1
-    )
-    assert IPCTrainerInitInfo(rank=0).packed_alignment == 16
-    assert (
-        NCCLTrainerInitInfo(
-            master_address="127.0.0.1", master_port=29500, world_size=2, rank=0
-        ).packed_alignment
-        == 16
-    )
+    assert client.last_init_info == {"packed": True}
 
 
 def test_ipc_trainer_init_rejects_a_partitioned_source():
@@ -1983,9 +1938,6 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
         "packed": packed,
         "packed_buffer_size_bytes": 1024,
         "packed_num_buffers": 3,
-        # Only packed transfers ship it, so unpacked ones still work against
-        # workers that predate the field.
-        **({"packed_alignment": 16} if packed else {}),
     }
 
 

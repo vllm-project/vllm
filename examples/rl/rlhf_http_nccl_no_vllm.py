@@ -124,9 +124,6 @@ def main() -> None:
                 "world_size": world_size,
                 "packed": args.packed,
                 "packed_buffer_size_bytes": args.packed_buffer_size_bytes,
-                # Packs back to back (the default `packed_alignment` of 1).
-                # Sending 16 and padding each tensor's start to 16 bytes lets
-                # the worker unpack without copies; see nccl.md.
             }
         },
     )

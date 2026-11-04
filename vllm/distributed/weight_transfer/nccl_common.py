@@ -29,8 +29,6 @@ from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     DEFAULT_PACKED_NUM_BUFFERS,
-    LEGACY_PACKED_ALIGNMENT,
-    check_packed_alignment,
 )
 from vllm.platforms import current_platform
 from vllm.utils.nccl import unpinned_nccl_env
@@ -98,9 +96,6 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     ``ncclCommInitRank`` (see ``PyNcclCommunicator.from_unique_id_bytes``), so a
     foreign peer must issue a matching one-element ``all_reduce`` before any
     other collective or all ranks deadlock.
-
-    ``packed_alignment`` defaults to 1, the unpadded packed layout, for
-    producers that do not send it; vLLM's trainer engine sends 16.
     """
 
     master_address: str | None = None
@@ -111,11 +106,9 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
-    packed_alignment: int = LEGACY_PACKED_ALIGNMENT
 
     def __post_init__(self) -> None:
         _ = self.nccl_unique_id_bytes
-        check_packed_alignment(self.packed_alignment)
 
     @property
     def nccl_unique_id_bytes(self) -> bytes | None:
@@ -131,15 +124,8 @@ def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     """Serialize a worker init info for `init_weight_transfer_engine`, dropping
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
     only the mode actually in use. Shared by the dense and sparse trainer
-    engines so the two cannot drift.
-
-    `packed_alignment` is sent only for packed transfers: unpacked ones never
-    read it, and leaving it out keeps them working against workers that
-    predate the field (which reject it as an unknown key)."""
-    payload = {k: v for k, v in asdict(init_info).items() if v is not None}
-    if not init_info.packed:
-        del payload["packed_alignment"]
-    return payload
+    engines so the two cannot drift."""
+    return {key: value for key, value in asdict(init_info).items() if value is not None}
 
 
 def build_worker_init_payload(
@@ -148,7 +134,6 @@ def build_worker_init_payload(
     packed: bool = False,
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
-    packed_alignment: int = LEGACY_PACKED_ALIGNMENT,
 ) -> dict:
     # Workers sit at rank_offset 1, after the single trainer sender rank 0.
     worker_init_info = NCCLWeightTransferInitInfo(
@@ -159,7 +144,6 @@ def build_worker_init_payload(
         packed=packed,
         packed_buffer_size_bytes=packed_buffer_size_bytes,
         packed_num_buffers=packed_num_buffers,
-        packed_alignment=packed_alignment,
     )
     return worker_init_payload(worker_init_info)
 

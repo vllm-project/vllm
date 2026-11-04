@@ -75,11 +75,9 @@ identical either way.
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `False` | Chunked, bounded-memory transfer (see below) |
 | `packed_buffer_size_bytes` | 1 GiB | Chunk size when `packed=True` |
-| `packed_alignment` | 16 | Byte alignment of each tensor in a packed chunk (power of two) |
 
-`packed` and `packed_alignment` are must-agree wire params: `trainer_init` ships
-them to the worker, which records them and decodes accordingly (`packed_alignment`
-only for packed transfers; the worker defaults to 1 when it is absent). It is not a `WeightTransferConfig` field and
+`packed` is a must-agree wire param: `trainer_init` ships it to the worker, which
+records it and decodes accordingly. It is not a `WeightTransferConfig` field and
 not a per-round `update_weights` field. `packed_buffer_size_bytes` is
 producer-only — the consumer rebuilds from the IPC handle plus the per-chunk
 `tensor_sizes`, so it never needs the buffer size.
@@ -91,7 +89,7 @@ models, this requires the full model to reside in GPU memory on both sides
 simultaneously. Setting `packed=True` enables **chunked transfer** with bounded
 GPU memory:
 
-- Weights are packed into fixed-size buffers (`packed_buffer_size_bytes`), each starting at an offset aligned to `packed_alignment`.
+- Weights are concatenated into fixed-size packed buffers (`packed_buffer_size_bytes`).
 - Each chunk is sent as a separate `update_weights` call within a single `start_weight_update` / `finish_weight_update` bracket, so the layerwise reload pass is initialized once at the start and finalized once at the end regardless of chunk count.
 - After each chunk is consumed, the GPU memory for that chunk can be reclaimed.
 
@@ -121,7 +119,6 @@ the first `/update_weights` returns 500. Reference:
 [`rlhf_http_ipc_no_vllm.py`](../../../examples/rl/rlhf_http_ipc_no_vllm.py).
 
 `POST /init_weight_transfer_engine` body: `{"init_info": {"packed": false}}`.
-Packed transfers may add `"packed_alignment"` (power of two, default 1).
 
 `POST /update_weights` body `{"update_info": {...}}`:
 
@@ -129,7 +126,7 @@ Packed transfers may add `"packed_alignment"` (power of two, default 1).
 | ----- | ------- |
 | `names`, `dtype_names`, `shapes` | Checkpoint names, `torch` dtype attribute names (`"bfloat16"`), full shapes |
 | `ipc_handles_pickled` | `base64(pickle.dumps(handles))`. Unpacked: a list with one dict per name. Packed: one dict for the shared buffer |
-| `tensor_sizes` | Packed only: unpadded byte size of each tensor in the chunk, in `names` order |
+| `tensor_sizes` | Packed only: byte size of each tensor in the chunk, in `names` order |
 
 - A handle dict is `{gpu_uuid: reduce_tensor(t)[1]}` with one entry per GPU the
   server uses (`torch.multiprocessing.reductions.reduce_tensor`).
@@ -139,12 +136,8 @@ Packed transfers may add `"packed_alignment"` (power of two, default 1).
 - `ipc_handles` (unpickled) is not JSON-serializable; over HTTP use
   `ipc_handles_pickled`.
 - Packed: export one `uint8` buffer once and reuse it for every chunk. Copy
-  `t.contiguous().view(-1).view(torch.uint8)` in `names` order, each tensor at
-  the previous tensor's end rounded up to `packed_alignment` (the first at 0),
-  and close a chunk **before** the next tensor, padding included, would
-  overflow it (unlike NCCL, which closes after). With the default alignment of
-  1, tensors whose offset is not a multiple of their itemsize are copied on the
-  worker; sending `packed_alignment: 16` and padding avoids that.
+  `t.contiguous().view(-1).view(torch.uint8)` in `names` order and close a chunk
+  **before** the next tensor would overflow it (unlike NCCL, which closes after).
   A tensor larger than the buffer is an error. Synchronize before each
   `/update_weights`; do not overwrite the buffer until the call returns.
 - Keep every exported tensor alive until `/finish_weight_update` returns, then
