@@ -246,6 +246,48 @@ def test_flydsl_falls_back_to_triton(flydsl_ops, monkeypatch) -> None:
     assert len(launches) == 2
 
 
+def test_flydsl_warmup_compiles_ahead(flydsl_ops, monkeypatch) -> None:
+    """flydsl_sparse_mla_warmup compiles every (has_invalid, return_lse) config
+    of a head count, so a warmed config engages even inside a graph capture."""
+    ops, launches = flydsl_ops
+    keys = {(6, hi, rl) for hi in (False, True) for rl in (False, True)}
+    for key in keys:
+        ops._FLYDSL_SPARSE_MLA_COMPILED.discard(key)
+
+    ops._FLYDSL_SPARSE_MLA = False
+    ops.flydsl_sparse_mla_warmup(6)
+    assert not keys & ops._FLYDSL_SPARSE_MLA_COMPILED
+    ops._FLYDSL_SPARSE_MLA = True
+
+    ops.flydsl_sparse_mla_warmup(6)
+    assert keys <= ops._FLYDSL_SPARSE_MLA_COMPILED
+    assert not launches
+
+    gen = torch.Generator().manual_seed(0)
+    cache = _fp8_ds_mla_cache(TOPK, gen)
+    indptr, indices, _ = _indices("ragged", 4, TOPK, gen)
+    q = torch.randn(4, 6, KV_LORA_RANK + ROPE_DIM, generator=gen).to(
+        "cuda", torch.bfloat16
+    )
+    with monkeypatch.context() as m:
+        m.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+        out, lse = _run(ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04)
+    assert launches == [(6, False, True)]
+    ops._FLYDSL_SPARSE_MLA = False
+    ref_out, ref_lse = _run(
+        ops, q, cache.unsqueeze(1), indptr, indices, False, True, 0.04
+    )
+    ops._FLYDSL_SPARSE_MLA = True
+    torch.testing.assert_close(out, ref_out, atol=3e-2, rtol=2e-2)
+    torch.testing.assert_close(lse, ref_lse, atol=1e-2, rtol=1e-3)
+
+    # Warmed configs compile nothing on a second call.
+    with monkeypatch.context() as m:
+        m.setattr(ops, "_flydsl_sparse_mla_warmup_fn", staticmethod(lambda: None))
+        ops.flydsl_sparse_mla_warmup(6)
+    assert keys <= ops._FLYDSL_SPARSE_MLA_COMPILED
+
+
 def _run_sink(ops, q, kv, indptr, indices, scale, sink):
     out = torch.empty(
         (q.shape[0], q.shape[1], KV_LORA_RANK), dtype=torch.bfloat16, device=q.device

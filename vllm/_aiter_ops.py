@@ -4,6 +4,7 @@ import ctypes
 import functools
 import importlib
 import os
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -2229,8 +2230,9 @@ class rocm_aiter_ops:
     _TRITON_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA
     _FLYDSL_SPARSE_MLA = envs.VLLM_ROCM_USE_AITER_FLYDSL_SPARSE_MLA
     _FLYDSL_SPARSE_MLA_MIN_TOKENS = envs.VLLM_ROCM_AITER_FLYDSL_SPARSE_MLA_MIN_TOKENS
-    # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that already
-    # ran eagerly, i.e. are compiled and loaded; see _flydsl_sparse_mla_fwd.
+    # FlyDSL sparse MLA configs (heads, has_invalid, return_lse) that are
+    # compiled and loaded, by flydsl_sparse_mla_warmup or an eager first call;
+    # see _flydsl_sparse_mla_fwd.
     _FLYDSL_SPARSE_MLA_COMPILED: set[tuple[int, bool, bool]] = set()
     _MOE_SHARED_EXPERTS_ENABLED = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     _MOE_SITUV2 = _resolve_situv2_activation()
@@ -3810,6 +3812,54 @@ class rocm_aiter_ops:
             error,
         )
         return None
+
+    @staticmethod
+    def _flydsl_sparse_mla_warmup_fn() -> Callable | None:
+        """The FlyDSL sparse MLA warm-up, from the same modules as the ops."""
+        for module in (
+            "vllm.models.kimi_k3.amd.ops.flydsl_sparse_mla",
+            "aiter.ops.flydsl.sparse_mla",
+        ):
+            try:
+                flydsl = importlib.import_module(module)
+            except Exception:
+                continue
+            fn = getattr(flydsl, "flydsl_sparse_mla_fp8ds_warmup", None)
+            if fn is not None:
+                return fn
+        return None
+
+    @classmethod
+    def flydsl_sparse_mla_warmup(cls, num_heads: int) -> None:
+        """Compile the FlyDSL sparse MLA for ``num_heads`` ahead of any request.
+
+        The ROCm sparse MLA impl calls this from process_weights_after_loading,
+        so the JIT (0.2-1.1 s per config on Kimi-K3.1) runs at model load, not
+        on the first prefill that reaches the kernel; the warmed configs then
+        also engage inside a CUDA-graph capture, which otherwise keeps a config
+        that never ran eagerly on the Triton kernel. Compiles the four
+        (has_invalid, return_lse) variants. A no-op when the flag is off, when
+        FlyDSL is absent, or once the configs are compiled.
+        """
+        if not cls._FLYDSL_SPARSE_MLA or not cls._AITER_ENABLED:
+            return
+        keys = [(num_heads, hi, rl) for hi in (False, True) for rl in (False, True)]
+        if all(key in cls._FLYDSL_SPARSE_MLA_COMPILED for key in keys):
+            return
+        if cls._flydsl_sparse_mla_ops() is None:
+            return
+        warmup = cls._flydsl_sparse_mla_warmup_fn()
+        if warmup is None:
+            return
+        start = time.perf_counter()
+        warmup(heads=(num_heads,))
+        cls._FLYDSL_SPARSE_MLA_COMPILED.update(keys)
+        logger.info(
+            "FlyDSL sparse MLA: compiled heads=%d (%d configs) in %.1f s",
+            num_heads,
+            len(keys),
+            time.perf_counter() - start,
+        )
 
     @classmethod
     def _flydsl_sparse_mla_fwd(

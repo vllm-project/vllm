@@ -1150,6 +1150,13 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
                     reason,
                 )
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        super().process_weights_after_loading(act_dtype)
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            # JIT the FlyDSL sparse MLA now, not on the first prefill that
+            # reaches it (or never, inside a CUDA-graph capture).
+            rocm_aiter_ops.flydsl_sparse_mla_warmup(self.num_heads)
+
     def _aiter_sparse_mla_unsupported_reason(
         self, vllm_config: VllmConfig
     ) -> str | None:
