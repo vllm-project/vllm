@@ -16,7 +16,7 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
@@ -251,7 +251,28 @@ impl HfChatRenderer {
             &request.messages,
             effective_template.content_format(),
             self.multimodal.as_ref(),
+            effective_template.supports_developer_role(),
         )?;
+        let has_developer_messages = request
+            .messages
+            .iter()
+            .any(|message| matches!(message, ChatMessage::Developer { .. }));
+        if has_developer_messages && !effective_template.supports_developer_role() {
+            // Consolidation moves every non-leading system message to the front,
+            // ahead of earlier media. Media data stays in message order, so the
+            // rendered placeholders would no longer match it.
+            let moves_media = request.messages.iter().skip(1).any(|message| {
+                matches!(
+                    message,
+                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
+                        if content.has_multimodal()
+                )
+            });
+            if moves_media {
+                return Err(Error::UnsupportedMultimodalSystemFallback);
+            }
+            messages = consolidate_system_messages(messages);
+        }
 
         // Handling of `continue_final_message`:
         // Append a sentinel tag to the final message content, render as usual, then
@@ -360,6 +381,91 @@ enum TemplateContentPart {
     Audio,
 }
 
+/// Match Python vLLM's fallback for templates that do not support `developer`.
+fn consolidate_system_messages<'a>(messages: Vec<TemplateMessage<'a>>) -> Vec<TemplateMessage<'a>> {
+    let needs_consolidation = messages
+        .iter()
+        .enumerate()
+        .any(|(index, message)| message.role == "system" && index > 0)
+        || messages.iter().filter(|message| message.role == "system").count() > 1;
+    if !needs_consolidation {
+        return messages;
+    }
+
+    let mut system_contents = Vec::new();
+    let mut non_system = Vec::with_capacity(messages.len());
+    for message in messages {
+        if message.role == "system" {
+            system_contents.push(message.content);
+        } else {
+            non_system.push(message);
+        }
+    }
+
+    let mut consolidated = Vec::with_capacity(non_system.len() + 1);
+    consolidated.push(TemplateMessage {
+        role: "system",
+        content: merge_system_content(system_contents),
+        tools: None,
+        reasoning: None,
+        reasoning_content: None,
+        tool_calls: None,
+        tool_call_id: None,
+    });
+    consolidated.extend(non_system);
+    consolidated
+}
+
+/// Merge system/developer content without changing the format selected by the
+/// chat template. OpenAI content arrays retain all text and multimodal parts.
+fn merge_system_content(contents: Vec<TemplateContent>) -> TemplateContent {
+    let mut contents = contents.into_iter();
+    let Some(mut merged) = contents.next() else {
+        return TemplateContent::String(String::new());
+    };
+
+    for content in contents {
+        merged = match (merged, content) {
+            (TemplateContent::String(mut left), TemplateContent::String(right)) => {
+                if !left.is_empty() && !right.is_empty() {
+                    left.push_str("\n\n");
+                }
+                left.push_str(&right);
+                TemplateContent::String(left)
+            }
+            (TemplateContent::OpenAi(mut left), TemplateContent::OpenAi(mut right)) => {
+                if !left.is_empty() && !right.is_empty() {
+                    left.push(TemplateContentPart::Text {
+                        text: "\n\n".to_string(),
+                    });
+                }
+                left.append(&mut right);
+                TemplateContent::OpenAi(left)
+            }
+            (left, right) => {
+                let mut left = into_openai_parts(left);
+                let mut right = into_openai_parts(right);
+                if !left.is_empty() && !right.is_empty() {
+                    left.push(TemplateContentPart::Text {
+                        text: "\n\n".to_string(),
+                    });
+                }
+                left.append(&mut right);
+                TemplateContent::OpenAi(left)
+            }
+        };
+    }
+
+    merged
+}
+
+fn into_openai_parts(content: TemplateContent) -> Vec<TemplateContentPart> {
+    match content {
+        TemplateContent::String(text) => vec![TemplateContentPart::Text { text }],
+        TemplateContent::OpenAi(parts) => parts,
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct TemplateToolCall {
     id: String,
@@ -396,10 +502,13 @@ fn to_template_messages<'a>(
     messages: &'a [ChatMessage],
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
+    supports_developer_role: bool,
 ) -> Result<Vec<TemplateMessage<'a>>> {
     messages
         .iter()
-        .map(|message| to_template_message(message, content_format, multimodal))
+        .map(|message| {
+            to_template_message(message, content_format, multimodal, supports_developer_role)
+        })
         .collect()
 }
 
@@ -407,6 +516,7 @@ fn to_template_message<'a>(
     message: &'a ChatMessage,
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
+    supports_developer_role: bool,
 ) -> Result<TemplateMessage<'a>> {
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
@@ -419,9 +529,15 @@ fn to_template_message<'a>(
             tool_call_id: None,
         },
         ChatMessage::Developer { content, tools } => TemplateMessage {
-            role: "developer",
+            role: if supports_developer_role {
+                "developer"
+            } else {
+                "system"
+            },
             content: to_template_content(content, content_format, multimodal)?,
-            tools: tools.as_deref().map(to_template_tools),
+            tools: supports_developer_role
+                .then(|| tools.as_deref().map(to_template_tools))
+                .flatten(),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -439,7 +555,7 @@ fn to_template_message<'a>(
         ChatMessage::Assistant { content } => {
             let text = content.text();
             let reasoning = content.reasoning();
-            let tool_calls = to_template_tool_calls(content)?;
+            let tool_calls = to_template_tool_calls(content);
             let content =
                 to_template_content(&ChatContent::Text(text), content_format, multimodal)?;
             TemplateMessage {
@@ -476,30 +592,21 @@ fn to_template_message<'a>(
     })
 }
 
-fn to_template_tool_calls(
-    content: &[AssistantContentBlock],
-) -> Result<Option<Vec<TemplateToolCall>>> {
+fn to_template_tool_calls(content: &[AssistantContentBlock]) -> Option<Vec<TemplateToolCall>> {
     let mut tool_calls = Vec::new();
 
     for tool_call in content.tool_calls() {
-        let arguments = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "assistant tool call `{}` has invalid JSON arguments: {}",
-                tool_call.id,
-                error.as_report()
-            ))
-        })?;
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
             function: TemplateToolFunction {
                 name: tool_call.name.clone(),
-                arguments,
+                arguments: JsonValue::Object(tool_call_arguments_or_empty(&tool_call.arguments)),
             },
         });
     }
 
-    Ok((!tool_calls.is_empty()).then_some(tool_calls))
+    (!tool_calls.is_empty()).then_some(tool_calls)
 }
 
 fn to_template_content(
@@ -560,31 +667,29 @@ fn to_template_string_content(
     match content {
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
-            let mut out = String::new();
-            for part in parts {
-                match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => {
-                        let image_token = multimodal
-                            .and_then(|multimodal| multimodal.image_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
-                        out.push_str(image_token);
-                    }
-                    ChatContentPart::VideoUrl { .. } => {
-                        let video_token = multimodal
-                            .and_then(|multimodal| multimodal.video_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
-                        out.push_str(video_token);
-                    }
+            // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
+            // media as its modality's placeholder in place, empty text parts are dropped, and
+            // the segments are joined with "\n". Python's default moves placeholders to the
+            // front instead.
+            let segments: Vec<&str> = parts
+                .iter()
+                .filter(|part| !part.is_empty_text())
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => Ok(text.as_str()),
+                    ChatContentPart::ImageUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_url")),
+                    ChatContentPart::VideoUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.video_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url")),
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
-                        let audio_token = multimodal
-                            .and_then(|multimodal| multimodal.audio_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
-                        out.push_str(audio_token);
+                        multimodal
+                            .and_then(|multimodal| multimodal.audio_token.as_deref())
+                            .ok_or(Error::UnsupportedMultimodalContent("audio"))
                     }
-                }
-            }
-            Ok(out)
+                })
+                .collect::<Result<_>>()?;
+            Ok(segments.join("\n"))
         }
     }
 }
@@ -730,7 +835,7 @@ mod tests {
         };
 
         let rendered = render(
-            Some("{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
+            Some("{% set developer_role = 'developer' %}{{ messages|length }}:{{ messages[0].role }}:{{ messages[0].tools[0].function.name }}:{{ tools[0].function.name }}"),
             &request,
         )
         .unwrap();
@@ -819,7 +924,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<image>b".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<image>\nb".to_string()));
     }
 
     #[test]
@@ -831,7 +936,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<video>b".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<video>\nb".to_string()));
     }
 
     #[test]
@@ -845,7 +950,7 @@ mod tests {
 
         assert_eq!(
             rendered.prompt,
-            Prompt::Text("a<audio><audio>b".to_string())
+            Prompt::Text("a\n<audio>\n<audio>\nb".to_string())
         );
     }
 
@@ -886,6 +991,56 @@ mod tests {
             rendered.prompt,
             Prompt::Text("a<|audio_pad|><|audio_pad|>b".to_string())
         );
+    }
+
+    #[test]
+    fn developer_fallback_preserves_openai_content_parts() {
+        let request = sample_request(vec![
+            ChatMessage::system(vec![
+                ChatContentPart::text("base policy"),
+                ChatContentPart::image_url("data:image/png;base64,test"),
+            ]),
+            ChatMessage::developer("additional policy", None),
+            ChatMessage::user("question"),
+        ]);
+        let rendered = render_mm(
+            "{% for message in messages %}{{ message.role }}={% for part in message.content %}{% if part.type == 'text' %}{{ part.text }}{% elif part.type == 'image' %}<image>{% endif %}{% endfor %};{% endfor %}",
+            &request,
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered.prompt,
+            Prompt::Text(
+                "system=base policy<image>\n\nadditional policy;user=question;".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn developer_fallback_rejects_media_in_moved_messages() {
+        let request = sample_request(vec![
+            ChatMessage::user(vec![
+                ChatContentPart::text("question"),
+                ChatContentPart::image_url("data:image/png;base64,a"),
+            ]),
+            ChatMessage::developer(
+                vec![
+                    ChatContentPart::text("policy"),
+                    ChatContentPart::image_url("data:image/png;base64,b"),
+                ],
+                None,
+            ),
+        ]);
+        let error = render_mm(
+            "{% for message in messages %}{{ message.role }}={{ message.content }};{% endfor %}",
+            &request,
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::UnsupportedMultimodalSystemFallback));
     }
 
     #[test]
@@ -1068,14 +1223,19 @@ mod tests {
 
     #[test]
     fn chat_template_flattens_text_parts_for_string_templates() {
-        let request = sample_request(vec![ChatMessage::user(vec![
-            ChatContentPart::text("hello"),
-            ChatContentPart::text(" world"),
-        ])]);
-
-        let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
-
-        assert_eq!(rendered, "hello world");
+        for (parts, expected) in [
+            (vec!["hello", " world"], "hello\n world"),
+            (vec!["", "hello", "", "world", ""], "hello\nworld"),
+            (vec!["hello\n", "world"], "hello\n\nworld"),
+            (vec!["hello"], "hello"),
+            (vec![""], ""),
+        ] {
+            let request = sample_request(vec![ChatMessage::user(
+                parts.into_iter().map(ChatContentPart::text).collect::<Vec<_>>(),
+            )]);
+            let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+            assert_eq!(rendered, expected);
+        }
     }
 
     #[test]
@@ -1096,12 +1256,32 @@ mod tests {
         )]);
 
         let rendered = render(
-            Some("{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
+            Some("{% set developer_role = 'developer' %}{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
             &request,
         )
         .unwrap();
 
         assert_eq!(rendered, "developer|policy|get_weather|city");
+    }
+
+    #[test]
+    fn chat_template_without_developer_role_consolidates_developer_as_system() {
+        let request = sample_request(vec![
+            ChatMessage::system("base policy"),
+            ChatMessage::user("question"),
+            ChatMessage::developer("additional policy", None),
+        ]);
+
+        let rendered = render(
+            Some("{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "system=base policy\n\nadditional policy;user=question;"
+        );
     }
 
     #[test]
@@ -1283,7 +1463,7 @@ mod tests {
         .unwrap()
         .prompt;
 
-        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+        assert_eq!(rendered, Prompt::Text("hello\n world".to_string()));
     }
 
     #[test]
@@ -1660,6 +1840,50 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_tool_call_arguments_that_are_not_an_object_render_as_empty() {
+        let render_arguments = |arguments: &[&str]| {
+            let tool_calls = arguments
+                .iter()
+                .map(|arguments| {
+                    AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: arguments.to_string(),
+                    })
+                })
+                .collect();
+            // `.items()` is what fails on anything but a mapping.
+            render(
+                Some(
+                    "{%- for call in messages[0].tool_calls -%}
+{{ call.function.arguments | tojson }}:
+{%- for key, value in call.function.arguments.items() -%}{{ key }}={{ value }}{%- endfor -%};
+{%- endfor -%}",
+                ),
+                &sample_request(vec![ChatMessage::assistant_blocks(tool_calls)]),
+            )
+            .unwrap()
+        };
+
+        for arguments in [
+            r#"{"cmd": "mkdir -p"#,
+            "   ",
+            "[]",
+            "42",
+            "true",
+            r#""hello""#,
+            "null",
+        ] {
+            assert_eq!(render_arguments(&[arguments]), "{}:;", "{arguments:?}");
+        }
+        // Each call is coerced on its own.
+        assert_eq!(
+            render_arguments(&[r#"{"a": 1}"#, r#"{"cmd": ""#]),
+            r#"{"a": 1}:a=1;{}:;"#
+        );
+    }
+
+    #[test]
     fn chat_template_tool_call_argument_items_method_is_not_shadowed_by_field() {
         let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
             AssistantContentBlock::ToolCall(crate::AssistantToolCall {
@@ -1780,7 +2004,7 @@ mod tests {
 
         expect![[r#"
             Text(
-                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:<im_patch>What is in it?<|EOT|><|BOT|>assistant\n<think>\n",
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:\n<im_patch>\nWhat is in it?<|EOT|><|BOT|>assistant\n<think>\n",
             )
         "#]]
         .assert_debug_eq(&rendered.prompt);
