@@ -104,6 +104,8 @@ When adding or modifying tests, consider both the coverage and the effectiveness
 
 Assess whether the included test cases are meaningful, concise, and maintainable. Testing should not be exhaustive: local validation is typically sufficient to ensure a baseline correctness of the change. Contributed tests should focus exclusively on areas that are deemed prone to errors, regressions, or complex interactions within the codebase. Recommend deletion of redundant, trivial, or otherwise unnecessary tests: this is one of the most common complaints raised during code reviews.
 
+Check added and changed tests against [`tests/AGENTS.md`](../../../tests/AGENTS.md). For reproducible bugs, the PR must show the new test failing without the fix and passing with it.
+
 Verify that testing actually exercises the new path, rather than passing through an unchanged path or fallback. Ensure added speculative decoding correctness tests assert nonzero acceptance rate, selection tests identify the desired backend, etc.
 
 Aim to write tests that are meaningful, targeted, and maintainable. Avoid redundant or trivial tests that do not contribute to the overall reliability of the test suite. Avoid using mock objects, especially when highly coupled with internal logic.

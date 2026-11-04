@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.layers.classifier import ClassificationHeadWithLoRA
+from vllm.lora.layers.classifier import (
+    BaseClassificationHeadWithLoRA,
+    ClassificationHeadWithLoRA,
+    TokenClassificationHeadWithLoRA,
+)
 from vllm.lora.layers.column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
@@ -14,6 +18,8 @@ from vllm.lora.layers.column_parallel_linear import (
     QKVParallelLinearWithShardedLoRA,
 )
 from vllm.lora.layers.custom_layer import (
+    DeepseekV4CompressorKVScoreWithLoRA,
+    DeepseekV4GroupedWoAWithLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
 )
@@ -29,6 +35,8 @@ from vllm.lora.layers.vocab_parallel_embedding import VocabParallelEmbeddingWith
 
 __all__ = [
     "BaseLayerWithLoRA",
+    "DeepseekV4CompressorKVScoreWithLoRA",
+    "DeepseekV4GroupedWoAWithLoRA",
     "Step5FusedQKVIndexerWithLoRA",
     "Step5SparseIndexerWWithLoRA",
     "VocabParallelEmbeddingWithLoRA",
@@ -50,4 +58,6 @@ __all__ = [
     "FusedMoEWithLoRA",
     "FusedMoE3DWithLoRA",
     "ClassificationHeadWithLoRA",
+    "BaseClassificationHeadWithLoRA",
+    "TokenClassificationHeadWithLoRA",
 ]

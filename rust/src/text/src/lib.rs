@@ -15,7 +15,8 @@ pub use backend::{
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
-    PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
+    EffectiveSampling, PreparedTextRequest, lower_sampling_params, lower_text_request,
+    resolve_max_tokens,
 };
 pub use output::{
     CollectedTextOutput, DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs,
@@ -25,8 +26,9 @@ pub use output::{
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
-use vllm_llm::{GenerateOutputStream, Llm};
+use vllm_llm::{GenerateOutputStream, GenerateRequest, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
@@ -53,6 +55,8 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Backend that compiles every structured-output constraint.
+    structured_outputs_backend: StructuredOutputBackend,
 }
 
 impl TextRequestProcessor {
@@ -62,6 +66,7 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            structured_outputs_backend: StructuredOutputBackend::default(),
         }
     }
 
@@ -73,9 +78,26 @@ impl TextRequestProcessor {
         self
     }
 
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.structured_outputs_backend = backend;
+        self
+    }
+
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_backend
+    }
+
     /// Return the tokenizer used by this processor.
     pub fn tokenizer(&self) -> DynTokenizer {
         self.backend.tokenizer()
+    }
+
+    /// Return whether a real tokenizer is loaded; see
+    /// [`TextBackend::has_tokenizer`].
+    pub fn has_tokenizer(&self) -> bool {
+        self.backend.has_tokenizer()
     }
 
     /// Return the effective model context length.
@@ -134,6 +156,11 @@ impl TextRequestProcessor {
 
     /// Tokenize and lower one request without submitting it to an engine.
     pub fn prepare(&self, mut request: TextRequest) -> Result<PreparedTextRequest> {
+        // Without a tokenizer the output stays token IDs only, which also
+        // rejects stop strings in `validate`.
+        if !self.has_tokenizer() {
+            request.decode_options.detokenize = false;
+        }
         request.validate()?;
 
         if request.arrival_time.is_none() {
@@ -159,6 +186,7 @@ impl TextRequestProcessor {
             prompt_token_ids,
             sampling_hints,
             sampling_limits,
+            self.structured_outputs_backend,
             tokenizer.as_ref(),
         )
     }
@@ -195,6 +223,12 @@ impl TextLlm {
         self
     }
 
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.processor = self.processor.with_structured_outputs_backend(backend);
+        self
+    }
+
     /// Return the backend model ID.
     pub fn model_id(&self) -> &str {
         self.processor.backend.model_id()
@@ -216,6 +250,12 @@ impl TextLlm {
         self.processor.tokenizer()
     }
 
+    /// Return whether a real tokenizer is loaded; see
+    /// [`TextBackend::has_tokenizer`].
+    pub fn has_tokenizer(&self) -> bool {
+        self.processor.has_tokenizer()
+    }
+
     /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
     /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
     pub fn tokenizer_vocab_size(&self) -> usize {
@@ -231,14 +271,26 @@ impl TextLlm {
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
-        let (_, raw_stream) = self.generate_inner(request).await?;
-        Ok(raw_stream)
+        let prepared = self.processor.prepare(request)?;
+        self.submit(prepared.generate_request).await
     }
 
     /// Tokenize if needed, lower to a generate request, and stream
     /// incrementally decoded text.
     pub async fn generate(&self, request: TextRequest) -> Result<impl TextOutputStream> {
-        let (text_request, raw_stream) = self.generate_inner(request).await?;
+        let prepared = self.processor.prepare(request)?;
+        self.generate_prepared(prepared).await
+    }
+
+    /// Stream incrementally decoded text for one already prepared request.
+    pub async fn generate_prepared(
+        &self,
+        PreparedTextRequest {
+            text_request,
+            generate_request,
+        }: PreparedTextRequest,
+    ) -> Result<impl TextOutputStream> {
+        let raw_stream = self.submit(generate_request).await?;
         let tokenizer = self.processor.tokenizer();
         let decoded_stream = output::decoded_text_event_stream(
             text_request.request_id,
@@ -251,17 +303,16 @@ impl TextLlm {
         Ok(decoded_stream)
     }
 
-    async fn generate_inner(
-        &self,
-        request: TextRequest,
-    ) -> Result<(TextRequest, GenerateOutputStream)> {
-        let PreparedTextRequest {
-            text_request,
-            generate_request,
-        } = self.processor.prepare(request)?;
+    /// Submit one lowered request to the engine.
+    async fn submit(&self, generate_request: GenerateRequest) -> Result<GenerateOutputStream> {
+        // The engine compiles grammars with its own tokenizer, which it skips
+        // along with this frontend under `--skip-tokenizer-init`. A render-only
+        // frontend forwards the constraint to an engine it does not configure.
+        if !self.has_tokenizer() && generate_request.sampling_params.structured_outputs.is_some() {
+            return Err(Error::TokenizerUnavailable);
+        }
 
-        let raw_stream = self.llm.generate(generate_request).await?;
-        Ok((text_request, raw_stream))
+        Ok(self.llm.generate(generate_request).await?)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.
@@ -281,6 +332,9 @@ impl TextLlm {
 mod tests {
     use std::sync::Arc;
 
+    use thiserror_ext::AsReport as _;
+    use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
+    use vllm_tokenizer::UnavailableTokenizer;
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
@@ -296,6 +350,107 @@ mod tests {
         fn model_id(&self) -> &str {
             "test-model"
         }
+    }
+
+    /// A `--skip-tokenizer-init` backend: token IDs only, bounded by the model
+    /// vocabulary.
+    struct TokenizerlessTextBackend;
+
+    impl TextBackend for TokenizerlessTextBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            Arc::new(UnavailableTokenizer::new(self.model_vocab_size()))
+        }
+
+        fn has_tokenizer(&self) -> bool {
+            false
+        }
+
+        fn model_vocab_size(&self) -> usize {
+            100
+        }
+
+        fn model_id(&self) -> &str {
+            "test-model"
+        }
+    }
+
+    #[test]
+    fn tokenizerless_backend_prepares_token_id_prompts_only() {
+        let processor = TextRequestProcessor::new(Arc::new(TokenizerlessTextBackend), 64);
+        let token_ids = || TextRequest {
+            prompt: Prompt::TokenIds(vec![1, 2, 99]),
+            ..TextRequest::for_test()
+        };
+
+        let prepared = processor.prepare(token_ids()).unwrap();
+        assert_eq!(prepared.generate_request.prompt_token_ids, vec![1, 2, 99]);
+        // The output is never detokenized.
+        assert!(!prepared.text_request.decode_options.detokenize);
+
+        // Preparing keeps structured outputs: a render-only frontend forwards
+        // them to an engine it does not configure.
+        let structured = processor
+            .prepare(TextRequest {
+                sampling_params: SamplingParams {
+                    structured_outputs: Some(StructuredOutputsParams::json(
+                        serde_json::json!({"type": "object"}),
+                    )),
+                    ..SamplingParams::default()
+                },
+                ..token_ids()
+            })
+            .unwrap();
+        assert!(structured.generate_request.sampling_params.structured_outputs.is_some());
+
+        let errors = [
+            processor.prepare(TextRequest::for_test()),
+            processor.prepare(TextRequest {
+                decode_options: TextDecodeOptions {
+                    stop_strings: Some(vec!["stop".to_string()]),
+                    ..Default::default()
+                },
+                ..token_ids()
+            }),
+            processor.prepare(TextRequest {
+                sampling_params: SamplingParams {
+                    bad_words: Some(vec!["bad".to_string()]),
+                    ..SamplingParams::default()
+                },
+                ..token_ids()
+            }),
+            // The model vocabulary bounds token IDs without a tokenizer.
+            processor.prepare(TextRequest {
+                prompt: Prompt::TokenIds(vec![100]),
+                ..TextRequest::for_test()
+            }),
+        ]
+        .map(|result| {
+            let error = result.unwrap_err();
+            (
+                error.is_request_validation_error(),
+                error.to_report_string(),
+            )
+        });
+        expect_test::expect![[r#"
+            [
+                (
+                    true,
+                    "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set",
+                ),
+                (
+                    true,
+                    "text request `test-request` stop strings require detokenization; enable it or use stop token IDs",
+                ),
+                (
+                    true,
+                    "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set",
+                ),
+                (
+                    true,
+                    "token_id(s) [100] in prompt are out of vocabulary. Vocabulary size: 100",
+                ),
+            ]
+        "#]].assert_debug_eq(&errors);
     }
 
     #[test]
