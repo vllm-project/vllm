@@ -56,6 +56,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
         specialize_spec_tokens: bool = False,
+        slot_mappings_buffer: torch.Tensor | None = None,
     ) -> None:
         if specialize_spec_tokens:
             speculative_config = self.vllm_config.speculative_config
@@ -95,6 +96,7 @@ class SpeculatorCudaGraphManager(CudaGraphManager):
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
+                slot_mappings_buffer=slot_mappings_buffer,
             )
 
             forward_kwargs = {}

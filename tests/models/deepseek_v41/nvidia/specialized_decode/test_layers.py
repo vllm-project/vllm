@@ -14,10 +14,11 @@ source, 2 a ratio-2 consumer with an Engram, 3 ratio-1 KV, index and
 candidate source, 4 a ratio-1 index source over 3's candidates. Twelve
 requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
-(6 rows each), above 48 rows (inline mHC), padded, row-sharded (12
-requests) and low-batch (one request). The draft samples probabilistically
-(the requests at temperature 0), so the specialized-decode run samples on the
-vocabulary-sharded Markov chain and, above its batch limit, the fused loop.
+(6 rows each), above 48 rows (the pinned projections), padded,
+row-sharded (from two requests) and low-batch (one request). The draft samples
+probabilistically (the requests at temperature 0), so the specialized-decode
+run samples on the vocabulary-sharded Markov chain and, above its batch limit,
+the fused loop.
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -158,20 +159,20 @@ class _Probe:
         # The same for the DSpark draft's executor (layers outside ``index``).
         self.draft_sublayers = 0
 
-        def sublayer_and_keep(boundaries, layer, ffn, state, step, **kwargs):
+        def sublayer_and_keep(boundaries, layer, ffn, state, **kwargs):
             i = index.get(layer)
             if i is None:
                 self.draft_sublayers += 1
             else:
                 self.executor_sublayers += 1
-            out = sublayer(boundaries, layer, ffn, state, step, **kwargs)
+            out = sublayer(boundaries, layer, ffn, state, **kwargs)
             if ffn and i is not None:
                 residual = out[0].residual
                 self.residual[i][: residual.shape[0]].copy_(residual)
                 self._keep_ffn_input(i, out[1])
             return out
 
-        Boundaries.sublayer = sublayer_and_keep
+        Boundaries.sublayer = sublayer_and_keep  # type: ignore[method-assign]
 
     def _keep_residual(self, i):
         def hook(module, args, out):
@@ -311,6 +312,7 @@ class StepRecorder:
             ],
             "draft_logits": type(draft.logits_processor).__name__,
             "markov_sampling": type(getattr(draft, "sample_sequential", None)).__name__,
+            "embedding": type(getattr(decode, "embedding", None)).__name__,
         }
 
     def record_steps(self, prompt_lens: list[int]) -> None:
@@ -321,13 +323,15 @@ class StepRecorder:
         self._prompt_lens = prompt_lens
         self._steps: list[dict] = []
         self._full = False
-        run_fullgraph = runner.cudagraph_manager.run_fullgraph
+        manager = runner.cudagraph_manager
+        assert manager is not None
+        run_fullgraph = manager.run_fullgraph
 
         def run_and_flag(desc):
             self._full = True
             return run_fullgraph(desc)
 
-        runner.cudagraph_manager.run_fullgraph = run_and_flag
+        manager.run_fullgraph = run_and_flag  # type: ignore[method-assign]
         execute_model = runner.execute_model
 
         def execute_and_record(*args, **kwargs):
@@ -522,6 +526,8 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["markov_sampling"] == "ShardedMarkovSampling", rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
+        # The executor embeds from the replicated table.
+        assert rank["embedding"] == "ReplicatedEmbedding", rank
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank

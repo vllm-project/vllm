@@ -24,7 +24,7 @@ from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
-from vllm.utils.mem_utils import format_gib
+from vllm.utils.mem_utils import device_memory_info, format_gib
 from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -255,7 +255,7 @@ class ExtensibleKVCache:
         a share of the headroom, never below what is already committed nor
         above the capacity.
         """
-        free_memory, _ = torch.accelerator.get_memory_info(self.buffer.device)
+        free_memory, _ = device_memory_info(self.buffer.device)
         headroom = free_memory + self.physical_bytes
         reserve = max(
             self.reserved_headroom_bytes,
@@ -570,7 +570,7 @@ def measure_kv_cache_blocks(
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
-    free_memory, _ = torch.accelerator.get_memory_info(device)
+    free_memory, _ = device_memory_info(device)
     transient_peak = kv_cache.reserved_headroom_bytes
     available = measure_kv_cache_bytes(
         init_free_memory=init_free_memory,
@@ -671,7 +671,7 @@ def _release_for_weight_update(
     layer_bytes = max_layer_reload_bytes(model)
     needed = WEIGHT_UPDATE_PEAK_LAYER_FACTOR * layer_bytes
     free = (
-        torch.accelerator.get_memory_info()[0]
+        device_memory_info()[0]
         + torch.accelerator.memory_reserved()
         - torch.accelerator.memory_allocated()
     )

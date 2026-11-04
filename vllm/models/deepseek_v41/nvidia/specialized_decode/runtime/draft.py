@@ -135,6 +135,8 @@ class DraftDecode:
                     mxfp8_input=quantize and can_fuse_query_quant([attn.fused_wqa_wkv]),
                     source=None,
                     consumer=None,
+                    # The draft's layers have no indexer to row-shard.
+                    all_gather=None,
                 ),
                 moe=MoEStep(layer.ffn, gemm, FUSED_MHC_MAX_ROWS, finalize=True),
             )
@@ -164,12 +166,14 @@ class DraftDecode:
         input_ids: torch.Tensor | None,
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
+        streams: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """The draft layers and the collapse of the step on the hc streams
         ``x`` ([n, hc, H]); returns the pre-norm hidden state, as
         ``DSparkDeepseekV4Model.forward`` does. The draft has no Engram
-        layers, so ``engram_hashes`` and ``engram_mask`` stay None."""
-        assert engram_hashes is None and engram_mask is None
+        layers and no executor embedding, so ``engram_hashes``,
+        ``engram_mask`` and ``streams`` stay None."""
+        assert engram_hashes is None and engram_mask is None and streams is None
         bound = self.boundaries
         self.tables.reset()
         self.all_reduce.reset()
@@ -178,20 +182,19 @@ class DraftDecode:
             for plan in self.plans:
                 quant = None
                 if state is None:
-                    state, layer_input = bound.first(plan.layer, x, step)
+                    state, layer_input = bound.first(plan.layer, x)
                 else:
                     state, layer_input, quant, _ = bound.sublayer(
                         plan.layer,
                         False,
                         state,
-                        step,
                         quantize=plan.attention.mxfp8_input,
                     )
                 state.pending = plan.attention.run(layer_input, quant, positions, step)
-                bound.join(step)
-                state, ffn_input, _, _ = bound.sublayer(plan.layer, True, state, step)
+                bound.join()
+                state, ffn_input, _, _ = bound.sublayer(plan.layer, True, state)
                 state.pending = plan.moe.run(ffn_input, input_ids, step)
-                bound.join(step)
+                bound.join()
             assert state is not None
             # No successor boundary: reduce the last layer's output into the
             # streams only.
