@@ -187,7 +187,6 @@ class _RecurrentTreeProvider:
     def kernels(self):
         return {
             ("mamba:gdn@slots", "verify"): _TreeKernel(),
-            ("mamba:mamba2@slots", "verify"): _TreeKernel(),
             ("layout:mamba_state@slots", "commit"): _TreeKernel(),
         }
 
@@ -338,22 +337,24 @@ def test_dsv3_mla_verifies_chains():
     assert resolve_spec_resources(_TreeConfig(), declared, [caps]) == declared
 
 
-@pytest.mark.parametrize(
-    "layer, builder, variant",
-    [
-        (MambaMixer2, Mamba2AttentionMetadataBuilder, "mamba2"),  # Nemotron-H
-        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder, "gdn"),
-    ],
-    ids=["nemotron-h", "qwen-gdn"],
-)
-def test_hybrids_verify_trees_only_with_a_provider(layer, builder, variant):
-    model = _hybrid(layer, builder)
+def test_qwen_gdn_verifies_trees_only_with_a_provider():
+    model = _hybrid(QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder)
     caps = _caps(model)
     assert caps.plan_kind == "chain"
     assert [limit.reason for limit in caps.limits] == [
-        f"mamba:{variant}@slots, 3 layers: no mamba:{variant}@slots/verify kernel"
+        "mamba:gdn@slots, 3 layers: no mamba:gdn@slots/verify kernel"
     ]
     assert _caps(model, kernels=_provided()).plan_kind == "tree"
+
+
+def test_nemotron_h_verifies_chains():
+    model = _hybrid(MambaMixer2, Mamba2AttentionMetadataBuilder)
+    for kernels in (None, _provided()):
+        caps = _caps(model, kernels=kernels)
+        assert caps.plan_kind == "chain"
+        assert [limit.reason for limit in caps.limits] == [
+            "MambaMixer2, 3 layers: declares no spec_layer_variant"
+        ]
 
 
 def test_qwen_gdn_verifies_trees_with_state_slots_and_chains_by_replay():
@@ -445,7 +446,6 @@ class _OwnTreeKernels(_OwnKernels):
 
 def test_spec_layer_variant_is_not_inherited():
     assert QwenGatedDeltaNetAttention.spec_layer_variant == "gdn"
-    assert MambaMixer2.spec_layer_variant == "mamba2"
     assert ShortConv.spec_layer_variant == "short_conv"
     assert _OwnTreeKernels.spec_layer_variant == "gdn"
     for chain_only in (
@@ -455,6 +455,7 @@ def test_spec_layer_variant_is_not_inherited():
         OlmoHybridGatedDeltaNetAttention,
         KimiGatedDeltaNetAttention,
         MambaMixer,
+        MambaMixer2,
     ):
         assert chain_only.spec_layer_variant is None, chain_only
 
@@ -537,14 +538,16 @@ def test_runner_reads_the_mamba_state_mode():
 
 
 @pytest.mark.parametrize(
-    "layer, builder",
+    "layer, builder, with_provider",
     [
-        (MambaMixer2, Mamba2AttentionMetadataBuilder),
-        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder),
+        (MambaMixer2, Mamba2AttentionMetadataBuilder, "chain"),
+        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder, "tree"),
     ],
     ids=["nemotron-h", "qwen-gdn"],
 )
-def test_tree_speculator_on_a_hybrid_without_a_provider_runs_as_a_chain(layer, builder):
+def test_tree_speculator_on_a_hybrid_without_a_provider_runs_as_a_chain(
+    layer, builder, with_provider
+):
     """At startup the runner lowers the tree to a chain; nothing raises."""
     attn_groups, layers = _hybrid(layer, builder)
     runner = _runner(
@@ -556,7 +559,7 @@ def test_tree_speculator_on_a_hybrid_without_a_provider_runs_as_a_chain(layer, b
     config = _TreeConfig()
     effective = resolve_spec_resources(config, config.resources(8), [caps])
     assert effective.plan_kind == "chain"
-    assert _resolve(runner, _provided()).plan_kind == "tree"
+    assert _resolve(runner, _provided()).plan_kind == with_provider
 
 
 # --- engine core: reduce, adapt, validate ------------------------------------

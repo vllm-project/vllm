@@ -28,7 +28,6 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape
 
 GDN_VERIFY = ("mamba:gdn@slots", "verify")
-MAMBA2_VERIFY = ("mamba:mamba2@slots", "verify")
 SHORT_CONV_VERIFY = ("mamba:short_conv@slots", "verify")
 STATE_COMMIT = ("layout:mamba_state@slots", "commit")
 KV_COMMIT = ("layout:paged_token", "commit")
@@ -100,14 +99,14 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
 def test_reference_keys():
     """The reference is the KV commit; recurrent layers take providers'."""
     registry = KernelRegistry()
-    for key in (GDN_VERIFY, MAMBA2_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT):
+    for key in (GDN_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT):
         assert registry.get(key) is None
     assert isinstance(registry.get(KV_COMMIT), KvCompactor)
 
 
 def test_required_keys():
-    assert KernelRegistry.required_keys(_mamba("m", "mamba2", "replay")) == [
-        ("mamba:mamba2@replay", "verify"),
+    assert KernelRegistry.required_keys(_mamba("m", "gdn", "replay")) == [
+        ("mamba:gdn@replay", "verify"),
         ("layout:mamba_state@replay", "commit"),
     ]
     assert KernelRegistry.required_keys(_attn("a")) == [KV_COMMIT]
@@ -126,7 +125,6 @@ def test_a_partial_provider_overrides_one_key():
     toy = ToyKernel()
     registry = KernelRegistry([Provider({GDN_VERIFY: toy})])
     assert registry.get(GDN_VERIFY) is toy
-    assert registry.get(MAMBA2_VERIFY) is None
     assert isinstance(registry.get(KV_COMMIT), KvCompactor)
 
 
@@ -155,7 +153,7 @@ def test_each_override_is_logged_once(caplog):
 def test_reference_plan_kinds():
     """Without a provider, recurrent layers chain and attention layers tree."""
     registry = KernelRegistry()
-    for variant in ("gdn", "mamba2"):
+    for variant in ("gdn", "short_conv"):
         assert registry.plan_kind(_mamba("m", variant)) == (
             "chain",
             f"no mamba:{variant}@slots/verify kernel",
@@ -170,10 +168,9 @@ def test_reference_plan_kinds():
     [
         (_mamba("m", "short_conv"), "no mamba:short_conv@slots/verify kernel"),
         (_mamba("m", "gdn", "replay"), "no mamba:gdn@replay/verify kernel"),
-        (_mamba("m", "mamba2", "replay"), "no mamba:mamba2@replay/verify kernel"),
         (_attn("a", layout="paged_split_scale"), "no layout:paged_split_scale/commit"),
     ],
-    ids=["short-conv", "gdn-replay", "mamba2-replay", "nvfp4-kv"],
+    ids=["short-conv", "gdn-replay", "nvfp4-kv"],
 )
 def test_a_missing_key_lowers_the_layer_to_chain(layer, why):
     plan_kind, reason = KernelRegistry().plan_kind(layer)

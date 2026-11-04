@@ -30,7 +30,7 @@ class MambaBase(AttentionLayerBase):
     supports_dcp: bool = False
 
     # What the layer is to speculative decoding beyond a chain: the variant of
-    # its verify kernels ("gdn", "mamba2", "short_conv"), the key under which the
+    # its verify kernels ("gdn", "short_conv"), the key under which the
     # spec kernel registry (vllm/v1/worker/gpu/spec_decode/kernels.py) says
     # whether they take trees. Not inherited: a subclass that does not set it in
     # its own body runs kernels of its own, so it verifies chains only, whatever

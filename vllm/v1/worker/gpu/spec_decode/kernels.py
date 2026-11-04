@@ -178,57 +178,6 @@ class GDNSpecRows:
     """``[T, num_v_heads, head_v_dim]``, written by the kernel."""
 
 
-@dataclass(frozen=True)
-class Mamba2SpecRows:
-    """The decode rows of one Mamba2 layer's forward: its spec-decode rows and
-    its single-token decodes, which are one-row chains.
-
-    ``T`` is the number of decode tokens and ``B`` the number of their requests
-    (a CUDA graph batch may pad ``B``; the in-tree kernels see the same
-    padding). Heads and groups are per tensor-parallel rank.
-    """
-
-    layer_name: str
-    """The layer's prefix, its key in the forward context."""
-    hidden_states_B_C: torch.Tensor
-    """``[T, conv_dim]`` convolution input (the x, B and C columns). May be a
-    view whose row stride is larger than ``conv_dim``."""
-    dt: torch.Tensor
-    """``[T, num_heads]`` time step before ``dt_bias`` and softplus. May be a
-    strided view."""
-    conv_state: torch.Tensor
-    """``[num_slots, conv_dim, kernel_size - 1 + num_spec]`` convolution
-    states."""
-    conv_weight: torch.Tensor
-    """``[conv_dim, kernel_size]``."""
-    conv_bias: torch.Tensor | None
-    activation: str | None
-    ssm_state: torch.Tensor
-    """``[num_slots, num_heads, head_dim, ssm_state_size]`` SSM states."""
-    A: torch.Tensor
-    """``[num_heads]`` float32 (``-exp(A_log)``)."""
-    D: torch.Tensor
-    """``[num_heads]``."""
-    dt_bias: torch.Tensor
-    """``[num_heads]``; the in-tree kernels use ``softplus(dt + dt_bias)``."""
-    num_heads: int
-    head_dim: int
-    n_groups: int
-    ssm_state_size: int
-    state_indices: torch.Tensor
-    """``[B, max_query_len]``: the state slot of each row of each request."""
-    num_accepted_tokens: torch.Tensor
-    """``[B]``: request ``b`` starts from ``state_indices[b, n - 1]``."""
-    query_start_loc: torch.Tensor
-    """``[B + 1]``: the rows of each request in ``hidden_states_B_C``."""
-    parents: torch.Tensor | None
-    """``[T]`` int32: each row's parent row within its request (-1 for the
-    root), or None for chains."""
-    out: torch.Tensor
-    """``[T, num_heads * head_dim]`` SSM output (before the gated norm),
-    written by the kernel."""
-
-
 # --- kernels and providers ---------------------------------------------------
 
 
@@ -236,8 +185,8 @@ class SpecKernel:
     """A kernel for one key. Subclass it, implement :meth:`supports` and the
     key's op:
 
-    - ``verify(rows) -> None`` (``mamba:*`` keys): ``rows`` is the layer's
-      :class:`GDNSpecRows` or :class:`Mamba2SpecRows`. Write every row's output
+    - ``verify(rows) -> None`` (``mamba:gdn@*`` keys): ``rows`` is the layer's
+      :class:`GDNSpecRows`. Write every row's output
       to ``rows.out`` and keep the in-tree state layout: row ``i`` of request
       ``b`` stores its convolution and recurrent state at ``state_indices[b, i]``
       and continues from row ``parents[i]`` (row ``i - 1`` when ``parents`` is
