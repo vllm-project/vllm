@@ -97,7 +97,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
-      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor! workspace,"
       "Tensor sorted_token_ids,"
