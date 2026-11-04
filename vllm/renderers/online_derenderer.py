@@ -40,6 +40,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateLogProbs,
     GenerateTokensResponse,
     GenerateTokensStreamResponse,
+    ParseContext,
 )
 from vllm.entrypoints.serve.engine.protocol import UsageInfo
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -54,11 +55,13 @@ from vllm.renderers import BaseRenderer
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
+    INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
     get_leading_space_marker,
 )
 from vllm.utils.async_utils import make_async
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.engine.detokenizer import check_stop_strings, uses_fast_detokenizer
 
 logger = init_logger(__name__)
@@ -338,7 +341,9 @@ class OnlineDerenderer:
                     choice.token_ids,
                     chat_request,
                     chat_template_kwargs,
-                    generate_response.prompt_token_ids,
+                    # The engine's ids are the full prompt; the caller's may
+                    # be a suffix.
+                    generate_response.prompt_token_ids or prompt_token_ids,
                 )
             else:
                 message = ChatMessage(role="assistant", content=decoded_text)
@@ -412,6 +417,48 @@ class OnlineDerenderer:
             )
             results.append((message, finish_reason))
         return results
+
+    def make_stream_processor(
+        self,
+        chat_request: ChatCompletionRequest | None,
+        history_tool_call_cnt: int,
+    ) -> ChatStreamProcessor:
+        """Build the request-scoped processor for one streamed choice.
+
+        Args:
+            chat_request: Request from `ParseContext.to_chat_request()`. Unused
+                when the server has no parser.
+            history_tool_call_cnt: Tool calls already in the conversation, for
+                deterministic tool call IDs.
+
+        Returns:
+            A processor holding its own parser, so call this once per choice.
+
+        Raises:
+            ValueError: If the parser rejects the request.
+            VLLMValidationError: If the parser rejects the request.
+
+        """
+        if self.parser is None or chat_request is None:
+            return ChatStreamProcessor(
+                ParseContext().to_chat_request(),
+                None,
+                enable_auto_tools=self.enable_auto_tools,
+                parser_cls=None,
+            )
+        parser = self.parser(
+            self.renderer.get_tokenizer(),
+            chat_request.tools,
+            chat_template_kwargs=chat_request.chat_template_kwargs or {},
+            model_config=self.model_config,
+        )
+        parser.set_history_tool_call_count(history_tool_call_cnt)
+        return ChatStreamProcessor(
+            chat_request,
+            parser,
+            enable_auto_tools=self.enable_auto_tools,
+            parser_cls=self.parser,
+        )
 
     def _resolve_chat_template_kwargs(
         self, chat_request: ChatCompletionRequest
@@ -500,13 +547,14 @@ class OnlineDerenderer:
         """Incrementally detokenize ``delta_token_ids`` from prior stream state.
 
         Resumes decoding from the offsets carried in ``state`` rather than
-        replaying token history. ``state.prev_tokens`` holds the trailing decode
-        window (from ``prefix_offset`` onward) that ``detokenize_incrementally``
-        still needs to reproduce any partially read multi-byte character
-        (tracked by ``read_offset``). The delta tokens are fed straight onto it.
+        replaying token history. ``state.prev_token_ids`` holds the trailing
+        decode window (from ``prefix_offset`` onward) that
+        ``detokenize_incrementally`` still needs to reproduce any partially read
+        multi-byte character (tracked by ``read_offset``). The delta tokens are
+        fed straight onto it.
 
         The window is bounded. ``detokenize_incrementally`` never reads before
-        ``prefix_offset``, so after each token we trim ``prev_tokens`` to that
+        ``prefix_offset``, so after each token we trim the window to that
         tail and rebase the offsets to it. State transport therefore stays
         O(window) per chunk instead of re-sending the full token history.
 
@@ -522,12 +570,22 @@ class OnlineDerenderer:
             state to pass to the next call.
 
         """
-        prev_tokens = list(state.prev_tokens)
+        vocab_size = len(tokenizer)
+        prev_token_ids = state.prev_token_ids
+        prev_tokens = [
+            token or ""
+            for token in tokenizer.convert_ids_to_tokens(
+                prev_token_ids, skip_special_tokens=skip_special_tokens
+            )
+        ]
         prefix_offset = state.prefix_offset
         read_offset = state.read_offset
 
         text_parts: list[str] = []
         for tok_id in delta_token_ids:
+            # Decodes to nothing, and could not be reconverted from the window.
+            if not 0 <= tok_id < vocab_size:
+                continue
             # prev_tokens is a (possibly empty) list, never None, so this
             # always takes the non first iter path and only consumes
             # all_input_ids[-1].
@@ -544,6 +602,9 @@ class OnlineDerenderer:
             # (everything before prefix_offset is dead) and rebase the
             # offsets, so the window stays bounded within a long batch
             # decode as well as across chunks.
+            # A skipped special token yields no piece, so it leaves the window.
+            new_ids = [tok_id] if new_toks else []
+            prev_token_ids = (prev_token_ids + new_ids)[prefix_offset:]
             prev_tokens = (prev_tokens + new_toks)[prefix_offset:]
             read_offset -= prefix_offset
             prefix_offset = 0
@@ -551,7 +612,7 @@ class OnlineDerenderer:
 
         updated_state = state.model_copy(
             update={
-                "prev_tokens": prev_tokens,
+                "prev_token_ids": prev_token_ids,
                 "prefix_offset": prefix_offset,
                 "read_offset": read_offset,
             }
@@ -731,8 +792,8 @@ class OnlineDerenderer:
         `state.output_chunk_lens`, so the rebuilt parser state matches
         standard serving, which calls `parse_delta` once per engine step.
         Text comes from a fresh incremental detokenizer with special tokens
-        preserved (``skip_special_tokens=False``), seeded from the prompt
-        tail on every call since replay starts from scratch.
+        preserved (see ``_decode_params``), seeded from the prompt tail on
+        every call since replay starts from scratch.
 
         Logprobs need no replay: a generate chunk's ``logprobs`` cover exactly
         that chunk's tokens, so they are resolved once and attached to
@@ -1178,12 +1239,13 @@ def _decode_params(
         tokenizer: Picks the engine's fast or slow detokenizer rules.
         request: The original request, if the caller supplied one.
         preserve_special: Keep special tokens so a parser can see markers.
-            The serving side does this via `adjust_request`.
+            The serving side does this via `adjust_request`, except for
+            `MistralTokenizer`, which keeps the parser's markers when skipping.
 
     """
     skip_special = (
         False
-        if preserve_special
+        if preserve_special and not is_mistral_tokenizer(tokenizer)
         else (request is None or request.skip_special_tokens is not False)
     )
     spaces_between = (
@@ -1215,11 +1277,18 @@ def _seed_stream_state(
             )
         return DerenderStreamState()
 
-    prev_tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+    _, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
         tokenizer, prompt_token_ids, skip_special_tokens=skip_special_tokens
     )
+    prompt_tail = prompt_token_ids[-INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET - 2 :]
     return DerenderStreamState(
-        prev_tokens=prev_tokens,
+        prev_token_ids=[
+            token_id
+            for token_id in prompt_tail
+            if tokenizer.convert_ids_to_tokens(
+                [token_id], skip_special_tokens=skip_special_tokens
+            )
+        ],
         prefix_offset=prefix_offset,
         read_offset=read_offset,
     )
