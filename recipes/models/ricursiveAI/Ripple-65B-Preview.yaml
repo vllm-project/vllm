@@ -43,8 +43,6 @@ features:
     args:
       - "--speculative-config"
       - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
-    env:
-      VLLM_USE_V2_MODEL_RUNNER: "1"
 
 opt_in_features:
   - spec_decoding
@@ -78,8 +76,7 @@ guide: |
   supports a 2M-token context. The NVFP4 checkpoint fits on one B200/B300.
 
   Ripple decides per turn whether to reason, so `reasoning_content` is empty
-  when it answers directly. The DFlash2 drafter requires the V2 model runner,
-  which the command sets.
+  when it answers directly.
 
   ## Client usage
 

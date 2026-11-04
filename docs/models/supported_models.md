@@ -510,13 +510,6 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 !!! note
     Currently, the ROCm version of vLLM supports Mistral and Mixtral only for context lengths up to 4096.
 
-!!! note
-    Ripple (`RicursiveForCausalLM`) pairs with `--reasoning-parser ripple` and
-    `--enable-auto-tool-choice --tool-call-parser ripple`. Its DFlash2 draft,
-    `ricursiveAI/Ripple-65B-Preview-DFlash2`, runs with
-    `--speculative-config '{"method": "dflash", "model": "ricursiveAI/Ripple-65B-Preview-DFlash2", "num_speculative_tokens": 15}'`
-    and needs `VLLM_USE_V2_MODEL_RUNNER=1`, since the draft mixes sliding-window and full-attention layers.
-
 ## List of Multimodal Language Models
 
 The following modalities are supported depending on the model:
