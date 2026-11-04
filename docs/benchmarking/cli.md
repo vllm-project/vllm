@@ -60,6 +60,19 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+## Top-k/Top-p Filtering Benchmark
+
+Compare Triton, FlashInfer and PyTorch masked-logit filtering from the repository root:
+
+```bash
+.venv/bin/python benchmarks/benchmark_topk_topp.py \
+  --batch-sizes 4 9 192 280 --vocab-sizes 248320 \
+  --top-k 20 --top-p 0.8 --implementations triton flashinfer-mask pytorch \
+  --check --output results/topk-topp.jsonl
+```
+
+`--top-k` and `--top-p` override active sampling values while retaining disabled rows in mixed scenarios. Without these flags, the existing scenario defaults apply. `flashinfer-mask` uses deterministic compact selection for uniform scalar k<=128, applies top-p to the selected candidates and reconstructs dense masked logits. Other scenarios use dense FlashInfer masking. Uniform k is resolved outside timing. Timings include a fresh-input copy and use CUPTI with cold L2, without CUDA graphs. Use `--scenarios` to select cases and `--num-finite-logits` for sparse inputs. `--distribution` selects `zipf` (default), `normal`, or Gaussian values rounded to BF16 then converted back to FP32 (`bf16-rounded`).
+
 ## Dataset Overview
 
 <style>
