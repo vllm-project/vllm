@@ -1079,15 +1079,6 @@ async fn responses_streaming_emits_function_call_events() {
             "response.function_call_arguments.delta",
             "response.function_call_arguments.done",
             "response.output_item.done",
-            // Trailing message item: the tool parser leaks the final
-            // `}\n</tool_call` chunk as visible text (the same leak is
-            // visible on /v1/chat/completions).
-            "response.output_item.added",
-            "response.content_part.added",
-            "response.output_text.delta",
-            "response.output_text.done",
-            "response.content_part.done",
-            "response.output_item.done",
             "response.completed"
         ],
         "{text}"
@@ -1095,7 +1086,7 @@ async fn responses_streaming_emits_function_call_events() {
 
     let completed = &payloads.last().expect("completed event")["response"];
     let output = completed["output"].as_array().expect("output items");
-    assert_eq!(output.len(), 3, "{text}");
+    assert_eq!(output.len(), 2, "{text}");
     assert_eq!(output[0]["type"], "reasoning");
     assert_eq!(output[0]["content"][0]["text"], "Need tool.");
     for index in [3, 6] {
