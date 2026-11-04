@@ -22,7 +22,7 @@ from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClam
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
-    fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -883,35 +883,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".conv1d", ".k_conv1d", 1),
             (".conv1d", ".v_conv1d", 2),
         ]
-        if _is_moe(self.config):
-            # Params for weights, fp8 weight scales, fp8 activation scales
-            # (param_name, weight_name, expert_id, shard_id)
-            # EPLB: the mapping enumerates physical experts, so it must cover
-            # the redundant replicas or their slots are never loaded.
-            num_redundant_experts = next(
-                (
-                    layer.mlp.n_redundant_experts
-                    for layer in self.layers
-                    if isinstance(layer, Glm5NextDecoderLayer)
-                    and isinstance(layer.mlp, Glm5NextMoE)
-                ),
-                0,
-            )
-            num_fused_shared = _num_fused_shared_experts(
-                self.config.n_shared_experts,
-                bool(self.fused_shared_expert_layers),
-            )
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
-                num_experts=self.config.n_routed_experts + num_fused_shared,
-                num_redundant_experts=num_redundant_experts,
-            )
-        else:
-            expert_params_mapping = []
+        # Rejects fused shared-expert loading with more than one shared expert.
+        _num_fused_shared_experts(
+            self.config.n_shared_experts, bool(self.fused_shared_expert_layers)
+        )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -980,12 +955,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                # We have mlp.experts[0].gate_proj in the checkpoint. Experts
+                # load below through load_routed_experts_weight, so skip here
+                # BEFORE we update the name to mlp.experts[0].gate_up_proj.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
@@ -1003,58 +975,28 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    # A checkpoint expert may map to several physical replicas
-                    # under EPLB; keep `name` intact and try the next entry
-                    # when this physical expert is not local to the rank.
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    param = params_dict[name_mapped]
-                    weight_loader = param.weight_loader
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        expert_id=expert_id,
-                        shard_id=expert_shard_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias")
-                        and name not in params_dict
-                        and not _is_linear_attn(self.config)
-                    ):  # noqa: E501
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None:
-                        continue
-                    name = remapped_name
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                expert_params = load_routed_experts_weight(self, name, loaded_weight)
+                if expert_params is not None:
+                    loaded_params.update(expert_params)
+                    continue
+                # Skip loading extra bias for GPTQ models.
+                if (
+                    name.endswith(".bias")
+                    and name not in params_dict
+                    and not _is_linear_attn(self.config)
+                ):  # noqa: E501
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None:
+                    continue
+                name = remapped_name
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight, **kwargs)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
         return loaded_params
 
