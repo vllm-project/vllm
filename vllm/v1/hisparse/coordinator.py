@@ -304,10 +304,17 @@ class HiSparseCoordinator:
         num_host_blocks = min(
             num_computed_tokens // self.host_manager.block_size, len(host_blocks)
         )
-        for host_idx in range(state.copies_recorded_blocks, num_host_blocks):
-            if host_idx in state.pending_pages:
-                continue
-            self._record_copy(request_id, host_idx, host_blocks[host_idx])
+        if state.copies_recorded_blocks >= num_host_blocks:
+            return
+        rows = [
+            manager.get_residency_row(request_id) for manager in self.resident_managers
+        ]
+        num_pages = min(num_host_blocks, *map(len, rows))
+        for host_idx in range(state.copies_recorded_blocks, num_pages):
+            if host_idx not in state.pending_pages:
+                self._store_copy(
+                    host_blocks[host_idx], tuple(row[host_idx] for row in rows)
+                )
         state.copies_recorded_blocks = max(
             state.copies_recorded_blocks, num_host_blocks
         )
@@ -315,16 +322,25 @@ class HiSparseCoordinator:
     def _record_copy(
         self, request_id: str, page_idx: int, host_block: KVCacheBlock
     ) -> None:
-        if host_block.is_null or host_block.block_hash is None:
-            return
         blocks: list[KVCacheBlock] = []
         for manager in self.resident_managers:
             block = manager.get_resident_page(request_id, page_idx)
             if block is None:
                 return
             blocks.append(block)
+        self._store_copy(host_block, tuple(blocks))
+
+    def _store_copy(
+        self, host_block: KVCacheBlock, blocks: tuple[KVCacheBlock, ...]
+    ) -> None:
+        if (
+            host_block.is_null
+            or host_block.block_hash is None
+            or any(block.is_null for block in blocks)
+        ):
+            return
         self._drop_copy(host_block.block_hash)
-        self.copies[host_block.block_hash] = tuple(blocks)
+        self.copies[host_block.block_hash] = blocks
         for block in blocks:
             self._copy_by_block[block.block_id] = host_block.block_hash
 
@@ -394,13 +410,6 @@ class HiSparseCoordinator:
     def _unpin_clean_pages(self, request_id: str, state: _HiSparseRequestState) -> None:
         # Tail first, so a prefix loses its tail pages before its head.
         self._unpin_pages(request_id, state, sorted(state.pinned_clean, reverse=True))
-
-    def _page_became_clean(
-        self, request_id: str, state: _HiSparseRequestState, page_idx: int
-    ) -> None:
-        state.pinned_clean.add(page_idx)
-        if self._can_read_from_host(request_id):
-            self._unpin_pages(request_id, state, (page_idx,))
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
         host_hash = self._copy_by_block.get(block.block_id)
@@ -491,20 +500,13 @@ class HiSparseCoordinator:
         state = self._get_request_state(request_id)
         budget = max(self.max_spill_pages - len(self.spills_to_send), 0)
         first_page = max(state.ready_prefix_pages, importing_pages)
-        for page_idx in range(first_page, num_pages):
-            if budget == 0:
-                break
-            if page_idx in state.pending_pages:
-                continue
-            if page_idx in state.valid_pages:
-                continue
-            if not all(
-                manager.get_resident_page(request_id, page_idx) is not None
-                for manager in self.resident_managers
-            ):
-                continue
-            if self._plan_page_transfer(request_id, page_idx):
-                budget -= 1
+        pages = [
+            page_idx
+            for page_idx in range(first_page, num_pages)
+            if page_idx not in state.valid_pages and page_idx not in state.pending_pages
+        ]
+        if pages and budget > 0:
+            self._plan_page_transfers(request_id, pages, budget)
 
     def publish_when_ready(
         self,
@@ -609,60 +611,72 @@ class HiSparseCoordinator:
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
         if num_computed_tokens:
-            self._plan_page_transfer(
+            self._plan_page_transfers(
                 request_id,
-                (num_computed_tokens - 1) // block_size,
+                ((num_computed_tokens - 1) // block_size,),
+                budget=1,
                 restore=True,
             )
         self._publish_host_blocks_if_ready(request_id)
 
-    def _plan_page_transfer(
+    def _plan_page_transfers(
         self,
         request_id: str,
-        page_idx: int,
+        page_indices: Iterable[int],
+        budget: int,
         *,
         restore: bool = False,
-    ) -> bool:
+    ) -> None:
+        """Plan up to ``budget`` transfers for the pages, in the given order."""
         assert self.host_manager is not None
-        state = self._get_request_state(request_id)
-        if page_idx in state.pending_pages:
-            return False
         host_blocks = self.host_manager.req_to_blocks.get(request_id)
-        if host_blocks is None or page_idx >= len(host_blocks):
-            return False
-        host_block = host_blocks[page_idx]
-        if host_block.is_null:
-            return False
-
-        blocks: list[KVCacheBlock] = []
-        for manager in self.resident_managers:
-            block = manager.get_resident_page(request_id, page_idx)
-            if block is None:
-                return False
-            blocks.append(block)
-
-        self.host_manager.block_pool.touch([host_block])
-        for manager, block in zip(self.resident_managers, blocks):
-            manager.block_pool.touch([block])
-        spill_id = self.next_spill_id
-        self.next_spill_id += 1
-        plan = SparseKVPageTransfer(
-            transfer_id=spill_id,
-            host_block_id=host_block.block_id,
-            resident_block_ids=tuple(block.block_id for block in blocks),
-            restore=restore,
-        )
-        self.pending_spills[spill_id] = _PendingSpill(
-            transfer_id=spill_id,
-            page=(request_id, page_idx),
-            request_state=state,
-            host_block=host_block,
-            resident_blocks=tuple(blocks),
-            restore=restore,
-        )
-        state.pending_pages[page_idx] = spill_id
-        self.spills_to_send.append(plan)
-        return True
+        if host_blocks is None:
+            return
+        state = self._get_request_state(request_id)
+        rows = [
+            manager.get_residency_row(request_id) for manager in self.resident_managers
+        ]
+        num_resident_pages = min(map(len, rows))
+        pinned_host_blocks: list[KVCacheBlock] = []
+        pinned_blocks: list[KVCacheBlock] = []
+        for page_idx in page_indices:
+            if budget == 0:
+                break
+            if (
+                page_idx in state.pending_pages
+                or page_idx >= len(host_blocks)
+                or page_idx >= num_resident_pages
+            ):
+                continue
+            host_block = host_blocks[page_idx]
+            blocks = tuple(row[page_idx] for row in rows)
+            if host_block.is_null or any(block.is_null for block in blocks):
+                continue
+            budget -= 1
+            pinned_host_blocks.append(host_block)
+            pinned_blocks.extend(blocks)
+            spill_id = self.next_spill_id
+            self.next_spill_id += 1
+            plan = SparseKVPageTransfer(
+                transfer_id=spill_id,
+                host_block_id=host_block.block_id,
+                resident_block_ids=tuple(block.block_id for block in blocks),
+                restore=restore,
+            )
+            self.pending_spills[spill_id] = _PendingSpill(
+                transfer_id=spill_id,
+                page=(request_id, page_idx),
+                request_state=state,
+                host_block=host_block,
+                resident_blocks=blocks,
+                restore=restore,
+            )
+            state.pending_pages[page_idx] = spill_id
+            self.spills_to_send.append(plan)
+        if pinned_blocks:
+            assert self.gpu_pool is not None
+            self.host_manager.block_pool.touch(pinned_host_blocks)
+            self.gpu_pool.touch(pinned_blocks)
 
     # ------------------------------------------------------------------
     # Worker-facing views
@@ -832,6 +846,7 @@ class HiSparseCoordinator:
 
     def _apply_enqueued_spills(self) -> None:
         """Drop the GPU pins once every worker has completed the transfer."""
+        unpinned: list[KVCacheBlock] = []
         for pending in self.pending_spills.values():
             if (
                 pending.enqueue_applied
@@ -839,9 +854,13 @@ class HiSparseCoordinator:
                 or pending.worker_completions < pending.expected_worker_completions
             ):
                 continue
-            for manager, block in zip(self.resident_managers, pending.resident_blocks):
-                manager.block_pool.free_blocks([block])
+            unpinned.extend(pending.resident_blocks)
             pending.enqueue_applied = True
+        if unpinned:
+            assert self.gpu_pool is not None
+            # Resident blocks are never hashed, so each one freed is prepended:
+            # reversing keeps the queue order of freeing them one at a time.
+            self.gpu_pool.free_blocks(reversed(unpinned))
 
     def _complete_host_writes(self) -> None:
         completed = [
@@ -851,7 +870,7 @@ class HiSparseCoordinator:
             and pending.expected_worker_completions
             and pending.worker_completions >= pending.expected_worker_completions
         ]
-        completed_request_ids: set[str] = set()
+        clean_pages: dict[str, list[int]] = {}
         for pending in completed:
             self.pending_spills.pop(pending.transfer_id, None)
             request_id, page_idx = pending.page
@@ -859,19 +878,22 @@ class HiSparseCoordinator:
             if self.request_states.get(request_id) is pending.request_state:
                 if not pending.restore:
                     pending.request_state.valid_pages.add(page_idx)
+                pages = clean_pages.setdefault(request_id, [])
                 if page_idx in pending.request_state.valid_pages:
-                    self._page_became_clean(request_id, pending.request_state, page_idx)
+                    pending.request_state.pinned_clean.add(page_idx)
+                    pages.append(page_idx)
                     if pending.restore:
                         self._record_copy(request_id, page_idx, pending.host_block)
-                completed_request_ids.add(request_id)
             elif pending.request_state.publication is not None:
                 if not pending.restore:
                     pending.request_state.valid_pages.add(page_idx)
                 self._publish_detached_blocks(pending.request_state)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
-        for request_id in completed_request_ids:
+        for request_id, pages in clean_pages.items():
             state = self.request_states[request_id]
+            if pages and self._can_read_from_host(request_id):
+                self._unpin_pages(request_id, state, pages)
             while state.ready_prefix_pages in state.valid_pages:
                 state.ready_prefix_pages += 1
             self._publish_host_blocks_if_ready(request_id)
