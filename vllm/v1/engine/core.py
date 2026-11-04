@@ -32,6 +32,7 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
+from vllm.distributed.utils import sched_yield
 from vllm.envs import enable_envs_cache
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import configure_logging, init_logger
@@ -723,7 +724,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -737,6 +738,10 @@ class EngineCore:
         self._attach_weight_version(engine_core_outputs)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Block until a step's model output is ready."""
+        return future.result()
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -822,7 +827,7 @@ class EngineCore:
             self.capture_iteration_details(scheduler_output) as iteration_details,
             self.log_error_detail(scheduler_output),
         ):
-            model_output = future.result()
+            model_output = self._wait_for_output(future)
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -1278,6 +1283,19 @@ class EngineShutdownState(IntEnum):
     SHUTTING_DOWN = 2
 
 
+# Input types that EngineCoreProc handles while waiting for a step's output.
+# Others are deferred until the step completes.
+_INPUTS_HANDLED_DURING_STEP = (
+    EngineCoreRequestType.ADD,
+    EngineCoreRequestType.ABORT,
+    EngineCoreRequestType.EXECUTOR_FAILED,
+    EngineCoreRequestType.WAKEUP,
+)
+# While waiting for a step's output, how long to busy-poll for new inputs
+# before falling back to a blocking wait for the output.
+_INPUT_SPIN_DURATION_S = 1.0
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -1299,6 +1317,9 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+        # Inputs taken from input_queue while waiting for a step's output that
+        # must not be handled until the step completes (see _wait_for_output).
+        self._deferred_inputs = deque[tuple[EngineCoreRequestType, Any]]()
 
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
@@ -1769,6 +1790,10 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+        # Inputs deferred during the last step precede anything still queued.
+        while self._deferred_inputs:
+            self._handle_client_request(*self._deferred_inputs.popleft())
+
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1870,6 +1895,30 @@ class EngineCoreProc(EngineCore):
             return False
 
         return True
+
+    def _wait_for_output(self, future: Future[Any]) -> Any:
+        """Wait for a step's model output, meanwhile handling new requests and
+        aborts as they arrive."""
+        poll: Callable[[], bool] | None = getattr(future, "poll", None)
+        if poll is not None:
+            pending_inputs = self.input_queue.queue
+            spin_deadline = time.monotonic() + _INPUT_SPIN_DURATION_S
+            while not self._deferred_inputs and not poll():
+                if pending_inputs:
+                    req = self.input_queue.get_nowait()
+                    # Some kinds of request must wait until the step completes.
+                    if req[0] in _INPUTS_HANDLED_DURING_STEP:
+                        self._handle_client_request(*req)
+                    else:
+                        self._deferred_inputs.append(req)
+                elif time.monotonic() < spin_deadline:
+                    sched_yield()
+                else:
+                    # Long-running step: stop busy-looping and block until the
+                    # output arrives. Later inputs are handled after the step.
+                    break
+
+        return future.result()
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
