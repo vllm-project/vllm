@@ -735,6 +735,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and not self.is_aiter_triton_fp4_bmm_enabled
             and not self.is_amx_bmm_enabled
             and self.q_pad_num_heads is None
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and getattr(self.impl, "supports_quant_query_input", False)
+            and self.impl.dcp_world_size == 1
+            and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+                self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
+            )
         )
 
         # Attributes for forward_impl method
@@ -1060,8 +1066,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            fused_q_heads = self._fused_decode_query_num_heads(
-                attn_metadata, fp8_attention
+            # The impl picks the decode path per batch, so this stays per step.
+            fused_q_heads = (
+                self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
+                if self.is_aiter_fused_decode_query_enabled
+                else None
             )
             if fused_q_heads is not None:
                 mqa_q = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
@@ -1419,24 +1428,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         return spec
-
-    def _fused_decode_query_num_heads(
-        self, attn_metadata: "MLACommonMetadata", fp8_attention: bool
-    ) -> int | None:
-        """Head count of the padded fp8 query AITER's fused W_UK absorb + concat +
-        quant + head padding builds for this decode step, or None to run the
-        unfused ops."""
-        if not (
-            self.is_aiter_fused_decode_query_enabled
-            and fp8_attention
-            and self.impl.supports_quant_query_input
-            and self.impl.dcp_world_size == 1
-            and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
-                self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
-            )
-        ):
-            return None
-        return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
