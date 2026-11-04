@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 from collections.abc import Iterator
+from copy import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -22,6 +23,7 @@ from vllm.v1.worker.utils import raise_if_nan_logits
 
 if TYPE_CHECKING:
     from vllm.distributed.aux_output_connector.worker import PendingAuxOutput
+    from vllm.distributed.kv_transfer.kv_checksum.worker import PendingKVChecksums
     from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -268,6 +270,60 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
     def get_kv_connector_output(self) -> KVConnectorOutput | None:
         """Get the KV connector output for this async output."""
         return self.model_runner_output.kv_connector_output
+
+
+class KVChecksumCopy:
+    """A step's KV checksums on their way to host memory."""
+
+    def __init__(
+        self,
+        pending: "PendingKVChecksums",
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+    ):
+        # Holds the device values until the copy is done.
+        self.pending = pending
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.copy_event = torch.cuda.Event(blocking=True)
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.record = pending.enqueue_async_cpu_copy()
+            self.copy_event.record(copy_stream)
+
+    def add_to_output(self, output: ModelRunnerOutput) -> None:
+        """Wait for the copy and add the checksums to ``output``, which must
+        not be the shared empty output."""
+        if output.kv_connector_output is None:
+            output.kv_connector_output = KVConnectorOutput()
+        self.copy_event.synchronize()
+        output.kv_connector_output.kv_checksums = [self.record]
+
+
+class AsyncKVChecksumOutput(AsyncModelRunnerOutput):
+    """A step's output with its KV checksums, which are copied to host memory
+    on their own event so that the output's own copy need not wait for them."""
+
+    def __init__(
+        self,
+        output: ModelRunnerOutput | AsyncModelRunnerOutput,
+        kv_checksums: KVChecksumCopy,
+    ):
+        self.output = output
+        self.kv_checksums = kv_checksums
+
+    def get_output(self) -> ModelRunnerOutput:
+        if isinstance(self.output, AsyncModelRunnerOutput):
+            output = self.output.get_output()
+        else:
+            # A copy, as this may be the shared empty output.
+            output = copy(self.output)
+        self.kv_checksums.add_to_output(output)
+        return output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        if isinstance(self.output, AsyncModelRunnerOutput):
+            return self.output.get_kv_connector_output()
+        return self.output.kv_connector_output
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:

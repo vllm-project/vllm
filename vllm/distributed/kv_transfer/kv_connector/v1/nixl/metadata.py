@@ -24,6 +24,10 @@ GET_META_MSG = b"get_meta_msg"
 # Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
 # PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
 PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
+# Push-mode WRITE completion notif carrying the producer's KV checksums:
+# KV_CHECKSUM_NOTIF_PREFIX + msgpack((request_id, tp_size, checksums)).
+# Without checksums the notif is "request_id:tp_size".
+KV_CHECKSUM_NOTIF_PREFIX = b"KV_CHECKSUM:"
 #
 # NIXL Connector Version
 #
@@ -53,8 +57,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Push WRITE completion notifs can carry KV checksums
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -291,6 +296,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Push mode (P side): KV checksums of push_finished_blocks requests,
+        # sent to D on the WRITE completion notif.
+        self.push_finished_kv_checksums: dict[ReqId, bytes] = {}
 
     def _add_new_req(
         self,

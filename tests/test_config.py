@@ -667,6 +667,7 @@ def test_v1_model_runner_rejects_v2_only_config(overrides, feature):
         watermark_config=None,
         speculative_config=None,
         model_config=None,
+        kv_transfer_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._is_dflash_candidate_draft = lambda: False
@@ -1706,6 +1707,7 @@ def test_v1_model_runner_rejects_v2_only_features():
         watermark_config=None,
         speculative_config=None,
         model_config=None,
+        kv_transfer_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._is_dflash_candidate_draft = lambda: False
@@ -1895,6 +1897,7 @@ def test_v1_model_runner_rejects_pipeline_parallelism_with_async_scheduling():
         watermark_config=None,
         speculative_config=None,
         model_config=None,
+        kv_transfer_config=None,
     )
     config._dflash_needs_multi_kv_group = lambda: False
     config._is_dflash_candidate_draft = lambda: False

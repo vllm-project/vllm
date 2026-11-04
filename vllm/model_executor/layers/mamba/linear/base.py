@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 
 class LinearAttention(PluggableLayer, MambaBase):
@@ -63,4 +64,9 @@ class LinearAttention(PluggableLayer, MambaBase):
     def get_state_shape(self) -> tuple[tuple[int, int, int], ...]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
             num_heads=self.num_heads, tp_size=self.tp_size, head_dim=self.head_dim
+        )
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.linear_attention_state_splits(
+            self.tp_size, self.num_heads
         )

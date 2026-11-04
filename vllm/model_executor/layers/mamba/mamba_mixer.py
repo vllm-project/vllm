@@ -44,6 +44,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.kv_cache_interface import MambaStateSplit
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
@@ -421,6 +422,12 @@ class MambaMixer(MambaBase, PluggableLayer):
             intermediate_size=self.intermediate_size,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
+        )
+
+    def get_state_splits(self) -> tuple[MambaStateSplit, ...] | None:
+        return MambaStateShapeCalculator.mamba1_state_splits(
+            tp_world_size=get_tensor_model_parallel_world_size(),
+            intermediate_size=self.intermediate_size,
         )
 
     @property

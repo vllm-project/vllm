@@ -1135,6 +1135,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = _Connector()
+    scheduler.kv_checksum = None
     scheduler.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True)
     )
