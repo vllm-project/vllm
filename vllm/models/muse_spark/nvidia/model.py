@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -69,6 +69,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
@@ -133,6 +134,9 @@ from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
 from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
     norm_quant_trtllm_nvfp4,
 )
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
@@ -145,6 +149,12 @@ from vllm.transformers_utils.configs.muse_spark import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
+
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 logger = init_logger(__name__)
 
@@ -437,14 +447,16 @@ class MuseSpark1xMoE(nn.Module):
 
         self.route_scale = config.routed_scaling_factor
 
+        # folded into the router weight as it loads (`_load_router_weight`)
         self.router_output_multiplier = config.output_multiplier
+        self.router.weight.weight_loader = self._load_router_weight
 
         self.moe_router = MuseSpark1xRouter(
             top_k=config.num_experts_per_tok,
             num_experts=config.num_local_experts,
             expert_bias=self.expert_bias,
             route_scale=self.route_scale,
-            router_output_multiplier=self.router_output_multiplier,
+            router_output_multiplier=None,
             router_score_normalization="sigmoid",
             router_score_division_eps=1e-15,
         )
@@ -653,14 +665,13 @@ class MuseSpark1xMoE(nn.Module):
         if self.use_mega_moe:
             self.experts.finalize_weights()
 
-    def fold_router_output_multiplier(self) -> None:
-        """Fold the router output multiplier into the gate weight; idempotent."""
-        if self.router_output_multiplier is None:
-            return
-        with torch.no_grad():
-            self.router.weight.mul_(self.router_output_multiplier)
-        self.router_output_multiplier = None
-        self.moe_router.router_output_multiplier = None
+    def _load_router_weight(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        self.router.weight_loader(param, loaded_weight)
+        if self.router_output_multiplier is not None:
+            with torch.no_grad():
+                param.mul_(self.router_output_multiplier)
 
     def _can_shard_projection(self, num_tokens: int, sp_active: bool) -> bool:
         return num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS and (
@@ -1152,8 +1163,18 @@ class MuseSpark1xAttention(nn.Module):
         self.sp_min_tokens = 0
         self.gemm_rs = None
 
-        self.rotary_emb = (
-            RotaryEmbedding(
+        # get_rope caches by key, so target layers share one fp32 table.
+        self.rotary_emb: RotaryEmbedding | None = None
+        if self.use_rope and not is_draft:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -1161,13 +1182,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -1392,9 +1410,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -1892,6 +1914,44 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             self.logits_processor.scale = 1.0
 
         self.set_moe_parameters()
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.specialized_decode_config is None:
+            # decode_backend=auto: the runner's default state for this model.
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            return DefaultModelState
+        from vllm.models.muse_spark.nvidia.model_state import MuseSparkModelState
+
+        return MuseSparkModelState
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def _init_model(
         self,
@@ -1998,6 +2058,13 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
+        if self.specialized_decode is not None:
+            # Runs again after a weight reload; the captured decode steps read
+            # the kernels' constants and buffers built from the loaded weights.
+            raise RuntimeError(
+                "The Muse Spark specialized decode does not support reloading "
+                "the model's weights"
+            )
         self.model.finalize_mega_moe_weights()
         n_gates = materialize_residual_path_constants(self)
         logger.info(
