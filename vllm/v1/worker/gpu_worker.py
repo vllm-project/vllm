@@ -179,6 +179,7 @@ def maybe_rocm_profiling_fallback(profile_result: MemoryProfilingResult) -> int 
 
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
+    from vllm.distributed.pp_sdma import PPSdmaReceiver, PPSdmaSender
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -279,8 +280,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
         # PP hand-off on SDMA copy engines (parallel_config.pp_sdma_handoff).
         self._pp_sdma = False
-        self._pp_sdma_tx = None
-        self._pp_sdma_rx = None
+        self._pp_sdma_tx: PPSdmaSender | None = None
+        self._pp_sdma_rx: PPSdmaReceiver | None = None
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
