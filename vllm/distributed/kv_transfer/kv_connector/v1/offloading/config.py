@@ -28,6 +28,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingGroupConfig,
     OffloadingModelConfig,
     OffloadingParallelConfig,
+    places_workers_by_nnodes,
 )
 
 if TYPE_CHECKING:
@@ -317,9 +318,8 @@ def build_offloading_config(
             data_parallel_rank_local=parallel_config.data_parallel_rank_local,
             is_parallelism_agnostic=is_parallelism_agnostic,
             local_world_size=parallel_config.local_world_size,
-            # Only these executors place workers by the configured nnodes.
-            placement_known=(
-                parallel_config.distributed_executor_backend in ("mp", "uni")
+            placement_known=places_workers_by_nnodes(
+                parallel_config.distributed_executor_backend
             ),
         ),
         replicated_layout=replicated_layout,

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from argparse import ArgumentError
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -453,13 +454,79 @@ def test_kv_transfer_registers_kv_cache_memory(
         transfer = KVTransferConfig(
             kv_connector=connector, kv_role="kv_both", kv_buffer_device=buffer_device
         )
-    assert transfer.registers_kv_cache_memory() is registers
+    one_node = SimpleNamespace(
+        world_size=2, local_world_size=2, distributed_executor_backend="mp"
+    )
+    assert transfer.registers_kv_cache_memory(one_node) is registers
 
 
+_MIRRORING_OFFLOAD = {
+    "spec_name": "TieringOffloadingSpec",
+    "secondary_tiers": [{"type": "example"}],
+}
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "world_size", "local_world_size", "backend", "registers"),
+    [
+        # Workers on two nodes mirror their CPU region slots over NIXL.
+        (_MIRRORING_OFFLOAD, 2, 1, "mp", True),
+        # Ray does not place workers by nnodes: they may span nodes.
+        (_MIRRORING_OFFLOAD, 2, 2, "ray", True),
+        # One node, or one worker: no mirror.
+        (_MIRRORING_OFFLOAD, 2, 2, "mp", False),
+        (_MIRRORING_OFFLOAD, 1, 1, "ray", False),
+        # Only secondary tiers of TieringOffloadingSpec use the mirror.
+        ({"spec_name": "TieringOffloadingSpec"}, 2, 1, "mp", False),
+        ({"secondary_tiers": [{"type": "example"}]}, 2, 1, "mp", False),
+    ],
+)
+@pytest.mark.parametrize("multi", [False, True])
+def test_offloading_mirror_registers_kv_cache_memory(
+    extra_config, world_size, local_world_size, backend, registers, multi
+):
+    """OffloadingConnector registers the device KV cache with NIXL when its
+    secondary tiers make workers off the head node mirror their CPU region
+    slots, also when nested in MultiConnector."""
+    from vllm.config.kv_transfer import KVTransferConfig
+
+    offloading = {
+        "kv_connector": "OffloadingConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": extra_config,
+    }
+    transfer = (
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"connectors": [offloading]},
+        )
+        if multi
+        else KVTransferConfig(**offloading)
+    )
+    parallel_config = SimpleNamespace(
+        world_size=world_size,
+        local_world_size=local_world_size,
+        distributed_executor_backend=backend,
+    )
+    assert transfer.registers_kv_cache_memory(parallel_config) is registers
+
+
+@pytest.mark.parametrize(
+    "transfer_kwargs",
+    [
+        {"kv_connector": "NixlConnector", "kv_buffer_device": "cuda"},
+        {
+            "kv_connector": "OffloadingConnector",
+            "kv_buffer_device": "cuda",
+            "kv_connector_extra_config": _MIRRORING_OFFLOAD,
+        },
+    ],
+)
 @pytest.mark.parametrize("rocm", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_for_rocm_registering_connector(
-    monkeypatch, rocm, requested
+    monkeypatch, transfer_kwargs, rocm, requested
 ):
     """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
     connector that registers the KV cache keeps the extensible cache off there
@@ -484,10 +551,14 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
-        parallel_config=SimpleNamespace(enable_elastic_ep=False),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both", kv_buffer_device="cuda"
+        # Workers on two nodes, as for the offloading mirror.
+        parallel_config=SimpleNamespace(
+            enable_elastic_ep=False,
+            world_size=2,
+            local_world_size=1,
+            distributed_executor_backend="mp",
         ),
+        kv_transfer_config=KVTransferConfig(kv_role="kv_both", **transfer_kwargs),
     )
     if rocm and requested:
         with pytest.raises(ValueError, match="ROCm"):
