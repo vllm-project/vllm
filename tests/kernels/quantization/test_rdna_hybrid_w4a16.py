@@ -388,13 +388,21 @@ def _build_dummy_layer(
     class DummyLayer(torch.nn.Module):
         pass
 
+    def parameter_data(checkpoint: torch.Tensor) -> torch.Tensor:
+        storage = checkpoint.new_empty(
+            checkpoint.untyped_storage().nbytes() // checkpoint.element_size()
+        )
+        return storage.as_strided(
+            checkpoint.shape, checkpoint.stride(), checkpoint.storage_offset()
+        ).copy_(checkpoint)
+
     layer = DummyLayer()
     output_dim = 0 if layout == "ct" else 1
     input_dim = 1 - output_dim
     layer.register_parameter(
         "weight_packed",
         PackedvLLMParameter(
-            data=w_ckpt_nk8,
+            data=parameter_data(w_ckpt_nk8),
             weight_loader=weight_loader,
             input_dim=input_dim,
             output_dim=output_dim,
@@ -405,7 +413,7 @@ def _build_dummy_layer(
     layer.register_parameter(
         "weight_scale",
         GroupQuantScaleParameter(
-            data=scales_ckpt_nkg,
+            data=parameter_data(scales_ckpt_nkg),
             weight_loader=weight_loader,
             input_dim=input_dim,
             output_dim=output_dim,
@@ -415,7 +423,7 @@ def _build_dummy_layer(
         layer.register_parameter(
             "weight_zero_point",
             PackedColumnParameter(
-                data=zeros_ckpt,
+                data=parameter_data(zeros_ckpt),
                 weight_loader=weight_loader,
                 output_dim=output_dim,
                 packed_factor=8,
