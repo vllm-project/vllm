@@ -89,7 +89,9 @@ constexpr int kWarps = kThreads / 32;
 constexpr int kChunkV = 32;
 constexpr int kNumChunks = kDimV / kChunkV;
 constexpr int kRowsPerWarp = kChunkV / kWarps;
-constexpr int kMaxMtpTokens = 8;
+// DSpark K=8 needs 9 tokens (8 drafts + 1 bonus). Shared memory is static, so
+// the 48KB per-block limit caps this (fp32 state uses ~45.6KB at 9 tokens).
+constexpr int kMaxMtpTokens = 9;
 constexpr int kDtBiasFloat32 = 0;
 constexpr int kDtBiasBFloat16 = 1;
 constexpr int kDtBiasFloat16 = 2;
@@ -202,8 +204,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   copy_state_chunk<StateT, kChunkV, kDimK, 2>(&shared_state[0][0][0],
                                               source_state, 0, tid, kThreads);
 
-  if (warp < num_tokens) {
-    const int t = warp;
+  // One warp per token. kMaxMtpTokens exceeds kWarps, so warps stride.
+  for (int t = warp; t < num_tokens; t += kWarps) {
     const int token = bos + t;
     const int64_t mixed_base = static_cast<int64_t>(token) * strides.mixed_row;
     float q_values[4];
@@ -338,8 +340,7 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
   }
   __syncthreads();
 
-  if (warp < num_tokens) {
-    const int t = warp;
+  for (int t = warp; t < num_tokens; t += kWarps) {
     float output_values[4];
     float sum_square = 0.0f;
 #pragma unroll
@@ -497,7 +498,7 @@ void fused_gdn_decode_post_conv_mtp(
   STD_TORCH_CHECK(state_indices.dim() == 2 && state_indices.size(0) > 0 &&
                       state_indices.size(1) > 0 &&
                       state_indices.size(1) <= kMaxMtpTokens,
-                  "state_indices must have shape [N, S] with 1 <= S <= 8");
+                  "state_indices must have shape [N, S] with 1 <= S <= 9");
   const int num_requests = static_cast<int>(state_indices.size(0));
   STD_TORCH_CHECK(
       cu_seqlens.dim() == 1 && cu_seqlens.numel() == num_requests + 1,
