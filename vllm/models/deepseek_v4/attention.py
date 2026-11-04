@@ -45,6 +45,10 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.indexer_capture import (
+    IndexerCaptureSource,
+    capture_indexer_topk,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
@@ -129,7 +133,7 @@ def _resolve_dsv4_kv_cache_dtype(
     return kv_cache_dtype, torch.bfloat16
 
 
-class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
+class DeepseekV4Attention(nn.Module, AttentionLayerBase, IndexerCaptureSource, ABC):
     """DeepseekV4 MLA attention layer.
 
     The platform-specific sparse-MLA forward (``forward_mqa`` /
@@ -472,6 +476,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                     _COMPUTE_GLOBAL_TOPK_INDICES_AND_LENS_KERNEL.register_warmup()
                     _BUILD_FLASHINFER_MIXED_SPARSE_INDICES_KERNEL.register_warmup()
 
+    def get_indexer_capture_metadata(self) -> tuple[int, int] | None:
+        if self.indexer is None:
+            return None
+        return extract_layer_index(self.prefix), self.indexer.topk_tokens
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -756,6 +765,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 index_weights,
             )
 
+            capture_indexer_topk(
+                self.indexer_capture, self.topk_indices_buffer, len(hidden_states)
+            )
+
         # MLA attention writes into the pre-allocated `out` buffer
         # (see _alloc_attn_out).
         self.forward_mqa(q, kv, positions, out)
@@ -958,6 +971,11 @@ class DeepseekV4Indexer(nn.Module):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
+        self.force_scoring = (
+            vllm_config.aux_output_config.enable_return_indexer_topk
+            and extract_layer_index(prefix)
+            < vllm_config.model_config.get_total_num_hidden_layers()
+        )
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -1119,7 +1137,9 @@ class DeepseekV4Indexer(nn.Module):
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
             if (
-                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                not self.force_scoring
+                and indexer_metadata.max_seq_len // self.compress_ratio
+                <= self.topk_tokens
                 and not torch.cuda.is_current_stream_capturing()
             ):
                 # candidates num smaller than topk, every candidate is selected

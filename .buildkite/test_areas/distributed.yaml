@@ -12,6 +12,10 @@ steps:
   source_file_dependencies:
   - vllm/distributed
   - "!vllm/distributed/kv_transfer/"
+  - vllm/model_executor/layers/indexer_capture.py
+  - vllm/model_executor/layers/fused_moe/routed_experts_capturer.py
+  - vllm/models/deepseek_v4/amd/mono_decode.py
+  - tests/model_executor/test_indexer_capture.py
   - tests/distributed
   commands:
   - pytest -v -s distributed/test_localization.py
@@ -21,6 +25,9 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/aux_output_connector/test_store.py
+  - pytest -v -s model_executor/test_indexer_capture.py
+  - pytest -v -s model_executor/test_routed_experts_capture.py
   mirror:
     amd:
       automatic_shard: true
@@ -40,6 +47,7 @@ steps:
       - pytest -v -s distributed/test_shm_broadcast.py
       - pytest -v -s distributed/test_shm_buffer.py
       - pytest -v -s distributed/test_shm_storage.py
+      - pytest -v -s distributed/aux_output_connector/test_store.py
 
 - label: ":nvidia: (L4) Sharded RDT Weight Transfer"
   key: sharded-rdt-weight-transfer

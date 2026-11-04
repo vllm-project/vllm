@@ -214,6 +214,11 @@ class MonoDecodeLayer:
     ) -> "MonoDecodeLayer | None":
         if not vllm_config.kernel_config.monokernel:
             return None
+        if vllm_config.aux_output_config.enable_return_indexer_topk:
+            raise ValueError(
+                "DeepSeek V4 ROCm --monokernel does not support "
+                "--enable-return-indexer-topk; disable --monokernel to use replay."
+            )
         why = _deployment_error(layer, vllm_config)
         if why is not None:
             raise ValueError(f"--monokernel {why}.")
