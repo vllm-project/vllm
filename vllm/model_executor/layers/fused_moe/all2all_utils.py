@@ -41,6 +41,7 @@ from vllm.utils.import_utils import (
     has_moonep,
     has_mori,
     has_nixl_ep,
+    mori_epv2_has_own_sdma_queue,
 )
 from vllm.utils.math_utils import cdiv
 
@@ -391,12 +392,22 @@ def maybe_make_prepare_finalize(
             num_experts_per_rank=num_local_experts,
             num_experts_per_token=moe.experts_per_token,
         )
+        async_ll = get_current_vllm_config().parallel_config.mori_epv2_async_ll
+        if async_ll:
+            # Only MORI's hip backend has the AsyncLL kernels.
+            all_to_all_args.update(
+                async_ll=True, async_ll_transport="sdma", kernel_backend="hip"
+            )
+            # DBO issues both microbatches on one stream: one SDMA queue per op.
+            if mori_epv2_has_own_sdma_queue():
+                all_to_all_args.update(async_ll_own_sdma_queue=True)
         prepare_finalize = MoriEPv2PrepareAndFinalize(
             _make_mori_epv2_ops(all2all_manager, all_to_all_args),
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             num_local_experts=num_local_experts,
             rank_expert_offset=all2all_manager.rank * num_local_experts,
+            async_ll=async_ll,
         )
 
     elif moe.use_mori_epv1_kernels:
