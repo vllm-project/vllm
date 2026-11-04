@@ -163,7 +163,7 @@ def get_shared_kv_cache_layers(vllm_config: VllmConfig) -> dict[str, str]:
     return {
         layer_name: kv_tgt_layer
         for layer_name, attn_module in attn_layers.items()
-        if (kv_tgt_layer := getattr(attn_module, "kv_sharing_target_layer_name", None))
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
     }
 
 
