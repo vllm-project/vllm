@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -426,6 +427,20 @@ class Scheduler(SchedulerInterface):
         # schedule() call including empty ones, so it would expire the hold
         # early; it keeps its own meaning (next_decode_eligible_step).
         self.num_executed_steps = 0
+        # Time-bounded prefill hold, see the WAITING loop in schedule().
+        self.prefill_hold_s = envs.VLLM_PREFILL_HOLD_MS / 1e3
+        self.prefill_hold_min_reqs = envs.VLLM_PREFILL_HOLD_MIN_REQS
+        self.prefill_hold_low_load_s = envs.VLLM_PREFILL_HOLD_LOW_LOAD_MS / 1e3
+        if self.prefill_hold_s > 0 or self.prefill_hold_low_load_s > 0:
+            logger.info_once(
+                "Prefill hold: while decodes run, new requests wait until the "
+                "oldest has waited %.0f ms (VLLM_PREFILL_HOLD_MS) with at least "
+                "%d requests in the engine (VLLM_PREFILL_HOLD_MIN_REQS), "
+                "%.0f ms with fewer (VLLM_PREFILL_HOLD_LOW_LOAD_MS).",
+                self.prefill_hold_s * 1e3,
+                self.prefill_hold_min_reqs,
+                self.prefill_hold_low_load_s * 1e3,
+            )
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -1053,8 +1068,32 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Prefill hold (VLLM_PREFILL_HOLD_MS): while decodes run, leave new
+        # requests waiting until the oldest has waited the hold time, so
+        # requests that arrive close together share one large prefill step
+        # instead of being prefilled one or two per step. In-flight prefill
+        # chunks and KV-holding requests are not held, and the extra TTFT is
+        # bounded by the hold time. Below VLLM_PREFILL_HOLD_MIN_REQS requests
+        # in the engine the hold time is VLLM_PREFILL_HOLD_LOW_LOAD_MS (default
+        # 0: no hold at low load, where there is little to batch).
+        if len(self.running) + len(self.waiting) >= self.prefill_hold_min_reqs:
+            hold_s = self.prefill_hold_s
+        else:
+            hold_s = self.prefill_hold_low_load_s
+        hold_new_prefills = (
+            hold_s > 0
+            and len(self.waiting) > 0
+            and not self.kv_holding_waiting
+            and any(not r.is_prefill_chunk for r in self.running)
+            and time.time() - min(r.arrival_time for r in self.waiting) < hold_s
+        )
+
         # Next, schedule the WAITING requests.
-        if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
+        if (
+            not preempted_reqs
+            and not hold_new_prefills
+            and self._pause_state != PauseState.PAUSED_ALL
+        ):
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
             step_skipped_async_kv: deque[Request] = deque()

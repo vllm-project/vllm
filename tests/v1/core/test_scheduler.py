@@ -1095,6 +1095,132 @@ def test_local_prefill_interval_holds_prefill_between_bursts(interval: int):
     assert scheduler.last_prefill_step == scheduler.num_executed_steps
 
 
+def _hold_scheduler(hold_ms: float, min_reqs: int = 0, low_load_ms: float = 0):
+    """A scheduler with the prefill hold on (VLLM_PREFILL_HOLD_MS/_MIN_REQS/
+    _LOW_LOAD_MS)."""
+    scheduler = create_scheduler()
+    scheduler.prefill_hold_s = hold_ms / 1e3
+    scheduler.prefill_hold_min_reqs = min_reqs
+    scheduler.prefill_hold_low_load_s = low_load_ms / 1e3
+    return scheduler
+
+
+def test_prefill_hold_waits_while_decodes_run():
+    """With the prefill hold on, a new request waits while a running request
+    decodes, until the oldest waiting request has waited the hold time."""
+    scheduler = _hold_scheduler(hold_ms=10_000)
+    _start_decoding(scheduler)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    output = scheduler.schedule()
+    assert "new0" not in output.num_scheduled_tokens
+    assert "run0" in output.num_scheduled_tokens
+    assert new_req.status == RequestStatus.WAITING
+    _decode_one(scheduler, output, ["run0"])
+
+    # The oldest waiting request has now waited the hold time: admitted.
+    new_req.arrival_time -= 10.0
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+    assert "run0" in output.num_scheduled_tokens
+
+
+def test_prefill_hold_batches_arrivals_into_one_step():
+    """Requests that arrive during the hold are prefilled together."""
+    scheduler = _hold_scheduler(hold_ms=10_000)
+    _start_decoding(scheduler)
+    reqs = create_requests(num_requests=3, num_tokens=8, req_ids=["a", "b", "c"])
+    for req in reqs:
+        scheduler.add_request(req)
+        output = scheduler.schedule()
+        assert not {"a", "b", "c"} & output.num_scheduled_tokens.keys()
+        _decode_one(scheduler, output, ["run0"])
+
+    reqs[0].arrival_time -= 10.0
+    output = scheduler.schedule()
+    assert {"a", "b", "c"} <= output.num_scheduled_tokens.keys()
+
+
+def test_prefill_hold_off_without_running_decodes():
+    """With nothing decoding there is nothing to protect: no hold."""
+    scheduler = _hold_scheduler(hold_ms=10_000)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+
+
+def test_prefill_hold_min_reqs():
+    """Below VLLM_PREFILL_HOLD_MIN_REQS requests in the engine, no hold."""
+    scheduler = _hold_scheduler(hold_ms=10_000, min_reqs=3)
+    _start_decoding(scheduler)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+    # Two requests in the engine, below the minimum of three.
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+
+
+@pytest.mark.parametrize("hold_ms", [0, 10_000])
+def test_prefill_hold_low_load(hold_ms: float):
+    """Below VLLM_PREFILL_HOLD_MIN_REQS requests, the hold time is
+    VLLM_PREFILL_HOLD_LOW_LOAD_MS, also when VLLM_PREFILL_HOLD_MS is 0."""
+    scheduler = _hold_scheduler(hold_ms=hold_ms, min_reqs=3, low_load_ms=5_000)
+    _start_decoding(scheduler)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    # Two requests in the engine, below the minimum of three: held.
+    output = scheduler.schedule()
+    assert "new0" not in output.num_scheduled_tokens
+    assert "run0" in output.num_scheduled_tokens
+    _decode_one(scheduler, output, ["run0"])
+
+    # Past the low-load hold time (and inside VLLM_PREFILL_HOLD_MS): admitted.
+    new_req.arrival_time -= 6.0
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+
+
+def test_prefill_hold_low_load_not_at_min_reqs():
+    """At VLLM_PREFILL_HOLD_MIN_REQS requests, VLLM_PREFILL_HOLD_MS applies."""
+    scheduler = _hold_scheduler(hold_ms=10_000, min_reqs=2, low_load_ms=5_000)
+    _start_decoding(scheduler)
+    (new_req,) = create_requests(num_requests=1, num_tokens=8, req_ids=["new0"])
+    scheduler.add_request(new_req)
+
+    # Two requests in the engine: past the low-load hold time, still held.
+    new_req.arrival_time -= 6.0
+    output = scheduler.schedule()
+    assert "new0" not in output.num_scheduled_tokens
+    _decode_one(scheduler, output, ["run0"])
+
+    new_req.arrival_time -= 5.0
+    output = scheduler.schedule()
+    assert "new0" in output.num_scheduled_tokens
+
+
+def test_prefill_hold_env(monkeypatch):
+    """Off by default; VLLM_PREFILL_HOLD_MS/_MIN_REQS configure it."""
+    envs.disable_envs_cache()
+    monkeypatch.delenv("VLLM_PREFILL_HOLD_MS", raising=False)
+    monkeypatch.delenv("VLLM_PREFILL_HOLD_MIN_REQS", raising=False)
+    monkeypatch.delenv("VLLM_PREFILL_HOLD_LOW_LOAD_MS", raising=False)
+    scheduler = create_scheduler()
+    assert scheduler.prefill_hold_s == 0
+    assert scheduler.prefill_hold_min_reqs == 0
+    assert scheduler.prefill_hold_low_load_s == 0
+
+    monkeypatch.setenv("VLLM_PREFILL_HOLD_MS", "150")
+    monkeypatch.setenv("VLLM_PREFILL_HOLD_MIN_REQS", "4")
+    monkeypatch.setenv("VLLM_PREFILL_HOLD_LOW_LOAD_MS", "40")
+    scheduler = create_scheduler()
+    assert scheduler.prefill_hold_s == pytest.approx(0.15)
+    assert scheduler.prefill_hold_min_reqs == 4
+    assert scheduler.prefill_hold_low_load_s == pytest.approx(0.04)
+
+
 def test_empty_schedule_does_not_advance_the_prefill_cadence():
     """An empty schedule() must not consume interval budget.
 
