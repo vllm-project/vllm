@@ -38,6 +38,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
+    SupportsReplaySSM,
     _require_is_multimodal,
 )
 from .utils import (
@@ -216,7 +217,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     },
     enable_if=should_torch_compile_mtp_drafter,
 )
-class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+class Qwen3_5MTP(
+    LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP, SupportsReplaySSM
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

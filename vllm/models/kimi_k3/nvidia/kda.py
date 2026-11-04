@@ -602,7 +602,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
-        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        self.use_recoverssm = self.cache_config.use_recoverssm
         if self.cache_config.use_replayssm and not self.use_recoverssm:
             raise ValueError(
                 "Kimi-K3 supports --use-replayssm only with speculative decoding"

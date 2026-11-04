@@ -119,7 +119,7 @@ def unsupported(vllm_config) -> str | None:
         ),
         (
             vllm_config.cache_config.use_replayssm
-            or vllm_config.cache_config.use_kda_recoverssm,
+            or vllm_config.cache_config.use_recoverssm,
             "ReplaySSM / RecoverSSM (--use-replayssm)",
         ),
         # The verify kernels take at most 8 tokens per request (KdaSplit's barriers).
