@@ -3375,7 +3375,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         q_pad_num_heads: int | None = None,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported for MLA")
+            raise NotImplementedError(
+                "KV sharing is only supported by sparse MLA backends"
+            )
 
         super().__init__(
             num_heads,
