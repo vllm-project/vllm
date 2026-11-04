@@ -133,6 +133,25 @@ def test_inline_rows_are_slots_without_packing():
     assert dsv41_flashinfer._slots_to_inline_rows(slots, 64, 64) is slots
 
 
+def test_swa_inline_rows_are_mapped_once_per_step():
+    metadata = SimpleNamespace(block_size=4, flashinfer_sparse_index_cache={})
+    slots = torch.tensor([[0, 3, 4, 9, -1]], dtype=torch.int32)
+    lens = torch.tensor([4], dtype=torch.int32)
+
+    rows = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert rows.tolist() == [[0, 3, 12, 25, -1]]
+    # Later layers of the step reuse the first layer's rows.
+    again = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert again is rows
+    # A rebuild clears the cache, so new indices are mapped again.
+    metadata.flashinfer_sparse_index_cache.clear()
+    fresh = dsv41_flashinfer._swa_inline_rows(metadata, "decode", slots, lens, 12)
+    assert fresh is not rows and torch.equal(fresh, rows)
+    # Without packing the indices are already rows.
+    unpacked = dsv41_flashinfer._swa_inline_rows(metadata, "prefill", slots, lens, 4)
+    assert unpacked is slots
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_global_topk_indices_address_packed_rows():
     # Block size 4 packed with two other layers' pages: 12 rows per block.

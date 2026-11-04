@@ -611,6 +611,29 @@ def _slots_to_inline_rows(
     return torch.where(indices >= 0, rows, indices)
 
 
+def _swa_inline_rows(
+    swa_metadata: "DeepseekSparseSWAMetadata",
+    phase: str,
+    indices: torch.Tensor,
+    lens: torch.Tensor,
+    block_span: int,
+) -> torch.Tensor:
+    """Return the step's SWA indices as inline-record rows.
+
+    Every layer of a step reads the same SWA indices, so the first layer maps
+    them and caches the rows on the step metadata (cleared by each build).
+    """
+    if block_span == swa_metadata.block_size:
+        return indices
+    key = f"swa_rows_{phase}_{block_span}"
+    cached = swa_metadata.flashinfer_sparse_index_cache.get(key)
+    if cached is None:
+        rows = _slots_to_inline_rows(indices, swa_metadata.block_size, block_span)
+        swa_metadata.flashinfer_sparse_index_cache[key] = (rows, lens)
+        return rows
+    return cached[0]
+
+
 class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     """DeepSeek V4 sparse MLA attention through FlashInfer's SM120 kernels."""
 
@@ -854,9 +877,11 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 "Compressed sparse MLA decode requires compressed sparse indices."
             )
         if self.kv_mxfp8:
-            swa_indices = _slots_to_inline_rows(
+            swa_indices = _swa_inline_rows(
+                swa_metadata,
+                "decode",
                 swa_indices,
-                swa_metadata.block_size,
+                swa_lens,
                 packed_block_span(self.swa_cache_layer.kv_cache),
             )
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
@@ -951,7 +976,15 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                 )
             extra_kv_paged = self._as_sparse_cache(compressed_k_cache)
 
-        swa_block_span = packed_block_span(swa_k_cache)
+        prefill_swa_indices = swa_metadata.prefill_swa_indices
+        if self.kv_mxfp8:
+            prefill_swa_indices = _swa_inline_rows(
+                swa_metadata,
+                "prefill",
+                prefill_swa_indices,
+                swa_metadata.prefill_swa_lens,
+                packed_block_span(swa_k_cache),
+            )
         num_chunks = (
             num_prefills + self.PREFILL_CHUNK_SIZE - 1
         ) // self.PREFILL_CHUNK_SIZE
@@ -977,11 +1010,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             )
 
             q_chunk = q[query_start:query_end]
-            swa_indices_chunk = swa_metadata.prefill_swa_indices[query_start:query_end]
-            if self.kv_mxfp8:
-                swa_indices_chunk = _slots_to_inline_rows(
-                    swa_indices_chunk, swa_metadata.block_size, swa_block_span
-                )
+            swa_indices_chunk = prefill_swa_indices[query_start:query_end]
             swa_lens_chunk = swa_metadata.prefill_swa_lens[query_start:query_end]
             if extra_kv_paged is not None and extra_sparse_indices_chunk is None:
                 raise RuntimeError(
