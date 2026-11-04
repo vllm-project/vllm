@@ -110,6 +110,8 @@ _SHARED_REGION_GROUP_ID = -1
 _INVALID_PEER_MIN_BACKOFF_S = 1.0
 _INVALID_PEER_MAX_BACKOFF_S = 60.0
 _MAX_HYBRID_BLOCK_SPLIT = 128
+# Default NIXL num_threads when UCX is the only backend; see the UAR note at its use.
+_UCX_DEFAULT_NUM_THREADS = 4
 
 
 def _region_sort_key(layer_name: str) -> tuple[tuple[int, int | str], ...]:
@@ -788,9 +790,9 @@ class NixlBaseConnectorWorker:
         num_threads = vllm_config.kv_transfer_config.get_from_extra_config(
             "num_threads", None
         )
-        # The default of 4 is tuned for UCX, so it applies only to UCX alone.
+        # The default is tuned for UCX, so it applies only to UCX alone.
         if num_threads is None and not non_ucx_backends:
-            num_threads = 4
+            num_threads = _UCX_DEFAULT_NUM_THREADS
         if nixl_agent_config is None:
             config = None
         else:
@@ -820,7 +822,9 @@ class NixlBaseConnectorWorker:
             self.nixl_wrapper.create_backend(
                 "UCX",
                 {
-                    "num_threads": str(4 if num_threads is None else num_threads),
+                    "num_threads": str(
+                        _UCX_DEFAULT_NUM_THREADS if num_threads is None else num_threads
+                    ),
                     "engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc",
                     **ucx_backend_params,
                 },
