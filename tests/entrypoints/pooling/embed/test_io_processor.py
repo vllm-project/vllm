@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
+from typing import get_args
+
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -21,6 +23,9 @@ from vllm.entrypoints.pooling.typing import (
     PoolingEngineInput,
     PoolingServeContext,
 )
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import mm_input, tokens_input
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
@@ -28,7 +33,7 @@ class TestEmbeddingRequestParsing:
     """Unit tests for OpenAI embedding request parsing."""
 
     def test_input_messages_parses_as_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [{"role": "user", "content": "hello"}],
@@ -42,7 +47,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_batched_input_messages_parses_as_batch_chat_input_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [
@@ -65,7 +70,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_token_ids_still_parse_as_completion_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [[1, 2, 3], [4, 5]],
@@ -76,7 +81,7 @@ class TestEmbeddingRequestParsing:
         assert request.input == [[1, 2, 3], [4, 5]]
 
     def test_messages_still_parses_as_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "messages": [{"role": "user", "content": "hello"}],
@@ -89,7 +94,7 @@ class TestEmbeddingRequestParsing:
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
     def test_batched_messages_parses_as_batch_chat_request(self):
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "messages": [
@@ -106,6 +111,65 @@ class TestEmbeddingRequestParsing:
             [{"role": "user", "content": "goodbye"}],
         ]
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": "hello"},
+            {"input": [[1, 2], [3]]},
+            {"input": []},
+            {"input": [{"role": "user", "content": "hi"}]},
+            {"input": [[{"role": "user", "content": "hi"}]]},
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"messages": [[{"role": "user", "content": "hi"}]]},
+            {"messages": []},
+            {"messages": [{"author": {"role": "user"}, "content": []}]},
+            {"input": "hello", "messages": [{"role": "user", "content": "hi"}]},
+            {
+                "input": [{"role": "user", "content": "hi"}],
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        ],
+    )
+    def test_parses_like_plain_union(self, body):
+        """The completion fast path must parse like the plain union."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        expected = plain_union.validate_python(body)
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(request) is type(expected)
+        assert request.model_dump(exclude={"request_id"}) == expected.model_dump(
+            exclude={"request_id"}
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": [1, "a"]},
+            {"input": [[1], "x"]},
+            {"input": "x", "dimensions": "abc"},
+            {
+                "input": "x",
+                "continue_final_message": True,
+                "add_generation_prompt": True,
+            },
+        ],
+    )
+    def test_rejects_like_plain_union(self, body):
+        """Invalid bodies must fail exactly as the plain union fails them."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        with pytest.raises(Exception) as expected:
+            plain_union.validate_python(body)
+        with pytest.raises(Exception) as actual:
+            TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(actual.value) is type(expected.value)
+        if isinstance(expected.value, ValidationError):
+            assert actual.value.errors(include_url=False) == expected.value.errors(
+                include_url=False
+            )
+        else:
+            assert str(actual.value) == str(expected.value)
 
 
 class TestCohereEmbedRequestParsing:
@@ -416,7 +480,7 @@ class TestChunkedEmbeddingProcessing:
 
     @staticmethod
     def _make_context() -> PoolingServeContext[EmbeddingCompletionRequest]:
-        request = TypeAdapter(EmbeddingRequest).validate_python(
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(
             {
                 "model": "test",
                 "input": [[0, 1, 2, 3, 4], [10, 11]],
@@ -431,13 +495,13 @@ class TestChunkedEmbeddingProcessing:
             request_id="embd-client-prompt-999-chunk-888",
             engine_inputs=[
                 PoolingEngineInput(
-                    prompts={"prompt_token_ids": [0, 1, 2, 3, 4]},
+                    prompts=tokens_input(prompt_token_ids=[0, 1, 2, 3, 4]),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,
                 ),
                 PoolingEngineInput(
-                    prompts={"prompt_token_ids": [10, 11]},
+                    prompts=tokens_input(prompt_token_ids=[10, 11]),
                     params=pooling_params,
                     lora_requests=None,
                     priorities=0,
@@ -461,6 +525,33 @@ class TestChunkedEmbeddingProcessing:
             num_cached_tokens=0,
             finished=True,
         )
+
+    @pytest.mark.parametrize(
+        ("chunking_enabled", "num_tokens"), [(True, 2), (True, 5), (False, 2)]
+    )
+    def test_multimodal_input_requires_chunking_disabled(
+        self, chunking_enabled, num_tokens
+    ):
+        """Reject images before changing a mixed batch, including short inputs."""
+        handler = self._make_handler()
+        handler.enable_chunked_processing = chunking_enabled
+        ctx = self._make_context()
+        assert ctx.engine_inputs is not None
+        image_prompt = mm_input(
+            prompt_token_ids=list(range(num_tokens)),
+            mm_kwargs=MultiModalKwargsItems({"image": [None]}),
+            mm_hashes={"image": ["cached-image"]},
+            mm_placeholders={"image": [PlaceholderRange(offset=0, length=1)]},
+        )
+        ctx.engine_inputs[1]["prompts"] = image_prompt
+
+        if chunking_enabled:
+            with pytest.raises(VLLMValidationError, match="multimodal inputs"):
+                handler.maybe_pre_process_chunked(ctx)
+        else:
+            handler.maybe_pre_process_chunked(ctx)
+        assert ctx.engine_inputs[1]["prompts"] is image_prompt
+        assert ctx.original_engine_inputs is None
 
     def test_aggregation_uses_metadata_not_request_id_parsing(self):
         handler = self._make_handler()

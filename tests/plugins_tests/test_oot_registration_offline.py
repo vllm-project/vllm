@@ -4,7 +4,7 @@
 import pytest
 
 from tests.utils import create_new_process_for_each_test
-from vllm import LLM, SamplingParams
+from vllm import LLM, EmbeddingRequestOutput, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import convert_image_mode
 
@@ -55,6 +55,7 @@ def test_oot_registration_embedding(
         outputs = llm.embed(prompts)
 
         for output in outputs:
+            assert isinstance(output, EmbeddingRequestOutput)
             assert all(v == 0 for v in output.outputs.embedding)
 
 
@@ -92,7 +93,7 @@ def test_oot_registration_multimodal(
         )
 
         first_token = llm.get_tokenizer().decode(0)
-        outputs = llm.generate(prompts, sampling_params)  # type: ignore[arg-type]
+        outputs = llm.generate(prompts, sampling_params)
 
         for output in outputs:
             generated_text = output.outputs[0].text

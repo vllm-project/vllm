@@ -18,6 +18,7 @@ Currently monitors:
 - Triton ``@triton.jit`` first-time compilations
   (via ``knobs.runtime.jit_post_compile_hook``)
 - TileLang ``@tilelang.jit`` first-time compilations
+- FlyDSL ``MlirCompiler.compile`` calls
 """
 
 import contextlib
@@ -39,6 +40,7 @@ _active: bool = False
 _mode: JitMonitorMode = "warn"
 _verbose: bool = False
 _cutedsl_hook_installed: bool = False
+_flydsl_hook_installed: bool = False
 _tilelang_hook_installed: bool = False
 _tilelang_jitimpl_compile_depth: int = 0
 
@@ -74,6 +76,7 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     _setup_triton_autotuning_print()
     _setup_triton_jit_hook()
     _setup_cutedsl_jit_hook()
+    _setup_flydsl_jit_hook()
 
     # Refer to #51159. tilelang ships broken symbols
     # on rocm.
@@ -325,6 +328,71 @@ def _setup_cutedsl_jit_hook() -> None:
 
 
 # ------------------------------------------------------------------
+# FlyDSL JIT compilation hook
+# ------------------------------------------------------------------
+
+
+def _log_flydsl_jit_compile(fn_name: str, detail: str | None = None) -> None:
+    _handle_jit_event(
+        backend="FlyDSL",
+        event="JIT compilation",
+        fn_name=fn_name,
+        detail=detail,
+    )
+
+
+def _flydsl_kernel_symbols(module: object, infer_kernel_names) -> str | None:
+    """Name the ``gpu.func`` kernels in a module about to be compiled.
+
+    ``func_name`` is the Python launcher name, which many kernels share
+    verbatim (``launch``), so the ``gpu.func`` symbols are what identify the
+    kernel and the width that needs warmup.
+    """
+    if module is None:
+        return None
+    names = dict.fromkeys(infer_kernel_names(str(module)))
+    return "kernels=" + ",".join(names) if names else None
+
+
+def _setup_flydsl_jit_hook() -> None:
+    """Wrap ``MlirCompiler.compile`` to warn on compilation."""
+    global _flydsl_hook_installed
+    if _flydsl_hook_installed:
+        return
+
+    try:
+        from flydsl.compiler import jit_function
+    except ImportError:
+        logger.debug("FlyDSL is not available; skipping FlyDSL JIT monitor.")
+        return
+
+    try:
+        compiler_cls = jit_function.MlirCompiler
+        # MlirCompiler.compile is called only on a cache miss, so for now
+        # we don't monitor disk cache hits
+        original_compile = compiler_cls.compile
+        # TODO: use a public API
+        infer_kernel_names = jit_function._infer_kernel_names_from_asm
+    except AttributeError as exc:
+        logger.warning(
+            "FlyDSL JIT monitoring is disabled; its JIT internals moved (%s).", exc
+        )
+        return
+
+    @functools.wraps(original_compile)
+    def _compile_with_monitor(cls, *args, **kwargs):
+        module = args[0] if args else kwargs.get("module")
+        detail = None
+        with suppress(Exception):
+            detail = _flydsl_kernel_symbols(module, infer_kernel_names)
+        _log_flydsl_jit_compile(str(kwargs.get("func_name") or "<unknown>"), detail)
+        return original_compile(*args, **kwargs)
+
+    compiler_cls.compile = classmethod(_compile_with_monitor)
+    _flydsl_hook_installed = True
+
+
+# ------------------------------------------------------------------
 # TileLang JIT compilation hook
 # ------------------------------------------------------------------
 
@@ -499,32 +567,30 @@ def _setup_tilelang_jit_hook() -> None:
     jit_kernel_cls.__init__ = _init_with_monitor
 
     if jit_impl_cls is not None:
-        original_call = jit_impl_cls.__call__
+        # JITImpl.__call__ only calls compile() on a kernel-cache miss, so
+        # hooking compile() keeps the per-call hot path untouched.
+        original_compile = jit_impl_cls.compile
 
-        @functools.wraps(original_call)
-        def _call_with_monitor(self, *args, **kwargs):
+        @functools.wraps(original_compile)
+        def _compile_with_monitor(self, *args, **kwargs):
             global _tilelang_jitimpl_compile_depth
-            cache_key = _tilelang_cache_miss_key(self, args, kwargs)
-            if cache_key is None:
-                return original_call(self, *args, **kwargs)
-
             _tilelang_jitimpl_compile_depth += 1
             try:
                 detail = None
                 if _verbose:
                     detail = _format_verbose_tilelang_compile_details(
-                        self, args, kwargs, cache_key
+                        self, args, kwargs, _tilelang_cache_miss_key(self, args, kwargs)
                     )
                 func = getattr(self, "func", None)
                 orig_func = getattr(func, "orig_func", None)
                 _log_tilelang_jit_compile(
                     _tilelang_kernel_name(orig_func or func), detail
                 )
-                return original_call(self, *args, **kwargs)
+                return original_compile(self, *args, **kwargs)
             finally:
                 _tilelang_jitimpl_compile_depth -= 1
 
-        jit_impl_cls.__call__ = _call_with_monitor
+        jit_impl_cls.compile = _compile_with_monitor
 
     _tilelang_hook_installed = True
 

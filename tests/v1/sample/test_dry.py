@@ -608,7 +608,10 @@ def test_v2_batch_sharded_sampling_matches_unsharded(monkeypatch):
             group = SimpleNamespace(rank_in_group=rank, world_size=tp_size)
             with mock.patch.object(batch_shard, "get_tp_group", return_value=group):
                 sharder = batch_shard.BatchSharder(
-                    max_num_reqs=8, max_num_logits_per_req=1, device=DEVICE
+                    max_num_reqs=8,
+                    max_num_logits_per_req=1,
+                    device=DEVICE,
+                    adaptive_verification_enabled=False,
                 )
             local, _, _, _ = sharder.shard_sampler_inputs(batch, None)
             owned = [int(req_id.split("-")[1]) for req_id in local.req_ids]
@@ -917,7 +920,10 @@ def test_loads_through_the_loader_by_fqcn():
         total_len=None,
     )
     procs = loader.build_custom_logits_processors(
-        _make_vllm_config(), req_states, False, [DRY_FQCN]
+        _make_vllm_config(),
+        req_states,
+        False,
+        [DRY_FQCN],
     )
     assert [type(p) for p in procs] == [DryState]
 

@@ -12,12 +12,22 @@ Run with:
   pytest tests/models/multimodal/processing/test_deepseek_ocr.py -v
 """
 
+from types import SimpleNamespace
+
 import pytest
+import torch
 from PIL import Image
 from transformers import AutoTokenizer
 
-from vllm.model_executor.models.deepseek_ocr import DeepseekOCRImagePixelInputs
-from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
+from vllm.model_executor.models.deepseek_ocr import (
+    DeepseekOCRForCausalLM,
+    DeepseekOCRImagePixelInputs,
+)
+from vllm.model_executor.models.deepseek_ocr2 import DeepseekOCR2ForCausalLM
+from vllm.transformers_utils.processors.deepseek_ocr import (
+    DeepseekOCRProcessor,
+    ImageTransform,
+)
 
 MODEL_ID = "deepseek-ai/DeepSeek-OCR"
 
@@ -155,3 +165,80 @@ class TestDeepseekOCRInputValidation:
     def test_missing_images_raises_value_error(self, processor):
         with pytest.raises(ValueError, match="prompt and images"):
             processor(prompt="<image>\nDescribe this image.", images=None)
+
+
+def _balanced_normalized_pixels(
+    batch: int = 1, channels: int = 3, height: int = 64, width: int = 64
+) -> torch.Tensor:
+    """Build a pixel tensor whose values cancel to an exact sum of 0.
+
+    Matches the normalized half-black / half-white case from the DeepSeek-OCR
+    processor (Normalize(0.5, 0.5) maps 0→-1 and 255→+1).
+    """
+    assert width % 2 == 0
+    pixel_values = torch.ones(batch, channels, height, width)
+    pixel_values[..., : width // 2] = -1.0
+    assert pixel_values.sum().item() == 0.0
+    return pixel_values
+
+
+class TestDeepseekOCRZeroSumPixelsAccepted:
+    """Zero-sum normalized pixels must still produce validated image inputs.
+
+    Returning None from ``_parse_and_validate_image_input`` makes
+    ``embed_multimodal`` return None and trips the worker encoder-output
+    sanity check, killing EngineCore. The zero-sum shortcut is therefore
+    removed; balanced images must parse like any other valid tensor.
+    """
+
+    def test_ocr_accepts_balanced_normalized_pixels(self):
+        pixel_values = _balanced_normalized_pixels()
+        images_crop = torch.zeros(0, 3, 40, 40)
+        images_spatial_crop = torch.tensor([[1, 1]])
+
+        image_input = DeepseekOCRForCausalLM._parse_and_validate_image_input(
+            None,
+            pixel_values=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+        )
+
+        assert image_input is not None
+        assert image_input.data is pixel_values
+
+    def test_ocr2_accepts_balanced_normalized_pixels(self):
+        pixel_values = _balanced_normalized_pixels()
+        images_crop = torch.zeros(0, 3, 40, 40)
+        images_spatial_crop = torch.tensor([[1, 1]])
+        model = SimpleNamespace(vision_config=SimpleNamespace(image_size=64))
+
+        image_input = DeepseekOCR2ForCausalLM._parse_and_validate_image_input(
+            model,
+            pixel_values=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+        )
+
+        assert image_input is not None
+        assert image_input.data is pixel_values
+
+    def test_image_transform_half_black_half_white_sums_to_zero(self):
+        """A 1024×1024 half-black/half-white PNG through ImageTransform
+        (ToTensor + Normalize(0.5, 0.5)) yields an exact zero sum, and parse
+        must still accept it.
+        """
+        image = Image.new("RGB", (1024, 1024), (0, 0, 0))
+        image.paste(Image.new("RGB", (512, 1024), (255, 255, 255)), (512, 0))
+        pixel_values = ImageTransform()(image).unsqueeze(0)
+        assert pixel_values.sum().item() == 0.0
+
+        images_crop = torch.zeros(0, 3, 640, 640)
+        images_spatial_crop = torch.tensor([[1, 1]])
+        image_input = DeepseekOCRForCausalLM._parse_and_validate_image_input(
+            None,
+            pixel_values=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+        )
+        assert image_input is not None
+        assert torch.equal(image_input.data, pixel_values)
