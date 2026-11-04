@@ -34,6 +34,12 @@ vllm serve <hybrid-model> \
 
 Choose a value that divides the block size of every prefix-cacheable KV cache group, and that is a multiple of the per-state compression ratio for models that use one, such as sparse MLA. vLLM validates both at startup and names the offending sizes in the error. Read the served block size from the startup log. 64 is a reasonable starting point.
 
+### Incremental multimodal requests
+
+With APC enabled, hybrid Mamba models also retain a checkpoint at the final multimodal feature boundary, rounded down to the Mamba block grid. A follow-up request that appends another image can reuse this state even when the producer has a long text tail. No additional checkpoint flag is required. Mamba `align` mode requires multimodal input chunking (the default); combining it with `--disable-chunked-mm-input` is rejected at startup.
+
+Prefill stops at each distinct block-aligned multimodal feature boundary, so appending an item preserves the shared prefix's split points. EAGLE/MTP also materializes a checkpoint one scheduler block lower, to leave room for the draft KV proof or lookahead hash. Under decode context parallelism (DCP), this can span multiple Mamba blocks. Both final-item checkpoints are required retention points, including with the default `prefix_cache_retention_interval=0`; other snapshots follow the configured retention policy. These stops can add prefill work; they do not change decode arithmetic. The shared prefix must contain a cacheable Mamba boundary (and, for EAGLE/MTP, its proof). This does not guarantee batch invariance across different batching or chunk-budget configurations.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

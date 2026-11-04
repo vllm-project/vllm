@@ -29,7 +29,11 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core import kv_cache_planning
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_utils import (
+    get_request_block_hasher,
+    init_none_hash,
+    resolve_kv_cache_block_sizes,
+)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
@@ -93,6 +97,8 @@ def create_scheduler(
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
     speculative_config: SpeculativeConfig | None = None,
+    parallel_config: ParallelConfig | None = None,
+    kv_cache_config: KVCacheConfig | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -212,7 +218,8 @@ def create_scheduler(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
-        parallel_config=ParallelConfig(
+        parallel_config=parallel_config
+        or ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
             data_parallel_size=data_parallel_size,
         ),
@@ -232,19 +239,27 @@ def create_scheduler(
             head_size=1,
             dtype=torch.float32,
         )
-    kv_cache_config = KVCacheConfig(
-        num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
-    )
-    cache_config.num_gpu_blocks = num_blocks
+    if kv_cache_config is None:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_blocks,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        )
+    cache_config.num_gpu_blocks = kv_cache_config.num_blocks
+    scheduler_block_size = block_size
+    hash_block_size: int | None = None
+    if parallel_config is not None or len(kv_cache_config.kv_cache_groups) > 1:
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
     register_all_kvcache_specs(vllm_config)
     if scheduler_cls is None:
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
     scheduler = scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        block_size=block_size,
+        block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
@@ -270,13 +285,16 @@ def create_requests(
     block_size: int = 16,
     req_ids: list[str] | None = None,
     sampling_params: SamplingParams | None = None,
+    num_hash_lookahead_tokens: int = 0,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, sha256)
+    block_hasher = get_request_block_hasher(
+        block_size, sha256, num_hash_lookahead_tokens=num_hash_lookahead_tokens
+    )
     if sampling_params is None:
         sampling_params = SamplingParams(
             ignore_eos=ignore_eos,
