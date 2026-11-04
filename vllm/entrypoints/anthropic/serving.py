@@ -940,7 +940,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             choice.finish_reason,
             choice.stop_reason,
             tool_used=bool(choice.message.tool_calls),
-            # Their arguments are json-decoded below, so parsed calls are complete.
+            # Non-repetition calls must successfully JSON-decode below.
             tool_complete=bool(choice.message.tool_calls),
         )
 
@@ -962,11 +962,23 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
         for tool_call in choice.message.tool_calls:
+            try:
+                tool_input = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError:
+                if choice.finish_reason != "repetition":
+                    raise
+                # Preserve truncated arguments without presenting an executable call.
+                content.append(
+                    AnthropicContentBlock(
+                        type="text", text=tool_call.function.arguments
+                    )
+                )
+                continue
             anthropic_tool_call = AnthropicContentBlock(
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=tool_input,
             )
             content += [anthropic_tool_call]
 

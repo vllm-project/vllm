@@ -40,6 +40,11 @@ parameter definitions.
 
 Repetition termination is reported as the vLLM-specific `stop_reason: "repetition"`
 with no stop sequence, including in streaming `message_delta` events.
+In non-streaming responses, tool arguments whose JSON was cut short by repetition
+detection are preserved as text blocks instead of `tool_use` blocks. In streaming
+responses, previously emitted tool argument fragments may be incomplete when this
+stop reason is received. Repetition detection also applies to reasoning tokens;
+reasoning content is preserved when generation stops.
 
 ## Cohere APIs
 
