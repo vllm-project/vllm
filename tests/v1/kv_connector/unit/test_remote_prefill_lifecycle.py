@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.config import LoRAConfig
+from vllm.lora.request import LoRARequest
 from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec
 from vllm.v1.metrics.stats import KV_FETCH_STAGES
 from vllm.v1.outputs import (
@@ -206,6 +208,83 @@ def test_inflight_kv_loads_follow_connector_may_load_async(monkeypatch):
     assert scheduler.running == [local]
     assert early.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert late.status == RequestStatus.WAITING
+
+
+def test_max_loras_blocked_request_does_not_stop_kv_loads():
+    """A waiting request blocked by max_loras does not end the scan before an
+    async KV load queued behind it starts."""
+    vllm_config = create_vllm_config(max_num_seqs=4)
+    vllm_config.scheduler_config.max_num_inflight_kv_loads = 2
+    vllm_config.lora_config = LoRAConfig(max_loras=1)
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    local, blocked = (
+        create_request(block_size=block_size, num_tokens=block_size) for _ in range(2)
+    )
+    remote = create_request(
+        block_size=block_size, num_tokens=block_size * 3, do_remote_prefill=True
+    )
+    local.lora_request = LoRARequest("lora-1", 1, "/p")
+    blocked.lora_request = LoRARequest("lora-2", 2, "/p")
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    for request in (blocked, remote):
+        scheduler.add_request(request)
+    assert list(scheduler.waiting) == [blocked]
+    assert list(scheduler.async_kv_waiting) == [remote]
+
+    scheduler.update_from_output(scheduler_output, create_model_runner_output([local]))
+    scheduler.schedule()
+    assert blocked.status == RequestStatus.WAITING
+    assert remote.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+def test_max_loras_blocked_kv_holding_request_does_not_stop_others():
+    """A request whose KV load finished but whose adapter max_loras blocks
+    does not end the scan of the other requests holding KV blocks."""
+    vllm_config = create_vllm_config()
+    vllm_config.lora_config = LoRAConfig(max_loras=1)
+    scheduler = create_scheduler(vllm_config)
+    block_size = vllm_config.cache_config.block_size
+    blocked, admitted = (
+        create_request(
+            block_size=block_size, num_tokens=block_size * 2, do_remote_prefill=True
+        )
+        for _ in range(2)
+    )
+    blocked.lora_request = LoRARequest("lora-2", 2, "/p")
+    admitted.lora_request = LoRARequest("lora-1", 1, "/p")
+    for request in (blocked, admitted):
+        scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+    assert list(scheduler.kv_holding_waiting) == [blocked, admitted]
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # lora-1 takes the only adapter slot while the loads are in flight.
+    local, waiting = (
+        create_request(block_size=block_size, num_tokens=block_size) for _ in range(2)
+    )
+    local.lora_request = LoRARequest("lora-1", 1, "/p")
+    waiting.lora_request = LoRARequest("lora-2", 2, "/p")
+    scheduler.add_request(local)
+    scheduler_output = scheduler.schedule()
+    assert scheduler.running == [local]
+    scheduler.add_request(waiting)
+    scheduler.update_from_output(
+        scheduler_output,
+        create_model_runner_output(
+            [local],
+            finished_recving={blocked.request_id, admitted.request_id},
+        ),
+    )
+
+    scheduler_output = scheduler.schedule()
+    assert [r.req_id for r in scheduler_output.scheduled_new_reqs] == [
+        admitted.request_id
+    ]
+    assert list(scheduler.kv_holding_waiting) == [blocked]
+    assert blocked.status == RequestStatus.WAITING
+    assert list(scheduler.waiting) == [waiting]
 
 
 def test_basic_lifecycle():
