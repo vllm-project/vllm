@@ -17,6 +17,7 @@ from vllm.renderers.chat_utils import (
     MultiModalItemTracker,
     parse_chat_message_content_parts,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from .typing import (
     ScoreContentPartParam,
@@ -48,22 +49,35 @@ def truncate_text_to_tokens(
 
     Uses offset_mapping to slice the original text at the exact character
     boundary, avoiding lossy encode→decode round-trips that can shift
-    the token count due to BPE merge boundary changes.
+    the token count due to BPE merge boundary changes. MistralTokenizer has
+    no offset_mapping, so its boundary comes from the decoded token prefix;
+    the token count of the sliced text is re-checked either way.
     """
     if max_tokens <= 0:
         return ""
 
     while text:
-        encoding = tokenizer(
-            text,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        offsets = encoding["offset_mapping"]
-        if len(encoding["input_ids"]) <= max_tokens:
-            break
+        if is_mistral_tokenizer(tokenizer):
+            token_ids = tokenizer.encode(text, add_special_tokens=False)
+            if len(token_ids) <= max_tokens:
+                break
 
-        char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+            # Unless special tokens are skipped, SentencePiece pieces such as
+            # "▁" and "<0x0A>" are decoded verbatim.
+            prefix = tokenizer.decode(token_ids[:max_tokens], skip_special_tokens=True)
+            char_end = len(prefix)
+        else:
+            encoding = tokenizer(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+            offsets = encoding["offset_mapping"]
+            if len(encoding["input_ids"]) <= max_tokens:
+                break
+
+            char_end = min(offsets[max_tokens - 1][1], offsets[max_tokens][0])
+
         if char_end >= len(text):
             char_end = len(text) - 1
         text = text[:char_end]
