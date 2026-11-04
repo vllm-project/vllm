@@ -23,7 +23,6 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
-COMMAND_CACHE_AMD = "/amd-ci cache"
 ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
@@ -54,7 +53,6 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
-        COMMAND_CACHE_AMD,
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
@@ -81,15 +79,6 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
-# pre-commit.yml fails a PR that changes these until it has one of these labels:
-# `/amd-ci cache` adds the first; maintainers add the second to skip caching.
-ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
-ROCM_CACHED_LABEL = "rocm-base-cached"
-ROCM_CACHE_SKIP_LABEL = "rocm-base-cache-skip"
-# build.sh base mode records the stack images it built under these keys.
-ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
-# build.sh promote copies only images built with main's versions of these.
-ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
 
 
 class ApiError(RuntimeError):
@@ -342,44 +331,6 @@ class GitHubClient:
         self._request(
             self._repo_path(f"/issues/{issue_number}/comments"),
             body={"body": body},
-            method="POST",
-        )
-
-    def list_pr_files(self, number: int) -> list[str]:
-        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
-        return [
-            str(path)
-            for file in files
-            for path in (file["filename"], file.get("previous_filename"))
-            if path
-        ]
-
-    def get_file_sha(self, path: str, ref: str) -> str:
-        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
-        try:
-            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
-        except ApiError as error:
-            if error.status == 404:
-                return "none"
-            raise
-
-    def rerun_failed_pre_commit(self, sha: str) -> None:
-        """A label added with GITHUB_TOKEN starts no workflow: re-run the gate."""
-        sha = urllib.parse.quote(sha, safe="")
-        runs = self._request(
-            self._repo_path(f"/actions/workflows/pre-commit.yml/runs?head_sha={sha}")
-        )["workflow_runs"]
-        latest = max(runs, key=lambda run: run["created_at"], default=None)
-        if latest and latest.get("conclusion") == "failure":
-            self._request(
-                self._repo_path(f"/actions/runs/{latest['id']}/rerun-failed-jobs"),
-                method="POST",
-            )
-
-    def add_label(self, issue_number: int, label: str) -> None:
-        self._request(
-            self._repo_path(f"/issues/{issue_number}/labels"),
-            body={"labels": [label]},
             method="POST",
         )
 
@@ -1231,90 +1182,6 @@ def handle_cancel_ci(
     )
 
 
-def changes_rocm_stack(github: GitHubClient, pr: Mapping[str, Any]) -> bool:
-    return any(path in ROCM_STACK_INPUTS for path in github.list_pr_files(pr["number"]))
-
-
-def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
-    labels = (ROCM_CACHED_LABEL, ROCM_CACHE_SKIP_LABEL)
-    if pr["base"]["ref"] != "main" or any(
-        label["name"] in labels for label in pr["labels"]
-    ):
-        return ""
-    try:
-        if not changes_rocm_stack(github, pr):
-            return ""
-    except ApiError as error:  # never fail the run command over a reminder
-        print(f"Could not check the ROCm stack inputs: {error}", file=sys.stderr)
-        return ""
-    return (
-        "\n\nℹ️ This PR changes the ROCm base image, so `pre-commit` fails until it "
-        f"has the `{ROCM_CACHED_LABEL}` label: once this CI has built the image, a "
-        f"maintainer comments `{COMMAND_CACHE_AMD}`, which adds it. Maintainers can "
-        f"instead add `{ROCM_CACHE_SKIP_LABEL}`."
-    )
-
-
-def handle_cache_amd(
-    *,
-    actor: str,
-    buildkite: BuildkiteClient,
-    ci_buildkite: BuildkiteClient,
-    github: GitHubClient,
-    pr: Mapping[str, Any],
-) -> str:
-    if not changes_rocm_stack(github, pr):
-        return "This PR does not change the ROCm base image; nothing to cache."
-    sha = pr["head"]["sha"]
-    if any(
-        github.get_file_sha(p, "main") != github.get_file_sha(p, sha)
-        for p in ROCM_RECIPE
-    ):
-        raise CiPreparationError(
-            f"`{sha[:12]}` has another `build.sh` or `docker-bake-rocm.hcl` than main, "
-            "so its images cannot be cached for main. Merge main with "
-            f"`{COMMAND_RUN_CI}` and run `{COMMAND_CACHE_AMD}` again, or add "
-            f"`{ROCM_CACHE_SKIP_LABEL}`."
-        )
-    # The images this PR's own CI built, by the digests it recorded: copied as
-    # built, whatever happens to their tags afterwards.
-    sources = [
-        build
-        for client in (buildkite, ci_buildkite)
-        for build in client.list_builds(sha)
-        if is_build_for_pr(build, pr["number"])
-        and all((build.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS)
-    ]
-    source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
-    if source is None:
-        raise CiPreparationError(
-            f"No CI build of `{sha[:12]}` recorded its ROCm stack images yet. Run "
-            f"`{COMMAND_RUN_AMD_CI}` or `{COMMAND_RUN_CI}`, then `{COMMAND_CACHE_AMD}`."
-        )
-    build = buildkite.create_build(
-        {
-            "commit": "HEAD",
-            "branch": "main",
-            "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
-            "env": {
-                "ROCM_PROMOTE_PR": str(pr["number"]),
-                "ROCM_PROMOTE_SHA": sha,
-                "ROCM_PROMOTE_IMAGES": " ".join(
-                    source["meta_data"][key] for key in ROCM_STACK_IMAGE_KEYS
-                ),
-            },
-        }
-    )
-    github.add_label(pr["number"], ROCM_CACHED_LABEL)
-    github.rerun_failed_pre_commit(sha)
-    return (
-        f"Started [Buildkite AMD CI #{build['number']}]({build['web_url']}) to copy "
-        f"the ROCm stack images of [this PR's CI]({source['web_url']}) into "
-        f"`rocm/vllm-ci`, and added `{ROCM_CACHED_LABEL}`. If that build fails, "
-        f"remove the label and run `{COMMAND_CACHE_AMD}` again once fixed."
-    )
-
-
 def reply_unrecognized_command(
     event: Mapping[str, Any],
     github: GitHubClient,
@@ -1343,7 +1210,6 @@ def run(
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
     branch_updater: GitHubClient | None = None,
-    ci_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1408,19 +1274,6 @@ def run(
                 pr=pr,
                 branch_updater=branch_updater,
                 allow_repeat_run=is_trusted_permission(permission),
-            )
-            message += rocm_cache_reminder(github, pr)
-        elif command == COMMAND_CACHE_AMD:
-            if not is_trusted_permission(permission):
-                raise CiPreparationError(
-                    f"Only maintainers with write access can use `{command}`."
-                )
-            message = handle_cache_amd(
-                actor=actor,
-                buildkite=buildkite,
-                ci_buildkite=ci_buildkite or buildkite,
-                github=github,
-                pr=pr,
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
@@ -1497,9 +1350,11 @@ def main() -> None:
         amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
         upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
     )
-    buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
-    organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
-    buildkite = BuildkiteClient(buildkite_token, organization, pipeline)
+    buildkite = BuildkiteClient(
+        os.environ.get("BUILDKITE_API_TOKEN", ""),
+        os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
+        pipeline,
+    )
     branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
@@ -1509,9 +1364,6 @@ def main() -> None:
         GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
         if branch_update_token
         else None,
-        BuildkiteClient(
-            buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
-        ),
     )
 
 

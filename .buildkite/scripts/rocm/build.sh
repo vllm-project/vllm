@@ -13,8 +13,8 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
-#   promote  Copy the stack images a PR's CI built into the trusted repo (vLLM's /amd-ci cache), so
-#            main reuses them after the merge instead of rebuilding the stack.
+#   promote  Copy the stack images a PR's CI built into the trusted repo (the cache-rocm-base-image
+#            label), so main reuses them after the merge instead of rebuilding the stack.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
@@ -386,7 +386,7 @@ case $MODE in
     ;;
 
   promote)
-    # /amd-ci cache: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
+    # cache-rocm-base-image: ROCM_PROMOTE_IMAGES are the digests #ROCM_PROMOTE_PR's CI build of
     # ROCM_PROMOTE_SHA recorded. Copy the stack pair here under the key main's keys_at gives that
     # commit, if it was built with main's recipe; main reuses it once it gets that key.
     [[ $REPO == "$TRUSTED" ]] || { echo "promote only pushes to $TRUSTED" >&2; exit 2; }

@@ -559,7 +559,12 @@ def test_promote_copies_the_stack_pair_the_pr_recorded(tmp_path):
 def test_promote_skips_tags_main_already_has(tmp_path):
     # Also when the PR's CI reused them instead of recording pr<N>- images.
     status, stderr, calls = promote(
-        tmp_path, [], existing=(f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}",)
+        tmp_path,
+        [],
+        existing=(
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}-wheels",
+            f"rocm/vllm-ci:stack-rocm-{PROMOTE_KS}",
+        ),
     )
     assert status == 0, stderr
     assert not copied(calls)

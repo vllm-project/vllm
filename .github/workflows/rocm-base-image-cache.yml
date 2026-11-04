@@ -1,0 +1,44 @@
+name: Cache the ROCm base image
+
+# A maintainer's cache-rocm-base-image label on a PR that changes the ROCm stack inputs copies
+# the stack images its CI built into rocm/vllm-ci, so main reuses them after the merge. The job
+# waits for that CI build if needed. pre-commit.yml fails such a PR until it has the label.
+on:
+  pull_request_target:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  cache:
+    if: >-
+      github.repository_owner == 'vllm-project' &&
+      github.event.label.name == 'cache-rocm-base-image'
+    # Per job: labels other than this one must not cancel a waiting run.
+    concurrency:
+      group: rocm-base-image-cache-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    # Mostly waiting for CI: not worth one of the project's own runners.
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          python-version: "3.12"
+      - name: Cache the ROCm base image
+        run: >-
+          uv run --no-project --python 3.12
+          .github/workflows/scripts/rocm_base_image_cache.py
+        env:
+          BUILDKITE_API_TOKEN: ${{ secrets.BUILDKITE_API_TOKEN }}
+          BUILDKITE_AMD_PIPELINE: amd-ci
+          BUILDKITE_ORGANIZATION: vllm
+          BUILDKITE_PIPELINE: ci
+          GH_TOKEN: ${{ github.token }}
