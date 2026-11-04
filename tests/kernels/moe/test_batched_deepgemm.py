@@ -91,6 +91,7 @@ def test_batched_deepgemm_vs_triton(
         global_num_experts=E,
         expert_map=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     # deepgemm
@@ -115,6 +116,7 @@ def test_batched_deepgemm_vs_triton(
         global_num_experts=E,
         expert_map=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     diff = calc_diff(out_deepgemm, out_triton)

@@ -381,6 +381,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         """Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -404,6 +406,8 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[Callable, Callable] | Callable:
         """Perform any combine plus apply weights and perform a reduction on the
         fused experts output but do not wait for results from other workers.
@@ -467,7 +471,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
         raise NotImplementedError
 
     @abstractmethod
-    def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
+    def finalize(
+        self,
+        fused_expert_output: torch.Tensor,
+        *,
+        quant_config: FusedMoEQuantConfig,
+    ) -> torch.Tensor:
         """Optional method for subclasses compatible with monolithic
         FusedMoEExpertsModular kernels.
 
@@ -522,7 +531,7 @@ class FusedMoEExperts(ABC):
             )
 
         self.moe_config = moe_config
-        self.quant_config = quant_config
+        self.quant_schema = quant_config.quant_schema
         self.activation_config = ApplyMoEActivationConfig.from_configs(
             moe_config, quant_config
         )
@@ -737,77 +746,36 @@ class FusedMoEExperts(ABC):
         return False
 
     #
-    # Various helpers for accessing quantization parameters from the
-    # quant_config.
+    # Various helpers for accessing static quantization parameters from the
+    # quant schema.
     #
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.quant_dtype
+        return self.quant_schema.quant_dtype
 
     @property
     def weight_quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.weight_quant_dtype
+        return self.quant_schema.weight_quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
-        return self.quant_config.block_shape
+        return self.quant_schema.block_shape
 
     @property
     def per_act_token_quant(self) -> bool:
-        return self.quant_config.per_act_token_quant
+        return self.quant_schema.per_act_token_quant
 
     @property
     def per_out_ch_quant(self) -> bool:
-        return self.quant_config.per_out_ch_quant
+        return self.quant_schema.per_out_ch_quant
 
     @property
-    def a1_scale(self) -> torch.Tensor | None:
-        return self.quant_config.a1_scale
+    def use_int4_w4a16(self) -> bool:
+        return self.quant_schema.use_int4_w4a16
 
-    @property
-    def a2_scale(self) -> torch.Tensor | None:
-        return self.quant_config.a2_scale
-
-    @property
-    def a1_gscale(self) -> torch.Tensor | None:
-        return self.quant_config.a1_gscale
-
-    @property
-    def a2_gscale(self) -> torch.Tensor | None:
-        return self.quant_config.a2_gscale
-
-    @property
-    def w1_scale(self) -> torch.Tensor | None:
-        return self.quant_config.w1_scale
-
-    @property
-    def w2_scale(self) -> torch.Tensor | None:
-        return self.quant_config.w2_scale
-
-    @property
-    def w1_zp(self) -> torch.Tensor | None:
-        return self.quant_config.w1_zp
-
-    @property
-    def w2_zp(self) -> torch.Tensor | None:
-        return self.quant_config.w2_zp
-
-    @property
-    def w1_bias(self) -> torch.Tensor | None:
-        return self.quant_config.w1_bias
-
-    @property
-    def w2_bias(self) -> torch.Tensor | None:
-        return self.quant_config.w2_bias
-
-    @property
-    def g1_alphas(self) -> torch.Tensor | None:
-        return self.quant_config.g1_alphas
-
-    @property
-    def g2_alphas(self) -> torch.Tensor | None:
-        return self.quant_config.g2_alphas
+    def config_name(self, dtype: torch.dtype) -> str | None:
+        return self.quant_schema.config_name(dtype)
 
     @staticmethod
     def supports_lora() -> bool:
@@ -987,6 +955,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> UnfinalizedMoEOutput | None:
         """This function computes the intermediate result of a Mixture of Experts
         (MoE) layer using two sets of weights, w1 and w2.
@@ -1027,6 +997,7 @@ class FusedMoEExpertsModular(FusedMoEExperts):
             apply_router_weight_on_input: True if router weights are already
                 applied on the input. This is relevant if the implementation
                 chooses to do weight application.
+            quant_config: Runtime quantization parameters for this invocation.
 
         """
         raise NotImplementedError
@@ -1090,6 +1061,8 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
@@ -1256,6 +1229,7 @@ class FusedMoEKernelModularImpl:
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor | None,
@@ -1285,7 +1259,7 @@ class FusedMoEKernelModularImpl:
                 global_num_experts,
                 expert_map,
                 apply_router_weight_on_input,
-                self.fused_experts.quant_config,
+                quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
         else:
@@ -1298,7 +1272,7 @@ class FusedMoEKernelModularImpl:
                 global_num_experts,
                 expert_map,
                 apply_router_weight_on_input,
-                self.fused_experts.quant_config,
+                quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
 
@@ -1350,6 +1324,7 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        quant_config: FusedMoEQuantConfig,
         output_alias: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
@@ -1414,11 +1389,12 @@ class FusedMoEKernelModularImpl:
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=a1q_scale,
-            a2_scale=self.fused_experts.a2_scale,
+            a2_scale=quant_config.a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=quant_config,
         )
 
         # Experts that stopped after GEMM2 wrote nothing into `fused_out`; the
@@ -1438,6 +1414,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         """The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
@@ -1456,6 +1433,7 @@ class FusedMoEKernelModularImpl:
                 tensor (smaller dimension) used by routed experts, while
                 shared_experts_input is the original hidden_states (full
                 dimension) needed by the shared expert MLP.
+            quant_config: Runtime quantization parameters for this invocation.
 
         """
         if not self.prepare_finalize.supports_async():
@@ -1468,6 +1446,7 @@ class FusedMoEKernelModularImpl:
                 topk_ids,
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
+                quant_config=quant_config,
             )
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
@@ -1477,6 +1456,7 @@ class FusedMoEKernelModularImpl:
                 topk_ids,
                 apply_router_weight_on_input,
                 self.fused_experts.finalize_weight_and_reduce_impl(),
+                quant_config=quant_config,
             )
             self._maybe_apply_shared_experts(shared_experts, shared_experts_input)
 
@@ -1516,6 +1496,8 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool = False,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -1541,6 +1523,7 @@ class FusedMoEKernelModularImpl:
             shared_experts_input (Optional[torch.Tensor]): Optional separate
                 input for shared experts. For latent MoE, this is the original
                 hidden_states before latent projection.
+            quant_config: Runtime quantization parameters for this invocation.
 
         Returns:
             torch.Tensor: The output tensor after applying the MoE layer, or
@@ -1566,6 +1549,7 @@ class FusedMoEKernelModularImpl:
             global_num_experts,
             expert_map,
             apply_router_weight_on_input,
+            quant_config,
         )
 
         # Stash the original unquantized hidden states on the LoRA context
@@ -1589,6 +1573,7 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            quant_config=quant_config,
             output_alias=output,
         )
 
@@ -1615,6 +1600,7 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=quant_config,
         )
 
 
@@ -1647,6 +1633,7 @@ class FusedMoEKernelMonolithicImpl:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         """Same as forward(), except uses router_logits as opposed
         to the topk_ids and topk_weights. This is used for kernels
@@ -1662,7 +1649,7 @@ class FusedMoEKernelMonolithicImpl:
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
-            quant_config=self.fused_experts.quant_config,
+            quant_config=quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
@@ -1691,6 +1678,7 @@ class FusedMoEKernelMonolithicImpl:
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
             routing_replay_out=routing_replay_out,
+            quant_config=quant_config,
             **hash_kwargs,
         )
         if routing_sink is not None:
@@ -1703,7 +1691,7 @@ class FusedMoEKernelMonolithicImpl:
                     "a deferred MoE output."
                 )
             return fused_out
-        return self.prepare_finalize.finalize(fused_out)
+        return self.prepare_finalize.finalize(fused_out, quant_config=quant_config)
 
 
 @final
@@ -1806,6 +1794,7 @@ class FusedMoEKernel:
         routing_sink: RoutedExpertsSink | None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1824,6 +1813,7 @@ class FusedMoEKernel:
             routing_sink=routing_sink,
             input_ids=input_ids,
             hash_indices_table=hash_indices_table,
+            quant_config=quant_config,
         )
 
     def apply(
@@ -1839,6 +1829,8 @@ class FusedMoEKernel:
         apply_router_weight_on_input: bool,
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
@@ -1853,4 +1845,5 @@ class FusedMoEKernel:
             apply_router_weight_on_input=apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=quant_config,
         )

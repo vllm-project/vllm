@@ -351,14 +351,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             " support (e.g. Nvidia Blackwell) for better performance."
         )
 
-        # `TritonExperts.apply` expects pre-dequantized weights,
-        # which we handle in `apply` below.
-        self.w1_scale_val = self.quant_config.w1_scale
-        self.w2_scale_val = self.quant_config.w2_scale
-
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
-
         self.quantization_emulation = True
 
     @property
@@ -369,10 +361,8 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     def expects_unquantized_inputs(self) -> bool:
         return True
 
-    @property
-    def a1_scale(self) -> torch.Tensor:
-        # Used in experts/triton_moe.py and passed to moe_kernel_quantize_input.
-        return self.a1_gscale
+    def _runtime_a1_scale(self, quant_config: FusedMoEQuantConfig) -> torch.Tensor:
+        return quant_config.a1_gscale
 
     @staticmethod
     def supports_lora() -> bool:
@@ -423,6 +413,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         """Apply emulated quantized MoE computation.
 
@@ -454,7 +445,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             w1.size(),
             w2.size(),
             top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
+            quant_config.config_name(hidden_states.dtype),
             num_tokens,
             block_shape=None,
         )
@@ -485,7 +476,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         # Activation NVFP4 QDQ.
         hidden_states_qdq, _ = moe_kernel_quantize_input(
             A=hidden_states,
-            A_scale=self.quant_config.a1_gscale,
+            A_scale=quant_config.a1_gscale,
             quant_dtype="nvfp4",
             per_act_token_quant=False,
             quantization_emulation=True,
@@ -496,9 +487,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             hidden_states_qdq,
             w1,
             intermediate_cache1,
-            self.w1_scale_val,
-            self.quant_config.a1_gscale,
-            self.quant_config.g1_alphas,
+            quant_config.w1_scale,
+            quant_config.a1_gscale,
+            quant_config.g1_alphas,
             None,  # topk_weights — applied after w2
             sorted_token_ids,
             expert_ids,
@@ -516,7 +507,7 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         # Activation NVFP4 QDQ.
         intermediate_cache2_qdq, _ = moe_kernel_quantize_input(
             A=intermediate_cache2,
-            A_scale=self.quant_config.a2_gscale,
+            A_scale=quant_config.a2_gscale,
             quant_dtype="nvfp4",
             per_act_token_quant=False,
             quantization_emulation=True,
@@ -527,9 +518,9 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             intermediate_cache2_qdq,
             w2,
             intermediate_cache3,
-            self.w2_scale_val,
-            self.quant_config.a2_gscale,
-            self.quant_config.g2_alphas,
+            quant_config.w2_scale,
+            quant_config.a2_gscale,
+            quant_config.g2_alphas,
             topk_weights,
             sorted_token_ids,
             expert_ids,

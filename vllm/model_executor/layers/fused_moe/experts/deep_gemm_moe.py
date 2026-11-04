@@ -331,12 +331,13 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert a1q_scale is not None
         assert a2_scale is None
         assert self.block_shape is not None
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         a1q = hidden_states
         _, N, K = w1.size()
@@ -404,7 +405,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             mm1_out = _resize_cache(workspace2, (M_sum, N))
             m_grouped_fp8_gemm_nt_contiguous(
                 (a1q, a1q_scale),
-                (w1, self.w1_scale),
+                (w1, quant_config.w1_scale),
                 mm1_out,
                 grouped_layout,
                 **gemm_kwargs,
@@ -425,7 +426,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             mm2_out = _resize_cache(workspace2, (M_sum, K))
             m_grouped_fp8_gemm_nt_contiguous(
                 (a2q, a2q_scale),
-                (w2, self.w2_scale),
+                (w2, quant_config.w2_scale),
                 mm2_out,
                 grouped_layout,
                 **gemm_kwargs,
@@ -614,11 +615,12 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert a1q_scale is not None
         assert a2_scale is None
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         a1q = hidden_states
         _, N, _ = w1.size()
@@ -662,7 +664,7 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             mm1_out = _resize_cache(workspace2, (M_sum, N))
             m_grouped_fp8_fp4_gemm_nt_contiguous(
                 (a1q, a1q_scale),
-                (w1.view(torch.int8), self.w1_scale),
+                (w1.view(torch.int8), quant_config.w1_scale),
                 mm1_out,
                 grouped_layout,
                 use_psum_layout=use_psum_layout,
@@ -687,7 +689,7 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             mm2_out = _resize_cache(workspace2, (M_sum, K))
             m_grouped_fp8_fp4_gemm_nt_contiguous(
                 (a2q, a2q_scale),
-                (w2.view(torch.int8), self.w2_scale),
+                (w2.view(torch.int8), quant_config.w2_scale),
                 mm2_out,
                 grouped_layout,
                 use_psum_layout=use_psum_layout,

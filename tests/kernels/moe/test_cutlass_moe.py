@@ -363,6 +363,7 @@ def test_cutlass_fp4_moe_EP(
         "activation": MoEActivation.SILU,
         "expert_map": None,
         "apply_router_weight_on_input": False,
+        "quant_config": quant_config,
     }
     reference = kernel.apply(**apply_kwargs)
     assert isinstance(reference, torch.Tensor)
@@ -558,8 +559,11 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
                 backend, torch.nn.Module(), w1, w2, w1_scale, w2_scale
             )
         )
+        quant_config = mxfp4_oracle.make_mxfp4_moe_quant_config(
+            backend, w13_scale, w2_scale
+        )
         kernel = mxfp4_oracle.make_mxfp4_moe_kernel(
-            mxfp4_oracle.make_mxfp4_moe_quant_config(backend, w13_scale, w2_scale),
+            quant_config,
             moe_config,
             experts_cls,
             backend,
@@ -574,6 +578,7 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
@@ -690,6 +695,9 @@ def run_with_expert_maps(
     experts_cls: type[mk.FusedMoEExperts],
     **cutlass_moe_kwargs,
 ):
+    cutlass_moe_kwargs = dict(cutlass_moe_kwargs)
+    cutlass_moe_kwargs.pop("quant_config", None)
+
     def slice_experts():
         slice_params = [
             "w1",
@@ -745,7 +753,7 @@ def run_with_expert_maps(
                 quant_config=new_quant_config,
             ),
         )
-        out_tensor = out_tensor + kernel.apply(**kwargs)
+        out_tensor = out_tensor + kernel.apply(quant_config=new_quant_config, **kwargs)
 
     return out_tensor
 
@@ -811,7 +819,7 @@ def run_8_bit(
                 quant_config=quant_config,
             ),
         )
-        return kernel.apply(**kwargs)
+        return kernel.apply(quant_config=quant_config, **kwargs)
 
     assert num_local_experts is not None
     return run_with_expert_maps(

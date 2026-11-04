@@ -152,6 +152,7 @@ def _route_launcher(
     num_experts: int,
     num_local_experts: int | None = None,
     expert_map: torch.Tensor | None = None,
+    quant_config: FusedMoEQuantConfig,
 ) -> tuple[torch.Tensor, Callable[[], None]]:
     """Allocate outputs once; return them with a graph-capturable launcher."""
     num_tokens, hidden_size = hidden_states.shape
@@ -187,6 +188,7 @@ def _route_launcher(
             workspace2,
             None,
             False,
+            quant_config=quant_config,
         )
 
     return routes, launch
@@ -194,9 +196,8 @@ def _route_launcher(
 
 def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None:
     config = _moe_config(parallel_config=_parallel_config(tp_size=8))
-    experts = MuseSparkAiterExperts(
-        config, _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
-    )
+    quant_config = _quant_config(_rms_norm, MuseSparkQuarkOCPMXMoEQuantConfig)
+    experts = MuseSparkAiterExperts(config, quant_config)
     calls: list[dict[str, torch.Tensor | bool]] = []
 
     def _fake_aiter_fused_experts(**kwargs) -> torch.Tensor:
@@ -230,6 +231,7 @@ def test_muse_aiter_experts_expand_routes_with_unit_weights(monkeypatch) -> None
         topk_ids,
         intermediate_size=8,
         num_experts=4,
+        quant_config=quant_config,
     )
     assert output.shape == (2, 2, 8)
     launch()
@@ -619,6 +621,7 @@ def test_rocm_aiter_mxfp4_route_expansion_numeric_and_graph_replay(
         topk_ids,
         intermediate_size=intermediate_size,
         num_experts=num_experts,
+        quant_config=quant_config,
     )
     output = torch.empty(num_tokens, hidden_size, device=device, dtype=dtype)
     parked: list[torch.Tensor] = []
@@ -693,7 +696,8 @@ def test_rocm_triton_experts_numeric_and_graph_replay() -> None:
         intermediate_size=intermediate_size,
         device="cuda",
     )
-    experts = MuseSparkTritonExperts(moe_config, _quant_config(_input_scaled_rms_norm))
+    quant_config = _quant_config(_input_scaled_rms_norm)
+    experts = MuseSparkTritonExperts(moe_config, quant_config)
     reducer = experts.finalize_weight_and_reduce_impl()
 
     hidden_states = (torch.randn(num_tokens, hidden_size, device="cuda") * 0.2).to(
@@ -745,6 +749,7 @@ def test_rocm_triton_experts_numeric_and_graph_replay() -> None:
         topk_ids,
         intermediate_size=intermediate_size,
         num_experts=num_experts,
+        quant_config=quant_config,
     )
     output = torch.empty(num_tokens, hidden_size, device="cuda", dtype=dtype)
     parked: list[torch.Tensor] = []
@@ -837,7 +842,8 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
         )
         experts: MuseSparkTritonExperts | MuseSparkAiterExperts
         if backend == "triton":
-            experts = MuseSparkTritonExperts(config, _quant_config(_rms_norm))
+            quant_config = _quant_config(_rms_norm)
+            experts = MuseSparkTritonExperts(config, quant_config)
             kernel_map = expert_map
         else:
             w13, w2, quant_config = _mxfp4_weights(w13, w2)
@@ -854,6 +860,7 @@ def test_rocm_ep_ranks_sum_to_the_unsharded_output(
             num_experts=num_experts,
             num_local_experts=local,
             expert_map=None if kernel_map is None else kernel_map.cuda(),
+            quant_config=quant_config,
         )
         launch()
         assert experts._route_output is not None

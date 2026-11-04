@@ -67,9 +67,6 @@ class TrtLlmFp8ExpertsBase:
     """
 
     kept_constants: tuple[str, ...] = (
-        "_g1_alphas",
-        "_g2_alphas",
-        "_g1_scale_c",
         "gemm1_alpha",
         "gemm1_beta",
         "gemm1_clamp_limit",
@@ -135,7 +132,7 @@ class TrtLlmFp8ExpertsBase:
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
         self.moe_config = moe_config
-        self.quant_config = quant_config
+        self.quant_schema = quant_config.quant_schema
 
         # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
         device = torch.accelerator.current_device_index()
@@ -286,6 +283,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> UnfinalizedMoEOutput | None:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
@@ -298,7 +296,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             )
         assert a1q_scale is not None
 
-        is_mxfp8 = self.quant_config.block_shape == [1, 32]
+        is_mxfp8 = quant_config.block_shape == [1, 32]
         if is_mxfp8:
             fp8_quant_type = Fp8QuantizationType.MxFp8
             use_shuffled_weight = True
@@ -318,12 +316,12 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_weights_scale=quant_config.w1_scale,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale,
+            gemm2_weights_scale=quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=topk_ids.size(1),
             n_group=None,
@@ -364,25 +362,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-
-        # Make additional scales for per-tensor interface.
-        if self.quant_config.is_per_tensor:
-            w1_scale = self.quant_config.w1_scale
-            assert w1_scale is not None
-            a1_scale = self.quant_config.a1_scale
-            assert a1_scale is not None
-            w2_scale = self.quant_config.w2_scale
-            assert w2_scale is not None
-            a2_scale = self.quant_config.a2_scale
-            assert a2_scale is not None
-
-            self._g1_alphas = (w1_scale * a1_scale).squeeze()
-            self._g2_alphas = (w2_scale * a2_scale).squeeze()
-            self._g1_scale_c = (
-                self._g1_alphas / self.quant_config.a2_scale
-                if moe_config.is_act_and_mul
-                else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
-            )
 
     @staticmethod
     def _supports_quant_scheme(
@@ -458,6 +437,8 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
@@ -471,13 +452,13 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         activation_type = activation_to_flashinfer_int(activation)
         assert self.topk <= global_num_experts
         assert global_num_experts % 4 == 0
-        assert self.quant_config.block_shape in [[128, 128], [1, 32]]
+        assert quant_config.block_shape in [[128, 128], [1, 32]]
         # Kernel expects #experts <= #threads 512
         assert global_num_experts <= 512
         # TODO: fuse into the quant kernel.
         assert a1q_scale is not None
 
-        is_mxfp8 = self.quant_config.block_shape == [1, 32]
+        is_mxfp8 = quant_config.block_shape == [1, 32]
         if is_mxfp8:
             fp8_quant_type = Fp8QuantizationType.MxFp8
             use_shuffled_weight = True
@@ -501,12 +482,12 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_weights_scale=quant_config.w1_scale,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale,
+            gemm2_weights_scale=quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=n_group,
@@ -544,6 +525,8 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         # Delay import for non-CUDA.
         import flashinfer
@@ -552,6 +535,22 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
         activation_type = activation_to_flashinfer_int(activation)
+
+        w1_scale = quant_config.w1_scale
+        assert w1_scale is not None
+        a1_scale = quant_config.a1_scale
+        assert a1_scale is not None
+        w2_scale = quant_config.w2_scale
+        assert w2_scale is not None
+        a2_scale = quant_config.a2_scale
+        assert a2_scale is not None
+        g1_alphas = (w1_scale * a1_scale).squeeze()
+        g2_alphas = (w2_scale * a2_scale).squeeze()
+        g1_scale_c = (
+            g1_alphas / a2_scale
+            if self.moe_config.is_act_and_mul
+            else torch.ones_like(g1_alphas) / a2_scale
+        )
 
         # Confirm Llama-4 routing is proper.
         if self.routing_method_type == RoutingMethodType.Llama4:
@@ -564,10 +563,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             gemm1_weights=w1,
-            output1_scales_scalar=self._g1_scale_c,
-            output1_scales_gate_scalar=self._g1_alphas,
+            output1_scales_scalar=g1_scale_c,
+            output1_scales_gate_scalar=g1_alphas,
             gemm2_weights=w2,
-            output2_scales_scalar=self._g2_alphas,
+            output2_scales_scalar=g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=num_expert_group or 0,
@@ -601,8 +600,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
-        if self.quant_config.block_shape is not None:
+        if quant_config.block_shape is not None:
             return self._apply_block_scale(
                 hidden_states,
                 w1,
@@ -618,8 +619,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 routed_scaling_factor=routed_scaling_factor,
                 topk_group=topk_group,
                 routing_replay_out=routing_replay_out,
+                quant_config=quant_config,
             )
-        elif self.quant_config.is_per_tensor:
+        elif quant_config.is_per_tensor:
             return self._apply_per_tensor(
                 hidden_states,
                 w1,
@@ -634,6 +636,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
                 e_score_correction_bias=e_score_correction_bias,
                 routed_scaling_factor=routed_scaling_factor,
                 routing_replay_out=routing_replay_out,
+                quant_config=quant_config,
             )
         else:
             raise NotImplementedError(

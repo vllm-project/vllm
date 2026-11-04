@@ -138,6 +138,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         num_token = output.shape[0]
         assert self._dispatch_topk_ids is not None, (

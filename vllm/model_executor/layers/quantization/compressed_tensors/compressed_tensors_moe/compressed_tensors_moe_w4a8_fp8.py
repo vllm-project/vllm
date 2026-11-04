@@ -194,7 +194,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             replace_parameter(layer, name, tensor)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None:
+        if self.moe_quant_config_or_none is not None:
             assert self.experts_cls is not None
             self.moe_kernel = make_w4a8_moe_kernel(
                 backend=self.w4a8_backend,
@@ -241,6 +241,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     @property

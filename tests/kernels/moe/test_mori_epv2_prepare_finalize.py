@@ -76,6 +76,7 @@ def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     prepare_finalize = _make_pf(op, **pf_kwargs)
     num_tokens = topk_ids.shape[0]
+    quant_config = SimpleNamespace(is_per_tensor=False, a1_scale=None)
     prepared = prepare_finalize.prepare(
         torch.ones(num_tokens, 4, dtype=torch.bfloat16),
         torch.ones(num_tokens, 2, dtype=torch.bfloat16),
@@ -83,7 +84,7 @@ def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
         num_experts=8,
         expert_map=None,
         apply_router_weight_on_input=False,
-        quant_config=SimpleNamespace(is_per_tensor=False, a1_scale=None),
+        quant_config=quant_config,
     )
     prepare_finalize.finalize(
         torch.empty(num_tokens, 4, dtype=torch.bfloat16),
@@ -92,6 +93,7 @@ def _run(monkeypatch, op, num_tokens_across_dp, topk_ids, **pf_kwargs):
         prepared[3],
         False,
         SimpleNamespace(),
+        quant_config=quant_config,
     )
     return prepared
 
@@ -291,7 +293,7 @@ def test_experts_it_cannot_feed_are_rejected(
 ):
     experts = SimpleNamespace(
         moe_config=SimpleNamespace(in_dtype=in_dtype),
-        quant_config=SimpleNamespace(quant_dtype=quant_dtype, is_per_tensor=per_tensor),
+        quant_schema=SimpleNamespace(quant_dtype=quant_dtype, is_per_tensor=per_tensor),
         expects_unquantized_inputs=quantizes_itself,
     )
     prepare_finalize = _make_pf(FakeOp(16))

@@ -235,6 +235,7 @@ def test_w8a8_block_fp8_fused_moe(
             apply_router_weight_on_input=False,
             expert_map=None,
             global_num_experts=w1.shape[0],
+            quant_config=quant_config,
         )
 
     # 0.039 only needed for M >= 8192
@@ -298,6 +299,7 @@ def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_in
                 apply_router_weight_on_input=False,
                 expert_map=None,
                 global_num_experts=E,
+                quant_config=quant_config,
             )
 
     else:
@@ -362,6 +364,7 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
             apply_router_weight_on_input=False,
             expert_map=None,
             global_num_experts=E,
+            quant_config=quant_config,
         )
 
     assert (fused_calls > 0) == (clamp_limit is None), (
@@ -414,6 +417,7 @@ def test_w8a8_block_fp8_fused_moe_expert_map(M, N, K, topk, ep_size, workspace_i
             apply_router_weight_on_input=False,
             expert_map=e_map,
             global_num_experts=E,
+            quant_config=quant_config,
         )
 
     torch.testing.assert_close(m_out, ref_out, atol=0.035, rtol=0.035)
@@ -491,6 +495,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             activation=MoEActivation.SILU,
             apply_router_weight_on_input=False,
             expert_map=False,
+            quant_config=quant_config,
         )
 
     # Set the context to avoid lots of warning spam.

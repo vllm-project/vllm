@@ -152,6 +152,8 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         if apply_router_weight_on_input:
             raise NotImplementedError(
@@ -190,14 +192,14 @@ class ZentorchExpertsInt4(mk.FusedMoEExpertsMonolithic):
             hidden_states,
             w1,
             w2,
-            self.w1_bias,
-            self.w2_bias,
+            quant_config.w1_bias,
+            quant_config.w2_bias,
             topk_weights,
             topk_ids,
             False,  # skip_weighted
             _moe_activation_to_str(activation),
-            self.w1_scale,
-            self.w2_scale,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
         )
         return output
 

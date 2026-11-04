@@ -551,6 +551,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def get_weight_loader(self, layer: RoutedExperts, weight_loader):
@@ -1026,6 +1027,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -1068,7 +1070,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         assert self.activation_quant_key is not None
         self.static_input_scales = self.activation_quant_key.scale.static
 
-        self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
         self.int8_backend: Int8MoeBackend | None = None
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
@@ -1393,6 +1394,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 expert_map=layer.expert_map,
                 shared_experts_input=shared_experts_input,
+                quant_config=self.moe_quant_config,
             )
 
         # Static-activation INT8 MoE: legacy monolithic path (the modular kernel
@@ -1891,7 +1893,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Build quant config and kernel
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        if self.moe_quant_config_or_none is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
@@ -2003,6 +2005,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def apply_monolithic(
@@ -2028,6 +2031,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -2195,6 +2199,7 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def apply_monolithic(
@@ -2220,6 +2225,7 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -2427,7 +2433,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
+        if self.moe_quant_config_or_none:
             assert self.experts_cls is not None
             self.moe_kernel = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
@@ -2477,4 +2483,5 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )

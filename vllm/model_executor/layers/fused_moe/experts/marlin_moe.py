@@ -632,18 +632,17 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
         # two-sided kernels are unsupported here.
         return not moe_parallel_config.use_fi_nvl_two_sided_kernels
 
-    @property
-    def quant_type_id(self) -> int:
-        if self.quant_config.use_int4_w4a16:
-            if self.w1_zp is not None or self.w2_zp is not None:
+    def _quant_type_id(self, quant_config: FusedMoEQuantConfig) -> int:
+        if quant_config.use_int4_w4a16:
+            if quant_config.w1_zp is not None or quant_config.w2_zp is not None:
                 return scalar_types.uint4.id
             return scalar_types.uint4b8.id
-        elif self.quant_config.use_int8_w8a16:
+        elif quant_config.use_int8_w8a16:
             return scalar_types.uint8b128.id
-        elif self.quant_config.use_mxfp4_w4a16 or self.quant_config.use_nvfp4_w4a16:
+        elif quant_config.use_mxfp4_w4a16 or quant_config.use_nvfp4_w4a16:
             return scalar_types.float4_e2m1f.id
         elif (
-            self.quant_config.use_fp8_w8a16
+            quant_config.use_fp8_w8a16
             and current_platform.fp8_dtype() == torch.float8_e4m3fn
         ):
             return scalar_types.float8_e4m3fn.id
@@ -737,9 +736,10 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         hooked = self._uses_post_gemm2_hook(hidden_states.shape[0])
         ctx = self._lora_context
@@ -765,19 +765,19 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
-                bias1=self.w1_bias,
-                bias2=self.w2_bias,
-                w1_scale=self.w1_scale,
-                w2_scale=self.w2_scale,
+                bias1=quant_config.w1_bias,
+                bias2=quant_config.w2_bias,
+                w1_scale=quant_config.w1_scale,
+                w2_scale=quant_config.w2_scale,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                global_scale1=self.g1_alphas,
-                global_scale2=self.g2_alphas,
-                input_global_scale1=self.a1_gscale,
-                input_global_scale2=self.a2_gscale,
-                w1_zeros=self.w1_zp,
-                w2_zeros=self.w2_zp,
-                quant_type_id=self.quant_type_id,
+                global_scale1=quant_config.g1_alphas,
+                global_scale2=quant_config.g2_alphas,
+                input_global_scale1=quant_config.a1_gscale,
+                input_global_scale2=quant_config.a2_gscale,
+                w1_zeros=quant_config.w1_zp,
+                w2_zeros=quant_config.w2_zp,
+                quant_type_id=self._quant_type_id(quant_config),
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 activation=activation,
@@ -878,19 +878,19 @@ class MarlinExperts(LoRAExpertsMixin, MarlinExpertsBase):
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
-            bias1=self.w1_bias,
-            bias2=self.w2_bias,
-            w1_scale=self.w1_scale,
-            w2_scale=self.w2_scale,
+            bias1=quant_config.w1_bias,
+            bias2=quant_config.w2_bias,
+            w1_scale=quant_config.w1_scale,
+            w2_scale=quant_config.w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            global_scale1=self.g1_alphas,
-            global_scale2=self.g2_alphas,
-            input_global_scale1=self.a1_gscale,
-            input_global_scale2=self.a2_gscale,
-            w1_zeros=self.w1_zp,
-            w2_zeros=self.w2_zp,
-            quant_type_id=self.quant_type_id,
+            global_scale1=quant_config.g1_alphas,
+            global_scale2=quant_config.g2_alphas,
+            input_global_scale1=quant_config.a1_gscale,
+            input_global_scale2=quant_config.a2_gscale,
+            w1_zeros=quant_config.w1_zp,
+            w2_zeros=quant_config.w2_zp,
+            quant_type_id=self._quant_type_id(quant_config),
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
@@ -983,6 +983,7 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert expert_tokens_meta is not None, "Num valid tokens per batch is required"
 
@@ -1009,22 +1010,22 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             expert_num_tokens=expert_tokens_meta.expert_num_tokens,
             w1=w1,
             w2=w2,
-            bias1=self.w1_bias,
-            bias2=self.w2_bias,
-            w1_scale=self.w1_scale,
-            w2_scale=self.w2_scale,
-            quant_type_id=self.quant_type_id,
+            bias1=quant_config.w1_bias,
+            bias2=quant_config.w2_bias,
+            w1_scale=quant_config.w1_scale,
+            w2_scale=quant_config.w2_scale,
+            quant_type_id=self._quant_type_id(quant_config),
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
-            input_global_scale1=self.a1_gscale,
-            input_global_scale2=self.a2_gscale,
+            input_global_scale1=quant_config.a1_gscale,
+            input_global_scale2=quant_config.a2_gscale,
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
-            w1_zeros=self.w1_zp,
-            w2_zeros=self.w2_zp,
+            w1_zeros=quant_config.w1_zp,
+            w2_zeros=quant_config.w2_zp,
             input_dtype=self.input_dtype,
             activation_func=activation_func,
             activation_config=self.activation_config,

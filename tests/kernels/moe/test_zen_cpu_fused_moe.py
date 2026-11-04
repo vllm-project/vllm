@@ -190,6 +190,7 @@ def test_zen_cpu_fused_moe_forward(
         workspace2=torch.empty(0),
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     # zentorch needs no prepacking; weights are consumed as loaded.

@@ -19,6 +19,7 @@ and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
@@ -329,11 +330,11 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.quant_dtype
+        return self.quant_schema.quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
-        return self.quant_config.block_shape
+        return self.quant_schema.block_shape
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -361,14 +362,15 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         activation_config = self.activation_config
         out = fused_moe_mxfp8_native(
             hidden_states,
             w1,
-            self.w1_scale_val,
+            quant_config.w1_scale,
             w2,
-            self.w2_scale_val,
+            quant_config.w2_scale,
             topk_weights,
             topk_ids,
             alpha=activation_config.alpha,

@@ -108,8 +108,9 @@ def test_hopper_marlin_moe_runs_with_triton_finalize(
         checkpoint, nvfp4_quant_config()
     )
     assert type(experts) is MarlinExperts
-    assert experts.g1_alphas is not None
-    assert experts.g1_alphas.shape == (E,)
+    quant_config = runner.routed_experts.quant_method.moe_quant_config
+    assert quant_config.g1_alphas is not None
+    assert quant_config.g1_alphas.shape == (E,)
 
     hidden_states = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") / 10
     router_logits = torch.randn(M, E, dtype=torch.float32, device="cuda")

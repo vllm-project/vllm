@@ -187,6 +187,7 @@ def _mori_worker(pgi, vllm_config, cpu_group, m, n, k, scheme, graph):
                 global_num_experts=32,
                 expert_map=expert_mask,
                 apply_router_weight_on_input=False,
+                quant_config=quant,
             )
 
     def check(actual):

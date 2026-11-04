@@ -371,9 +371,10 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
-        assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+        assert quant_config.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
+        assert quant_config.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
         expert_num_tokens = None
         if expert_tokens_meta is not None:
@@ -393,8 +394,8 @@ class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
             activation,
             global_num_experts,
             expert_map,
-            self.w1_scale,
-            self.w2_scale,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
             a1q_scale,
             a2_scale,
             self.ab_strides1,
@@ -809,6 +810,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
@@ -816,14 +818,14 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         run_cutlass_moe_fp4(
             output=output,
             a=hidden_states,
-            a1_gscale=self.a1_gscale,
+            a1_gscale=quant_config.a1_gscale,
             w1_fp4=w1,
-            w1_blockscale=self.w1_scale,
-            w1_alphas=self.g1_alphas,
-            a2_gscale=self.a2_gscale,
+            w1_blockscale=quant_config.w1_scale,
+            w1_alphas=quant_config.g1_alphas,
+            a2_gscale=quant_config.a2_gscale,
             w2_fp4=w2,
-            w2_blockscale=self.w2_scale,
-            w2_alphas=self.g2_alphas,
+            w2_blockscale=quant_config.w2_scale,
+            w2_alphas=quant_config.g2_alphas,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,
@@ -1138,6 +1140,7 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         e, m, n, k, _ = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         n = w2.shape[2] * 2
@@ -1146,9 +1149,9 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
             output=output,
             a=hidden_states,
             w1_fp4=w1,
-            w1_blockscale=self.w1_scale,
+            w1_blockscale=quant_config.w1_scale,
             w2_fp4=w2,
-            w2_blockscale=self.w2_scale,
+            w2_blockscale=quant_config.w2_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=activation,
@@ -1465,9 +1468,10 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
-        assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+        assert quant_config.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
+        assert quant_config.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
         expert_num_tokens = None
 
@@ -1487,12 +1491,12 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             activation,
             global_num_experts,
             expert_map,
-            self.w1_scale,
-            self.w2_scale,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
             a1q_scale,
             a2_scale,
-            self.g1_alphas,  # per-channel scales
-            self.g2_alphas,  # per-channel scales
+            quant_config.g1_alphas,  # per-channel scales
+            quant_config.g2_alphas,  # per-channel scales
             self.a_strides1,
             self.a_strides2,
             self.b_strides1,

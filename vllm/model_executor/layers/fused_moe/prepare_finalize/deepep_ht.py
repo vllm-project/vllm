@@ -441,6 +441,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> Callable:
         receiver = self._finalize(
             output,
@@ -462,6 +463,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         self._finalize(
             output,

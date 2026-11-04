@@ -70,7 +70,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if self.quant_config.use_nvfp4_w4a4:
+        if self.quant_schema.use_nvfp4_w4a4:
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
             layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
 
@@ -129,7 +129,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
+        return self.quant_schema.use_fp8_w8a8 and self.quant_schema.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -266,6 +266,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        quant_config: "FusedMoEQuantConfig",
     ):
         quant_scales = None
         fc1_expert_weights = None
@@ -293,10 +294,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
-                self.g1_alphas,  # w13_weight_scale * w13_input_scale
-                self.a2_gscale,  # 1.0 / w2_input_scale
-                self.g2_alphas,  # w2_weight_scale * w2_input_scale
-                self.a1_scale,
+                quant_config.g1_alphas,  # w13_weight_scale * w13_input_scale
+                quant_config.a2_gscale,  # 1.0 / w2_input_scale
+                quant_config.g2_alphas,  # w2_weight_scale * w2_input_scale
+                quant_config.a1_scale,
             ]
 
             a1q_scale = None  # not passing input_sf in fp8
@@ -304,29 +305,31 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc2_expert_weights = w2
         elif self.quant_dtype == "nvfp4":
             # Ensure w1_scale and w2_scale are not None before calling view
-            assert self.w1_scale is not None and self.w2_scale is not None, (
-                "w1_scale and w2_scale must not be None for FlashInferExperts"
-            )
+            assert (
+                quant_config.w1_scale is not None and quant_config.w2_scale is not None
+            ), "w1_scale and w2_scale must not be None for FlashInferExperts"
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
-                self.a1_gscale,
-                self.w1_scale.view(torch.int32),
-                self.g1_alphas,
-                self.a2_gscale,
-                self.w2_scale.view(torch.int32),
-                self.g2_alphas,
+                quant_config.a1_gscale,
+                quant_config.w1_scale.view(torch.int32),
+                quant_config.g1_alphas,
+                quant_config.a2_gscale,
+                quant_config.w2_scale.view(torch.int32),
+                quant_config.g2_alphas,
             ]
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
         elif self.weight_quant_dtype == "mxfp4":
-            assert self.w1_scale is not None and self.w2_scale is not None
+            assert (
+                quant_config.w1_scale is not None and quant_config.w2_scale is not None
+            )
             assert w1.is_contiguous() and w2.is_contiguous()
             assert topk_ids.is_contiguous()
 
-            fc1_expert_biases = self.w1_bias
-            fc2_expert_biases = self.w2_bias
+            fc1_expert_biases = quant_config.w1_bias
+            fc2_expert_biases = quant_config.w2_bias
             swiglu_alpha = self.gemm1_alpha
             swiglu_beta = self.gemm1_beta
             swiglu_limit = self.gemm1_clamp_limit
@@ -337,9 +340,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 fc2_expert_weights = w2.view(torch.long)
 
                 quant_scales = [
-                    self.w1_scale.view(torch.int32),
+                    quant_config.w1_scale.view(torch.int32),
                     self.fake_input_scale,
-                    self.w2_scale.view(torch.int32),
+                    quant_config.w2_scale.view(torch.int32),
                     self.fake_input_scale,
                 ]
                 use_mxfp8_act_scaling = True
@@ -348,8 +351,8 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 fc1_expert_weights = w1
                 fc2_expert_weights = w2
                 quant_scales = [
-                    self.w1_scale,
-                    self.w2_scale,
+                    quant_config.w1_scale,
+                    quant_config.w2_scale,
                 ]
                 a1q_scale = None
                 use_w4_group_scaling = True
@@ -357,8 +360,8 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale
             quant_scales = [
-                self.w1_scale,
-                self.w2_scale,
+                quant_config.w1_scale,
+                quant_config.w2_scale,
             ]
             a1q_scale = None
             fc1_expert_weights = w1

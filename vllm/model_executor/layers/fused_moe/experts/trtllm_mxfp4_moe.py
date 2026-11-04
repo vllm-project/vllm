@@ -46,7 +46,7 @@ class TrtLlmMxfp4ExpertsBase:
         **kwargs,
     ):
         self.moe_config = moe_config
-        self.quant_config = quant_config
+        self.quant_schema = quant_config.quant_schema
 
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -221,6 +221,8 @@ class TrtLlmMxfp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         from flashinfer import trtllm_fp4_block_scale_moe
 
@@ -248,14 +250,14 @@ class TrtLlmMxfp4ExpertsMonolithic(
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
             gemm1_weights=w1,
-            gemm1_weights_scale=self.w1_scale,
-            gemm1_bias=self.w1_bias,
+            gemm1_weights_scale=quant_config.w1_scale,
+            gemm1_bias=quant_config.w1_bias,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.w2_scale,
-            gemm2_bias=self.w2_bias,
+            gemm2_weights_scale=quant_config.w2_scale,
+            gemm2_bias=quant_config.w2_bias,
             output1_scale_scalar=None,
             output1_scale_gate_scalar=None,
             output2_scale_scalar=None,
@@ -368,6 +370,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         local_num_experts: int,
         local_expert_offset: int,
         topk: int,
+        quant_config: FusedMoEQuantConfig,
     ) -> UnfinalizedMoEOutput | None:
         """Finalize into ``output``, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
@@ -378,14 +381,14 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             hidden_states=x_quant,
             hidden_states_scale=x_scale,
             gemm1_weights=w1,
-            gemm1_weights_scale=self.w1_scale,
-            gemm1_bias=self.w1_bias,
+            gemm1_weights_scale=quant_config.w1_scale,
+            gemm1_bias=quant_config.w1_bias,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.w2_scale,
-            gemm2_bias=self.w2_bias,
+            gemm2_weights_scale=quant_config.w2_scale,
+            gemm2_bias=quant_config.w2_bias,
             output1_scale_scalar=None,
             output1_scale_gate_scalar=None,
             output2_scale_scalar=None,
@@ -434,6 +437,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> UnfinalizedMoEOutput | None:
         topk_ids = topk_ids.to(dtype=torch.int32)
 
@@ -449,8 +453,8 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
             x_quant = hidden_states
             x_scale = None
 
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         # Chunk tokens so the batched-GEMM grid stays within CUDA limits. Each
         # launch permutes into its own buffer, so only a run that fits in one
@@ -474,6 +478,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
                 local_num_experts,
                 local_expert_offset,
                 topk,
+                quant_config,
             )
 
         return unfinalized

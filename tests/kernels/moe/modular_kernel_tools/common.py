@@ -968,7 +968,7 @@ def _maybe_convert_weights_for_experts(
         config.quant_dtype is None
         or config.quant_block_shape is not None
         or (
-            issubclass(fe_type, (AiterFp8TensorExperts, AiterFp8ChannelExperts))
+            issubclass(fe_type, AiterFp8TensorExperts | AiterFp8ChannelExperts)
             and rank_weights.w2.size(-1) % 256 == 0
         )
     ):
@@ -1079,6 +1079,7 @@ def run_modular_kernel(
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
         and config.supports_apply_weight_on_input(),
+        "quant_config": quant_config,
     }
 
     num_tokens = rank_tensors.hidden_states.shape[0]

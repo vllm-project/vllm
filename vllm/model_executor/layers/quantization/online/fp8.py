@@ -616,7 +616,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
+        if self.moe_quant_config_or_none:
             assert self.experts_cls is not None
             self.moe_kernel = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,

@@ -194,6 +194,7 @@ def test_triton_experts_no_mul_activation(
         workspace2=workspace2,
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 
     assert output.shape == (m, k), f"Expected shape {(m, k)}, got {output.shape}"

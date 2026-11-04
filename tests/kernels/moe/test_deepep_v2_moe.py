@@ -208,6 +208,7 @@ def deepep_v2_moe_impl(
         global_num_experts=num_experts,
         expert_map=build_expert_map(),
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     return out
@@ -411,7 +412,15 @@ def _make_experts(
             moe_config=moe_config,
             quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
-        return fused_experts, w1_ep, w2_ep, torch_combined, 1e-1, 2e-1
+        return (
+            fused_experts,
+            FUSED_MOE_UNQUANTIZED_CONFIG,
+            w1_ep,
+            w2_ep,
+            torch_combined,
+            1e-1,
+            2e-1,
+        )
 
     from tests.kernels.moe.test_moe_layer import _quantize_fp8_halves
     from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
@@ -466,16 +475,17 @@ def _make_experts(
         w2_input_scale=None,
     )
 
+    quant_config = FusedMoEQuantConfig.make(
+        torch.float8_e4m3fn,
+        block_shape=block_shape,
+        w1_scale=w1_scale_ep,
+        w2_scale=w2_scale_ep,
+    )
     fused_experts = TrtLlmFp8ExpertsModular(
         moe_config=moe_config,
-        quant_config=FusedMoEQuantConfig.make(
-            torch.float8_e4m3fn,
-            block_shape=block_shape,
-            w1_scale=w1_scale_ep,
-            w2_scale=w2_scale_ep,
-        ),
+        quant_config=quant_config,
     )
-    return fused_experts, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
+    return fused_experts, quant_config, w1_ep, w2_ep, torch_combined, 6e-2, 6e-2
 
 
 def _deep_ep_v2_moe_backends(
@@ -556,6 +566,7 @@ def _deep_ep_v2_moe_backends(
 
         (
             fused_experts,
+            quant_config,
             w1_ep,
             w2_ep,
             torch_combined,
@@ -604,6 +615,7 @@ def _deep_ep_v2_moe_backends(
                     global_num_experts=config.num_experts,
                     expert_map=None,
                     apply_router_weight_on_input=False,
+                    quant_config=quant_config,
                 )
 
     torch.testing.assert_close(torch_combined, out, atol=atol, rtol=rtol)

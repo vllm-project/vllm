@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 
 
 class Mxfp8TritonExpertsBase(TritonExperts):
-    """Shared MXFP8 MoE setup: stash E8M0 scales, clear scales on ``quant_config``."""
+    """Shared MXFP8 MoE setup."""
 
     def __init__(
         self,
@@ -37,10 +37,6 @@ class Mxfp8TritonExpertsBase(TritonExperts):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        self.w1_scale_val = self.quant_config.w1_scale
-        self.w2_scale_val = self.quant_config.w2_scale
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
 
     @staticmethod
     def _supports_quant_scheme(
@@ -67,6 +63,7 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+        self.quantization_emulation = True
         logger.warning_once(
             "Using Mxfp8EmulationTritonExperts MoE backend. Weights are "
             "dequantized to BF16 on the fly; this is slower than a native "
@@ -132,6 +129,7 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         # If the weights were already dequantized to BF16 at load time
         # (process_weights_after_loading on devices without a native MXFP8 MoE
@@ -143,10 +141,10 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
             w1_bf16 = w1.to(hidden_states.dtype)
             w2_bf16 = w2.to(hidden_states.dtype)
         else:
-            w1_bf16 = dequant_mxfp8_to_bf16(w1, self.w1_scale_val).to(
+            w1_bf16 = dequant_mxfp8_to_bf16(w1, quant_config.w1_scale).to(
                 hidden_states.dtype
             )
-            w2_bf16 = dequant_mxfp8_to_bf16(w2, self.w2_scale_val).to(
+            w2_bf16 = dequant_mxfp8_to_bf16(w2, quant_config.w2_scale).to(
                 hidden_states.dtype
             )
 
@@ -166,4 +164,5 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=quant_config,
         )

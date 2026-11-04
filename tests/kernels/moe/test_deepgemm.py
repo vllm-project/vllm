@@ -248,6 +248,7 @@ def test_block_fp8_padding_on_graph_replay(num_tokens, with_metadata, monkeypatc
                 ws2,
                 metadata,
                 False,
+                quant_config=quant,
             )
 
         with monkeypatch.context() as mp:
@@ -387,6 +388,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         activation=MoEActivation.SILU,
         apply_router_weight_on_input=False,
         expert_map=None,
+        quant_config=quant_config,
     )
     diff = calc_diff(out_deepgemm, out_triton)
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
@@ -570,6 +572,7 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
         activation=MoEActivation.SILU,
         apply_router_weight_on_input=False,
         expert_map=None,
+        quant_config=quant_config,
     )
 
     # BF16 reference using the same original weights

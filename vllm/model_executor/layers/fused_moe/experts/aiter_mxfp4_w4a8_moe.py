@@ -284,6 +284,8 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         assert self.moe_config.intermediate_size_per_partition_unpadded is not None
         assert self.moe_config.hidden_dim_unpadded is not None
@@ -296,7 +298,7 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             renormalize=self.renormalize,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
             unpadded_N_w1=self.moe_config.intermediate_size_per_partition_unpadded * 2,
             unpadded_K_w1=self.moe_config.hidden_dim_unpadded,

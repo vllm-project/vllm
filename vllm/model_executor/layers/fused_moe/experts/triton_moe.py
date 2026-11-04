@@ -116,6 +116,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self.moe_config.moe_parallel_config.use_all2all_kernels
         )
 
+    def _runtime_a1_scale(
+        self, quant_config: "FusedMoEQuantConfig"
+    ) -> torch.Tensor | None:
+        return quant_config.a1_scale
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -271,9 +276,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         # Check constraints.
-        if self.quant_config.use_int4_w4a16:
+        if self.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
         else:
             assert hidden_states.size(-1) == w1.size(2), (
@@ -305,7 +311,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             lora_unquantized_hidden_states = hidden_states
             hidden_states, a1q_scale = moe_kernel_quantize_input(
                 hidden_states,
-                self.a1_scale,
+                self._runtime_a1_scale(quant_config),
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
@@ -323,7 +329,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             w1.size(),
             w2.size(),
             top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
+            self.config_name(hidden_states.dtype),
             num_tokens,
             block_shape=self.block_shape,
         )
@@ -386,8 +392,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 top_k_num,
                 num_align_experts,
                 expert_map,
-                use_int8_w8a16=self.quant_config.use_int8_w8a16,
-                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                use_int8_w8a16=quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.use_int4_w4a16,
                 block_shape=self.block_shape,
                 ignore_invalid_experts=skip_invalid,
                 weights_host_resident=_weights_host_resident(w1, w2),
@@ -422,7 +428,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         else:
             lora_x = hidden_states
 
-        # TODO: The fallback to self.a1_scale was added for deferred static
+        # TODO: The fallback to quant_config.a1_scale was added for deferred static
         # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
         # Activation emulation relies solely on `a1q_scale` output of
         # `moe_kernel_quantize_input` - this should be adapted to
@@ -430,8 +436,14 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         input_scale = (
             a1q_scale
             if self.quantization_emulation
-            else (a1q_scale if a1q_scale is not None else self.a1_scale)
+            else (
+                a1q_scale
+                if a1q_scale is not None
+                else self._runtime_a1_scale(quant_config)
+            )
         )
+        w1_scale = None if self.quantization_emulation else quant_config.w1_scale
+        w2_scale = None if self.quantization_emulation else quant_config.w2_scale
 
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
@@ -439,7 +451,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 w1,
                 intermediate_cache1,
                 input_scale,
-                self.w1_scale,
+                w1_scale,
                 None,  # topk_weights
                 sorted_token_ids,
                 expert_ids,
@@ -448,13 +460,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 top_k_num,
                 config,
                 compute_type=compute_type,
-                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-                use_int8_w8a8=self.quant_config.use_int8_w8a8,
-                use_int8_w8a16=self.quant_config.use_int8_w8a16,
-                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                use_fp8_w8a8=quant_config.use_fp8_w8a8,
+                use_int8_w8a8=quant_config.use_int8_w8a8,
+                use_int8_w8a16=quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
-                B_bias=self.w1_bias,
+                B_bias=quant_config.w1_bias,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -525,7 +537,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if (
             activation == MoEActivation.SILU
             and self.activation_config.clamp_limit is None
-            and self.quant_config.use_fp8_w8a8
+            and quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]
             and lora_context is None
             and not is_deep_gemm_e8m0_used()
@@ -560,7 +572,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 w2,
                 intermediate_cache3,
                 a2q_scale,
-                self.w2_scale,
+                w2_scale,
                 topk_weights,
                 sorted_token_ids,
                 expert_ids,
@@ -570,13 +582,13 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 1,
                 config,
                 compute_type=compute_type,
-                use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-                use_int8_w8a8=self.quant_config.use_int8_w8a8,
-                use_int8_w8a16=self.quant_config.use_int8_w8a16,
-                use_int4_w4a16=self.quant_config.use_int4_w4a16,
+                use_fp8_w8a8=quant_config.use_fp8_w8a8,
+                use_int8_w8a8=quant_config.use_int8_w8a8,
+                use_int8_w8a16=quant_config.use_int8_w8a16,
+                use_int4_w4a16=self.use_int4_w4a16,
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
-                B_bias=self.w2_bias,
+                B_bias=quant_config.w2_bias,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -716,9 +728,10 @@ class TritonWNA16Experts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         # Check constraints.
-        if self.quant_config.use_int4_w4a16:
+        if quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), (
                 f"Hidden size mismatch {hidden_states.size(-1) // 2} == {w1.size(2)}"
             )
@@ -750,7 +763,7 @@ class TritonWNA16Experts(TritonExperts):
             w1.size(),
             w2.size(),
             top_k_num,
-            self.quant_config.config_name(hidden_states.dtype),
+            quant_config.config_name(hidden_states.dtype),
             num_tokens,
             block_shape=self.block_shape,
         )
@@ -787,8 +800,8 @@ class TritonWNA16Experts(TritonExperts):
             hidden_states,
             w1,
             intermediate_cache1,
-            self.w1_scale,
-            self.quant_config.w1_zp,
+            quant_config.w1_scale,
+            quant_config.w1_zp,
             None,  # topk_weights
             sorted_token_ids,
             expert_ids,
@@ -797,8 +810,8 @@ class TritonWNA16Experts(TritonExperts):
             top_k_num,
             config,
             compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            use_int8_w8a16=quant_config.use_int8_w8a16,
+            use_int4_w4a16=quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
         )
 
@@ -820,8 +833,8 @@ class TritonWNA16Experts(TritonExperts):
             qintermediate_cache2,
             w2,
             intermediate_cache3,
-            self.w2_scale,
-            self.quant_config.w2_zp,
+            quant_config.w2_scale,
+            quant_config.w2_zp,
             topk_weights,
             sorted_token_ids,
             expert_ids,
@@ -830,8 +843,8 @@ class TritonWNA16Experts(TritonExperts):
             1,
             config,
             compute_type=compute_type,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            use_int8_w8a16=quant_config.use_int8_w8a16,
+            use_int4_w4a16=quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
         )
 

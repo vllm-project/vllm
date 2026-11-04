@@ -219,6 +219,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
         output: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
     ) -> list[torch.Tensor]:
         """Call the dtype-specific trtllm_*_routed_moe and return list[Tensor].
 
@@ -238,6 +239,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         gemm1_lora_delta: torch.Tensor,
         lora_context: MoELoRAContext,
         topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         """Hook to rewrite the W13 delta before it is handed to the kernel."""
         return gemm1_lora_delta
@@ -259,6 +261,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         lora_context = self._lora_context
         assert lora_context is not None, "LoRA context must be set"
@@ -282,6 +285,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 global_num_experts=global_num_experts,
                 a1q_scale=a1q_scale,
                 output=output,
+                quant_config=quant_config,
             )
             return
 
@@ -345,7 +349,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             swap_w13_slices=True,
         )
         gemm1_lora_delta = self.prepare_gemm1_lora_delta(
-            gemm1_lora_delta, lora_context, topk_ids
+            gemm1_lora_delta, lora_context, topk_ids, quant_config
         )
 
         # ---- 2) Call the routed flashinfer kernel ----
@@ -358,6 +362,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             global_num_experts=global_num_experts,
             a1q_scale=a1q_scale,
             output=output,
+            quant_config=quant_config,
         )
         # ---- 3) W2 LoRA (computed out of kernel) ----
         # do_finalize=False: flashinfer returns the *unfinalized* base output.
@@ -541,6 +546,7 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
         output: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
     ) -> list[torch.Tensor]:
         import flashinfer
 
@@ -582,10 +588,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
 
     # FusedMoEExpertsModular's empty tuple precedes TrtLlmMxfp4ExpertsBase's
     # in the MRO.
-    kept_constants: tuple[str, ...] = (
-        *TrtLlmMxfp4ExpertsBase.kept_constants,
-        "_w13_bias_up_gate_index",
-    )
+    kept_constants: tuple[str, ...] = (*TrtLlmMxfp4ExpertsBase.kept_constants,)
 
     def __init__(
         self,
@@ -595,9 +598,6 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         _TrtLlmLoRAExpertsBase.__init__(self, moe_config, quant_config)
         # gemm1_alpha / gemm1_beta / gemm1_clamp_limit, hidden_dim_unpadded.
         TrtLlmMxfp4ExpertsBase.__init__(self, moe_config, quant_config)
-        self._w13_bias_up_gate_index = (
-            None if self.w1_bias is None else self._bias_up_gate_index(self.w1_bias)
-        )
 
     @staticmethod
     def _supports_quant_scheme(
@@ -655,6 +655,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         gemm1_lora_delta: torch.Tensor,
         lora_context: MoELoRAContext,
         topk_ids: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         """Bring the W13 delta to [up | gate] halves and fold in the FC1 bias."""
         intermediate_size = gemm1_lora_delta.size(-1) // 2
@@ -672,9 +673,9 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
 
         # The kernel has a single FC1 bias slot, shared by the static bias and
         # the per-token delta, so the static bias rides along in the delta.
-        if self.w1_bias is not None:
-            bias = self.w1_bias.reshape(self.local_num_experts, -1)
-            bias = bias[:, self._w13_bias_up_gate_index].float()
+        if quant_config.w1_bias is not None:
+            bias = quant_config.w1_bias.reshape(self.local_num_experts, -1)
+            bias = bias[:, self._bias_up_gate_index(quant_config.w1_bias)].float()
             local_ids = topk_ids.long() - self.ep_rank * self.local_num_experts
             local_ids = local_ids.clamp_(0, self.local_num_experts - 1)
             delta = (delta.float() + bias[local_ids]).to(torch.bfloat16)
@@ -691,6 +692,7 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
         output: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
     ) -> list[torch.Tensor]:
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
@@ -704,15 +706,15 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
             hidden_states=hidden_states,
             hidden_states_scale=None,
             gemm1_weights=w1,
-            gemm1_weights_scale=self.w1_scale,
+            gemm1_weights_scale=quant_config.w1_scale,
             # With a delta the bias is folded into it (prepare_gemm1_lora_delta).
-            gemm1_bias=self.w1_bias if do_finalize else None,
+            gemm1_bias=quant_config.w1_bias if do_finalize else None,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.w2_scale,
-            gemm2_bias=self.w2_bias,
+            gemm2_weights_scale=quant_config.w2_scale,
+            gemm2_bias=quant_config.w2_bias,
             output1_scale_scalar=None,
             output1_scale_gate_scalar=None,
             output2_scale_scalar=None,

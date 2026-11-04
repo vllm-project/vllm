@@ -83,7 +83,7 @@ def make_eep_staged_quant_method(
             "Elastic EP full modular-kernel staging is not supported for "
             "monolithic fused MoE kernels."
         )
-    if quant_method.moe_quant_config is None:
+    if quant_method.moe_quant_config_or_none is None:
         raise ValueError(
             "Elastic EP full modular-kernel staging requires initialized "
             "MoE quant config."

@@ -692,9 +692,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
     )
 
     experts = object.__new__(AiterMxfp8Experts)  # bypass heavy __init__
-    experts.quant_config = SimpleNamespace(gemm1_clamp_limit=None)
-    experts.w1_scale_val = None
-    experts.w2_scale_val = None
+    quant_config = SimpleNamespace(gemm1_clamp_limit=None, w1_scale=None, w2_scale=None)
 
     captured = {}
 
@@ -726,6 +724,7 @@ def _capture_expert_mask(expert_mask, *, global_num_experts):
             workspace2=None,
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
     return captured["expert_mask"]
 

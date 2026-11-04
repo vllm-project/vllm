@@ -187,6 +187,7 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         # expert_map is ignored: MoonEP dispatches on global expert ids and
         # the weights are addressed by global [E+B] row, on every rank.

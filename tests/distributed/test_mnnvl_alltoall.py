@@ -581,6 +581,7 @@ def test_args_cpu_workspace_allocation(monkeypatch):
 
 def test_args_finalize_noop_reuses_fused_expert_output(monkeypatch):
     import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
     from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
         TopKWeightAndReduceNoOP,
     )
@@ -598,6 +599,7 @@ def test_args_finalize_noop_reuses_fused_expert_output(monkeypatch):
         torch.zeros((2, 1), dtype=torch.long),
         False,
         TopKWeightAndReduceNoOP(),
+        quant_config=FusedMoEQuantConfig.make(),
     )
 
     assert group.allocation_calls == 0
@@ -608,6 +610,7 @@ def test_args_finalize_noop_reuses_fused_expert_output(monkeypatch):
 def test_args_finalize_contiguous_writes_combine_input(monkeypatch):
     import vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep as pf
     import vllm.model_executor.layers.fused_moe.topk_weight_and_reduce as wr
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 
     fused_expert_output = torch.arange(12, dtype=torch.float32).view(2, 2, 3)
     original = fused_expert_output.clone()
@@ -630,6 +633,7 @@ def test_args_finalize_contiguous_writes_combine_input(monkeypatch):
         torch.zeros((2, 2), dtype=torch.long),
         False,
         wr.TopKWeightAndReduceContiguous(),
+        quant_config=FusedMoEQuantConfig.make(),
     )
 
     expected = (original * topk_weights.unsqueeze(-1)).sum(dim=1)
@@ -1197,7 +1201,15 @@ def _one_sided_prepare_finalize_worker(rank, world_size, *, empty_rank, cuda_gra
             expert_output = torch.where(
                 local.any(dim=-1, keepdim=True), received.float() * factor, 0
             ).to(torch.bfloat16)
-            adapter.finalize(output, expert_output, weights, ids, False, reduce_impl)
+            adapter.finalize(
+                output,
+                expert_output,
+                weights,
+                ids,
+                False,
+                reduce_impl,
+                quant_config=quant_config,
+            )
 
         def check_output():
             expected = x.float() * (weights * (ids + 1)).sum(dim=-1, keepdim=True)

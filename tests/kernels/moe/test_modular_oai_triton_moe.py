@@ -257,6 +257,7 @@ def oai_triton_moe_impl(
         global_num_experts=num_experts,
         expert_map=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
 
@@ -408,6 +409,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
             workspace2=workspace2,
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
         output = output[..., :k]
 

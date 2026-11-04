@@ -259,7 +259,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
             replace_parameter(layer, "w2_bias", w2_bias)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        if self.moe_quant_config_or_none is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,

@@ -266,6 +266,7 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
     def apply(
@@ -290,4 +291,5 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )

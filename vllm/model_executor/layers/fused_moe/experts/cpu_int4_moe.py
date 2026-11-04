@@ -199,6 +199,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         """Apply the monolithic 4-bit INT MoE forward pass.
 
@@ -217,6 +219,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             routed_scaling_factor: Scaling factor for routing
             topk_group: Group size for topk
             routing_replay_out: Unused; this kernel does not capture routing
+            quant_config: Runtime quantization parameters for this invocation.
 
         Returns:
             Output tensor after MoE computation
@@ -251,12 +254,12 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
         hidden_size = self.moe_config.hidden_dim
         intermediate_size = self.moe_config.intermediate_size_per_partition
-        assert self.quant_config.block_shape is not None
+        assert quant_config.block_shape is not None
         # C++ kernel expects an int: -1 for channelwise, and group size for groupwise
-        if self.quant_config.block_shape == [-1, 1]:
+        if quant_config.block_shape == [-1, 1]:
             group_size = -1
         else:
-            group_size = self.quant_config.block_shape[1]
+            group_size = quant_config.block_shape[1]
         return torch.ops._C.dynamic_4bit_int_moe(
             hidden_states,
             topk_ids.to(torch.long),

@@ -112,6 +112,7 @@ def test_mori_combine_uses_original_per_rank_topk_ids(monkeypatch):
         dispatch_ids,
         apply_router_weight_on_input=False,
         weight_and_reduce_impl=SimpleNamespace(),
+        quant_config=quant_config,
     )
 
     assert mori_op.combine_indices is router_topk_ids, (

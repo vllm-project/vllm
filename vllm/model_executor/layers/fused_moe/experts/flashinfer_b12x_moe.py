@@ -120,9 +120,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # causes every intermediate activation to saturate at max FP4 when
         # multiplied by values that large.  Force to 1.0 so the kernel uses
         # its own per-block dynamic scale.
-        if self.a2_gscale is not None:
-            self.a2_gscale.fill_(1.0)
-            self._fc2_input_scale = self.a2_gscale
+        a2_gscale = getattr(layer, "_a2_gscale", None)
+        if a2_gscale is None:
+            a2_input_scale = getattr(layer, "w2_input_scale", None)
+            if a2_input_scale is not None:
+                a2_gscale = 1.0 / a2_input_scale
+        if a2_gscale is not None:
+            a2_gscale.fill_(1.0)
+            self._fc2_input_scale = a2_gscale
         else:
             # W4A16 NVFP4 checkpoints have no calibrated a2_gscale; b12x
             # performs dynamic per-block FC2-input quantization, so a uniform
@@ -137,21 +142,23 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         # Precompute MMA-layout views of the weight scale factors once here
         # rather than recomputing on every forward pass.
-        assert self.w1_scale is not None
-        num_experts_w1, m1, k1_sf = self.w1_scale.shape
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        assert w1_scale is not None
+        num_experts_w1, m1, k1_sf = w1_scale.shape
         k1 = k1_sf * 16
         self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
+            w1_scale.reshape(num_experts_w1 * m1, k1_sf),
             m=m1,
             k=k1,
             num_groups=num_experts_w1,
         )
 
-        assert self.w2_scale is not None
-        num_experts_w2, m2, k2_sf = self.w2_scale.shape
+        assert w2_scale is not None
+        num_experts_w2, m2, k2_sf = w2_scale.shape
         k2 = k2_sf * 16
         self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
+            w2_scale.reshape(num_experts_w2 * m2, k2_sf),
             m=m2,
             k=k2,
             num_groups=num_experts_w2,
@@ -267,13 +274,14 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        assert self.w1_scale is not None and self.w2_scale is not None, (
-            "w1_scale and w2_scale must not be None for FlashInferB12xExperts"
-        )
-        assert self.g1_alphas is not None and self.g2_alphas is not None, (
-            "g1_alphas and g2_alphas must not be None for FlashInferB12xExperts"
-        )
+        assert (
+            quant_config.w1_scale is not None and quant_config.w2_scale is not None
+        ), "w1_scale and w2_scale must not be None for FlashInferB12xExperts"
+        assert (
+            quant_config.g1_alphas is not None and quant_config.g2_alphas is not None
+        ), "g1_alphas and g2_alphas must not be None for FlashInferB12xExperts"
         assert self._fc2_input_scale is not None, (
             "_fc2_input_scale must be set by process_weights_after_loading"
         )
@@ -289,11 +297,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             x=hidden_states,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
-            w1_alpha=self.g1_alphas,
+            w1_alpha=quant_config.g1_alphas,
             fc2_input_scale=self._fc2_input_scale,
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
-            w2_alpha=self.g2_alphas,
+            w2_alpha=quant_config.g2_alphas,
             token_selected_experts=topk_ids.to(torch.int32),
             token_final_scales=topk_weights,
         )

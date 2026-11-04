@@ -387,7 +387,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         # Build kernel (modular or monolithic)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        if self.moe_quant_config_or_none is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
@@ -463,6 +463,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def apply_monolithic(
@@ -490,6 +491,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             routing_sink=layer.routing_sink,
             input_ids=input_ids,
             hash_indices_table=layer.hash_indices_table,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -981,7 +983,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def _build_moe_kernel(self, layer: RoutedExperts) -> None:
         """Build the modular MoE kernel from the (already in-format) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        if self.moe_quant_config_or_none is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
@@ -1026,7 +1028,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.w2_weight.is_shuffled = True
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None and self.experts_cls is not None:
+        if self.moe_quant_config_or_none is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
@@ -1134,6 +1136,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def apply_monolithic(
@@ -1161,4 +1164,5 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             routing_sink=layer.routing_sink,
             input_ids=input_ids,
             hash_indices_table=layer.hash_indices_table,
+            quant_config=self.moe_quant_config,
         )

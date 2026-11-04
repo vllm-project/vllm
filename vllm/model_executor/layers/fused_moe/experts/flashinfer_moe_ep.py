@@ -148,7 +148,10 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
                 w13_scale=getattr(layer, "w13_weight_scale", None),
                 w2_scale=getattr(layer, "w2_weight_scale", None),
             ),
-            epilogue_from_quant_config(self.quant_config),
+            epilogue_from_alphas(
+                getattr(layer, "w13_weight_scale_2", None),
+                getattr(layer, "w2_weight_scale_2", None),
+            ),
             apply_topk_in_fc1=apply_topk_in_fc1(
                 self.moe_config,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
@@ -177,6 +180,7 @@ class FlashInferMoeEpExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         if self._adapter is None:
             raise RuntimeError("FlashInfer MoE-EP weights have not been processed")
@@ -196,7 +200,13 @@ def epilogue_from_quant_config(
     and keep the default epilogue. The alphas alias the layer's parameters, so
     EPLB permutations reach the kernel.
     """
-    fc1_alpha, fc2_alpha = quant_config.g1_alphas, quant_config.g2_alphas
+    return epilogue_from_alphas(quant_config.g1_alphas, quant_config.g2_alphas)
+
+
+def epilogue_from_alphas(
+    fc1_alpha: torch.Tensor | None,
+    fc2_alpha: torch.Tensor | None,
+) -> FlashInferMoeEpEpilogue:
     if fc1_alpha is None and fc2_alpha is None:
         return FlashInferMoeEpEpilogue()
     assert fc1_alpha is not None and fc2_alpha is not None

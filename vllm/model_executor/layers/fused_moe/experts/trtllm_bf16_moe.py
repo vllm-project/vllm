@@ -86,7 +86,7 @@ class TrtLlmBf16ExpertsBase:
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
         self.moe_config = moe_config
-        self.quant_config = quant_config
+        self.quant_schema = quant_config.quant_schema
         self.gemm1_activation_params: dict[str, torch.Tensor] = {}
         if moe_config.activation == MoEActivation.SWIGLUSTEP:
             if any(
@@ -223,6 +223,8 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ):
         import flashinfer
         from flashinfer.fused_moe import WeightLayout
@@ -310,6 +312,8 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 

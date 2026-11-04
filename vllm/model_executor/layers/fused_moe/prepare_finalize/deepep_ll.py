@@ -174,7 +174,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             x_fp8, x_scales = x
             x = dequant_fp8(x_fp8, x_scales).to(dtype=a1_dtype)
 
-        assert isinstance(x, (torch.Tensor, tuple))
+        assert isinstance(x, torch.Tensor | tuple)
         q_dtype = quant_config.quant_dtype
 
         if q_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH:
@@ -413,6 +413,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> tuple[Callable, Callable]:
         return self._finalize(
             output,
@@ -432,6 +433,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         self._finalize(
             output,

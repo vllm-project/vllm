@@ -106,6 +106,7 @@ def test_flashinfer_swigluoai_params_are_forwarded(activation, monkeypatch):
         workspace2=None,
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     assert experts._supports_activation(activation)
@@ -197,6 +198,7 @@ def test_flashinfer_fp4_moe_no_graph(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
         # Reference check:

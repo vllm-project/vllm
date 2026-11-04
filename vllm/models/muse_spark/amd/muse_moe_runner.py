@@ -323,13 +323,14 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
         super().__init__(moe_config, quant_config)
         if not isinstance(
             quant_config,
-            (MuseSparkUnquantizedMoEQuantConfig, MuseSparkQuarkFp8MoEQuantConfig),
+            MuseSparkUnquantizedMoEQuantConfig | MuseSparkQuarkFp8MoEQuantConfig,
         ):
             raise TypeError(
                 "MuseSparkTritonExperts requires a MuseSpark Triton quant config."
             )
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
+        self.post_expert_norm_fn = quant_config.post_expert_norm_fn
 
     def workspace_shapes(
         self,
@@ -372,14 +373,8 @@ class MuseSparkTritonExperts(_RouteOutputHandoff, TritonExperts):
         self._park_route_output(expert_output, expert_map)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        quant_config = self.quant_config
-        assert isinstance(
-            quant_config,
-            (MuseSparkUnquantizedMoEQuantConfig, MuseSparkQuarkFp8MoEQuantConfig),
-        )
-        assert quant_config.post_expert_norm_fn is not None
         return MuseSparkTopKWeightAndReduce(
-            quant_config.post_expert_norm_fn,
+            self.post_expert_norm_fn,
             pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
             take_route_output=self._take_route_output,
             take_route_expert_map=self._take_route_expert_map,
@@ -426,6 +421,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             )
         if quant_config.post_expert_norm_fn is None:
             raise ValueError("MuseSpark1x post-expert norm is not configured.")
+        self.post_expert_norm_fn = quant_config.post_expert_norm_fn
         self._unit_weights_bufs: dict[int, torch.Tensor] = {}
 
     def _unit_weights(
@@ -480,6 +476,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             raise NotImplementedError(
@@ -530,7 +527,7 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             topk_ids=flat_topk_ids,
             activation=activation,
             expert_mask=expert_map,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             quant_method=self._AITER_QUANT_METHOD,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
@@ -538,16 +535,13 @@ class MuseSparkAiterExperts(_RouteOutputHandoff, AiterMxfp4Experts):
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             apply_router_weight_on_input=False,
-            **self._extra_fused_moe_kwargs(),
+            **self._extra_fused_moe_kwargs(quant_config),
         )
         self._park_route_output(route_output.view_as(output))
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        quant_config = self.quant_config
-        assert isinstance(quant_config, MuseSparkQuarkOCPMXMoEQuantConfig)
-        assert quant_config.post_expert_norm_fn is not None
         return MuseSparkTopKWeightAndReduce(
-            quant_config.post_expert_norm_fn,
+            self.post_expert_norm_fn,
             pre_norm_all_reduce=self.moe_config.moe_parallel_config.tp_size > 1,
             take_route_output=self._take_route_output,
         )
@@ -867,7 +861,7 @@ class MuseSparkRoutedExperts(MuseSparkConsolidatedRoutedExperts):
             self.quant_method, MuseSparkOnlineMXFP4FusedMoE
         ) or not isinstance(
             self.quant_method,
-            (MuseSparkQuarkW8A8Fp8FusedMoE, MuseSparkQuarkOCPMXFusedMoE),
+            MuseSparkQuarkW8A8Fp8FusedMoE | MuseSparkQuarkOCPMXFusedMoE,
         ):
             # Quark's unquantized layers (0 and 61) store per-expert tensors.
             consolidated: list[tuple[str, torch.Tensor]] = []

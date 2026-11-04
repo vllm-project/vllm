@@ -381,6 +381,7 @@ def test_flashinfer_cutedsl_fp4_moe(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             )
             assert isinstance(out, torch.Tensor)
             return out[:, :k]
@@ -479,17 +480,15 @@ def test_localization_arguments_initialized_after_loading(
         routing_method=RoutingMethodType.TopK,
         max_capture_size=max_capture_size,
     )
-    experts = FlashInferCuteDSLExperts(
-        config,
-        nvfp4_moe_quant_config(
-            g1_alphas=scale,
-            g2_alphas=scale,
-            a1_gscale=scale,
-            a2_gscale=scale,
-            w1_scale=scale,
-            w2_scale=scale,
-        ),
+    quant_config = nvfp4_moe_quant_config(
+        g1_alphas=scale,
+        g2_alphas=scale,
+        a1_gscale=scale,
+        a2_gscale=scale,
+        w1_scale=scale,
+        w2_scale=scale,
     )
+    experts = FlashInferCuteDSLExperts(config, quant_config)
     shard = {
         name: torch.ones(1)
         for name in ("w13_weight", "w13_weight_scale", "w2_weight", "w2_weight_scale")
@@ -535,6 +534,7 @@ def test_localization_arguments_initialized_after_loading(
         workspace2=None,
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
     kwargs = backend.call_args.kwargs
     if activation == MoEActivation.SITU:

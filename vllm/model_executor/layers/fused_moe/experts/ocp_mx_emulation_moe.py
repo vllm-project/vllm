@@ -107,14 +107,6 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             " OCP_MXQuantizationEmulationTritonExperts"
         )
 
-        # `TritonExperts.apply` expects pre-dequantized weights,
-        # which we handle in `apply` below.
-        self.w1_scale_val = self.quant_config.w1_scale
-        self.w2_scale_val = self.quant_config.w2_scale
-
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
-
         self.quantization_emulation = True
 
         self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
@@ -188,6 +180,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         """Apply emulated quantized MoE computation.
 
@@ -199,10 +192,10 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
         w1_dequant = self._dequantize_weights(
-            w1, self.w1_scale_val, hidden_states.dtype
+            w1, quant_config.w1_scale, hidden_states.dtype
         )
         w2_dequant = self._dequantize_weights(
-            w2, self.w2_scale_val, hidden_states.dtype
+            w2, quant_config.w2_scale, hidden_states.dtype
         )
 
         # Activation quantization/dequantization is deferred to
@@ -223,4 +216,5 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=quant_config,
         )

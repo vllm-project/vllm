@@ -161,23 +161,20 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert self._supports_activation(activation), f"{activation=} not supported"
-        assert self.quant_config.w1_scale is not None, (
-            "w13_weight_scale must be provided"
-        )
-        assert self.quant_config.w2_scale is not None, (
-            "w2_weight_scale must be provided"
-        )
+        assert quant_config.w1_scale is not None, "w13_weight_scale must be provided"
+        assert quant_config.w2_scale is not None, "w2_weight_scale must be provided"
 
-        if self.quant_config.is_block_quantized:
+        if quant_config.is_block_quantized:
             hpc_fuse_moe_blockwise(
                 x=hidden_states,
                 x_scale=a1q_scale,
                 gate_up_weight=w1,
-                gate_up_weight_scale=self.quant_config.w1_scale,
+                gate_up_weight_scale=quant_config.w1_scale,
                 down_weight=w2,
-                down_weight_scale=self.quant_config.w2_scale,
+                down_weight_scale=quant_config.w2_scale,
                 topk_ids=topk_ids,
                 topk_scale=topk_weights,
                 rank_ep=self.ep_rank,
@@ -185,19 +182,15 @@ class HPCExperts(mk.FusedMoEExpertsModular):
                 output=output,
             )
         else:
-            assert self.quant_config.a1_scale is not None, (
-                "w13_input_scale must be provided"
-            )
-            assert self.quant_config.a2_scale is not None, (
-                "w2_input_scale must be provided"
-            )
+            assert quant_config.a1_scale is not None, "w13_input_scale must be provided"
+            assert quant_config.a2_scale is not None, "w2_input_scale must be provided"
             hpc_fuse_moe(
                 x=hidden_states,
                 gate_up_weight=w1,
                 down_weight=w2,
-                gate_up_scale=self.quant_config.g1_alphas,
-                down_scale=self.quant_config.g2_alphas,
-                act_and_mul_scale=self.quant_config.a2_gscale,
+                gate_up_scale=quant_config.g1_alphas,
+                down_scale=quant_config.g2_alphas,
+                act_and_mul_scale=quant_config.a2_gscale,
                 topk_ids=topk_ids,
                 topk_scale=topk_weights,
                 rank_ep=self.ep_rank,

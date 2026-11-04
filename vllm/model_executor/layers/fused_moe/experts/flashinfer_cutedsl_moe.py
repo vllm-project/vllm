@@ -54,8 +54,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     Supports expert parallelism natively.
     """
 
-    kept_constants: tuple[str, ...] = ("per_token_global_scale",)
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -86,13 +84,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.situ_beta = moe_config.activation_situ_beta
         self.situ_linear_beta = moe_config.activation_situ_linear_beta
         self.per_token_activation = per_token_activation
-        self.per_token_global_scale = None
-        if per_token_activation:
-            assert quant_config.a2_gscale is not None
-            self.per_token_global_scale = quant_config.a2_gscale.new_full(
-                (1,),
-                NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
-            )
         self.autotune_use_cuda_graph = moe_config.max_capture_size > 0
         self._localized_kwargs: dict = {}
 
@@ -227,21 +218,26 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert self.quant_dtype == "nvfp4"
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
                 quantize_nvfp4_per_token_input(hidden_states)
             )
-            fc2_input_scale = self.per_token_global_scale
+            assert quant_config.a2_gscale is not None
+            fc2_input_scale = quant_config.a2_gscale.new_full(
+                (1,),
+                NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+            )
         else:
             assert a1q_scale is not None
             block_scale = a1q_scale
             per_token_scale = None
-            fc2_input_scale = self.a2_gscale
+            fc2_input_scale = quant_config.a2_gscale
 
         assert block_scale is not None
         assert fc2_input_scale is not None
@@ -288,12 +284,12 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             token_selected_experts=topk_ids.to(torch.int32),
             token_final_scales=topk_weights.float(),
             w1_weight=w1,
-            w1_weight_sf=self.w1_scale,
-            w1_alpha=self.g1_alphas,
+            w1_weight_sf=quant_config.w1_scale,
+            w1_alpha=quant_config.g1_alphas,
             fc2_input_scale=fc2_input_scale,
             w2_weight=w2,
-            w2_weight_sf=self.w2_scale,
-            w2_alpha=self.g2_alphas,
+            w2_weight_sf=quant_config.w2_scale,
+            w2_alpha=quant_config.g2_alphas,
             num_experts=self.global_num_experts,
             top_k=self.topk,
             num_local_experts=self.local_num_experts,

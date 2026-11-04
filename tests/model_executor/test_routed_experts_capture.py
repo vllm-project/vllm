@@ -319,6 +319,7 @@ def test_monolithic_capture_survives_kernel_rebuilds():
             expert_map=None,
             apply_router_weight_on_input=False,
             routing_sink=sink,
+            quant_config=None,
         )
 
     for offset in (0, 7):  # the kernel before and after a reload

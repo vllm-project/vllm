@@ -482,12 +482,13 @@ def _unsupported_reason(runner: torch.nn.Module) -> str | None:
     if not isinstance(impl, TrtLlmMxfp4ExpertsModular):
         return f"experts kernel {type(impl).__name__}"
     config = impl.moe_config
-    quant = impl.quant_config
+    quant = runner.routed_experts.quant_method.moe_quant_config
+    assert quant is not None
     if config.activation != MoEActivation.SILU:
         return f"activation {config.activation}"
     if impl.gemm1_alpha is not None or impl.gemm1_beta is not None:
         return "gemm1 alpha/beta"
-    if impl.w1_bias is not None or impl.w2_bias is not None:
+    if quant.w1_bias is not None or quant.w2_bias is not None:
         return "expert biases"
     if impl.local_num_experts != config.num_experts:
         return "expert parallelism"
@@ -577,16 +578,18 @@ def build_routed_expert_gemms(
             routed = runner.routed_experts
             kernel = routed.quant_method.moe_kernel
             impl = kernel.fused_experts
+            quant = routed.quant_method.moe_quant_config
+            assert quant is not None
             try:
                 gemm = RoutedExpertGemm(
                     routed.w13_weight,
-                    impl.w1_scale,
+                    quant.w1_scale,
                     routed.w2_weight,
-                    impl.w2_scale,
-                    impl.gemm1_clamp_limit,
+                    quant.w2_scale,
+                    quant.gemm1_clamp_limit,
                     impl.topk,
                     kernel.prepare_finalize,
-                    impl.quant_config,
+                    quant,
                 )
             except ValueError as error:
                 reasons[str(error)] += 1

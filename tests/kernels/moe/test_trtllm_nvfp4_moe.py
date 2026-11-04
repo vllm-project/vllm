@@ -316,6 +316,7 @@ def test_trtllm_fp4_moe_no_graph(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
         assert isinstance(trtllm_output, torch.Tensor)
 
@@ -496,6 +497,7 @@ def test_trtllm_fp4_moe_deferred_finalize(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             ),
             router_weights=topk_weights,
             chunked=chunk_size is not None,

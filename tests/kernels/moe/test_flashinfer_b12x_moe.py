@@ -213,6 +213,7 @@ def test_flashinfer_b12x_moe(
             activation=MoEActivation.SILU,
             apply_router_weight_on_input=False,
             expert_map=None,
+            quant_config=quant_config,
         )
 
         # Reference: BF16 torch MoE using original [gate, up] BF16 weights.
@@ -331,6 +332,7 @@ def test_flashinfer_b12x_moe_relu2(
             activation=MoEActivation.RELU2_NO_MUL,
             apply_router_weight_on_input=False,
             expert_map=None,
+            quant_config=quant_config,
         )
 
         torch_output = torch_moe(

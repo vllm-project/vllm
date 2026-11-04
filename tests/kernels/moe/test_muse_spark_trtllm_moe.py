@@ -352,7 +352,7 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     a2 = ckpt["w2_input_scale"].max()
     experts = routed.quant_method.moe_kernel.fused_experts
     assert isinstance(experts, MuseSparkTrtLlmNvFp4Experts)
-    qc = experts.quant_config
+    qc = routed.quant_method.moe_quant_config
     torch.testing.assert_close(qc.g1_alphas, a13 * ckpt["w13_weight_scale_2"][:, 0])
     torch.testing.assert_close(
         experts.g1_scale_c, a13 * ckpt["w13_weight_scale_2"][:, 1] / a2

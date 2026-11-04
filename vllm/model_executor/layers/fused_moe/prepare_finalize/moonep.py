@@ -411,6 +411,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         # Route weights are applied in the expert compute and MoonEP's
         # combine performs the K-sum, so any weight/reduce work in finalize

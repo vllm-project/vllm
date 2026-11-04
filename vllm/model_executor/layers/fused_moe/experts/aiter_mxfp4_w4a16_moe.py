@@ -424,6 +424,8 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routing_replay_out: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
         hash_indices_table: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         routing_method = self.moe_config.routing_method
         if routing_method == RoutingMethodType.DeepseekV4:
@@ -449,7 +451,7 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             activation=activation,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
             unpadded_N_w1=None,
             unpadded_K_w1=None,

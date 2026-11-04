@@ -279,6 +279,7 @@ def deep_ep_moe_impl(
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
         if not skip_result_store:

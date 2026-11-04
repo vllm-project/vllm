@@ -76,7 +76,7 @@ class TrtLlmNvFp4ExpertsBase:
         per_token_activation: bool = False,
     ):
         self.moe_config = moe_config
-        self.quant_config = quant_config
+        self.quant_schema = quant_config.quant_schema
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
@@ -96,7 +96,7 @@ class TrtLlmNvFp4ExpertsBase:
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.is_situ = moe_config.activation == MoEActivation.SITU
 
-        self.g1_scale_c = self._compute_g1_scale_c()
+        self.g1_scale_c: torch.Tensor | None = None
 
         # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
         # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
@@ -170,20 +170,29 @@ class TrtLlmNvFp4ExpertsBase:
             clamp,
         )
 
-    def _compute_g1_scale_c(self) -> torch.Tensor:
-        assert self.quant_config.g1_alphas is not None
-        assert self.quant_config.a2_gscale is not None
+    def _compute_g1_scale_c(
+        self,
+        g1_alphas: torch.Tensor | None,
+        a2_gscale: torch.Tensor | None,
+    ) -> torch.Tensor:
+        assert g1_alphas is not None
+        assert a2_gscale is not None
         if not self.moe_config.is_act_and_mul:
-            return self.quant_config.a2_gscale.clone()
+            return a2_gscale.clone()
         if self.is_situ:
             # SITU applies its nonlinear activation after g1_alphas, so only
             # the output quantization factor belongs in g1_scale_c.
-            return self.quant_config.a2_gscale.clone()
+            return a2_gscale.clone()
 
         # g1_alphas = a13_scale * w13_scale_2
         # a2_gscale = 1 / a2_scale
         # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-        return self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        return g1_alphas * a2_gscale
+
+    def _g1_scale_c_for(self, quant_config: FusedMoEQuantConfig) -> torch.Tensor:
+        if self.g1_scale_c is not None:
+            return self.g1_scale_c
+        return self._compute_g1_scale_c(quant_config.g1_alphas, quant_config.a2_gscale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if not is_weights_pre_processed():
@@ -192,7 +201,15 @@ class TrtLlmNvFp4ExpertsBase:
         # Recompute g1_scale_c since g1_alphas was just fused in-place.
         # Register as a layer parameter so EPLB rearranges it alongside
         # other expert weights.
-        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
+        g1_alphas = layer.w13_weight_scale_2
+        a2_gscale = getattr(layer, "_a2_gscale", None)
+        if a2_gscale is None:
+            a2_scale = getattr(layer, "w2_input_scale", None)
+            assert a2_scale is not None
+            a2_gscale = 1.0 / a2_scale
+        replace_parameter(
+            layer, "g1_scale_c", self._compute_g1_scale_c(g1_alphas, a2_gscale)
+        )
         self.g1_scale_c = layer.g1_scale_c
 
         # Pre-fold the per-expert g1_alphas (= output1_scale_gate_scalar)
@@ -205,7 +222,7 @@ class TrtLlmNvFp4ExpertsBase:
         # g1_alphas fold used by the SwiGLU-OAI clamp/beta below.
         clamp_limit = self._gemm1_clamp_limit_unfolded
         if clamp_limit is not None and not self.is_situ:
-            gemm1_clamp_limit = clamp_limit / self.quant_config.g1_alphas
+            gemm1_clamp_limit = clamp_limit / g1_alphas
             replace_parameter(layer, "gemm1_clamp_limit", gemm1_clamp_limit)
             self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
@@ -215,7 +232,7 @@ class TrtLlmNvFp4ExpertsBase:
         # other per-expert tensors.
         beta = self._gemm1_beta_unfolded
         if beta is not None:
-            gemm1_beta = beta if self.is_situ else beta / self.quant_config.g1_alphas
+            gemm1_beta = beta if self.is_situ else beta / g1_alphas
             replace_parameter(layer, "gemm1_beta", gemm1_beta)
             self.gemm1_beta = layer.gemm1_beta
 
@@ -357,12 +374,13 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         activation: MoEActivation,
         global_num_experts: int,
         a1q_scale: torch.Tensor | None,
+        quant_config: FusedMoEQuantConfig,
     ) -> UnfinalizedMoEOutput | None:
         """Finalize into ``output``, or stop after GEMM2 when it is None."""
         import flashinfer
 
-        assert self.quant_config.w1_scale is not None
-        assert self.quant_config.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
@@ -372,7 +390,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
-        output1_scale_gate_scalar = self.quant_config.g1_alphas
+        output1_scale_gate_scalar = quant_config.g1_alphas
         # With output=None the caller consumes the UnfinalizedMoEOutput itself.
         defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
 
@@ -385,17 +403,17 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_weights_scale=quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_weights_scale=quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c,
+            output1_scale_scalar=self._g1_scale_c_for(quant_config),
             output1_scale_gate_scalar=output1_scale_gate_scalar,
-            output2_scale_scalar=self.quant_config.g2_alphas,
+            output2_scale_scalar=quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=0,
@@ -452,6 +470,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> UnfinalizedMoEOutput | None:
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
@@ -481,6 +501,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                 activation,
                 global_num_experts,
                 a1q_scale,
+                quant_config,
             )
         else:
             for start in range(0, M, chunk_size):
@@ -495,6 +516,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
                     activation,
                     global_num_experts,
                     None if a1q_scale is None else a1q_scale[start:end],
+                    quant_config,
                 )
         return None
 
@@ -556,13 +578,15 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert self._supports_activation(activation)
         assert a1q_scale is not None or self.expects_unquantized_inputs
-        assert self.quant_config.w1_scale is not None
-        assert self.quant_config.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
         assert (
             apply_router_weight_on_input
             and self.routing_method_type == RoutingMethodType.Llama4
@@ -579,7 +603,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         else:
             block_scale, per_token_scale = a1q_scale, None
 
-        output1_scale_gate_scalar = self.quant_config.g1_alphas
+        output1_scale_gate_scalar = quant_config.g1_alphas
 
         num_tokens = hidden_states.shape[0]
         hooked = self._uses_post_gemm2_hook(num_tokens)
@@ -598,17 +622,17 @@ class TrtLlmNvFp4ExpertsMonolithic(
                 *hidden_states.shape[:-1], -1
             ),
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_weights_scale=quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_weights_scale=quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c,
+            output1_scale_scalar=self._g1_scale_c_for(quant_config),
             output1_scale_gate_scalar=output1_scale_gate_scalar,
-            output2_scale_scalar=self.quant_config.g2_alphas,
+            output2_scale_scalar=quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=(num_expert_group or 0),

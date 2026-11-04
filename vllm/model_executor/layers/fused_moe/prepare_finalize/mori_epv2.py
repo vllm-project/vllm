@@ -54,7 +54,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 f"{fused_experts.moe_config.in_dtype}. Set VLLM_MORI_EP_V2=0 to "
                 "use MORI EPv1."
             )
-        quant_dtype = fused_experts.quant_config.quant_dtype
+        quant_dtype = fused_experts.quant_schema.quant_dtype
         if quant_dtype is not None and not fused_experts.expects_unquantized_inputs:
             raise ValueError(
                 "MORI EPv2 dispatches unquantized BF16 activations, but "
@@ -64,7 +64,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "VLLM_MORI_EP_V2=0 for MORI EPv1, which also requires AITER fused MoE."
             )
 
-        if quant_dtype is not None and fused_experts.quant_config.is_per_tensor:
+        if quant_dtype is not None and fused_experts.quant_schema.is_per_tensor:
             raise ValueError(
                 "MORI EPv2 does not support per-tensor activation quantization: "
                 "the experts would quantize the received rows, which AITER's "
@@ -232,6 +232,7 @@ class MoriEPv2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
+        quant_config: FusedMoEQuantConfig,
     ) -> None:
         del topk_weights, topk_ids, apply_router_weight_on_input
         del weight_and_reduce_impl

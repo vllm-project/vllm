@@ -795,6 +795,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
     def apply_monolithic(
@@ -820,4 +821,5 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )

@@ -35,9 +35,26 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__()
         self.moe: FusedMoEConfig = moe
-        self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self._moe_quant_config: FusedMoEQuantConfig | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
         self._quant_schema: FusedMoEQuantSchema | None = None
+
+    @property
+    def moe_quant_config_or_none(self) -> FusedMoEQuantConfig | None:
+        return self._moe_quant_config
+
+    @property
+    def moe_quant_config(self) -> FusedMoEQuantConfig:
+        if self._moe_quant_config is None:
+            raise RuntimeError(
+                f"{type(self).__name__} requires its MoE quant config to be "
+                "initialized before execution."
+            )
+        return self._moe_quant_config
+
+    @moe_quant_config.setter
+    def moe_quant_config(self, quant_config: FusedMoEQuantConfig | None) -> None:
+        self._moe_quant_config = quant_config
 
     @property
     def quant_schema(self) -> FusedMoEQuantSchema:

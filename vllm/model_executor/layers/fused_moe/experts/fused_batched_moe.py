@@ -725,10 +725,10 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        assert not self.quant_config.use_int8_w8a8, "NYI"
-        assert not self.quant_config.use_int8_w8a16, "NYI"
-        assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert self.quant_config.ocp_mx_scheme is None, "NYI"
+        assert not self.quant_schema.use_int8_w8a8, "NYI"
+        assert not self.quant_schema.use_int8_w8a16, "NYI"
+        assert not self.quant_schema.use_int4_w4a16, "NYI"
+        assert self.quant_schema.ocp_mx_scheme is None, "NYI"
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -797,9 +797,9 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         return (workspace13, workspace2, output)
 
     def dequant(self, t: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        assert self.quant_config.is_quantized
+        assert self.quant_schema.is_quantized
         f32 = torch.float32
-        if self.quant_config.is_per_act_token or self.quant_config.is_per_tensor:
+        if self.quant_schema.is_per_act_token or self.quant_schema.is_per_tensor:
             return t.to(f32) * scale
         else:
             return t.to(f32) * group_broadcast(scale, t.shape)
@@ -821,6 +821,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
@@ -844,19 +845,19 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
 
             tmp = _resize_cache(workspace2, (num, N))
 
-            if self.quant_config.is_quantized:
-                assert a1q_scale is not None and self.w1_scale is not None
+            if quant_config.is_quantized:
+                assert a1q_scale is not None and quant_config.w1_scale is not None
                 input = self.dequant(hidden_states[expert, :, :], a1q_scale[expert])
-                w1_dq = self.dequant(w1[expert], self.w1_scale[expert])
+                w1_dq = self.dequant(w1[expert], quant_config.w1_scale[expert])
                 input = input[:num] @ w1_dq.transpose(0, 1)
             else:
                 input = hidden_states[expert, :num, :] @ w1[expert].transpose(0, 1)
 
             self.activation(activation, tmp, input.to(tmp.dtype))
 
-            if self.quant_config.is_quantized:
-                assert self.w2_scale is not None
-                w2_dq = self.dequant(w2[expert], self.w2_scale[expert])
+            if quant_config.is_quantized:
+                assert quant_config.w2_scale is not None
+                w2_dq = self.dequant(w2[expert], quant_config.w2_scale[expert])
             else:
                 w2_dq = w2[expert]
 
@@ -948,10 +949,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
-        assert not self.quant_config.use_int8_w8a8, "NYI"
-        assert not self.quant_config.use_int8_w8a16, "NYI"
-        assert not self.quant_config.use_int4_w4a16, "NYI"
-        assert self.quant_config.ocp_mx_scheme is None, "NYI"
+        assert not self.quant_schema.use_int8_w8a8, "NYI"
+        assert not self.quant_schema.use_int8_w8a16, "NYI"
+        assert not self.quant_schema.use_int4_w4a16, "NYI"
+        assert self.quant_schema.ocp_mx_scheme is None, "NYI"
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1055,9 +1056,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         # Check constraints.
-        if self.quant_config.use_int4_w4a16:
+        if quant_config.use_int4_w4a16:
             assert hidden_states.size(-1) // 2 == w1.size(2), "Hidden size mismatch"
         else:
             assert hidden_states.size(-1) == w1.size(2), (
@@ -1085,7 +1087,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         assert w1.size(0) == E
         assert w2.size(0) == E
 
-        config_dtype = self.quant_config.config_name(hidden_states.dtype)
+        config_dtype = quant_config.config_name(hidden_states.dtype)
 
         config = try_get_optimal_moe_config(
             w1.size(),
@@ -1120,7 +1122,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         )
 
         # TODO(bnell): should this be done for any quantized type?
-        if self.quant_config.use_fp8_w8a8:
+        if quant_config.use_fp8_w8a8:
             intermediate_cache1.fill_(0)
 
         a1q_scale = normalize_batched_scales_shape(a1q_scale, E)
@@ -1133,11 +1135,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             expert_num_tokens=expert_num_tokens,
             compute_type=compute_type,
             A_scale=a1q_scale,
-            B_scale=self.w1_scale,
-            B_zp=self.w1_zp,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            B_scale=quant_config.w1_scale,
+            B_zp=quant_config.w1_zp,
+            use_fp8_w8a8=quant_config.use_fp8_w8a8,
+            use_int8_w8a16=quant_config.use_int8_w8a16,
+            use_int4_w4a16=quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape,
@@ -1179,11 +1181,11 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             expert_num_tokens=expert_num_tokens,
             compute_type=compute_type,
             A_scale=a2q_scale,
-            B_scale=self.w2_scale,
-            B_zp=self.w2_zp,
-            use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a16=self.quant_config.use_int8_w8a16,
-            use_int4_w4a16=self.quant_config.use_int4_w4a16,
+            B_scale=quant_config.w2_scale,
+            B_zp=quant_config.w2_zp,
+            use_fp8_w8a8=quant_config.use_fp8_w8a8,
+            use_int8_w8a16=quant_config.use_int8_w8a16,
+            use_int4_w4a16=quant_config.use_int4_w4a16,
             config=config,
             per_act_token_quant=self.per_act_token_quant,
             block_shape=self.block_shape,

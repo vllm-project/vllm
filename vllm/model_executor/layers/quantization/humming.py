@@ -856,4 +856,5 @@ class HummingMoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=False,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )

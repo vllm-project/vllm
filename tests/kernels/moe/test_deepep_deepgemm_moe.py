@@ -321,6 +321,7 @@ def deepep_deepgemm_moe_impl(
             global_num_experts=num_experts,
             expert_map=build_expert_map(),
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
     return out
 

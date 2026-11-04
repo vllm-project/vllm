@@ -117,6 +117,7 @@ def test_cutlass_fp4_moe_no_graph(
             activation=mk.MoEActivation.SILU,
             apply_router_weight_on_input=False,
             expert_map=None,
+            quant_config=quant_config,
         )
 
         # Reference check:
@@ -237,6 +238,7 @@ def test_cutlass_fp4_moe_swiglustep(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
         # Reference: dequantize everything and run torch_moe with swiglustep

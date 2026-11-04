@@ -475,21 +475,21 @@ class MuseSparkNvFp4MoEQuantConfig(FusedMoEQuantConfig):
 class _MuseSparkNvFp4Scales:
     """Split w1/w3 GEMM1 global scales (``w13_weight_scale_2`` is [E, 2])."""
 
-    quant_config: FusedMoEQuantConfig
     gemm1_clamp_limit: torch.Tensor | None
     gemm1_alpha: torch.Tensor | None
     gemm1_beta: torch.Tensor | None
     # g1_scale_c is registered below; there is no SwiGLU constant to keep
     kept_constants: tuple[str, ...] = ()
 
-    def _compute_g1_scale_c(self) -> torch.Tensor:
-        quant_config = self.quant_config
+    def _g1_scale_c_for(self, quant_config: FusedMoEQuantConfig) -> torch.Tensor:
+        if self.g1_scale_c is not None:
+            return self.g1_scale_c
         if (
             isinstance(quant_config, MuseSparkNvFp4MoEQuantConfig)
             and quant_config.g1_scale_c is not None
         ):
             return quant_config.g1_scale_c
-        return super()._compute_g1_scale_c()  # type: ignore[misc]
+        return super()._g1_scale_c_for(quant_config)  # type: ignore[misc]
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Scales are already folded; the base class's folding must not rerun.
@@ -498,7 +498,9 @@ class _MuseSparkNvFp4Scales:
             and self.gemm1_alpha is None
             and self.gemm1_beta is None
         ), "MuseSpark NVFP4 MoE does not support SwiGLU clamp/alpha/beta"
-        replace_parameter(layer, "g1_scale_c", self._compute_g1_scale_c())
+        g1_scale_c = getattr(layer, "_g1_scale_c", None)
+        assert g1_scale_c is not None
+        replace_parameter(layer, "g1_scale_c", g1_scale_c)
         self.g1_scale_c = layer.g1_scale_c
 
 
@@ -515,14 +517,15 @@ class MuseSparkTrtLlmNvFp4Experts(_MuseSparkNvFp4Scales, TrtLlmNvFp4ExpertsMonol
         w2: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
+        quant_config: FusedMoEQuantConfig,
     ) -> torch.Tensor:
         """Experts on quantized input with routing computed by the caller."""
         import flashinfer
 
         num_tokens = a1q.shape[0]
         assert self._uses_post_gemm2_hook(num_tokens)
-        assert self.quant_config.w1_scale is not None
-        assert self.quant_config.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
@@ -531,17 +534,17 @@ class MuseSparkTrtLlmNvFp4Experts(_MuseSparkNvFp4Scales, TrtLlmNvFp4ExpertsMonol
                 num_tokens, -1
             ),
             gemm1_weights=w1,
-            gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
+            gemm1_weights_scale=quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
             gemm1_alpha=self.gemm1_alpha,
             gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
-            gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
+            gemm2_weights_scale=quant_config.w2_scale.view(torch.float8_e4m3fn),
             gemm2_bias=None,
             output1_scale_scalar=self.g1_scale_c,
-            output1_scale_gate_scalar=self.quant_config.g1_alphas,
-            output2_scale_scalar=self.quant_config.g2_alphas,
+            output1_scale_gate_scalar=quant_config.g1_alphas,
+            output2_scale_scalar=quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
             n_group=0,
@@ -748,7 +751,7 @@ class MuseSparkModelOptNvFp4FusedMoE(ModelOptNvFp4FusedMoE):
     def get_fused_moe_quant_config(
         self, layer: "MuseSparkRoutedExperts"
     ) -> FusedMoEQuantConfig:
-        if self.moe_quant_config is None:
+        if self.moe_quant_config_or_none is None:
             raise RuntimeError(
                 "MuseSparkModelOptNvFp4FusedMoE quant config is only available "
                 "after process_weights_after_loading (the split w1/w3 scales "
@@ -858,7 +861,10 @@ class MuseMoERunner(MoERunner):
     def nvfp4_input_global_scale(self) -> torch.Tensor | None:
         """The static NVFP4 input scale, if the experts take prepared inputs."""
         experts = self._prepared_nvfp4_experts
-        return None if experts is None else experts.quant_config.a1_gscale
+        if experts is None:
+            return None
+        quant_config = self.routed_experts.quant_method.moe_quant_config_or_none
+        return None if quant_config is None else quant_config.a1_gscale
 
     def forward_prepared_nvfp4(
         self,
@@ -874,6 +880,8 @@ class MuseMoERunner(MoERunner):
         layer = self.routed_experts
         experts = self._prepared_nvfp4_experts
         assert experts is not None
+        quant_config = layer.quant_method.moe_quant_config_or_none
+        assert quant_config is not None
         if isinstance(routing, tuple):
             topk_ids, topk_weights = routing
             output = experts.apply_routed(
@@ -885,6 +893,7 @@ class MuseMoERunner(MoERunner):
                 layer.w2_weight,
                 layer.activation,
                 layer.global_num_experts,
+                quant_config=quant_config,
             )
         else:
             output = experts.apply(
@@ -899,6 +908,7 @@ class MuseMoERunner(MoERunner):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 e_score_correction_bias=layer.e_score_correction_bias,
                 routed_scaling_factor=layer.routed_scaling_factor,
+                quant_config=quant_config,
             )
         return self._maybe_reduce_final_output(
             output, None, self._fused_output_is_reduced

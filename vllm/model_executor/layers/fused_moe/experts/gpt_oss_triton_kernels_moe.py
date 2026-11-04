@@ -1140,10 +1140,9 @@ class OAITritonExperts(BaseOAITritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        if self.quant_config is None:
-            self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
-
         if expert_map is not None:
             # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
             # make_routing_data treats -1 as the skip sentinel.
@@ -1168,7 +1167,7 @@ class OAITritonExperts(BaseOAITritonExperts):
             scatter_indx,
             topk=topk,
             activation=activation,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
             expert_map=None,  # applied already
@@ -1225,40 +1224,40 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         input: torch.Tensor,
         **kwargs,
     ) -> None:
-        quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
+        quant_schema = self.quant_schema
         if activation == MoEActivation.SWIGLUOAI:
             alpha = (
-                quant_config.gemm1_alpha
-                if quant_config.gemm1_alpha is not None
+                quant_schema.gemm1_alpha
+                if quant_schema.gemm1_alpha is not None
                 else 1.702
             )
             limit = (
-                quant_config.gemm1_clamp_limit
-                if quant_config.gemm1_clamp_limit is not None
+                quant_schema.gemm1_clamp_limit
+                if quant_schema.gemm1_clamp_limit is not None
                 else 7.0
             )
             torch.ops._C.swigluoai_and_mul(output, input, alpha, limit)
         elif (
             activation == MoEActivation.SILU
-            and quant_config.gemm1_clamp_limit is not None
+            and quant_schema.gemm1_clamp_limit is not None
         ):
             swiglu_limit_func(
                 output,
                 input,
-                quant_config.gemm1_clamp_limit,
+                quant_schema.gemm1_clamp_limit,
             )
         elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            assert quant_config.gemm1_clamp_limit is not None
+            assert quant_schema.gemm1_clamp_limit is not None
             alpha = (
-                quant_config.gemm1_alpha
-                if quant_config.gemm1_alpha is not None
+                quant_schema.gemm1_alpha
+                if quant_schema.gemm1_alpha is not None
                 else 1.0
             )
             beta = (
-                quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+                quant_schema.gemm1_beta if quant_schema.gemm1_beta is not None else 0.0
             )
             torch.ops._C.silu_and_mul_with_clamp(
-                output, input, quant_config.gemm1_clamp_limit, alpha, beta
+                output, input, quant_schema.gemm1_clamp_limit, alpha, beta
             )
         else:
             super().activation(activation, output, input)
@@ -1280,11 +1279,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         # Use local variable to help mypy narrow the type after None check
-        quant_config = self.quant_config
-        if quant_config is None:
-            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
         global_topk_ids = topk_ids
         if expert_map is not None:
@@ -1593,6 +1590,8 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         return triton_kernel_moe_forward(
             hidden_states=hidden_states,
@@ -1603,6 +1602,6 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             renormalize=self.renormalize,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )

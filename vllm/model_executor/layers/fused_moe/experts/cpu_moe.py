@@ -133,7 +133,7 @@ class _CPUPaddedIntermediateMixin:
 
         # Assign through .data rather than replacing the Parameter: the quant
         # config is built before this runs and holds a reference to these very
-        # objects, which is what feeds self.w1_bias / self.w1_scale in apply().
+        # objects, which is what feeds quant_config.w1_bias / w1_scale in apply().
         if hasattr(layer, "w13_bias"):
             new_bias = layer.w13_bias.new_zeros(num_experts, 2 * padded_size)
             new_bias[:, :intermediate_size] = layer.w13_bias[:, :intermediate_size]
@@ -312,6 +312,7 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         # apply_router_weight_on_input (topk=1 only) is already applied to
         # hidden_states by MoEPrepareAndFinalizeNoDPEPModular.prepare().
@@ -321,8 +322,8 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
                 hidden_states,
                 w1,
                 w2,
-                self.w1_bias,
-                self.w2_bias,
+                quant_config.w1_bias,
+                quant_config.w2_bias,
                 topk_weights,
                 topk_ids,
                 apply_router_weight_on_input,
@@ -334,8 +335,8 @@ class CPUUnquantizedExperts(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModul
             hidden_states,
             w1,
             w2,
-            self.w1_bias,
-            self.w2_bias,
+            quant_config.w1_bias,
+            quant_config.w2_bias,
             topk_weights,
             topk_ids,
             activation.value,
@@ -574,6 +575,7 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             # fused_experts_cpu always applies topk_weights internally on
@@ -584,11 +586,11 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
                 "CPUExpertsFp8 does not support apply_router_weight_on_input=True."
             )
         block_shape = (
-            list(self.quant_config.block_shape)
-            if self.quant_config.block_shape
+            list(quant_config.block_shape)
+            if quant_config.block_shape
             else (
-                [self.quant_config._w1.shape.row, self.quant_config._w1.shape.col]
-                if self.quant_config._w1.shape is not None
+                [quant_config._w1.shape.row, quant_config._w1.shape.col]
+                if quant_config._w1.shape is not None
                 else None
             )
         )
@@ -601,8 +603,8 @@ class CPUExpertsFp8(mk.FusedMoEExpertsModular):
             topk_weights,
             topk_ids,
             CPUQuantMethod.FP8_W8A16,  # moe_comp_method
-            self.w1_scale,  # w1_scale
-            self.w2_scale,  # w2_scale
+            quant_config.w1_scale,  # w1_scale
+            quant_config.w2_scale,  # w2_scale
             None,  # w1_zero
             None,  # w2_zero
             block_shape,  # block_size
@@ -747,6 +749,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             # fused_experts_cpu always applies topk_weights internally on
@@ -757,10 +760,10 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
                 "CPUExpertsMxfp4 does not support apply_router_weight_on_input=True."
             )
         # Get bias and swiglu params from quant config
-        w1_bias = self.quant_config.w1_bias
-        w2_bias = self.quant_config.w2_bias
-        alpha = getattr(self.quant_config, "gemm1_alpha", None)
-        limit = getattr(self.quant_config, "gemm1_clamp_limit", None)
+        w1_bias = quant_config.w1_bias
+        w2_bias = quant_config.w2_bias
+        alpha = getattr(quant_config, "gemm1_alpha", None)
+        limit = getattr(quant_config, "gemm1_clamp_limit", None)
 
         fused_experts_cpu(
             output,
@@ -770,8 +773,8 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsModular):
             topk_weights,
             topk_ids,
             CPUQuantMethod.MXFP4,  # moe_comp_method
-            self.w1_scale,  # w1_scale
-            self.w2_scale,  # w2_scale
+            quant_config.w1_scale,  # w1_scale
+            quant_config.w2_scale,  # w2_scale
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size
@@ -988,6 +991,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             raise NotImplementedError(
@@ -1003,10 +1007,10 @@ class CPUExpertsInt4(mk.FusedMoEExpertsModular):
             topk_weights,
             topk_ids,
             CPUQuantMethod.INT4_W4A8,
-            self.w1_scale,
-            self.w2_scale,
-            self.w1_zp,
-            self.w2_zp,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
+            quant_config.w1_zp,
+            quant_config.w2_zp,
             None,  # block_size
             None,  # w1_bias
             None,  # w2_bias
@@ -1162,6 +1166,7 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             # fused_experts_cpu always applies topk_weights internally on
@@ -1179,8 +1184,8 @@ class CPUExpertsInt8(_CPUPaddedIntermediateMixin, mk.FusedMoEExpertsModular):
             topk_weights,
             topk_ids,
             CPUQuantMethod.INT8_W8A8,
-            self.w1_scale,
-            self.w2_scale,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size (per-channel, no block)
@@ -1330,20 +1335,21 @@ class ArmCPUExpertsInt8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         # apply_router_weight_on_input (topk=1 only) is already applied to
         # hidden_states by MoEPrepareAndFinalizeNoDPEPModular.prepare().
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
         cpu_fused_moe_int8(
             output,
             hidden_states,
             w1,
             w2,
-            self.w1_scale,
-            self.w2_scale,
-            self.w1_bias,
-            self.w2_bias,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
+            quant_config.w1_bias,
+            quant_config.w2_bias,
             topk_weights,
             topk_ids,
             activation.value,
@@ -1484,20 +1490,21 @@ class PowerCPUExpertsInt8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         # The modular prepare step applies router weights to the input when
         # apply_router_weight_on_input is enabled.
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
         cpu_fused_moe_int8(
             output,
             hidden_states,
             w1,
             w2,
-            self.w1_scale,
-            self.w2_scale,
-            self.w1_bias,
-            self.w2_bias,
+            quant_config.w1_scale,
+            quant_config.w2_scale,
+            quant_config.w1_bias,
+            quant_config.w2_bias,
             topk_weights,
             topk_ids,
             activation.value,
@@ -1516,34 +1523,6 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
-        assert self.w1_scale is not None and self.w2_scale is not None, (
-            "ZenCPUExpertsInt8 requires per-channel weight scales on the layer."
-        )
-        num_experts = self.w1_scale.shape[0]
-        # ZenDNN's fast routed MoE kernel only accepts f32 expert scales; bf16
-        # silently drops the layer onto the slower per-expert path.
-        self._w1_scale_f32 = (
-            self.w1_scale.detach()
-            .to(torch.float32)
-            .reshape(num_experts, -1)
-            .contiguous()
-        )
-        self._w2_scale_f32 = (
-            self.w2_scale.detach()
-            .to(torch.float32)
-            .reshape(num_experts, -1)
-            .contiguous()
-        )
-        self._w1_bias_bf16 = (
-            None
-            if self.w1_bias is None
-            else self.w1_bias.detach().to(torch.bfloat16).contiguous()
-        )
-        self._w2_bias_bf16 = (
-            None
-            if self.w2_bias is None
-            else self.w2_bias.detach().to(torch.bfloat16).contiguous()
-        )
         logger.info_once("[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE")
 
     @property
@@ -1639,6 +1618,7 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             assert topk_ids.size(1) == 1, (
@@ -1646,19 +1626,46 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsModular):
             )
             hidden_states = hidden_states.mul(topk_weights.to(hidden_states.dtype))
 
+        w1_scale = quant_config.w1_scale
+        w2_scale = quant_config.w2_scale
+        assert w1_scale is not None and w2_scale is not None, (
+            "ZenCPUExpertsInt8 requires per-channel weight scales on the layer."
+        )
+        num_experts = w1_scale.shape[0]
+        # ZenDNN's fast routed MoE kernel only accepts f32 expert scales; bf16
+        # silently drops the layer onto the slower per-expert path.
+        w1_scale_f32 = (
+            w1_scale.detach().to(torch.float32).reshape(num_experts, -1).contiguous()
+        )
+        w2_scale_f32 = (
+            w2_scale.detach().to(torch.float32).reshape(num_experts, -1).contiguous()
+        )
+        w1_bias = quant_config.w1_bias
+        w2_bias = quant_config.w2_bias
+        w1_bias_bf16 = (
+            None
+            if w1_bias is None
+            else w1_bias.detach().to(torch.bfloat16).contiguous()
+        )
+        w2_bias_bf16 = (
+            None
+            if w2_bias is None
+            else w2_bias.detach().to(torch.bfloat16).contiguous()
+        )
+
         torch.ops.zentorch.zentorch_fused_moe(
             output,
             hidden_states,
             w1,
             w2,
-            self._w1_bias_bf16,
-            self._w2_bias_bf16,
+            w1_bias_bf16,
+            w2_bias_bf16,
             topk_weights.to(torch.float32).contiguous(),
             topk_ids.to(torch.int32).contiguous(),
             apply_router_weight_on_input,  # skip_weighted
             str(activation.value).lower(),
-            self._w1_scale_f32,
-            self._w2_scale_f32,
+            w1_scale_f32,
+            w2_scale_f32,
         )
 
 
@@ -1826,6 +1833,7 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         if apply_router_weight_on_input:
             # fused_experts_cpu always applies topk_weights internally on
@@ -1837,14 +1845,14 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             )
 
         block_shape = (
-            list(self.quant_config.block_shape)
-            if self.quant_config.block_shape
+            list(quant_config.block_shape)
+            if quant_config.block_shape
             else (
                 [
-                    self.quant_config._w1.shape.row,
-                    self.quant_config._w1.shape.col,
+                    quant_config._w1.shape.row,
+                    quant_config._w1.shape.col,
                 ]
-                if self.quant_config._w1.shape is not None
+                if quant_config._w1.shape is not None
                 else None
             )
         )
@@ -1863,8 +1871,8 @@ class CPUExpertsFp8W8A8(mk.FusedMoEExpertsModular):
             topk_weights,
             topk_ids,
             CPUQuantMethod.FP8_W8A8,
-            self.w1_scale,  # w1_scale
-            self.w2_scale,  # w2_scale
+            quant_config.w1_scale,  # w1_scale
+            quant_config.w2_scale,  # w2_scale
             None,  # w1_zero
             None,  # w2_zero
             block_shape,  # block_size

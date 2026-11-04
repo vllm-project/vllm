@@ -219,6 +219,7 @@ def test_zen_int8_dispatch_contract(
         workspace2=torch.empty(0),
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     call = mock_zentorch_fused_moe["fused_moe"]

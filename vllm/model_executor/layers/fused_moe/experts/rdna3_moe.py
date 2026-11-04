@@ -162,9 +162,10 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
-        assert self.w1_scale is not None and self.w2_scale is not None
-        assert self.w1_zp is not None and self.w2_zp is not None
+        assert quant_config.w1_scale is not None and quant_config.w2_scale is not None
+        assert quant_config.w1_zp is not None and quant_config.w2_zp is not None
 
         E, M, N, K, top_k = self.moe_problem_size(hidden_states, w1, w2, topk_ids)
         if global_num_experts == -1:
@@ -202,8 +203,8 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             hidden_states,
             gate_up_out,
             w1,
-            self.w1_scale,
-            self.w1_zp,
+            quant_config.w1_scale,
+            quant_config.w1_zp,
             topk_weights_f32 if apply_router_weight_on_input else no_topk_weights,
             sorted_token_ids,
             expert_ids,
@@ -222,8 +223,8 @@ class Rdna3WNA16Experts(mk.FusedMoEExpertsModular):
             act_out,
             output,
             w2,
-            self.w2_scale,
-            self.w2_zp,
+            quant_config.w2_scale,
+            quant_config.w2_zp,
             no_topk_weights if apply_router_weight_on_input else topk_weights_f32,
             sorted_token_ids,
             expert_ids,

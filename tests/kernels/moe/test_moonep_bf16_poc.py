@@ -216,6 +216,7 @@ def moonep_moe_impl(
             test_tensors.topk,
             apply_router_weight_on_input=False,
             weight_and_reduce_impl=TopKWeightAndReduceNoOP(),
+            quant_config=_no_quant_config(),
         )
         torch.accelerator.synchronize()
         return output
@@ -285,6 +286,7 @@ def moonep_modular_kernel_impl(
             global_num_experts=config.num_experts,
             expert_map=None,
             apply_router_weight_on_input=config.apply_router_weight_on_input,
+            quant_config=_no_quant_config(),
         )
         torch.accelerator.synchronize()
         return out

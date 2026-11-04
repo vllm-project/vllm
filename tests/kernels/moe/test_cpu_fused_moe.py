@@ -608,6 +608,7 @@ def test_cpu_fused_moe_unaligned_intermediate_size(
         workspace2=torch.empty(0),
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     atol, rtol = get_default_atol(output), get_default_rtol(output)
@@ -701,6 +702,7 @@ def test_cpu_experts_int8_unaligned_intermediate_size(
         workspace2=torch.empty(0),
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)

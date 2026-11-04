@@ -768,8 +768,11 @@ def test_trtllm_mxfp4_deferred_finalize(
         ),
         in_dtype=torch.bfloat16,
     )
+    quant_config = make_mxfp4_moe_quant_config(
+        backend, w1_scale=w13_scale, w2_scale=w2_scale
+    )
     kernel = make_mxfp4_moe_kernel(
-        make_mxfp4_moe_quant_config(backend, w1_scale=w13_scale, w2_scale=w2_scale),
+        quant_config,
         moe_config,
         TrtLlmMxfp4ExpertsMonolithic if monolithic else TrtLlmMxfp4ExpertsModular,
         backend,
@@ -792,6 +795,7 @@ def test_trtllm_mxfp4_deferred_finalize(
                 expert_map=None,
                 apply_router_weight_on_input=False,
                 routing_sink=None,
+                quant_config=quant_config,
             ),
         )
         return
@@ -811,6 +815,7 @@ def test_trtllm_mxfp4_deferred_finalize(
             global_num_experts=num_experts,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         ),
         router_weights=topk_weights,
         chunked=chunk_size is not None,
@@ -1814,6 +1819,7 @@ def test_rocm_mxfp4_moe_oracle(
                 expert_map=None,
                 apply_router_weight_on_input=False,
                 routing_sink=None,
+                quant_config=quant_config,
             )
         else:
             # Modular impl uses topk_weights and topk_ids
@@ -1827,6 +1833,7 @@ def test_rocm_mxfp4_moe_oracle(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             )
 
     assert isinstance(out, torch.Tensor)
@@ -2020,6 +2027,7 @@ def test_aiter_mxfp4_w4a4_moe_pad_masks_only_padding(
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             )
 
     padded = run(intermediate_size_unpadded)
@@ -2518,6 +2526,7 @@ def test_emulation_a_mxfp6_moe_forward_quantizes_activations():
                 global_num_experts=num_experts,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             )
 
     # A fresh quant config per run: the experts nulls the weight scales on it.

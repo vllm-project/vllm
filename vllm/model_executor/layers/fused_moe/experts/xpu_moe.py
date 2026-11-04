@@ -150,22 +150,20 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
-            if (
-                self.quant_config is not None
-                and self.quant_config.weight_quant_dtype == "mxfp4"
-            ):
+            if quant_config is not None and quant_config.weight_quant_dtype == "mxfp4":
                 w1 = w1.view(torch.float4_e2m1fn_x2)
                 w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
-                w13_scales=self.w1_scale,
-                w13_bias=self.w1_bias,
+                w13_scales=quant_config.w1_scale,
+                w13_bias=quant_config.w1_bias,
                 w2=w2,
-                w2_scales=self.w2_scale,
-                w2_bias=self.w2_bias,
+                w2_scales=quant_config.w2_scale,
+                w2_bias=quant_config.w2_bias,
                 n_experts_per_token=topk,
                 activation=activation.value,
                 num_experts=self.moe_config.num_local_experts,

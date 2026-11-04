@@ -300,6 +300,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             apply_router_weight_on_input=True,
             routed_scaling_factor=1.0,
             routing_sink=None,
+            quant_config=quant_config,
         )
 
         check_accuracy(
@@ -410,6 +411,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
+            quant_config=quant_config,
         )
 
         check_accuracy(
@@ -909,6 +911,7 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant_config,
             )
 
         if is_block and transposed:
@@ -1021,6 +1024,7 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
             e_score_correction_bias=bias,
             routed_scaling_factor=scale,
             routing_sink=None,
+            quant_config=quant_config,
             **common,
         )
         topk_weights, topk_ids = fused_topk_bias(
@@ -1033,7 +1037,11 @@ def test_trtllm_mxfp8_minimax2_routing_applies_routed_scale(m: int, workspace_in
             routed_scaling_factor=scale,
         )
         reference = make_kernel(TrtLlmFp8ExpertsModular).apply(
-            hidden_states=a, topk_weights=topk_weights, topk_ids=topk_ids, **common
+            hidden_states=a,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            quant_config=quant_config,
+            **common,
         )
 
     torch.testing.assert_close(fused, reference, atol=2e-2, rtol=2e-2)
@@ -1143,6 +1151,7 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
             apply_router_weight_on_input=False,
             routed_scaling_factor=1.0,
             routing_sink=None,
+            quant_config=quant_config,
         )
         assert isinstance(output, torch.Tensor)
         output = output[:, :k]

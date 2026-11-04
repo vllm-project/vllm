@@ -279,16 +279,16 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         ):
             return None, None, None
 
-        limit = self.quant_config.gemm1_clamp_limit
+        limit = self.quant_schema.gemm1_clamp_limit
         if limit is None:
             limit = self.moe_config.swiglu_limit
         if activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE:
             return limit, None, None
 
-        alpha = self.quant_config.gemm1_alpha
+        alpha = self.quant_schema.gemm1_alpha
         if alpha is None:
             alpha = self.moe_config.swiglu_alpha
-        beta = self.quant_config.gemm1_beta
+        beta = self.quant_schema.gemm1_beta
         if beta is None:
             beta = self.moe_config.swiglu_beta
         return limit, alpha, beta
@@ -296,6 +296,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     def _prepare_experts(
         self,
         *,
+        layer: torch.nn.Module,
         w1: torch.Tensor,
         w2: torch.Tensor,
         activation: MoEActivation,
@@ -331,7 +332,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 ),
             )
             return prepared._impl
-        if self.w1_scale is None or self.w2_scale is None:
+        w1_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+        if w1_scale is None or w2_scale is None:
             raise ValueError("b12x MoE requires w1 and w2 block scales")
 
         _canonicalize_fp4_zero_signs_(w1)
@@ -344,17 +347,25 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         intermediate_size = int(w2.shape[2]) * 2
         unit_scale = self._unit_scale(w1.device, num_experts)
         w1_global_scale = self._weight_global_scale(
-            w1.device, num_experts, self.g1_alphas, "w1 global scales"
+            w1.device,
+            num_experts,
+            getattr(layer, "w13_weight_scale_2", None),
+            "w1 global scales",
         )
         w2_global_scale = self._weight_global_scale(
-            w2.device, num_experts, self.g2_alphas, "w2 global scales"
+            w2.device,
+            num_experts,
+            getattr(layer, "w2_weight_scale_2", None),
+            "w2 global scales",
         )
 
         if quant_mode in ("nvfp4", "w4a8_nvfp4"):
-            if self.a1_gscale is None or self.a2_gscale is None:
-                raise ValueError("b12x NVFP4 MoE requires activation global scales")
-            a1_gscale = _normalize_expert_scale(self.a1_gscale).to(w1.device)
-            a2_gscale = _normalize_expert_scale(self.a2_gscale).to(w2.device)
+            a1_gscale = _normalize_expert_scale(1.0 / layer.w13_input_scale).to(
+                w1.device
+            )
+            a2_gscale = _normalize_expert_scale(1.0 / layer.w2_input_scale).to(
+                w2.device
+            )
         else:
             a1_gscale = unit_scale
             a2_gscale = unit_scale
@@ -372,39 +383,21 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         return fused_moe.prepare_weights(
             plan=weight_plan,
             w1_fp4=w1,
-            w1_blockscale=self.w1_scale,
+            w1_blockscale=w1_scale,
             w1_global_scale=w1_global_scale,
             a1_gscale=a1_gscale,
             w2_fp4=w2,
-            w2_blockscale=self.w2_scale,
+            w2_blockscale=w2_scale,
             w2_global_scale=w2_global_scale,
             a2_gscale=a2_gscale,
             params_dtype=params_dtype,
         )
 
-    def _refresh_quant_config(self, layer: torch.nn.Module) -> None:
-        if self._source_format in B12X_BLOCK_CODECS:
-            return
-        self.quant_config._w1.scale = layer.w13_weight_scale
-        self.quant_config._w2.scale = layer.w2_weight_scale
-        if self._source_format != "modelopt_nvfp4":
-            return
-
-        self.quant_config._w1.alpha_or_gscale = layer.w13_weight_scale_2
-        self.quant_config._w2.alpha_or_gscale = layer.w2_weight_scale_2
-        if self._quant_mode in ("nvfp4", "w4a8_nvfp4"):
-            self.quant_config._a1.alpha_or_gscale = 1.0 / layer.w13_input_scale
-            self.quant_config._a2.alpha_or_gscale = 1.0 / layer.w2_input_scale
-
     def _release_source_parameters(self, layer: torch.nn.Module) -> None:
         if self._source_parameters_released:
             return
-        w1_scale = _replace_parameter_with_empty(layer, "w13_weight_scale")
-        w2_scale = _replace_parameter_with_empty(layer, "w2_weight_scale")
-        if w1_scale is not None:
-            self.quant_config._w1.scale = w1_scale
-        if w2_scale is not None:
-            self.quant_config._w2.scale = w2_scale
+        _replace_parameter_with_empty(layer, "w13_weight_scale")
+        _replace_parameter_with_empty(layer, "w2_weight_scale")
         _replace_parameter_with_empty(layer, "w13_weight")
         _replace_parameter_with_empty(layer, "w2_weight")
         self._source_parameters_released = True
@@ -425,8 +418,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 "b12x MoE supports apply_router_weight_on_input only with W4A16"
             )
         self._source_parameters_released = False
-        self._refresh_quant_config(layer)
         prepared = self._prepare_experts(
+            layer=layer,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             activation=layer.activation,
@@ -778,6 +771,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         del w1, w2, global_num_experts
         del a1q_scale, a2_scale, workspace13, expert_tokens_meta

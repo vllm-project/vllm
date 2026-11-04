@@ -119,4 +119,5 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )

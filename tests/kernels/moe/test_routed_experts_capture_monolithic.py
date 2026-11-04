@@ -130,14 +130,15 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
             ]
         ).view(torch.bfloat16)
 
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype=None,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=None,
+    )
     experts = TrtLlmBf16ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=FusedMoEQuantConfig.make(
-            quant_dtype=None,
-            per_act_token_quant=False,
-            per_out_ch_quant=False,
-            block_shape=None,
-        ),
+        quant_config=quant_config,
     )
     w13 = block_major_k(
         torch.randn(NUM_EXPERTS, 2 * INTERMEDIATE, HIDDEN, device=DEVICE).bfloat16()
@@ -160,6 +161,7 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
             a1q_scale=None,
             apply_router_weight_on_input=False,
             routing_replay_out=routing_replay_out,
+            quant_config=quant_config,
             **_routing_kwargs(routing_method),
         )
 
@@ -180,18 +182,19 @@ def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
             torch.float8_e4m3fn
         ),
     )
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=torch.ones(
+            NUM_EXPERTS, 2 * INTERMEDIATE // block, HIDDEN // block, device=DEVICE
+        ),
+        w2_scale=torch.ones(
+            NUM_EXPERTS, HIDDEN // block, INTERMEDIATE // block, device=DEVICE
+        ),
+        block_shape=[block, block],
+        per_act_token_quant=False,
+    )
     experts = TrtLlmFp8ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=fp8_w8a8_moe_quant_config(
-            w1_scale=torch.ones(
-                NUM_EXPERTS, 2 * INTERMEDIATE // block, HIDDEN // block, device=DEVICE
-            ),
-            w2_scale=torch.ones(
-                NUM_EXPERTS, HIDDEN // block, INTERMEDIATE // block, device=DEVICE
-            ),
-            block_shape=[block, block],
-            per_act_token_quant=False,
-        ),
+        quant_config=quant_config,
     )
 
     def forward(router_logits, routing_replay_out):
@@ -209,6 +212,7 @@ def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
             a1q_scale=torch.ones(num_tokens, HIDDEN // block, device=DEVICE),
             apply_router_weight_on_input=False,
             routing_replay_out=routing_replay_out,
+            quant_config=quant_config,
             **_routing_kwargs(routing_method),
         )
 
@@ -235,20 +239,21 @@ def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
         torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE, device=DEVICE).bfloat16()
     )
     ones = torch.ones(NUM_EXPERTS, device=DEVICE)
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype="nvfp4",
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=None,
+        w1_scale=w13_scale,
+        w2_scale=w2_scale,
+        g1_alphas=ones,
+        g2_alphas=ones,
+        a1_gscale=global_scale,
+        a2_gscale=ones,
+    )
     experts = TrtLlmNvFp4ExpertsMonolithic(
         moe_config=_moe_config(top_k, routing_method),
-        quant_config=FusedMoEQuantConfig.make(
-            quant_dtype="nvfp4",
-            per_act_token_quant=False,
-            per_out_ch_quant=False,
-            block_shape=None,
-            w1_scale=w13_scale,
-            w2_scale=w2_scale,
-            g1_alphas=ones,
-            g2_alphas=ones,
-            a1_gscale=global_scale,
-            a2_gscale=ones,
-        ),
+        quant_config=quant_config,
     )
 
     def forward(router_logits, routing_replay_out):
@@ -272,6 +277,7 @@ def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
             a1q_scale=hidden_scale,
             apply_router_weight_on_input=False,
             routing_replay_out=routing_replay_out,
+            quant_config=quant_config,
             **_routing_kwargs(routing_method),
         )
 

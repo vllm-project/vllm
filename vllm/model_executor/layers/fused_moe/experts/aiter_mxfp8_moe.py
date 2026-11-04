@@ -14,6 +14,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
@@ -32,11 +33,11 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        return self.quant_config.quant_dtype
+        return self.quant_schema.quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
-        return self.quant_config.block_shape
+        return self.quant_schema.block_shape
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -112,13 +113,14 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         from aiter import ActivationType, QuantType
         from aiter.ops.flydsl.moe_common import GateMode
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        limit = self.quant_config.gemm1_clamp_limit
+        limit = quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
         if activation == MoEActivation.SILU:
             activation_method = ActivationType.Silu.value
@@ -149,8 +151,8 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             activation_method=activation_method,
             quant_method=QuantType.per_1x32.value,
             doweight_stage1=apply_router_weight_on_input,
-            w1_scale=self.w1_scale_val,
-            w2_scale=self.w2_scale_val,
+            w1_scale=quant_config.w1_scale,
+            w2_scale=quant_config.w2_scale,
             a1_scale=None,
             a2_scale=None,
             # MXFP8 w1 and its scales are preshuffled into AITER's GUGU layout

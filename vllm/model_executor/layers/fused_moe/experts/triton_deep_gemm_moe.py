@@ -26,6 +26,8 @@ class TritonOrDeepGemmExperts(FallbackExperts):
 
     def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
             experts=DeepGemmExperts(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )

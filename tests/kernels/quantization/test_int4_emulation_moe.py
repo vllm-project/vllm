@@ -264,7 +264,17 @@ def _canonicalize_gptq_moe_inputs(
 
 
 def _run_emulation_forward(
-    experts, w13_bf16, w2_bf16, hidden_states, topk_weights, topk_ids, E, K, N
+    experts,
+    w13_bf16,
+    w2_bf16,
+    hidden_states,
+    topk_weights,
+    topk_ids,
+    E,
+    K,
+    N,
+    *,
+    quant_config,
 ):
     ws13_size = hidden_states.shape[0] * topk_ids.shape[1] * max(N, K)
     ws2_size = hidden_states.shape[0] * topk_ids.shape[1] * max(2 * N, K)
@@ -289,6 +299,7 @@ def _run_emulation_forward(
         workspace2=workspace2,
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
     return output
 
@@ -677,10 +688,28 @@ def test_gptq_vs_awq_forward_agree(E, K, N, top_k, group_size, num_tokens):
     ).to(torch.int32)
 
     out_gptq = _run_emulation_forward(
-        experts_gptq, w13_gptq, w2_gptq, hidden_states, topk_weights, topk_ids, E, K, N
+        experts_gptq,
+        w13_gptq,
+        w2_gptq,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        K,
+        N,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
     out_awq = _run_emulation_forward(
-        experts_awq, w13_awq, w2_awq, hidden_states, topk_weights, topk_ids, E, K, N
+        experts_awq,
+        w13_awq,
+        w2_awq,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        K,
+        N,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
 
     assert torch.allclose(out_gptq, out_awq, atol=0), (
@@ -716,6 +745,8 @@ def _run_emulation_forward_ep(
     topk_ids,
     global_num_experts,
     expert_map,
+    *,
+    quant_config,
 ):
     """Run forward with EP expert_map; returns output tensor."""
     T, K = hidden_states.shape
@@ -741,6 +772,7 @@ def _run_emulation_forward_ep(
         workspace2=workspace2,
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
     return output
 
@@ -817,7 +849,16 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
         moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
     )
     out_no_ep = _run_emulation_forward(
-        experts_ref, w13_all, w2_all, hidden_states, topk_weights, topk_ids, E, K, N
+        experts_ref,
+        w13_all,
+        w2_all,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        K,
+        N,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
 
     # EP simulation: sum contributions from each rank
@@ -852,6 +893,7 @@ def test_ep_output_matches_no_ep(E, K, N, top_k, group_size, num_tokens, ep_size
             topk_ids,
             global_num_experts=E,
             expert_map=expert_map,
+            quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
         )
         out_ep_sum = out_ep_sum + out_rank
 
@@ -947,6 +989,7 @@ def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
             topk_ids,
             E,
             expert_map,
+            quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
         )
         out_awq = _run_emulation_forward_ep(
             experts_awq,
@@ -957,6 +1000,7 @@ def test_ep_gptq_awq_agree(E, K, N, top_k, group_size, num_tokens, ep_size):
             topk_ids,
             E,
             expert_map,
+            quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
         )
         assert torch.allclose(out_gptq, out_awq, atol=0), (
             f"rank={rank} max diff: {(out_gptq - out_awq).abs().max().item()}"
@@ -1035,6 +1079,7 @@ def test_ep_partial_rank_no_active_experts(
         topk_ids,
         E,
         expert_map,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
     assert torch.all(out == 0), (
         f"Expected zeros for inactive rank, got max={out.abs().max().item()}"
@@ -1102,7 +1147,16 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
         moe_config_full, int4_w4a16_moe_quant_config(dummy_scale, dummy_scale)
     )
     out_full = _run_emulation_forward(
-        experts_full, w13_all, w2_all, hidden_states, topk_weights, topk_ids, E, K, N
+        experts_full,
+        w13_all,
+        w2_all,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        K,
+        N,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
 
     # EP sum
@@ -1137,6 +1191,7 @@ def test_ep_sum_equals_full_forward(E, K, N, top_k, group_size, num_tokens, ep_s
             topk_ids,
             E,
             expert_map,
+            quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
         )
         out_ep_sum = out_ep_sum + out_rank
 
@@ -1202,7 +1257,16 @@ def test_emulation_output_close_to_bf16_reference(
     ).to(torch.int32)
 
     out_emulation = _run_emulation_forward(
-        experts, w13_bf16, w2_bf16, hidden_states, topk_weights, topk_ids, E, K, N
+        experts,
+        w13_bf16,
+        w2_bf16,
+        hidden_states,
+        topk_weights,
+        topk_ids,
+        E,
+        K,
+        N,
+        quant_config=int4_w4a16_moe_quant_config(dummy_scale, dummy_scale),
     )
 
     ref = torch.zeros(num_tokens, K, dtype=torch.bfloat16, device=device)

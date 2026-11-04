@@ -90,23 +90,14 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     ):
         super().__init__(moe_config, quant_config)
 
-        # `TritonExperts.apply` expects pre-dequantized weights,
-        # which we handle in `apply` below.
-        self.w1_scale_val = self.quant_config.w1_scale
-        self.w2_scale_val = self.quant_config.w2_scale
-
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
-
         self.quantization_emulation = True
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return "nvfp4"
 
-    @property
-    def a1_scale(self) -> torch.Tensor | None:
-        return self.quant_config.a1_gscale
+    def _runtime_a1_scale(self, quant_config: FusedMoEQuantConfig) -> torch.Tensor:
+        return quant_config.a1_gscale
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -136,16 +127,17 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
     ):
         assert w1.dtype == torch.uint8
         assert w2.dtype == torch.uint8
 
         # Dequantize w1 from packed NVFP4 to fp16/bf16
-        w13_global_scale = self.quant_config.g1_alphas
+        w13_global_scale = quant_config.g1_alphas
 
         w1_dequant = dequantize_to_dtype(
             tensor_fp4=w1,
-            tensor_sf=self.w1_scale_val,
+            tensor_sf=quant_config.w1_scale,
             global_scale=w13_global_scale,
             dtype=hidden_states.dtype,
             block_size=16,
@@ -153,11 +145,11 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
         )
 
         # Dequantize w2 from packed NVFP4 to fp16/bf16
-        w2_global_scale = self.quant_config.g2_alphas
+        w2_global_scale = quant_config.g2_alphas
 
         w2_dequant = dequantize_to_dtype(
             tensor_fp4=w2,
-            tensor_sf=self.w2_scale_val,
+            tensor_sf=quant_config.w2_scale,
             global_scale=w2_global_scale,
             dtype=hidden_states.dtype,
             block_size=16,
@@ -175,11 +167,12 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=None,
-            a2_scale=self.quant_config.a2_gscale,
+            a2_scale=quant_config.a2_gscale,
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=quant_config,
         )
 
 
@@ -703,13 +696,15 @@ def test_nvfp4_moe_correctness(
             w2_scale=w2_scale.clone(),
         )
 
+    ref_quant_config = _make_quant_config()
+    fused_quant_config = _make_quant_config()
     ref_experts = Nvfp4QuantizationEmulationTritonExpertsReference(
         moe_config=moe_config,
-        quant_config=_make_quant_config(),
+        quant_config=ref_quant_config,
     )
     fused_experts = Nvfp4QuantizationEmulationTritonExperts(
         moe_config=moe_config,
-        quant_config=_make_quant_config(),
+        quant_config=fused_quant_config,
     )
 
     torch.manual_seed(42)
@@ -758,6 +753,7 @@ def test_nvfp4_moe_correctness(
         output=output_ref,
         workspace13=workspace13_ref,
         workspace2=workspace2_ref,
+        quant_config=ref_quant_config,
         **apply_kwargs,
     )
 
@@ -766,6 +762,7 @@ def test_nvfp4_moe_correctness(
         output=output_fused,
         workspace13=workspace13_fused,
         workspace2=workspace2_fused,
+        quant_config=fused_quant_config,
         **apply_kwargs,
     )
 

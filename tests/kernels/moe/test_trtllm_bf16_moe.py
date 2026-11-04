@@ -137,6 +137,7 @@ def test_trtllm_bf16_moe_modular_no_graph(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
 
         torch_output = torch_moe(
@@ -188,6 +189,7 @@ def test_trtllm_bf16_lora_accepts_checkpoint_shaped_weights(has_lora_delta):
             global_num_experts=128,
             a1q_scale=None,
             output=torch.empty_like(x),
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
         if has_lora_delta:
             # Only compare rows belonging to real tokens, excluding padding.

@@ -127,8 +127,6 @@ def get_humming_moe_gemm_type(moe_config: FusedMoEConfig | None = None) -> str:
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
-    quant_config: "HummingMoEQuantConfig"
-
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -144,7 +142,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.locks = create_humming_locks(moe_config.device)
         self.num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
-        self.quant_config = humming_quant_config
+        self.w1_hadamard_block_size = humming_quant_config.w1_hadamard_block_size
+        self.w2_hadamard_block_size = humming_quant_config.w2_hadamard_block_size
         self.init_humming_moe()
 
         if self.is_batched():
@@ -186,6 +185,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         sublayer_name: str,
         inputs: torch.Tensor,
         quanted_input: torch.Tensor | None,
+        quant_config: FusedMoEQuantConfig,
         input_scale: torch.Tensor | None = None,
         expert_tokens: torch.Tensor | None = None,
         activation: MoEActivation | None = None,
@@ -197,7 +197,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         )
         from vllm.utils.humming import may_process_input
 
-        quant_config = self.quant_config
+        humming_quant_config = cast("HummingMoEQuantConfig", quant_config)
         config = self.humming_configs[sublayer_name]
         if input_scale is not None:
             assert scatter_idx is None
@@ -211,14 +211,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             activation_kwargs = get_humming_activation(activation, activation_config)
 
         prefix = "w1" if sublayer_name == "w13" else "w2"
-        scale = getattr(quant_config, f"{prefix}_input_scale")
-        scale2 = getattr(quant_config, f"{prefix}_input_scale_2")
+        scale = getattr(humming_quant_config, f"{prefix}_input_scale")
+        scale2 = getattr(humming_quant_config, f"{prefix}_input_scale_2")
         mode = config.input_quant_mode
         layout = "grouped_mask" if self.is_batched() else "normal"
         if scatter_idx is not None:
             layout = "scatter"
 
-        hadamard_block_size = getattr(quant_config, f"{prefix}_hadamard_block_size")
+        hadamard_block_size = getattr(self, f"{prefix}_hadamard_block_size")
         has_input_processing = (
             mode.should_quantize
             or (hadamard_block_size is not None and hadamard_block_size > 1)
@@ -249,20 +249,22 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         weight: torch.Tensor,
         input_scale: torch.Tensor | None,
         outputs: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
         input_scale_2: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
         from vllm.utils.humming import humming_forward
 
+        humming_quant_config = cast("HummingMoEQuantConfig", quant_config)
         index = 1 if sublayer_name == "w13" else 2
         return humming_forward(
             self.humming_configs[sublayer_name],
             inputs=inputs,
             weight=weight,
-            weight_scale=getattr(self.quant_config, f"w{index}_scale"),
-            zero_point=getattr(self.quant_config, f"w{index}_zp"),
-            bias=getattr(self.quant_config, f"w{index}_bias"),
-            weight_scale_2=getattr(self.quant_config, f"g{index}_alphas"),
+            weight_scale=getattr(humming_quant_config, f"w{index}_scale"),
+            zero_point=getattr(humming_quant_config, f"w{index}_zp"),
+            bias=getattr(humming_quant_config, f"w{index}_bias"),
+            weight_scale_2=getattr(humming_quant_config, f"g{index}_alphas"),
             input_scale=input_scale,
             input_scale_2=input_scale_2,
             outputs=outputs,
@@ -376,10 +378,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         produced by vLLM's block-FP8 quantization ([M, K // 128] float32,
         row-major) matches what the Humming WGMMA grouped GEMM expects.
         """
-        quant_config = self.quant_config
+        quant_schema = self.quant_schema
         return (
-            quant_config.is_block_quantized
-            and quant_config.quant_dtype == current_platform.fp8_dtype()
+            quant_schema.is_block_quantized
+            and quant_schema.quant_dtype == current_platform.fp8_dtype()
         )
 
     @property
@@ -806,6 +808,7 @@ class HummingIndexedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         """Standard apply implementation for Humming indexed experts.
 
@@ -836,6 +839,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w13",
+            quant_config=quant_config,
             inputs=hidden_states,
             input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
@@ -843,6 +847,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w13",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w1,
             input_scale=input_scale,
@@ -853,6 +858,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w2",
+            quant_config=quant_config,
             inputs=buffers["gate_up_output"],
             quanted_input=buffers["quanted_down_input"],
             activation=activation,
@@ -861,6 +867,7 @@ class HummingIndexedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w2",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w2,
             input_scale=input_scale,
@@ -917,6 +924,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         """Standard apply implementation for Humming grouped experts.
 
@@ -971,6 +979,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w13",
+            quant_config=quant_config,
             inputs=hidden_states,
             input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
@@ -980,6 +989,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w13",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w1,
             input_scale=input_scale,
@@ -993,6 +1003,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w2",
+            quant_config=quant_config,
             inputs=buffers["gate_up_output"],
             quanted_input=buffers["quanted_down_input"],
             activation=activation,
@@ -1001,6 +1012,7 @@ class HummingGroupedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w2",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w2,
             input_scale=input_scale,
@@ -1052,6 +1064,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ) -> None:
         """Standard apply implementation for Humming batched grouped experts.
 
@@ -1084,6 +1097,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w13",
+            quant_config=quant_config,
             inputs=hidden_states,
             input_scale=a1q_scale,
             quanted_input=buffers.get("quanted_gate_up_input", None),
@@ -1092,6 +1106,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w13",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w1,
             input_scale=input_scale,
@@ -1105,6 +1120,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
         inputs, input_scale, input_scale_2 = self.process_input(
             "w2",
+            quant_config=quant_config,
             inputs=buffers["gate_up_output"],
             quanted_input=buffers["quanted_down_input"],
             expert_tokens=expert_num_tokens,
@@ -1113,6 +1129,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
         self.humming_forward(
             "w2",
+            quant_config=quant_config,
             inputs=inputs,
             weight=w2,
             input_scale=input_scale,

@@ -265,6 +265,7 @@ def _run_b12x_moe(
         global_num_experts=num_experts,
         expert_map=None,
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
 
@@ -1291,6 +1292,7 @@ def test_b12x_moe_cuda_graph_replay(
                 global_num_experts=case.w1.shape[0],
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=case.quant_config,
             )
 
         expected = apply().clone()
@@ -1347,6 +1349,7 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=quant,
             )
 
         apply()

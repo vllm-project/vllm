@@ -318,7 +318,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
-        assert self.quant_config.use_fp8_w8a8
+        assert self.quant_schema.use_fp8_w8a8
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -429,6 +429,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
@@ -455,7 +456,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
-            (w1, self.w1_scale),
+            (w1, quant_config.w1_scale),
             workspace1,
             expert_num_tokens,
             expected_m,
@@ -470,7 +471,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
 
         fp8_m_grouped_gemm_nt_masked(
             (a2q, a2q_scale),
-            (w2, self.w2_scale),
+            (w2, quant_config.w2_scale),
             output,
             expert_num_tokens,
             expected_m,

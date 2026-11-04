@@ -376,6 +376,7 @@ def _make_cutlass_fp4_moe_batch_invariant_case(
         "e": e,
         "topk": topk,
         "dtype": dtype,
+        "quant_config": quant_config,
     }
 
 
@@ -397,6 +398,7 @@ def _run_cutlass_fp4_moe(
         activation=case["activation"],
         apply_router_weight_on_input=False,
         expert_map=None,
+        quant_config=case["quant_config"],
     )
 
 

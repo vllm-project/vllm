@@ -26,6 +26,8 @@ class TritonOrCutlassExperts(FallbackExperts):
     ):
         self.is_sm100 = current_platform.has_device_capability(100)
         super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
             experts=CutlassExpertsFp8(moe_config, quant_config),
             fallback_experts=TritonExperts(moe_config, quant_config),
         )

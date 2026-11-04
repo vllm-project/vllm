@@ -135,21 +135,23 @@ class TrtLlmMxint4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
+        *,
+        quant_config: "FusedMoEQuantConfig",
     ) -> torch.Tensor:
         from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (  # noqa: E501
             flashinfer_trtllm_mxint4_moe,
         )
 
-        assert self.w1_scale is not None
-        assert self.w2_scale is not None
+        assert quant_config.w1_scale is not None
+        assert quant_config.w2_scale is not None
 
         result = flashinfer_trtllm_mxint4_moe(
             x=hidden_states,
             router_logits=router_logits,
             w13_weight_packed=w1,
-            w13_weight_scale=self.w1_scale,
+            w13_weight_scale=quant_config.w1_scale,
             w2_weight_packed=w2,
-            w2_weight_scale=self.w2_scale,
+            w2_weight_scale=quant_config.w2_scale,
             global_num_experts=global_num_experts,
             top_k=self.topk,
             intermediate_size_per_partition=self.intermediate_size_per_partition,

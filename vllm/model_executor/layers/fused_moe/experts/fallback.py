@@ -7,7 +7,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
@@ -16,12 +19,12 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
 
     def __init__(
         self,
+        moe_config: mk.FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
         experts: mk.FusedMoEExpertsModular,
         fallback_experts: mk.FusedMoEExpertsModular,
     ):
-        super().__init__(
-            moe_config=experts.moe_config, quant_config=experts.quant_config
-        )
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
         self.fallback_experts = fallback_experts
         self.experts = experts
 
@@ -152,6 +155,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         experts = self._select_experts_impl(hidden_states, w1, w2)
         experts.apply(
@@ -170,4 +174,5 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
             workspace2,
             expert_tokens_meta,
             apply_router_weight_on_input,
+            quant_config=quant_config,
         )

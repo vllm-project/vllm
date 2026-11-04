@@ -423,6 +423,7 @@ def test_fused_moe(
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)
@@ -504,6 +505,7 @@ def test_fused_shared_expert_alignment(workspace_init):
             global_num_experts=routed_experts,
             expert_map=None,
             apply_router_weight_on_input=False,
+            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
@@ -608,6 +610,7 @@ def test_host_resident_weights_take_sorted_path(
                 global_num_experts=e,
                 expert_map=None,
                 apply_router_weight_on_input=False,
+                quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
             )
         else:
             out = fused_moe(a, w1_dev, w2_dev, score, topk, renormalize=False)
@@ -678,6 +681,7 @@ def test_naive_block_assignment_moe(
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)
@@ -1373,7 +1377,7 @@ def _make_humming_indexed_experts(activation: MoEActivation):
         moe_config=moe_config,
         quant_config=quant_config,
     )
-    return experts, layer
+    return experts, layer, quant_config
 
 
 @pytest.mark.parametrize("valid_shape_m", [8192, 8193])
@@ -1630,6 +1634,7 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         workspace2=torch.empty(0),
         expert_tokens_meta=None,
         apply_router_weight_on_input=False,
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
     )
 
     call_kwargs = experts.process_input.call_args.kwargs
@@ -1656,19 +1661,21 @@ def test_batched_marlin_activation_uses_expert_token_counts(
     activation_func = Mock()
     experts = SimpleNamespace(
         activation=activation_func,
-        w1_bias=None,
-        w2_bias=None,
-        w1_scale=None,
-        w2_scale=None,
-        quant_type_id=0,
-        a1_gscale=None,
-        a2_gscale=None,
-        w1_zp=None,
-        w2_zp=None,
+        _quant_type_id=lambda _: 0,
         input_dtype=None,
         activation_config=ApplyMoEActivationConfig(
             clamp_limit=3.0, alpha=1.3, beta=0.5
         ),
+    )
+    quant_config = SimpleNamespace(
+        w1_bias=None,
+        w2_bias=None,
+        w1_scale=None,
+        w2_scale=None,
+        a1_gscale=None,
+        a2_gscale=None,
+        w1_zp=None,
+        w2_zp=None,
     )
     hidden_states = torch.empty(2, 3, 4)
     expert_num_tokens = torch.tensor([1, 2], dtype=torch.int32)
@@ -1707,6 +1714,7 @@ def test_batched_marlin_activation_uses_expert_token_counts(
         workspace2=torch.empty(0),
         expert_tokens_meta=ExpertTokensMetadata(expert_num_tokens, None),
         apply_router_weight_on_input=False,
+        quant_config=quant_config,
     )
 
     activation_func.assert_called_once()
@@ -1728,7 +1736,7 @@ def test_batched_marlin_activation_uses_expert_token_counts(
 def test_humming_gated_non_gated_shape_contract(activation: MoEActivation):
     from vllm.utils import humming
 
-    experts, layer = _make_humming_indexed_experts(activation)
+    experts, layer, _ = _make_humming_indexed_experts(activation)
     moe_config = experts.moe_config
     top_k = moe_config.experts_per_token
     num_experts = moe_config.num_experts
@@ -1771,7 +1779,7 @@ def test_humming_indexed_writes_supplied_output_buffer():
     from vllm.forward_context import set_forward_context
 
     activation = MoEActivation.SILU
-    experts, layer = _make_humming_indexed_experts(activation)
+    experts, layer, quant_config = _make_humming_indexed_experts(activation)
     moe_config = experts.moe_config
     num_tokens = 1
     top_k = moe_config.experts_per_token
@@ -1818,6 +1826,7 @@ def test_humming_indexed_writes_supplied_output_buffer():
             workspace2=workspace2,
             expert_tokens_meta=None,
             apply_router_weight_on_input=False,
+            quant_config=quant_config,
         )
 
     assert torch.isfinite(output).all()

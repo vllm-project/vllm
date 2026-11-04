@@ -177,6 +177,7 @@ def batched_moe(
         activation=moe_config.activation,
         apply_router_weight_on_input=False,
         expert_map=None,
+        quant_config=quant_config,
     )
 
 
@@ -229,6 +230,7 @@ def naive_batched_moe(
         activation=moe_config.activation,
         apply_router_weight_on_input=False,
         expert_map=None,
+        quant_config=quant_config,
     )
 
 

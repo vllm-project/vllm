@@ -486,7 +486,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
     _AITER_QUANT_METHOD: QuantMethod
     _SUPPORTS_ROUTER_WEIGHT_ON_INPUT = True
 
-    def _extra_fused_moe_kwargs(self) -> dict:
+    def _extra_fused_moe_kwargs(self, quant_config: FusedMoEQuantConfig) -> dict:
         """Leaf-specific extra kwargs for `rocm_aiter_fused_experts`."""
         return {}
 
@@ -563,7 +563,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
         packed_fp4_input = (
-            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
+            self.moe_config.use_mori_epv1_kernels and self.quant_schema.use_mxfp4_w4a4
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
@@ -585,8 +585,9 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
-        # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
+        # TODO(rob): rocm_aiter_fused_experts uses quant_config's
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
         assert self._SUPPORTS_ROUTER_WEIGHT_ON_INPUT or not (
@@ -607,14 +608,14 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_mask=expert_map,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             moe_config=self.moe_config,
             quant_method=self._AITER_QUANT_METHOD,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
-            **self._extra_fused_moe_kwargs(),
+            **self._extra_fused_moe_kwargs(quant_config),
         )
         _write_moe_output(output, result)
 
@@ -698,6 +699,7 @@ class AiterFp8ChannelExperts(AiterExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         if not apply_router_weight_on_input:
             return super().apply(
@@ -716,6 +718,7 @@ class AiterFp8ChannelExperts(AiterExperts):
                 workspace2=workspace2,
                 expert_tokens_meta=expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                quant_config=quant_config,
             )
 
         # tkw1 applies topk_weights to FC1's output instead of FC2's.
@@ -730,8 +733,8 @@ class AiterFp8ChannelExperts(AiterExperts):
             w2,
             topk_weights.to(torch.float32),
             topk_ids.to(torch.int32),
-            fc1_scale=self.quant_config.w1_scale,
-            fc2_scale=self.quant_config.w2_scale,
+            fc1_scale=quant_config.w1_scale,
+            fc2_scale=quant_config.w2_scale,
             fc1_smooth_scale=None,
             fc2_smooth_scale=None,
             a16=False,
@@ -766,5 +769,5 @@ class AiterMxfp4Experts(AiterExperts):
             return False
         return on_gfx950() and not on_gfx1250()
 
-    def _extra_fused_moe_kwargs(self) -> dict:
-        return mxfp4_w4a16_extra_kwargs(self.quant_config, self.moe_config)
+    def _extra_fused_moe_kwargs(self, quant_config: FusedMoEQuantConfig) -> dict:
+        return mxfp4_w4a16_extra_kwargs(quant_config, self.moe_config)

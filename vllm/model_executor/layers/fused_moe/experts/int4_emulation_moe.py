@@ -41,18 +41,11 @@ class Int4EmulationTritonExperts(TritonExperts):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+        self.quantization_emulation = True
         logger.warning_once(
             "Using Int4EmulationTritonExperts MoE backend. Int4 weights are "
             "dequantized to BF16 at load time "
         )
-        # Weights are dequantized to BF16 before apply() is called, so
-        # TritonExperts must see them as plain float — clear the int4 dtype
-        # and scales so the hidden-size assertion and kernel dispatch treat
-        # them as unquantized.
-        self.quant_config._w1.dtype = None
-        self.quant_config._w2.dtype = None
-        self.quant_config._w1.scale = None
-        self.quant_config._w2.scale = None
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -76,6 +69,17 @@ class Int4EmulationTritonExperts(TritonExperts):
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
+        return None
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return None
+
+    @property
+    def use_int4_w4a16(self) -> bool:
+        return False
+
+    def config_name(self, dtype: torch.dtype) -> str | None:
         return None
 
     @property
@@ -103,6 +107,7 @@ class Int4EmulationTritonExperts(TritonExperts):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        quant_config: "FusedMoEQuantConfig",
     ):
         if w1.element_size() < 2:
             raise RuntimeError(
@@ -126,4 +131,5 @@ class Int4EmulationTritonExperts(TritonExperts):
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_config=quant_config,
         )

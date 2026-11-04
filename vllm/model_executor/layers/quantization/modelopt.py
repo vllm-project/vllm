@@ -236,12 +236,12 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
-        if isinstance(layer, (Attention, MLAAttention)):
+        if isinstance(layer, Attention | MLAAttention):
             return self.KVCacheMethodCls(self)
 
         # handle exclusion
         if self.is_layer_excluded(prefix):
-            if isinstance(layer, (LinearBase, ParallelLMHead)):
+            if isinstance(layer, LinearBase | ParallelLMHead):
                 return UnquantizedLinearMethod()
             return None
 
@@ -258,7 +258,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             return UnquantizedLinearMethod()
 
         # now, the layer is quantized, handle it here
-        if isinstance(layer, (LinearBase, ParallelLMHead)):
+        if isinstance(layer, LinearBase | ParallelLMHead):
             return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
             quant_method = self.FusedMoEMethodCls(
@@ -705,6 +705,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
     def apply(
@@ -730,6 +731,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -1219,6 +1221,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
     def apply(
@@ -1244,6 +1247,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -1647,6 +1651,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
             routing_sink=layer.routing_sink,
+            quant_config=self.moe_quant_config,
         )
 
     def apply(
@@ -1672,6 +1677,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+            quant_config=self.moe_quant_config,
         )
 
 
@@ -1983,7 +1989,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         # Excluded layers
         if self.is_layer_excluded(prefix):
-            if isinstance(layer, (LinearBase, ParallelLMHead)):
+            if isinstance(layer, LinearBase | ParallelLMHead):
                 return UnquantizedLinearMethod()
             return None
 
@@ -1999,13 +2005,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptBlockQuantMoEMethod(
                     layer.moe_config, codec=quant_algo.lower()
                 )
-            if isinstance(layer, (LinearBase, VocabParallelEmbedding)):
+            if isinstance(layer, LinearBase | VocabParallelEmbedding):
                 return ModelOptBlockQuantLinearMethod(codec=quant_algo.lower())
             raise ValueError(
                 f"{quant_algo} requires a linear, embedding or routed experts"
             )
 
-        if isinstance(layer, (LinearBase, ParallelLMHead)):
+        if isinstance(layer, LinearBase | ParallelLMHead):
             # Per-prefix algo -> its sub-config, then the generic linear method.
             # resolve() reads group_size off whichever sub-config it is handed.
             # Read-only — never write back, or a linear-only change leaks into
