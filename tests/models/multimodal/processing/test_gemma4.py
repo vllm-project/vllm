@@ -369,8 +369,8 @@ def test_embed_patches_normalizes_channel_last_patches():
     model.vision_input_norm = FusedMMInputNorm(
         image_mean=mean, image_std=std, rescale_factor=1 / 255
     )
+    model.config = SimpleNamespace(vision_config=SimpleNamespace(num_channels=3))
     model.vision_tower = SimpleNamespace(
-        config=SimpleNamespace(num_channels=3),
         patch_embedder=SimpleNamespace(
             input_proj=lambda pixel_values: pixel_values,
             _position_embeddings=lambda *_: 0.0,

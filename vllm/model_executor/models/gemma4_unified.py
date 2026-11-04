@@ -29,6 +29,7 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 )
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -239,9 +240,6 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
       * ``get_mm_mapping`` — no tower entries.
     """
 
-    # The encoder-free path consumes rescaled pixels from the processor.
-    supports_mm_device_do_normalize = False
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.embed_audio.": "embed_audio.",
@@ -279,6 +277,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "vision_embedder"),
         )
+        self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
         self.embed_vision = Gemma4MultimodalEmbedder(
             config.vision_config,
             config.text_config,
@@ -377,6 +376,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
     ) -> torch.Tensor:
+        pixel_values = self._normalize_pixel_values(
+            pixel_values, self.vision_embedder.pos_embedding.dtype
+        )
         weight = self.embed_vision.embedding_projection.weight
         target_dtype = weight.dtype
         if pixel_values.numel() == 0:
