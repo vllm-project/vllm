@@ -112,9 +112,13 @@ vllm serve deepseek-ai/DeepSeek-V4-Pro \
 
 | `VLLM_MORI_EP_V2` | Behavior |
 | ----------------- | -------- |
-| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1`, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
+| unset | EPv2, falling back to EPv1 with a warning when MoRI is older than 1.2.4, the GPU is not gfx950 or gfx1250, EP spans hosts (except on gfx1250, whose UALink team can span hosts), `MORI_ENABLE_SDMA=1` with a MoRI that has no EPv2 AsyncLL kernels, `--moe-backend aiter_mega_moe`, the model is not BF16, or MoE activations use per-tensor FP8 |
 | `1` | Always EPv2. The checks above only log a warning; startup fails if the EP ranks are not in one CCO-LSA team |
 | `0` | EPv1 |
+
+On gfx950, `MORI_ENABLE_SDMA=1` makes EPv2 run its AsyncLL kernels, which move tokens by SDMA, when the installed MoRI has them; gfx1250 keeps native EPv2.
+
+On EPv2, `mori` supports `--enable-dbo` with native and AsyncLL kernels. DBO speeds up prefill but slows decode here, so set a large `--dbo-decode-token-threshold` or enable DBO on prefill instances only.
 
 On EPv1, `mori` uses the IntraNode kernel within one node. Across nodes it uses InterNodeV1LL when the per-rank token budget (`--max-num-batched-tokens`) is at most `VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD` (default 256), and InterNodeV1 otherwise. `mori_high_throughput` and `mori_low_latency` always run EPv1 and pin the inter-node kernel to InterNodeV1 and InterNodeV1LL respectively.
 
