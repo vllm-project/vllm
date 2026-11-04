@@ -5,7 +5,7 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import CompileFactors, config
 
 KVProducer = Literal["kv_producer", "kv_both"]
 KVConsumer = Literal["kv_consumer", "kv_both"]
@@ -103,21 +103,13 @@ class KVTransferConfig:
     'fail': immediately fail the request with an error finish reason (default)"""
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config, add it to
-        `ignored_factors` if it does not affect the computation graph.
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        ignored_factors = {
-            "kv_connector",
-            "engine_id",
-            "kv_buffer_device",
-            "kv_role",
-            "kv_port",
-            "kv_connector_extra_config",
-            "kv_connector_module_path",
-            "enable_permute_local_kv",
-            "kv_load_failure_policy",
-        }
-        return get_compile_factors(self, ignored_factors)
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

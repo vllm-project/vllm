@@ -6,7 +6,7 @@ from typing import Literal, get_args
 from pydantic import model_validator
 from pydantic_core import ArgsKwargs
 
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 from vllm.tasks import PoolingTask, check_removed_pooling_task
 
@@ -183,22 +183,10 @@ class PoolerConfig:
         return self.tok_pooling_type
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config, add it to
-        `ignored_factors` if it does not affect the computation graph.
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        ignored_factors = {
-            "task",
-            "pooling_type",
-            "seq_pooling_type",
-            "tok_pooling_type",
-            "use_activation",
-            "enable_flash_late_interaction",
-            "dimensions",
-            "enable_chunked_processing",
-            "max_embed_len",
-            "logit_mean",
-            "logit_sigma",
-            "step_tag_id",
-            "returned_token_ids",
-        }
-        return get_compile_factors(self, ignored_factors)
+        return {}

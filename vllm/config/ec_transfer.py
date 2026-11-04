@@ -4,7 +4,7 @@ import uuid
 from dataclasses import field
 from typing import Any, Literal, get_args
 
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import CompileFactors, config
 
 ECProducer = Literal["ec_producer", "ec_both"]
 ECConsumer = Literal["ec_consumer", "ec_both"]
@@ -60,22 +60,13 @@ class ECTransferConfig:
     """
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config, add it to
-        `ignored_factors` if it does not affect the computation graph.
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        ignored_factors = {
-            "ec_connector",
-            "engine_id",
-            "ec_buffer_device",
-            "ec_buffer_size",
-            "ec_role",
-            "ec_ip",
-            "ec_port",
-            "ec_connector_extra_config",
-            "ec_connector_module_path",
-            "mm_encoder_output_widths",
-        }
-        return get_compile_factors(self, ignored_factors)
+        return {}
 
     def __post_init__(self) -> None:
         if self.engine_id is None:

@@ -6,7 +6,7 @@ from typing import Literal, Self
 
 from pydantic import Field, model_validator
 
-from vllm.config.utils import CompileFactors, config, get_compile_factors
+from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -194,37 +194,13 @@ class ProfilerConfig:
     """
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config, add it to
-        `ignored_factors` if it does not affect the computation graph.
+        """This config does not affect the compiled graph.
+
+        If a field starts affecting it, return
+        `get_compile_factors(self, ignored_factors)` with every other field in
+        `ignored_factors`.
         """
-        ignored_factors = {
-            "profiler",
-            "torch_profiler_dir",
-            "torch_profiler_activities",
-            "proton_profiler_dir",
-            "proton_context",
-            "proton_data",
-            "proton_backend",
-            "proton_mode",
-            "proton_hook",
-            "proton_output_format",
-            "proton_graph_attribution",
-            "torch_profiler_with_stack",
-            "torch_profiler_with_flops",
-            "torch_profiler_use_gzip",
-            "torch_profiler_dump_cuda_time_total",
-            "torch_profiler_record_shapes",
-            "torch_profiler_with_memory",
-            "capture_torch_profiler",
-            "detailed_trace_annotation",
-            "ignore_frontend",
-            "delay_iterations",
-            "max_iterations",
-            "warmup_iterations",
-            "active_iterations",
-            "wait_iterations",
-        }
-        return get_compile_factors(self, ignored_factors)
+        return {}
 
     @model_validator(mode="after")
     def _validate_profiler_config(self) -> Self:
