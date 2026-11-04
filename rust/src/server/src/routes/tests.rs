@@ -3322,6 +3322,45 @@ async fn invalid_request_returns_openai_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_unconnected_data_parallel_rank_reports_connected_ranks() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        EngineId::from_engine_index(3),
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .header("X-data-parallel-rank", "0")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    expect_test::expect![[r#""engine-core error: data parallel rank 0 is not connected to this frontend; connected ranks: [3]""#]]
+    .assert_eq(&json["error"]["message"].to_string());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
     let mut app = test_app().await;
     let response = app
