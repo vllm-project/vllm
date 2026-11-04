@@ -48,6 +48,14 @@ class CompilerInterface:
     # This is a class-level attribute.
     name: str
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "compute_hash" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__qualname__} defines `compute_hash`, which is no longer "
+                "called. Implement `compile_factors` instead."
+            )
+
     def initialize_cache(
         self, cache_dir: str, disable_cache: bool = False, prefix: str = ""
     ) -> None:
