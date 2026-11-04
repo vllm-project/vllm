@@ -1015,63 +1015,32 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     prompt_list,
                 };
 
-                // Send request, retry on connection errors
-                let max_retries = 3;
-                let mut output = None;
-
-                for attempt in 0..=max_retries {
-                    // Capture monotonic start time right before sending,
-                    // relative to benchmark_start. Python uses perf_counter()
-                    // for both start_time and ttft/itl, keeping them on the
-                    // same clock. We do the same with Instant.
-                    let request_instant = Instant::now();
-                    let result = backend.send_request(&input, &client).await;
-
-                    match result {
-                        Ok(mut o) => {
-                            // Override SystemTime-based start_time with monotonic offset
-                            o.start_time =
-                                request_instant.duration_since(bench_start).as_secs_f64();
-
-                            // Retry on connection-level failures reported as !success
-                            if !o.success && attempt < max_retries && is_connection_error(&o.error)
-                            {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(o);
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt < max_retries {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(RequestFuncOutput {
-                                success: false,
-                                error: e.to_string(),
-                                prompt_len: input.prompt_len,
-                                start_time: request_instant
-                                    .duration_since(bench_start)
-                                    .as_secs_f64(),
-                                ..Default::default()
-                            });
-                            break;
-                        }
+                // Capture monotonic start time right before sending,
+                // relative to benchmark_start. Python uses perf_counter()
+                // for both start_time and ttft/itl, keeping them on the
+                // same clock. We do the same with Instant.
+                let request_instant = Instant::now();
+                let output = match backend.send_request(&input, &client).await {
+                    Ok(mut output) => {
+                        // Override SystemTime-based start_time with monotonic offset
+                        output.start_time =
+                            request_instant.duration_since(bench_start).as_secs_f64();
+                        output
                     }
-                }
+                    Err(error) => RequestFuncOutput {
+                        success: false,
+                        error: format!("{}", error.as_report()),
+                        prompt_len: input.prompt_len,
+                        start_time: request_instant.duration_since(bench_start).as_secs_f64(),
+                        ..Default::default()
+                    },
+                };
 
                 if let Some(pb) = pb {
                     pb.inc(1);
                 }
 
-                output.unwrap()
+                output
             }),
         ));
     }
@@ -1823,21 +1792,6 @@ async fn server_detokenize(
     unreachable!()
 }
 
-/// Check if an error message indicates a transient connection error worth retrying.
-fn is_connection_error(error: &str) -> bool {
-    let patterns = [
-        "connection reset",
-        "Connection reset",
-        "connection error",
-        "broken pipe",
-        "connect error",
-        "timed out",
-        "connection refused",
-        "Connection refused",
-    ];
-    patterns.iter().any(|p| error.contains(p))
-}
-
 // --- Tokenizer verification cache ---
 
 /// Build a cache key from base_url + model_id.
@@ -1936,7 +1890,140 @@ async fn sample_verify_prompts(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use clap::Parser;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+    use crate::cli::BenchServeArgs;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchServeArgs,
+    }
+
+    async fn read_request_path(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let (header_end, content_length) = loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request headers");
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::parse::<usize>)
+                })
+                .transpose()
+                .unwrap()
+                .unwrap_or(0);
+            break (header_end + 4, content_length);
+        };
+
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+
+        String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string()
+    }
+
+    #[allow(
+        deprecated,
+        reason = "zero linger deterministically resets the regression-test connection"
+    )]
+    async fn spawn_connection_reset_server()
+    -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let workload_requests = Arc::new(AtomicUsize::new(0));
+        let request_count = workload_requests.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let path = read_request_path(&mut stream).await;
+                if path != "/v1/completions" {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\
+                              connection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+
+                let attempt = request_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    stream.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+                    continue;
+                }
+
+                let body = concat!(
+                    "data: {\"choices\":[{\"text\":\"ok\"}]}\n\n",
+                    "data: {\"choices\":[],\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":1}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        (format!("http://{addr}"), workload_requests, server)
+    }
+
+    #[tokio::test]
+    async fn test_measured_request_does_not_retry_connection_failure() {
+        let (base_url, workload_requests, server) = spawn_connection_reset_server().await;
+        let dataset_path = crate::datasets::test_support::write_temp_jsonl(
+            "measured-request-no-retry",
+            r#"{"prompt":"hello","output_tokens":1}"#,
+        );
+        let cli = TestCli::parse_from([
+            "vllm-bench",
+            "--backend",
+            "openai",
+            "--base-url",
+            &base_url,
+            "--model",
+            "test-model",
+            "--tokenizer",
+            "gpt2",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            &dataset_path,
+            "--custom-output-len",
+            "-1",
+            "--num-prompts",
+            "1",
+            "--disable-tqdm",
+        ]);
+        let config = BenchConfig::from_args(&cli.args).unwrap();
+
+        let result = run_benchmark(&config).await.unwrap();
+        server.abort();
+
+        assert_eq!(workload_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(result["completed"], 0);
+        assert_eq!(result["failed"], 1);
+    }
 
     #[test]
     fn test_parse_num_requests_running_sums_dp_engines() {
