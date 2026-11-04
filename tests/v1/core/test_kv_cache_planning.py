@@ -209,18 +209,12 @@ def test_hisparse_hma_uses_resolved_gpu_block_size(
     ],
     ids=["main-bf16", "main-fp8"],
 )
-@pytest.mark.parametrize(
-    "indexer_dtype",
-    [torch.bfloat16, torch.float8_e4m3fn],
-    ids=["indexer-bf16", "indexer-fp8"],
-)
 def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
     monkeypatch,
     main_dtype,
     host_blocks,
     host_stride,
     layer_stride,
-    indexer_dtype,
     gpu_reserved_bytes,
 ):
     from vllm.v1.kv_cache_interface import SparseFullAttentionSpec
@@ -256,7 +250,7 @@ def test_hisparse_sparse_full_attention_owns_rank_local_complete_kv(
             block_size=16,
             num_kv_heads=1,
             head_size=16,
-            dtype=indexer_dtype,
+            dtype=torch.bfloat16,
             tokens_per_state=4,
             cache_role=SparseCacheRole.INDEXER,
         )

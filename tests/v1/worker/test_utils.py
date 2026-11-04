@@ -15,7 +15,6 @@ import vllm.v1.attention.backends.mla.index_group as index_group_module
 import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from vllm.config import CacheConfig, CUDAGraphMode
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
-from vllm.distributed.kv_transfer import kv_transfer_state
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse import (
     worker as hisparse_worker_module,
 )
@@ -103,6 +102,7 @@ def _make_hisparse_worker() -> HiSparseConnectorWorker:
     worker._slot_mapping_staging = None
     worker._row_mirror_num_rows = 0
     worker._per_layer_mirrored = set()
+    worker._in_step = True
     worker._submitted_mirror_layers = set()
     worker._draft_layers = ()
     worker._draft_mirror_pending = False
@@ -248,7 +248,6 @@ def test_hisparse_submits_layer_mirror_at_replayed_attention_boundary(
     monkeypatch, mode, expected_calls
 ):
     """Piecewise replay must pipeline DMA; FULL replay uses the batch fallback."""
-    monkeypatch.setattr(kv_transfer_state, "_KV_CONNECTOR_AGENT", object())
     handle = object.__new__(hisparse_runtime_module.HiSparseCacheHandle)
     handle.dummy_batch = False
     handle.decode_batch = False

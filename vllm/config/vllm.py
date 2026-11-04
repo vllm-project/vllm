@@ -2039,6 +2039,14 @@ class VllmConfig:
                     "HiSparse requires --scheduler-reserve-full-isl; remove "
                     "--no-scheduler-reserve-full-isl."
                 )
+            if self.model_config is not None and not any(
+                hasattr(self.model_config.hf_config, attr)
+                for attr in ("index_topk", "indexer_budget")
+            ):
+                raise ValueError(
+                    "HiSparse is only supported for DSA models with index_topk "
+                    "and QSA models with indexer_budget."
+                )
 
         self._normalize_piecewise_cudagraph_mode(
             breakable_cudagraph_enabled=breakable_cudagraph_enabled

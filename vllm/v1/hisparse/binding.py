@@ -49,15 +49,13 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
     """Resolve sparse source/indexer block sizes and add resident/hot specs."""
-    if vllm_config.attention_config.hisparse_config is None:
-        return kv_cache_spec
     sparse_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
         if isinstance(spec, (MLAAttentionSpec, SparseFullAttentionSpec))
     }
     if not sparse_specs:
-        raise ValueError("HiSparse requires a model with sparse attention layers.")
+        return kv_cache_spec
     block_sizes = {spec.block_size for spec in sparse_specs.values()}
     if len(block_sizes) != 1:
         raise ValueError("HiSparse requires one scheduler block size.")

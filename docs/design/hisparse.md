@@ -48,74 +48,21 @@ host only their active tail pages, plus one request being admitted at its full
 footprint. Host-pool metrics are listed in
 [Metrics](../usage/metrics.md#hisparse-kv-connector-metrics).
 
-## QSA configuration and validation scope
+## QSA models
 
-For a model using the Qwen4Exp QSA implementation, configure `HiSparseConnector`
-to enable main K/V offloading. This also selects Model Runner V2 and supplies
-default `HiSparseConfig` values. For example, replace `QSA_MODEL` with the model
-identifier or checkpoint path:
+For Qwen4Exp QSA models, configuring `HiSparseConnector` enables main K/V
+offloading and selects Model Runner V2:
 
 ```bash
 vllm serve QSA_MODEL \
-  --dtype bfloat16 --kv-cache-dtype bfloat16 \
-  --attention-config '{"indexer_kv_dtype":"bf16"}' \
-  --enforce-eager --no-async-scheduling \
-  --no-enable-prefix-caching --no-enable-chunked-prefill \
-  --max-model-len 8192 --max-num-batched-tokens 8192 \
   --kv-transfer-config '{"kv_connector":"HiSparseConnector","kv_role":"kv_both","kv_connector_extra_config":{"host_pool_gib":8}}'
 ```
 
-This example selects eager execution, synchronous scheduling, and BF16 main
-K/V and indexer keys, with MTP, prefix caching, and chunked prefill disabled.
-Choose the context length and host capacity for the workload. The hybrid KV
-cache manager must remain enabled. Add `--tensor-parallel-size` as appropriate
-for the model and device count; `host_pool_gib` remains a logical capacity per
-DP replica.
-
-HiSparse QSA automatically resolves the device layout to `BLNHC`, so one copy row
-contains a token's K and V for every local K/V head. The host pool uses compact
-token rows within each layer. HiSparse preserves the indexer's sparse selection;
-compressed indexer keys, raw-key rings, and recurrent state remain GPU-resident.
-
-With prefix caching enabled, HiSparse reuses prefixes at whole scheduler-page
-boundaries. Any matching tokens beyond that boundary are recomputed into a new
-writable resident page. KV and recurrent-state cache hits use the same boundary;
-sub-page prefix reuse is not supported.
-
-The NVIDIA CUDA single-engine regression suites cover the following paths.
-These are complementary test configurations, not a complete matrix of dtype,
-execution mode, and topology. Test coverage does not establish that every
-configuration has been run on the current revision.
-
-| Path | Test configuration and expected behavior |
-| --- | --- |
-| Eager decode | Synchronous TP2 execution with MTP disabled; full K/V offload, physical page reuse, and host refill with private per-rank K/V shards |
-| Cache dtypes | BF16 model/query dtype with independently selected BF16 or FP8 main K/V and indexer formats; all four combinations cover original scales, complete K/V rows, nonresident prefill, and selected-K/V replay, with matching eager on/off model evaluations |
-| MTP, FULL replay, and async scheduling | TP2 with three draft tokens, shared logical selection, native `FULL_DECODE_ONLY` replay, and async scheduling; real page reuse and host refill cover target verification and draft decoding, including acceptance/rejection, padding, and stable replay storage |
-| Prefix and request lifecycle | BF16 at TP1 with MTP disabled and `FULL_DECODE_ONLY` plus async scheduling; chunked prefill, shared prefixes with private writable tails, cancellation of a prefix-sharing request, and natural preemption/recompute with state invalidation and resource return |
-
-Use `FULL_DECODE_ONLY` or `FULL_AND_PIECEWISE` for full decode graphs.
-HiSparse rejects `cudagraph_mode=FULL`, which also requires full prefill graphs.
-
-The dtype representation checks and lifecycle checks exercise their respective
-shared paths; they do not constitute a full dtype-by-lifecycle matrix. Existing
-backend restrictions on recurrent-state formats and supported parallelism still
-apply. Related MLA HiSparse and non-offload QSA paths have regression coverage.
-
-HiSparse preserves the indexer's selection budget, logical positions, and valid
-counts in these paths. It does not change the dtypes or ownership of raw indexer
-rings and recurrent state. Model evaluations compare each offload configuration
-against its matching non-offload configuration, with the same prompts, decoding
-settings, and output budget. Reports retain per-response finish reasons, including
-responses that reach the output limit. Results for one dtype or execution mode do
-not establish the others. Cache-correctness checks and model-quality evaluations
-do not establish throughput, latency, or capacity gains; those require separate
-workload-specific measurements.
-
-NIXL P/D integration for QSA is separate follow-up work, including transfer and
-lifecycle handling for main K/V, indexer caches, and hybrid state. The P/D import
-and generic indexer offloading sections below describe the connector
-architecture; they do not establish validated QSA P/D combinations.
+The device layout resolves to `BLNHC`, so one copy row holds a token's K and V
+for every local K/V head. Compressed indexer keys, raw-key rings and recurrent
+state stay GPU-resident. With prefix caching, prefixes are reused at whole
+scheduler-page boundaries; matching tokens past the boundary are recomputed.
+P/D disaggregation and decode context parallelism are not supported for QSA.
 
 ## Ownership
 

@@ -229,10 +229,10 @@ class QSAIndexer(nn.Module):
         index).
 
         With ``attn.use_fused_qsa_prepare``, the same launch also writes
-        ``attn``'s K/V into ``main_kv_cache`` (default ``attn.kv_cache``) at
-        ``slot_mapping`` and prepares its Q and gate from ``qkv``, returned as
-        the second element (None otherwise). ``qkv``, ``slot_mapping`` and
-        ``main_kv_cache`` are only read in that mode.
+        ``attn``'s K/V into ``main_kv_cache`` at ``slot_mapping`` and prepares
+        its Q and gate from ``qkv``, returned as the second element (None
+        otherwise). ``qkv``, ``slot_mapping`` and ``main_kv_cache`` are only
+        read in that mode.
         """
         metadata = self._metadata()
         if metadata is None:
@@ -276,16 +276,16 @@ class QSAIndexer(nn.Module):
 
         main_outputs: tuple[torch.Tensor, torch.Tensor] | None = None
         if attn.use_fused_qsa_prepare:
-            if qkv is None or slot_mapping is None:
-                raise ValueError("fused QSA prepare requires qkv and slot_mapping")
+            if qkv is None or slot_mapping is None or main_kv_cache is None:
+                raise ValueError(
+                    "fused QSA prepare requires qkv, slot_mapping and main_kv_cache"
+                )
             q = projected_q.new_empty(
                 num_tokens,
                 self.index_n_heads,
                 self.index_head_dim,
                 dtype=self.indexer_dtype,
             )
-            if main_kv_cache is None:
-                main_kv_cache = attn.kv_cache
             main_kv_cache = main_kv_cache.transpose(1, 2)
             if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)

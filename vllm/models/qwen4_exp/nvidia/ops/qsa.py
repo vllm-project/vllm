@@ -820,8 +820,13 @@ def warmup_qsa_sparse_paged_attention(
     *,
     num_query_heads: int,
     selection_width: int,
+    physical_indices: bool = False,
 ) -> tuple[tuple[int, int, int], ...]:
-    """Compile every production-reachable split-K/merge specialization."""
+    """Compile every production-reachable split-K/merge specialization.
+
+    With physical_indices=True, warm the HiSparse decode variant that reads
+    hot-cache rows; it never runs the prefill configs.
+    """
     head_dim = kv_cache.shape[-1] // 2
     key_cache, value_cache = kv_cache.transpose(1, 2).split(head_dim, dim=-1)
     # An fp8 cache is allocated as uint8 storage; warm the dtype the impl hands
@@ -843,7 +848,7 @@ def warmup_qsa_sparse_paged_attention(
             num_rows, num_kv_heads, use_prefill_config, selection_width, is_fp8
         )
         for num_rows in range(1, 8193)
-        for use_prefill_config in (False, True)
+        for use_prefill_config in ((False,) if physical_indices else (False, True))
     }
 
     # Scalars constant per deployment get their real values (their divisibility
@@ -936,7 +941,7 @@ def warmup_qsa_sparse_paged_attention(
             NUM_TILES=num_tiles,
             BLOCK_M=block_m,
             BLOCK_N=block_n,
-            PHYSICAL_INDICES=False,
+            PHYSICAL_INDICES=physical_indices,
             num_warps=warps,
             num_stages=2,
             grid=(num_rows, num_kv_heads, num_splits),

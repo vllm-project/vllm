@@ -1259,11 +1259,8 @@ class HiSparseCacheHandle:
     def finish_kv_update(self) -> None:
         if self.dummy_batch:
             return
-        from vllm.distributed.kv_transfer import has_kv_transfer_group
-
         if (
             self.submit_layer_mirror is not None
-            and has_kv_transfer_group()
             and not self.decode_batch
             and get_forward_context().cudagraph_runtime_mode != CUDAGraphMode.FULL
         ):

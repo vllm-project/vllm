@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import ClassVar, cast
 
 import torch
@@ -63,8 +63,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
 )
 
-from ..common.qsa import Qwen4ExpQSAMetadata
-from ..common.qsa import Qwen4ExpQSAMetadataBuilder as BaseQSAMetadataBuilder
+from ..common.qsa import Qwen4ExpQSAMetadata, Qwen4ExpQSAMetadataBuilder
 from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
@@ -148,7 +147,7 @@ class Qwen4ExpQSAQKVIndexerLinear(MergedColumnParallelLinear):
         return super().load_weights(remap_shards())
 
 
-class Qwen4ExpQSAMetadataBuilder(BaseQSAMetadataBuilder):
+class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
     """Add HiSparse batch fields to the platform-independent QSA metadata."""
 
     def __init__(
@@ -245,8 +244,8 @@ class Qwen4ExpQSABackend(AttentionBackend):
         return Qwen4ExpQSAImpl
 
     @staticmethod
-    def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
-        return Qwen4ExpQSAMetadataBuilder
+    def get_builder_cls() -> type[Qwen4ExpQSAHiSparseMetadataBuilder]:
+        return Qwen4ExpQSAHiSparseMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -314,24 +313,42 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         token_to_req: torch.Tensor,
         use_prefill_config: bool,
         output_gate: torch.Tensor,
-        topk_indices: torch.Tensor | None = None,
-        physical_indices: bool = False,
     ) -> torch.Tensor:
         """Run sparse attention over the owner's indexer-selected K/V rows."""
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()
         if num_tokens == 0:
             return output
-
-        topk_buffer = (
-            topk_indices
-            if topk_indices is not None
-            else getattr(layer, "topk_indices_buffer", None)
-        )
+        topk_buffer = getattr(layer, "topk_indices_buffer", None)
         if topk_buffer is None:
             raise RuntimeError("QSA owner did not provide its top-k buffer")
-        selected_indices = topk_buffer[:num_tokens]
-        token_to_req = token_to_req[:num_tokens]
+        self.attend(
+            layer,
+            query[:num_tokens],
+            kv_cache,
+            topk_buffer[:num_tokens],
+            attn_metadata.block_table,
+            token_to_req[:num_tokens],
+            use_prefill_config,
+            output[:num_tokens],
+            output_gate[:num_tokens],
+        )
+        return output
+
+    def attend(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        selected_indices: torch.Tensor,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+        use_prefill_config: bool,
+        output: torch.Tensor,
+        output_gate: torch.Tensor,
+        physical_indices: bool = False,
+    ) -> None:
+        """Attend every query row; the caller sizes all row tensors."""
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
@@ -357,20 +374,19 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         from .ops.qsa import qsa_sparse_paged_attention
 
         qsa_sparse_paged_attention(
-            query[:num_tokens],
+            query,
             key_cache,
             value_cache,
             selected_indices,
-            attn_metadata.block_table,
+            block_table,
             token_to_req,
             use_prefill_config,
-            output[:num_tokens],
+            output,
             k_scale=k_scale,
             v_scale=v_scale,
-            output_gate=output_gate[:num_tokens],
+            output_gate=output_gate,
             physical_indices=physical_indices,
         )
-        return output
 
 
 class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
@@ -530,6 +546,18 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.indexer",
         )
+        # One launch does the indexer prepare, the main QK-norm/RoPE/gate and
+        # the main K/V cache write (see QSAIndexer.forward); otherwise all of
+        # them take the separate kernels. The fused writer receives an fp8
+        # pointer, which Triton cannot lower below sm_89.
+        self.use_fused_qsa_prepare = (
+            self.use_fused_qk_norm_rope_gate
+            and self.indexer.use_fused_pre_indexer
+            and (
+                self.kv_cache_torch_dtype != torch.uint8
+                or current_platform.has_device_capability(89)
+            )
+        )
         # Without a quant config here (BF16, or ModelOpt FP4, which keeps
         # attention in BF16) the fused layer is unquantized. Otherwise the
         # indexer shares the q/k/v GEMM only if it uses the same quant method.
@@ -557,16 +585,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             is_index_group_leader=True,
             row_width=self.num_kv_heads * 2 * self.head_dim,
             kv_dtype=self.kv_cache_torch_dtype,
-        )
-        # The fused writer receives an fp8 pointer, which Triton cannot lower
-        # below sm_89.
-        self.use_fused_qsa_prepare = (
-            self.use_fused_qk_norm_rope_gate
-            and self.indexer.use_fused_pre_indexer
-            and (
-                self.kv_cache_torch_dtype != torch.uint8
-                or current_platform.has_device_capability(89)
-            )
         )
         if self.hisparse_cache is not None:
             assert physical_topk_indices_buffer is not None
@@ -643,16 +661,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
             assert isinstance(resolved, torch.Tensor)
             physical[:, :-1].copy_(resolved)
-            self.impl.forward(
+            self.impl.attend(
                 self,
                 query[:num_decode],
                 self._hisparse_kv_view(cache.runtime.hot.attention_cache),
-                replace(metadata, num_actual_tokens=num_decode),
+                physical,
+                metadata.block_table,
+                metadata.req_id_per_token[:num_decode],
+                False,
                 output[:num_decode],
-                token_to_req=metadata.req_id_per_token[:num_decode],
-                use_prefill_config=False,
-                output_gate=output_gate[:num_decode],
-                topk_indices=physical,
+                output_gate[:num_decode],
                 physical_indices=True,
             )
         if num_decode == num_tokens:
@@ -676,20 +694,16 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
             block_table = plan.block_table
             req_ids = req_ids - metadata.num_decodes
-        self.impl.forward(
+        self.impl.attend(
             self,
             query[num_decode:num_tokens],
             self._hisparse_kv_view(prefill_cache),
-            replace(
-                metadata,
-                num_actual_tokens=num_tokens - num_decode,
-                block_table=block_table,
-            ),
+            self.topk_indices_buffer[num_decode:num_tokens],
+            block_table,
+            req_ids,
+            True,
             output[num_decode:num_tokens],
-            token_to_req=req_ids,
-            use_prefill_config=True,
-            output_gate=output_gate[num_decode:num_tokens],
-            topk_indices=self.topk_indices_buffer[num_decode:num_tokens],
+            output_gate[num_decode:num_tokens],
         )
 
     @eager_break_during_capture
