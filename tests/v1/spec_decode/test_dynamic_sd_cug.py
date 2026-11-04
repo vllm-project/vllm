@@ -53,8 +53,10 @@ def _create_vllm_config_for_dsd(
     vllm_config.compilation_config = compilation_config
     vllm_config.scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=max_capture_tokens,
     )
     vllm_config.parallel_config = ParallelConfig()
+    vllm_config.cache_config = SimpleNamespace(use_kda_recoverssm=False)
     # num_speculative_tokens is the max K (num_speculative_steps). The manager
     # recovers num_new_sampled_tokens_per_step as
     # decode_query_len - num_speculative_tokens; with decode_query_len =
@@ -63,6 +65,7 @@ def _create_vllm_config_for_dsd(
 
     speculative_config = MagicMock()
     speculative_config.uses_dynamic_speculative_decoding.return_value = use_dynamic_sd
+    speculative_config.enable_adaptive_verification = False
     if use_dynamic_sd:
         # DSD reads the per-batch-size schedule; a schedule entry with K
         # speculative tokens maps to decode query length K + 1. By default
@@ -79,6 +82,16 @@ def _create_vllm_config_for_dsd(
     else:
         speculative_config.num_speculative_tokens_per_batch_size = None
     vllm_config.speculative_config = speculative_config
+    # Resolve both kinds of sizes from the deprecated shared ones.
+    vllm_config.uniform_decode_query_len = max_decode_query_len
+    VllmConfig._split_cudagraph_capture_sizes(
+        vllm_config,
+        legacy_sizes=True,
+        target_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
+            vllm_config, max_decode_query_len
+        ),
+    )
+    compilation_config.post_init_cudagraph_sizes()
 
     return vllm_config
 
@@ -88,7 +101,8 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
 
     This validates the MRv2 CudaGraphManager path directly: once candidate
     shapes have been built, dispatch() should pick a FULL graph for every
-    uniform decode batch shape produced by DSD up to max_num_seqs.
+    uniform decode batch shape DSD produces, i.e. up to the largest batch the
+    schedule drafts k - 1 tokens for.
     """
     max_num_seqs = 512
     max_spec_tokens = 7
@@ -106,19 +120,23 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
         max_num_seqs=max_num_seqs,
         max_spec_tokens=max_spec_tokens,
     )
+    query_lens = VllmConfig.get_decode_cudagraph_query_lens(
+        vllm_config, max_decode_query_len
+    )
+    assert sorted(query_lens) == list(range(1, max_decode_query_len + 1))
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=max_decode_query_len,
+        decode_query_lens=query_lens,
     )
 
     # dispatch() only uses the precomputed candidate table after graphs are
     # considered captured. The actual graph objects are irrelevant here.
     manager._graphs_captured = True
 
-    for num_reqs in range(1, max_num_seqs + 1):
-        for max_query_len in range(1, max_decode_query_len + 1):
+    for max_query_len, max_reqs in query_lens.items():
+        for num_reqs in range(1, max_reqs + 1):
             # Uniform decode means every request contributes the same number of
             # tokens, so the total token count is exactly num_reqs * query_len.
             num_tokens = num_reqs * max_query_len
@@ -171,7 +189,7 @@ def test_dynamic_sd_cudagraphs_use_clamped_query_length(monkeypatch):
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=4,
+        decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(vllm_config, 4),
     )
 
     full_query_lens = {
@@ -206,7 +224,9 @@ def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=max_spec_tokens + 1,
+        decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
+            vllm_config, max_spec_tokens + 1
+        ),
     )
     manager._graphs_captured = True
 
@@ -251,7 +271,9 @@ def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=decode_query_len,
+        decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
+            vllm_config, decode_query_len
+        ),
     )
     manager._graphs_captured = True
 
@@ -323,7 +345,9 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=max_decode_query_len,
+        decode_query_lens=VllmConfig.get_decode_cudagraph_query_lens(
+            vllm_config, max_decode_query_len
+        ),
     )
     manager._graphs_captured = True
 
@@ -386,16 +410,20 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
         use_dynamic_sd=True,
         num_spec_per_batch_size=num_spec_per_batch_size,
     )
+    query_lens = VllmConfig.get_decode_cudagraph_query_lens(
+        vllm_config, max_decode_query_len
+    )
     manager = gpu_cudagraph_utils.CudaGraphManager(
         vllm_config=vllm_config,
         device=torch.device("cpu"),
         cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-        decode_query_len=max_decode_query_len,
+        decode_query_lens=query_lens,
     )
     manager._graphs_captured = True
 
-    for num_reqs in range(1, max_num_seqs + 1):
-        for max_query_len in range(1, max_decode_query_len + 1):
+    for max_query_len in range(1, max_decode_query_len + 1):
+        # A query length's batches have at most its schedule tier's requests.
+        for num_reqs in range(1, query_lens.get(max_query_len, max_num_seqs) + 1):
             num_tokens = num_reqs * max_query_len
             uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
