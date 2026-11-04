@@ -516,3 +516,16 @@ If you observe that GPU utilization is lower than expected, CPU contention may b
 vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
 
 For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.
+
+## Chat streaming serialization
+
+The OpenAI-compatible chat endpoint reuses a per-choice SSE frame template for
+non-final text and reasoning chunks. It preserves the protocol models' JSON
+serialization, while requests with logprobs, token IDs, continuous usage, or
+delta logging use model serialization for every chunk. Tool-call, role, finish,
+and final usage chunks continue to use the model path. Integrations that
+override or wrap the raw chat-stream generator also retain that path.
+
+For Harmony models, completed messages are read only after a message-ending
+token or end of stream. Both optimizations are automatic and reduce frontend
+CPU work; their throughput impact depends on model size and serving load.

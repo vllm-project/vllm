@@ -11,6 +11,7 @@ from openai_harmony import (
     Message,
     RenderConversationConfig,
     Role,
+    StreamableParser,
 )
 from transformers import AutoTokenizer, GenerationConfig
 
@@ -21,7 +22,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.parser.harmony import HarmonyParser
+from vllm.parser.harmony import HarmonyParser, Segment
 from vllm.parser.parser_manager import ParserManager
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
@@ -174,6 +175,86 @@ def assert_parser_is_reset(harmony_parser: HarmonyParser):
     assert harmony_parser._parser is None
     assert harmony_parser._num_processed_messages == 0
     assert harmony_parser._current_message_tokens == []
+
+
+def process_in_chunks(
+    harmony_parser: HarmonyParser, token_ids: list[int], chunk_size: int | None
+) -> list[Segment]:
+    chunk_size = chunk_size or len(token_ids)
+    segments: list[Segment] = []
+    for start in range(0, len(token_ids), chunk_size):
+        chunk = token_ids[start : start + chunk_size]
+        segments.extend(harmony_parser.process_chunk(chunk).segments)
+    segments.extend(harmony_parser.flush())
+    return segments
+
+
+class PollAfterEveryToken:
+    """Stands in for the stop-token set to restore the ungated poll."""
+
+    def __contains__(self, token_id: object) -> bool:
+        return True
+
+
+# Rendered turns, plus raw streams that hit Harmony's error and recovery paths.
+POLL_GATING_OUTPUTS = {
+    "reasoning_and_content": lambda: get_model_output_tokens(
+        [
+            assistant("I should think first.", "analysis"),
+            assistant("The answer is 4.", "final"),
+        ]
+    ),
+    "preamble_and_tool_call": lambda: get_model_output_tokens(
+        [
+            assistant("Let me check the weather.", "commentary"),
+            tool_call("functions.get_weather", '{"location": "SF"}'),
+        ]
+    ),
+    "tool_calls_and_content": lambda: get_model_output_tokens(
+        [
+            assistant("Two lookups.", "analysis"),
+            tool_call("functions.get_weather", '{"location": "SF"}'),
+            tool_call("get_time", '{"timezone": "UTC"}', channel="analysis"),
+            assistant("Done.", "final"),
+        ]
+    ),
+    "constrained_content": lambda: get_model_output_tokens(
+        [assistant('{"result": true}', "final", content_type="json")]
+    ),
+    "multibyte_content": lambda: get_model_output_tokens(
+        [assistant("Think 🤖 — 日本語", "analysis"), assistant("Done 🤖", "final")]
+    ),
+    "stop_token_mid_character": lambda: (
+        encode_output("<|channel|>final<|message|>Hi 🤖")[:-1]
+        + encode_output("<|end|>")
+    ),
+    "truncated_mid_character": lambda: (
+        encode_output("<|channel|>final<|message|>Hi 🤖")[:-1]
+    ),
+    "malformed_messages": lambda: encode_output(
+        "<|channel|>analysis<|message|>thinking<|end|>"
+        "<|start|>assistant<|channel|>commentary<|message|>thinking<|end|>"
+        '<|start|>assistant<|channel|>final {"answer": "hi"}<|return|>'
+    ),
+    "return_after_end": lambda: encode_output(
+        "<|channel|>analysis<|message|>think<|end|><|return|>"
+        "<|start|>assistant<|channel|>final<|message|>answer<|return|>"
+    ),
+    "stop_token_in_header": lambda: encode_output("<|channel|>analysis<|end|>"),
+    "start_token_in_content": lambda: encode_output(
+        "<|channel|>final<|message|>a<|start|>b<|end|>"
+    ),
+    "tokens_after_return": lambda: encode_output(
+        "<|channel|>final<|message|>Done<|return|>trailing text"
+    ),
+    "truncated_in_content": lambda: encode_output(
+        "<|channel|>analysis<|message|>Think<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>Ans"
+    ),
+    "truncated_in_header": lambda: encode_output(
+        "<|channel|>analysis<|message|>Think<|end|><|start|>assistant<|channel|>fin"
+    ),
+}
 
 
 class TestFlush:
@@ -883,6 +964,54 @@ class TestProcessChunk:
 
         result = harmony_parser.process_chunk(malformed)
         assert "".join(s.delta for s in result.segments if s.delta) == "thinkanswer"
+
+    @pytest.mark.parametrize("chunk_size", [1, 2, 3, 7, None])
+    @pytest.mark.parametrize(
+        "make_output",
+        list(POLL_GATING_OUTPUTS.values()),
+        ids=list(POLL_GATING_OUTPUTS),
+    )
+    def test_stop_token_poll_matches_every_token_poll(
+        self, gpt_oss_tokenizer, monkeypatch, make_output, chunk_size
+    ):
+        """Polling for completed messages only after stop tokens loses nothing."""
+        token_ids = make_output()
+        gated = process_in_chunks(
+            HarmonyParser(gpt_oss_tokenizer), token_ids, chunk_size
+        )
+
+        monkeypatch.setattr("vllm.parser.harmony._stop_token_ids", PollAfterEveryToken)
+        every_token = process_in_chunks(
+            HarmonyParser(gpt_oss_tokenizer), token_ids, chunk_size
+        )
+
+        assert gated == every_token
+        assert any(segment.completed_message is not None for segment in gated)
+
+    def test_messages_read_once_per_stop_token(self, gpt_oss_tokenizer, monkeypatch):
+        """Each read of messages re-serializes all completed messages."""
+        num_reads = 0
+        read_messages = StreamableParser.messages.fget
+
+        def counting_read(streamable_parser: StreamableParser) -> list[Message]:
+            nonlocal num_reads
+            num_reads += 1
+            return read_messages(streamable_parser)
+
+        monkeypatch.setattr(StreamableParser, "messages", property(counting_read))
+        token_ids = get_model_output_tokens(
+            [
+                assistant("Think. " * 100, "analysis"),
+                assistant("Answer. " * 100, "final"),
+            ]
+        )
+        parser = HarmonyParser(gpt_oss_tokenizer)
+        for token_id in token_ids:
+            parser.process_chunk([token_id])
+        parser.flush()
+
+        # One read per <|end|>, plus one after process_eos().
+        assert num_reads == 3
 
 
 class TestCountReasoningTokens:

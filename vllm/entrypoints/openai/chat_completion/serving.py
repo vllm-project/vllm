@@ -4,11 +4,14 @@
 import asyncio
 import itertools
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
+from functools import partial
 from http import HTTPStatus
+from types import MethodType
 from typing import Any, Final, cast
 
+import orjson
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -119,6 +122,118 @@ def _make_completion_tokens_details(
     reasoning_tokens: int,
 ) -> CompletionTokenUsageInfo:
     return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
+def _make_delta_chunk(
+    request_id: str,
+    created: int,
+    model_name: str,
+    index: int,
+    delta: DeltaMessage,
+    logprobs: ChatCompletionLogProbs | None,
+    token_ids: list[int] | None,
+) -> ChatCompletionStreamResponse:
+    """Build the stream chunk of one choice that has not finished yet."""
+    return ChatCompletionStreamResponse(
+        id=request_id,
+        object="chat.completion.chunk",
+        created=created,
+        choices=[
+            ChatCompletionResponseStreamChoice(
+                index=index,
+                delta=delta,
+                logprobs=logprobs,
+                finish_reason=None,
+                token_ids=token_ids,
+            )
+        ],
+        model=model_name,
+        kv_transfer_params=None,
+    )
+
+
+def _sse_frame(chunk: ChatCompletionStreamResponse | ErrorResponse) -> str:
+    if isinstance(chunk, ErrorResponse):
+        data = chunk.model_dump_json()
+    else:
+        data = chunk.model_dump_json(exclude_unset=True, exclude_none=not chunk.choices)
+    return f"data: {data}\n\n"
+
+
+_PROBE_CONTENT: Final = "\x00vllm-delta-probe\x00"
+_PROBE_DELTA_JSON: Final = orjson.dumps({"content": _PROBE_CONTENT}).decode()
+_TEMPLATE_DELTA_FIELDS: Final = frozenset(
+    ("role", "content", "reasoning", "tool_calls")
+)
+
+
+class _DeltaFrameTemplate:
+    """The SSE frame of a choice's non-final chunk, split around its delta.
+
+    The split comes from a probe chunk that goes through `_make_delta_chunk`
+    and `_sse_frame` like any other chunk, so rendered frames are
+    byte-identical to the model path. Each render returns None when the delta
+    needs the model path instead.
+    """
+
+    __slots__ = ("prefix", "suffix")
+
+    def __init__(self, prefix: str, suffix: str) -> None:
+        self.prefix = prefix
+        self.suffix = suffix
+
+    @classmethod
+    def build(
+        cls, request_id: str, created: int, model_name: str, index: int
+    ) -> "_DeltaFrameTemplate | None":
+        try:
+            probe = DeltaMessage(content=_PROBE_CONTENT)
+            frame = _sse_frame(
+                _make_delta_chunk(
+                    request_id, created, model_name, index, probe, None, None
+                )
+            )
+        except Exception:
+            # The model path hits and reports the same error.
+            return None
+        parts = frame.split(_PROBE_DELTA_JSON)
+        if len(parts) != 2:
+            return None
+        return cls(*parts)
+
+    def render_content(self, content: str) -> str | None:
+        """Render the frame for `DeltaMessage(content=content)`."""
+        try:
+            delta = orjson.dumps({"content": content})
+        except TypeError:
+            # e.g. lone surrogates, which pydantic also refuses to serialize.
+            return None
+        return self.prefix + delta.decode() + self.suffix
+
+    def render_delta(self, delta: DeltaMessage) -> str | None:
+        """Render the frame for a delta without tool calls or extra fields."""
+        if (
+            type(delta) is not DeltaMessage
+            or delta.__pydantic_extra__
+            or delta.tool_calls != []
+        ):
+            return None
+        fields_set = delta.model_fields_set
+        if not fields_set <= _TEMPLATE_DELTA_FIELDS:
+            return None
+        # Same keys and order as `DeltaMessage` dumps with `exclude_unset`.
+        data: dict[str, str | None] = {}
+        for name in ("role", "content", "reasoning"):
+            if name in fields_set:
+                value = getattr(delta, name)
+                if value is not None and type(value) is not str:
+                    return None
+                data[name] = value
+        try:
+            encoded = orjson.dumps(data)
+        except TypeError:
+            return None
+        return self.prefix + encoded.decode() + self.suffix
 
 
 class OpenAIServingChat(GenerateBaseServing):
@@ -482,8 +597,21 @@ class OpenAIServingChat(GenerateBaseServing):
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
+        raw_generator = self.chat_completion_stream_generator_raw
+        stream: Callable[
+            ...,
+            AsyncIterator[ChatCompletionStreamResponse | ErrorResponse | str],
+        ]
+        if (
+            type(raw_generator) is MethodType
+            and getattr(raw_generator, "__func__", None) is _BASE_RAW_GENERATOR
+        ):
+            stream = partial(self._chat_completion_stream_chunks, render_frames=True)
+        else:
+            # Keep serializing the chunks of an overridden or patched raw generator.
+            stream = raw_generator
         try:
-            async for chunk in self.chat_completion_stream_generator_raw(
+            async for chunk in stream(
                 request,
                 result_generator,
                 request_id,
@@ -494,20 +622,14 @@ class OpenAIServingChat(GenerateBaseServing):
                 chat_template_kwargs=chat_template_kwargs,
                 mm_token_counts=mm_token_counts,
             ):
-                if isinstance(chunk, ErrorResponse):
-                    data = chunk.model_dump_json()
-                else:
-                    data = chunk.model_dump_json(
-                        exclude_unset=True, exclude_none=not chunk.choices
-                    )
-                yield f"data: {data}\n\n"
+                yield chunk if isinstance(chunk, str) else _sse_frame(chunk)
         except Exception as e:
             logger.exception("Error serializing chat completion stream.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
 
-    async def chat_completion_stream_generator_raw(
+    def chat_completion_stream_generator_raw(
         self,
         request: ChatCompletionRequest,
         result_generator: AsyncIterator[RequestOutput],
@@ -520,6 +642,42 @@ class OpenAIServingChat(GenerateBaseServing):
         mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None]:
         """Yield chat chunks or errors without serializing them into SSE frames."""
+        return cast(
+            AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse, None],
+            self._chat_completion_stream_chunks(
+                request,
+                result_generator,
+                request_id,
+                model_name,
+                conversation,
+                tokenizer,
+                request_metadata,
+                chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
+                render_frames=False,
+            ),
+        )
+
+    async def _chat_completion_stream_chunks(
+        self,
+        request: ChatCompletionRequest,
+        result_generator: AsyncIterator[RequestOutput],
+        request_id: str,
+        model_name: str,
+        conversation: list[ConversationMessage],
+        tokenizer: TokenizerLike,
+        request_metadata: RequestResponseMetadata,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
+        *,
+        render_frames: bool,
+    ) -> AsyncGenerator[ChatCompletionStreamResponse | ErrorResponse | str, None]:
+        """Yield chat chunks or errors.
+
+        With `render_frames`, non-final chunks that carry no per-token metadata
+        are yielded as finished SSE frames rendered from a per-choice template,
+        which skips building and dumping three pydantic models per token.
+        """
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -572,6 +730,26 @@ class OpenAIServingChat(GenerateBaseServing):
         include_usage, include_continuous_usage = should_include_usage(
             stream_options, self.enable_force_include_usage
         )
+
+        # Logprobs, token IDs and continuous usage differ per chunk, and delta
+        # logging reads the DeltaMessage that plain-text frames skip.
+        frame_templates: list[_DeltaFrameTemplate | None] = [None] * num_choices
+        if (
+            render_frames
+            and not request.logprobs
+            and not request.return_token_ids
+            and not include_continuous_usage
+            and not (
+                self.enable_log_outputs
+                and self.enable_log_deltas
+                and self.request_logger
+            )
+        ):
+            frame_templates = [
+                _DeltaFrameTemplate.build(request_id, created_time, model_name, i)
+                for i in range(num_choices)
+            ]
+        plain_text = self.parser_cls is None
 
         last_res: RequestOutput | None = None
         try:
@@ -720,6 +898,20 @@ class OpenAIServingChat(GenerateBaseServing):
                         # Chunked prefill case, don't return empty chunks
                         continue
 
+                    template = frame_templates[i]
+                    if (
+                        template is not None
+                        and plain_text
+                        and output.finish_reason is None
+                    ):
+                        # step() would return DeltaMessage(content=delta_text).
+                        frame = template.render_content(delta_text)
+                        if frame is not None:
+                            processor.step_plain_text(output.token_ids)
+                            previous_texts[i] += delta_text
+                            yield frame
+                            continue
+
                     delta_message, finish_reason = processor.step(
                         delta_text,
                         as_list(output.token_ids),
@@ -791,15 +983,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     )
 
                     if output.finish_reason is None:
+                        if template is not None:
+                            frame = template.render_delta(delta_message)
+                            if frame is not None:
+                                yield frame
+                                continue
                         # Send token-by-token response for each request.n
-                        choice_data = ChatCompletionResponseStreamChoice(
-                            index=i,
-                            delta=delta_message,
-                            logprobs=logprobs,
-                            finish_reason=None,
-                            token_ids=(
-                                as_list(output.token_ids) if include_token_ids else None
-                            ),
+                        chunk = _make_delta_chunk(
+                            request_id,
+                            created_time,
+                            model_name,
+                            i,
+                            delta_message,
+                            logprobs,
+                            as_list(output.token_ids) if include_token_ids else None,
                         )
 
                     # if the model is finished generating
@@ -823,26 +1020,24 @@ class OpenAIServingChat(GenerateBaseServing):
 
                         finish_reason_sent[i] = True
 
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        object=chunk_object_type,
-                        created=created_time,
-                        choices=[choice_data],
-                        model=model_name,
-                        kv_transfer_params=(
-                            res.kv_transfer_params if finish_reason_sent[i] else None
-                        ),
-                    )
-                    # Stamp the fingerprint on terminal chunks only (those with
-                    # finish_reason set). When ``include_usage`` is on, the
-                    # trailing usage chunk below overrides this as the true
-                    # final message.
-                    if (
-                        not include_usage
-                        and self.system_fingerprint is not None
-                        and choice_data.finish_reason is not None
-                    ):
-                        chunk.system_fingerprint = self.system_fingerprint
+                        chunk = ChatCompletionStreamResponse(
+                            id=request_id,
+                            object=chunk_object_type,
+                            created=created_time,
+                            choices=[choice_data],
+                            model=model_name,
+                            kv_transfer_params=res.kv_transfer_params,
+                        )
+                        # Stamp the fingerprint on terminal chunks only (those
+                        # with finish_reason set). When ``include_usage`` is on,
+                        # the trailing usage chunk below overrides this as the
+                        # true final message.
+                        if (
+                            not include_usage
+                            and self.system_fingerprint is not None
+                            and choice_data.finish_reason is not None
+                        ):
+                            chunk.system_fingerprint = self.system_fingerprint
 
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
@@ -1289,3 +1484,8 @@ class OpenAIServingChat(GenerateBaseServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+
+# Captured at import so that `chat_completion_stream_generator` honors a raw
+# generator patched on this class or an instance, not only a subclass override.
+_BASE_RAW_GENERATOR: Final = OpenAIServingChat.chat_completion_stream_generator_raw

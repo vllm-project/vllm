@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
+import logging
+import time
 from collections.abc import AsyncIterator, Coroutine
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -20,9 +24,12 @@ from tests.entrypoints.openai.utils import (
 )
 from tests.utils import RemoteOpenAIServer
 from vllm._aiter_ops import is_aiter_found_and_supported
-from vllm.config import MultiModalConfig
+from vllm.config import DeviceConfig, ModelConfig, MultiModalConfig, VllmConfig
+from vllm.entrypoints.cohere.cohere_chat_message import CohereDeltaMessage
 from vllm.entrypoints.generate.base.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     RequestResponseMetadata,
 )
 from vllm.entrypoints.generate.base.serving import build_per_request_timing_metrics
@@ -33,9 +40,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
+    _DeltaFrameTemplate,
     _get_mm_token_counts,
     _make_completion_tokens_details,
+    _make_delta_chunk,
     _make_prompt_tokens_details,
+    _sse_frame,
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
@@ -44,6 +54,7 @@ from vllm.entrypoints.openai.models.serving import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import resolve_finish_reason
 from vllm.exceptions import GenerationError, QueueOverflowError, VLLMValidationError
 from vllm.inputs import TokensPrompt
@@ -58,6 +69,7 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.metrics.stats import RequestStateStats
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
@@ -171,6 +183,35 @@ async def gptoss_speculative_client(gptoss_speculative_server):
 
 
 class TestGPTOSSChat:
+    @pytest.mark.asyncio
+    async def test_chat_stream_frames_match_protocol_serialization(self, gptoss_server):
+        """Real model frames retain the protocol serializer's exact JSON bytes."""
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                gptoss_server.url_for("v1/chat/completions"),
+                json={
+                    "model": GPT_OSS_MODEL_NAME,
+                    "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+                    "stream": True,
+                    "temperature": 0,
+                    "max_tokens": 256,
+                    "stream_options": {"include_usage": True},
+                },
+            )
+        response.raise_for_status()
+        frames = response.text.removesuffix("\n\n").split("\n\n")
+        assert frames[-1] == "data: [DONE]"
+        text_chunks = 0
+        for frame in frames[:-1]:
+            assert frame.startswith("data: ")
+            chunk = ChatCompletionStreamResponse.model_validate_json(frame[6:])
+            assert _sse_frame(chunk) == frame + "\n\n"
+            text_chunks += sum(
+                bool(choice.delta.content or choice.delta.reasoning)
+                for choice in chunk.choices
+            )
+        assert text_chunks > 0
+
     @pytest.mark.asyncio
     async def test_gpt_oss_chat_tool_call_streaming(
         self, gptoss_client: OpenAI, with_tool_parser: bool
@@ -873,6 +914,316 @@ async def test_streaming_errors_preserve_envelope(
         )
     assert error_response.error.message == "backend failed"
     assert error_response.error.code == (500 if failure == "generation" else 400)
+
+
+_FRAME_TEXTS = [
+    "Hello",
+    ' "quoted" \\ back\nslash\t {"content":"x"}',
+    "\x00\x1f\x7f\x85",
+    "\u2028\u2029 </script>",
+    "café \u4e2d\u6587 \U0001f680",
+    "",
+]
+
+
+def _frame_delta(mode: str, step: int, text: str, finished: bool) -> DeltaMessage:
+    if finished:
+        return DeltaMessage()
+    if mode == "reasoning":
+        # Assigned after construction, like HarmonyParser does; the step that
+        # ends reasoning carries both fields.
+        delta = DeltaMessage()
+        if step <= 2:
+            delta.reasoning = text
+        if step >= 2:
+            delta.content = text
+        return delta
+    if mode == "tools" and step >= 3:
+        first = step == 3
+        function = DeltaFunctionCall(
+            name="get_weather" if first else None, arguments=text
+        )
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_0" if first else None,
+                    type="function" if first else None,
+                    function=function,
+                )
+            ]
+        )
+    if mode == "subclass":
+        return CohereDeltaMessage(content=text)
+    if mode == "extra":
+        return DeltaMessage(content=text, extra_field=step)
+    return DeltaMessage(content=text)
+
+
+@pytest.fixture(scope="module")
+def frame_engine_client():
+    """Mock the external engine service; construct frontend objects normally."""
+    config = VllmConfig(
+        model_config=ModelConfig(model=MODEL_NAME, max_model_len=128),
+        device_config=DeviceConfig(device="cpu"),
+    )
+    engine = MagicMock(spec=AsyncLLM)
+    engine.vllm_config = config
+    engine.model_config = config.model_config
+    engine.renderer = HfRenderer(config, get_tokenizer(MODEL_NAME))
+    engine.input_processor = InputProcessor(config, renderer=engine.renderer)
+    return engine
+
+
+def _build_frame_serving(
+    engine,
+    cls: type[OpenAIServingChat] = OpenAIServingChat,
+    **kwargs,
+) -> OpenAIServingChat:
+    models = OpenAIServingModels(
+        engine_client=engine, base_model_paths=BASE_MODEL_PATHS
+    )
+    return cls(
+        engine,
+        models,
+        response_role="assistant",
+        online_renderer=_build_online_renderer(engine, models.registry),
+        request_logger=RequestLogger(max_log_len=None),
+        chat_template=CHAT_TEMPLATE,
+        chat_template_content_format="auto",
+        **kwargs,
+    )
+
+
+def _frame_outputs(
+    n: int, kv_transfer_params: dict[str, Any] | None = None
+) -> list[RequestOutput]:
+    """One output per token and choice, then a final one per choice."""
+    outputs = []
+    for step, text in enumerate([*_FRAME_TEXTS, "!"]):
+        finished = step == len(_FRAME_TEXTS)
+        for index in range(n):
+            token_id = 100 + step
+            result = _make_metrics_request_output(metrics=None, token_ids=(token_id,))
+            completion = result.outputs[0]
+            completion.index = index
+            completion.text = text
+            completion.finish_reason = "stop" if finished else None
+            completion.logprobs = [
+                {token_id: Logprob(logprob=-0.5, rank=1, decoded_token=text)}
+            ]
+            result.finished = finished and index == n - 1
+            result.kv_transfer_params = kv_transfer_params if finished else None
+            outputs.append(result)
+    return outputs
+
+
+async def _collect_stream(
+    serving: OpenAIServingChat,
+    request: ChatCompletionRequest,
+    outputs: list[RequestOutput],
+    raw: bool = False,
+) -> list[Any]:
+    method = (
+        serving.chat_completion_stream_generator_raw
+        if raw
+        else serving.chat_completion_stream_generator
+    )
+    return [
+        chunk
+        async for chunk in method(
+            request,
+            _stream_request_outputs(*outputs),
+            "chatcmpl-frames",
+            "test-model",
+            conversation=list(request.messages),
+            tokenizer=serving.renderer.tokenizer,
+            request_metadata=RequestResponseMetadata(request_id="chatcmpl-frames"),
+        )
+    ]
+
+
+def _record_template_frames(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    rendered: list[str] = []
+
+    def recording(render):
+        def spy(self, value):
+            frame = render(self, value)
+            if frame is not None:
+                rendered.append(frame)
+            return frame
+
+        return spy
+
+    for name in ("render_content", "render_delta"):
+        render = getattr(_DeltaFrameTemplate, name)
+        monkeypatch.setattr(_DeltaFrameTemplate, name, recording(render))
+    return rendered
+
+
+_FRAME_CASES: dict[str, dict[str, Any]] = {
+    "plain": {},
+    "include_usage": {"request": {"stream_options": {"include_usage": True}}},
+    "continuous_usage": {
+        "request": {
+            "stream_options": {"include_usage": True, "continuous_usage_stats": True}
+        },
+        "templated": 0,
+    },
+    "force_include_usage": {
+        "serving": {"enable_force_include_usage": True},
+        "templated": 0,
+    },
+    "logprobs": {"request": {"logprobs": True}, "templated": 0},
+    "return_token_ids": {"request": {"return_token_ids": True}, "templated": 0},
+    "n2_kv_transfer": {
+        "n": 2,
+        "kv_transfer_params": {"remote_block_ids": [1]},
+    },
+    "echo": {
+        "request": {
+            "echo": True,
+            "add_generation_prompt": False,
+            "messages": [
+                {"role": "user", "content": "Test"},
+                {"role": "assistant", "content": "Prefix"},
+            ],
+        }
+    },
+    "log_deltas": {
+        "serving": {"enable_log_outputs": True, "enable_log_deltas": True},
+        "templated": 0,
+    },
+    "log_outputs_without_deltas": {
+        "serving": {"enable_log_outputs": True, "enable_log_deltas": False}
+    },
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", list(_FRAME_CASES))
+async def test_stream_frame_template_matches_model_path(
+    case: str, monkeypatch: pytest.MonkeyPatch, frame_engine_client, caplog
+):
+    """Frames rendered from the template equal the pydantic frames, byte for byte,
+    output logging sees the same calls, chunks with per-token metadata keep the
+    model path, and the raw generator still yields the models."""
+    spec = _FRAME_CASES[case]
+    n = spec.get("n", 1)
+    serving = _build_frame_serving(frame_engine_client, **spec.get("serving", {}))
+    request = ChatCompletionRequest(
+        **{
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Test"}],
+            "stream": True,
+            "n": n,
+            **spec.get("request", {}),
+        }
+    )
+    kv_transfer_params = spec.get("kv_transfer_params")
+    # Both runs need the same `created`.
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    rendered = _record_template_frames(monkeypatch)
+    caplog.set_level(logging.INFO)
+    caplog.clear()
+
+    frames = await _collect_stream(
+        serving, request, _frame_outputs(n, kv_transfer_params)
+    )
+    logged = [record.getMessage() for record in caplog.records]
+    caplog.clear()
+    raw_chunks = await _collect_stream(
+        serving, request, _frame_outputs(n, kv_transfer_params), raw=True
+    )
+    model_frames = [_sse_frame(chunk) for chunk in raw_chunks]
+
+    assert frames == [*model_frames, "data: [DONE]\n\n"]
+    assert [record.getMessage() for record in caplog.records] == logged
+    assert len(rendered) == spec.get("templated", n * len(_FRAME_TEXTS))
+    assert all(frame in frames for frame in rendered)
+
+
+@pytest.mark.asyncio
+async def test_stream_frame_template_keeps_error_for_unencodable_text(
+    monkeypatch: pytest.MonkeyPatch, frame_engine_client
+):
+    """Text pydantic cannot serialize still ends the stream with its error."""
+    serving = _build_frame_serving(frame_engine_client)
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
+    )
+
+    def outputs() -> list[RequestOutput]:
+        results = _frame_outputs(1)
+        results[1].outputs[0].text = "lone \ud800"
+        return results
+
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    rendered = _record_template_frames(monkeypatch)
+    frames = await _collect_stream(serving, request, outputs())
+    assert rendered == [frames[1]]
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert len(frames) == 4
+    assert "error" in json.loads(frames[2].removeprefix("data: "))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replaced_on", ["subclass", "class", "instance"])
+async def test_stream_frame_template_skipped_when_raw_generator_replaced(
+    replaced_on: str, monkeypatch: pytest.MonkeyPatch, frame_engine_client
+):
+    """A raw generator overridden or patched, e.g. by a tracer, sees every chunk."""
+    seen: list[ChatCompletionStreamResponse | ErrorResponse] = []
+    base_raw = OpenAIServingChat.chat_completion_stream_generator_raw
+
+    def traced(self, *args, **kwargs):
+        async def record():
+            async for chunk in base_raw(self, *args, **kwargs):
+                seen.append(chunk)
+                yield chunk
+
+        return record()
+
+    class Traced(OpenAIServingChat):
+        def chat_completion_stream_generator_raw(self, *args, **kwargs):
+            return traced(self, *args, **kwargs)
+
+    serving = _build_frame_serving(
+        frame_engine_client,
+        cls=Traced if replaced_on == "subclass" else OpenAIServingChat,
+    )
+    if replaced_on == "class":
+        monkeypatch.setattr(
+            OpenAIServingChat, "chat_completion_stream_generator_raw", traced
+        )
+    elif replaced_on == "instance":
+        monkeypatch.setattr(
+            serving, "chat_completion_stream_generator_raw", partial(traced, serving)
+        )
+    request = ChatCompletionRequest(
+        model="test-model", messages=[{"role": "user", "content": "Test"}], stream=True
+    )
+    frames = await _collect_stream(serving, request, _frame_outputs(1))
+
+    assert len(seen) == len(_FRAME_TEXTS) + 2
+    assert [_sse_frame(chunk) for chunk in seen] == frames[:-1]
+
+
+@pytest.mark.parametrize("mode", ["plain", "reasoning", "tools", "subclass", "extra"])
+def test_frame_template_parser_deltas_preserve_model_serialization(mode):
+    template = _DeltaFrameTemplate.build("chatcmpl-test", 0, "test-model", 0)
+    assert template is not None
+    for step, text in enumerate(_FRAME_TEXTS):
+        delta = _frame_delta(mode, step, text, False)
+        rendered = template.render_delta(delta)
+        if mode in {"subclass", "extra"} or (mode == "tools" and step >= 3):
+            assert rendered is None
+        else:
+            assert rendered == _sse_frame(
+                _make_delta_chunk(
+                    "chatcmpl-test", 0, "test-model", 0, delta, None, None
+                )
+            )
 
 
 def test_build_per_request_timing_metrics_valid_timestamps():
