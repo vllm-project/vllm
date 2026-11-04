@@ -3,7 +3,8 @@
 """End-to-end restore through the MORI-backed UMBP runtime.
 
 Batch-invariant kernels make a restore bitwise comparable with recomputing the
-prompt, so restored KV must reproduce the cold run's tokens and logprobs.
+prompt, so restored KV must reproduce the cold run's tokens and logprobs. Mamba
+hybrids have no batch-invariant kernels, so they compare with a GPU prefix hit.
 """
 
 import time
@@ -29,13 +30,15 @@ PARAMS = SamplingParams(temperature=0, max_tokens=16, logprobs=5, ignore_eos=Tru
 
 @pytest.fixture
 def umbp_llm(vllm_runner, socket_dir, monkeypatch, request):
+    options = dict(getattr(request, "param", {}))
+    tp_size = options.pop("tensor_parallel_size", 1)
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with vllm_runner(
         QWEN_MODEL,
         revision=_REVISIONS[QWEN_MODEL],
         enforce_eager=True,
-        tensor_parallel_size=getattr(request, "param", 1),
+        tensor_parallel_size=tp_size,
         block_size=BLOCK_SIZE,
         enable_prefix_caching=True,
         disable_log_stats=False,
@@ -46,6 +49,7 @@ def umbp_llm(vllm_runner, socket_dir, monkeypatch, request):
                 "mode": "embedded",
                 "capacity_bytes": 1 << 30,
                 "lookup_dir": socket_dir,
+                **options,
             },
         ),
     ) as runner:
@@ -97,8 +101,12 @@ def _assert_same_outputs(expected, actual) -> None:
 @pytest.mark.parametrize(
     "umbp_llm",
     [
-        pytest.param(1, id="tp1"),
-        pytest.param(2, id="tp2", marks=multi_gpu_marks(num_gpus=2)),
+        pytest.param({"tensor_parallel_size": 1}, id="tp1"),
+        pytest.param(
+            {"tensor_parallel_size": 2},
+            id="tp2",
+            marks=multi_gpu_marks(num_gpus=2),
+        ),
     ],
     indirect=True,
 )
@@ -136,3 +144,82 @@ def test_restore_extends_a_local_prefix_hit(umbp_llm):
     assert mixed[0].num_cached_tokens == 8 * BLOCK_SIZE
     assert _external_tokens(umbp_llm) - before == 6 * BLOCK_SIZE
     _assert_same_outputs(computed, mixed)
+
+
+# Eight full blocks of Qwen3-0.6B KV take 14 MiB, so this pool starts evicting
+# after about three prompts.
+@pytest.mark.parametrize(
+    "umbp_llm",
+    [
+        {
+            "capacity_bytes": 64 << 20,
+            "dram_high_watermark": 0.75,
+            "dram_low_watermark": 0.5,
+        }
+    ],
+    ids=["64MiB"],
+    indirect=True,
+)
+def test_restore_under_pool_eviction(umbp_llm):
+    """The newest prompt survives eviction exactly and the oldest is gone."""
+    prompts = [_prompt(seed, 8 * BLOCK_SIZE + 7) for seed in range(8)]
+    computed = [umbp_llm.generate(p, PARAMS, use_tqdm=False)[0] for p in prompts]
+    _reset_gpu_prefix_cache(umbp_llm)
+
+    before = _external_tokens(umbp_llm)
+    newest = umbp_llm.generate(prompts[-1], PARAMS, use_tqdm=False)
+    assert _external_tokens(umbp_llm) - before == 8 * BLOCK_SIZE
+    _assert_same_outputs([computed[-1]], newest)
+
+    before = _external_tokens(umbp_llm)
+    umbp_llm.generate(prompts[0], PARAMS, use_tqdm=False)
+    assert _external_tokens(umbp_llm) == before
+
+
+HYBRID_MODEL = "ibm-granite/granite-4.0-h-350m"
+HYBRID_REVISION = "3b17b717b8f2f5d305b0a92c1491e239aeda19c8"
+
+
+@pytest.fixture
+def umbp_hybrid_llm(vllm_runner, socket_dir):
+    with vllm_runner(
+        HYBRID_MODEL,
+        revision=HYBRID_REVISION,
+        enforce_eager=True,
+        max_model_len=2048,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="UMBPStoreConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "mode": "embedded",
+                "capacity_bytes": 1 << 30,
+                "lookup_dir": socket_dir,
+            },
+        ),
+    ) as runner:
+        yield runner.llm
+
+
+def test_hybrid_restore_matches_local_prefix_hit(umbp_hybrid_llm):
+    """Mamba boundary states restored through UMBP resume like a GPU hit.
+
+    A prompt ending exactly on a block boundary still recomputes its last block.
+    """
+    llm = umbp_hybrid_llm
+    block_size = llm.llm_engine.vllm_config.cache_config.block_size
+    for seed, tail in enumerate((7, block_size)):
+        prompt = _prompt(seed, 2 * block_size + tail)
+        llm.generate(prompt, PARAMS, use_tqdm=False)
+        local_hit = llm.generate(prompt, PARAMS, use_tqdm=False)
+        assert local_hit[0].num_cached_tokens == 2 * block_size
+        _reset_gpu_prefix_cache(llm)
+
+        before = _external_tokens(llm)
+        restored = llm.generate(prompt, PARAMS, use_tqdm=False)
+
+        assert restored[0].num_cached_tokens == 2 * block_size
+        assert _external_tokens(llm) - before == 2 * block_size
+        _assert_same_outputs(local_hit, restored)

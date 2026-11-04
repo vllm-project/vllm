@@ -38,23 +38,24 @@ def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
     num_speculative_tokens: int = 0,
+    mamba_cache_mode: str = "none",
 ) -> MambaSpec:
     ring_buffer_len = buffer_len + (
         1 + num_speculative_tokens
         if mamba_backend == MambaBackendEnum.FLASHINFER
         else 0
     )
-    shapes = (
-        (1, 1),
-        (1, 1, 1),
+    replayssm_shapes = (
         (1, ring_buffer_len, 1),
         (1, ring_buffer_len),
         (1, ring_buffer_len, 1),
     )
+    base_shapes = ((1, 1), (1, 1, 1))
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=shapes,
-        dtypes=(torch.float32,),
+        shapes=(*base_shapes, *replayssm_shapes),
+        dtypes=(torch.float32,) * 5,
+        mamba_cache_mode=mamba_cache_mode,
     )
 
 
@@ -81,7 +82,12 @@ def _create_replayssm_builder(
             num_speculative_tokens=num_speculative_tokens,
         )
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len, mamba_backend, num_speculative_tokens),
+        _make_mamba_spec(
+            buffer_len,
+            mamba_backend,
+            num_speculative_tokens,
+            mamba_cache_mode,
+        ),
         ["layer0"],
         vllm_config,
         DEVICE,
