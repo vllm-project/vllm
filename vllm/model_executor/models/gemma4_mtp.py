@@ -19,6 +19,7 @@ Checkpoint layout (``gemma4_assistant``)::
     masked_embedding.token_ordering -- token-to-centroid mapping buffer
 """
 
+import weakref
 from collections.abc import Iterable
 
 import torch
@@ -489,8 +490,12 @@ class Gemma4MTP(nn.Module):
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if getattr(config, "tie_word_embeddings", True):
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", True)
+        if self.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
+        # The speculator replaces model.embed_tokens with the target's
+        # embedding after the cold load (a weak reference: not a submodule).
+        self._own_embed_tokens = weakref.ref(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             text_config.vocab_size,
@@ -599,8 +604,17 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        mapper = self.hf_to_vllm_mapper
+        if self.model.embed_tokens is not self._own_embed_tokens():
+            # A weight update after the target's (backbone-dim) embedding was
+            # shared: the checkpoint's draft-dim embed_tokens is the tied
+            # lm_head, or unused when untied.
+            lm_head = "lm_head." if self.tie_word_embeddings else None
+            mapper = mapper | WeightsMapper(
+                orig_to_new_prefix={"model.embed_tokens.": lm_head}
+            )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(weights, mapper=mapper)
 
     def process_weights_after_loading(self) -> None:
         # Built here, outside inference mode, and refilled in place on reload.
