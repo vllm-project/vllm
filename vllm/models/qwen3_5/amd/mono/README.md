@@ -8,8 +8,8 @@ and TP2 dispatch.
 On a pure decode inside the row cap, K1 replaces the linear-attention mixer
 and K2 replaces the MXFP4 feed-forward. Norms, full attention, and the
 tensor-parallel all-reduces stay outside those launches. Prefill, mixed
-batches, spec decode, and wider decode call the compiled stock model with
-its module methods left unwrapped.
+batches, partial verify steps (below), and wider decode call the compiled
+stock model with its module methods left unwrapped.
 
 ## Enable
 
@@ -65,8 +65,8 @@ those; where they equal the defaults the build is unchanged.
 ## When it runs
 
 A step enters the mono graph only when it is a pure decode
-(`num_prefills == 0`, at least one decode row, no spec-decode mask) and
-the row count is inside the kernel build. The builds cover 1–8 rows at
+(`num_prefills == 0`, at least one decode row; with speculative decoding,
+a whole verify step) and the row count is inside the kernel build. The builds cover 1–8 rows at
 TP1 and 1–16 rows at TP2.
 
 Serving defaults are narrower than the builds. K1 and K2 each default to
@@ -168,13 +168,23 @@ in both arms, same image; the arms differ only in
 Default row caps (4); caps 8 give the same up to 4 requests and 579.1
 (+1.3%) at 8.
 
-With MTP-3 (mono is then K2 only), one request: 221.9 → 238.5 and
-221.0 → 226.2 output tok/s on two prompt seeds (+4.9% together); two
-requests and more: within ±1% (a verify step of two requests is 8 rows,
-above the cap).
+With MTP-3 (`num_speculative_tokens` 3), K1 and K2 on the verify steps,
+same image, flag unset vs set:
 
-At 8 rows K1 and K2 take about as long as the MI350P stock MXFP4 GEMMs
-they replace, so keep the default TP1 caps (4) on MI350P.
+| Concurrency | Output tok/s, MTP-3 → MTP-3 + mono | Median TPOT (ms) |
+| --- | --- | --- |
+| 1 | 223.7 → 267.0 (+19.4%) | 3.98 → 3.30 (+17.1%) |
+| 1 (second prompt seed) | 222.7 → 266.7 (+19.7%) | 3.76 → 3.08 (+18.1%) |
+| 2 | 353.3 → 389.4 (+10.2%) | 5.22 → 4.55 (+12.8%) |
+| 4 | 592.7 → 591.1 (−0.3%) | 5.97 → 5.95 (+0.3%) |
+| 8 | 930.4 → 934.1 (+0.4%) | 7.67 → 7.65 (+0.3%) |
+
+Caps 8 (the default with speculative decoding); with caps 4 a verify step
+of two requests runs stock (+3.7% at 2). With K2 alone (K1 off) the gain
+at one request was +4.9%.
+
+Without MTP, at 8 rows K1 and K2 take about as long as the MI350P stock
+MXFP4 GEMMs they replace, so the plain-decode TP1 caps stay at 4.
 
 Accuracy on MI350P at 8 concurrent requests, so that decode steps stay
 inside the caps (8) and K1 and K2 produce nearly every token:
@@ -191,9 +201,10 @@ The model card setting is `lm_eval` `local-completions`, 5-shot, all
 1319 questions, sampled (thinking: temperature 1.0, max_gen_toks 3072;
 non-thinking: the card's custom prompt that closes the think block). The paired differences
 over the three seeds are −0.18 ± 0.36 and −0.45 ± 0.45 points.
-With MTP-3, one request at a time (where K2 runs), one seed per arm:
-thinking 0.9265 → 0.9303 (paired +0.38 ± 0.69 points), non-thinking
-0.8961 → 0.8908 (−0.53 ± 0.76).
+With MTP-3, one request at a time (K1 and K2 on every verify step), one
+seed per arm: thinking 0.9265 → 0.9318 (paired +0.53 ± 0.67 points),
+non-thinking 0.8961 → 0.8893 (−0.68 ± 0.80); the eval ran 22% and 16%
+faster.
 
 ## Tests
 
