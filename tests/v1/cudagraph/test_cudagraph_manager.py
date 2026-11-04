@@ -809,24 +809,3 @@ def test_decode_graphs_follow_the_declared_plan_shapes(monkeypatch):
         num_reqs=2, num_tokens=2, uniform_token_count=1, num_active_loras=0
     )
     assert (desc.cg_mode, desc.uniform_token_count) == (CUDAGraphMode.FULL, 1)
-
-
-def test_default_resources_capture_todays_decode_graphs(monkeypatch):
-    """A built-in config's default resources keep today's list: one uniform
-    shape per K of the Dynamic SD schedule, K + 1 alone for a static K."""
-    static_k = _make_spec_decode_manager(
-        monkeypatch,
-        decode_query_len=4,
-        capture_sizes=[2, 4, 8, 16],
-        num_speculative_tokens=3,
-        dynamic_spec_schedule=[(1, 8, 3)],
-    )
-    assert _full_uniform_counts(static_k) == {4}
-    dynamic = _make_spec_decode_manager(
-        monkeypatch,
-        decode_query_len=4,
-        capture_sizes=[2, 4, 6, 8],
-        num_speculative_tokens=3,
-        dynamic_spec_schedule=[(1, 2, 3), (3, 4, 2), (5, 6, 1), (7, 8, 0)],
-    )
-    assert _full_uniform_counts(dynamic) == {1, 2, 3, 4}
