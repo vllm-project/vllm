@@ -59,7 +59,7 @@ class TransferJob:
     and the scheduler processes the completion.
     """
 
-    req_id: ReqId
+    req_id: ReqId | None
     src_spec: LoadStoreSpec
     dst_spec: LoadStoreSpec
     # Load only: completed before this step's forward pass.
@@ -70,7 +70,7 @@ class TransferJob:
 class TransferJobStatus:
     """Tracks scheduler-side state for a single transfer job."""
 
-    req_id: ReqId
+    req_id: ReqId | None
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
