@@ -11,7 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 @multi_gpu_test(num_gpus=2)
