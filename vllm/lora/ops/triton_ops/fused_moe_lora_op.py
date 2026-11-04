@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
+from vllm import envs
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
@@ -1711,13 +1710,13 @@ def _fused_moe_lora(
     )
 
     use_a100_zero_mask = (
-        os.environ.get("VLLM_MOE_LORA_INTERMEDIATE_MASK") == "1"
+        envs.VLLM_MOE_LORA_INTERMEDIATE_MASK
         and device.type == "cuda"
         and torch.cuda.get_device_capability(device) == (8, 0)
         and not use_tma
     )
     use_h100_zero_mask = (
-        os.environ.get("VLLM_MOE_LORA_TMA_INTERMEDIATE_MASK") == "1"
+        envs.VLLM_MOE_LORA_TMA_INTERMEDIATE_MASK
         and device.type == "cuda"
         and torch.cuda.get_device_capability(device) == (9, 0)
         and use_tma
