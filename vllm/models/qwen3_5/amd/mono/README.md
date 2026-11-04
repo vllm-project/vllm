@@ -73,8 +73,7 @@ a whole verify step) and the row count is inside the kernel build. The builds co
 TP1 and 1–16 rows at TP2.
 
 Serving defaults are narrower than the builds. K1 and K2 each default to
-4 rows at TP1 and 8 rows at TP2; with speculative decoding at TP1 to 8
-rows (verify steps of up to two requests with three draft tokens). Override either cap with
+4 rows at TP1 and 8 rows at TP2. Override either cap with
 `VLLM_ROCM_QWEN38_DENSE_MONO_K1_MAX_ROWS` or
 `VLLM_ROCM_QWEN38_DENSE_MONO_K2_MAX_ROWS`. A value outside 1..8 at TP1 or
 1..16 at TP2 is clamped and a warning is logged.
@@ -176,15 +175,18 @@ same image, flag unset vs set:
 
 | Concurrency | Output tok/s, MTP-3 → MTP-3 + mono | Median TPOT (ms) |
 | --- | --- | --- |
-| 1 | 223.7 → 267.0 (+19.4%) | 3.98 → 3.30 (+17.1%) |
-| 1 (second prompt seed) | 222.7 → 266.7 (+19.7%) | 3.76 → 3.08 (+18.1%) |
-| 2 | 353.3 → 389.4 (+10.2%) | 5.22 → 4.55 (+12.8%) |
-| 4 | 592.7 → 591.1 (−0.3%) | 5.97 → 5.95 (+0.3%) |
-| 8 | 930.4 → 934.1 (+0.4%) | 7.67 → 7.65 (+0.3%) |
+| 1 | 223.7 → 268.2 (+19.9%) | 3.98 → 3.29 (+17.3%) |
+| 1 (second prompt seed) | 222.7 → 264.3 (+18.7%) | 3.76 → 3.19 (+15.2%) |
+| 2 | 353.3 → 366.4 (+3.7%) | 5.22 → 5.10 (+2.3%) |
+| 4 | 592.7 → 592.1 (−0.1%) | 5.97 → 5.98 (−0.2%) |
+| 8 | 930.4 → 932.9 (+0.3%) | 7.67 → 7.65 (+0.3%) |
 
-Caps 8 (the default with speculative decoding); with caps 4 a verify step
-of two requests runs stock (+3.7% at 2). With K2 alone (K1 off) the gain
-at one request was +4.9%.
+Default caps (4): a verify step of two requests (8 rows) runs stock. With
+caps 8 K1 and K2 take those too: 389.4 (+10.2%) at two requests on this
+image, whose MXFP4 linears run on the AITER ASM GEMM; on a stack whose
+stock decode GEMM is AITER's FlyDSL A4W4 kernel the same steps ran about
+5% slower than stock, so the default stays 4. With K2 alone (K1 off) the
+gain at one request was +4.9%.
 
 Without MTP, at 8 rows K1 and K2 take about as long as the MI350P stock
 MXFP4 GEMMs they replace, so the plain-decode TP1 caps stay at 4.

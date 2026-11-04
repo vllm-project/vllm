@@ -54,10 +54,6 @@ _K1_COS_FLOOR = 1e-6
 _K1_ABS_SLACK = 2.0
 # Default row caps by TP. Chosen on MI355X against the AITER ASM FP4 GEMM.
 _DEFAULT_ROWS = {1: (4, 4), 2: (8, 8)}
-# With speculative decoding (TP1): verify steps of up to two requests with
-# three draft tokens. On MI350P (MTP-3) these beat the stock path at 4 and 8
-# rows, where plain decode steps of 8 rows do not.
-_SPEC_DEFAULT_ROWS = (8, 8)
 _K1_ROWS = "VLLM_ROCM_QWEN38_DENSE_MONO_K1_MAX_ROWS"
 _K2_ROWS = "VLLM_ROCM_QWEN38_DENSE_MONO_K2_MAX_ROWS"
 
@@ -84,17 +80,15 @@ def _o_proj(layer):
     return layer.linear_attn.out_proj if _is_gdn(layer) else layer.self_attn.o_proj
 
 
-def row_caps(tp: int, spec: bool = False) -> tuple[int, int]:
-    """K1's and K2's widest step at this TP (``spec``: with speculative
-    decoding): the defaults, unless the ``VLLM_ROCM_QWEN38_DENSE_MONO_K1_MAX_ROWS``
-    / ``_K2_MAX_ROWS`` overrides are set. Clamped to the kernels' builds (8 at
-    TP1, 16 at TP2)."""
+def row_caps(tp: int) -> tuple[int, int]:
+    """K1's and K2's widest step at this TP: the defaults, unless the
+    ``VLLM_ROCM_QWEN38_DENSE_MONO_K1_MAX_ROWS`` / ``_K2_MAX_ROWS`` overrides
+    are set. Clamped to the kernels' builds (8 at TP1, 16 at TP2)."""
     from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 
     top = D.max_tokens(tp)
-    defaults = _SPEC_DEFAULT_ROWS if spec and tp == 1 else _DEFAULT_ROWS[tp]
     caps = []
-    for name, default in zip((_K1_ROWS, _K2_ROWS), defaults):
+    for name, default in zip((_K1_ROWS, _K2_ROWS), _DEFAULT_ROWS[tp]):
         cap = _optional_int(name)
         if cap is None:
             cap = default
@@ -824,9 +818,7 @@ class DenseMono:
             and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True)
         )
         self.k2 = not self.whole_step and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K2", True)
-        self.k1_rows, self.k2_rows = (
-            (0, 0) if why else row_caps(self.tp, spec=self.spec)
-        )
+        self.k1_rows, self.k2_rows = (0, 0) if why else row_caps(self.tp)
         self.grid = 0
         if why is None:
             from vllm.models.qwen3_5.amd.mono.tiling import device_grid

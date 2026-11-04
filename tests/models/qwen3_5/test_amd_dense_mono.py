@@ -320,12 +320,6 @@ class RowCapsTest(unittest.TestCase):
             with self.subTest(k1=v1, k2=v2), _env(keys[0], v1), _env(keys[1], v2):
                 self.assertEqual(row_caps(1), want1)
                 self.assertEqual(row_caps(2), want2)
-        # speculative decoding at TP1: verify steps of up to two requests
-        with _env(keys[0], None), _env(keys[1], None):
-            self.assertEqual(row_caps(1, spec=True), (8, 8))
-            self.assertEqual(row_caps(2, spec=True), (8, 8))
-        with _env(keys[0], "4"), _env(keys[1], None):
-            self.assertEqual(row_caps(1, spec=True), (4, 8))
 
 
 @unittest.skipUnless(_gfx950(), "needs aiter on gfx950")
