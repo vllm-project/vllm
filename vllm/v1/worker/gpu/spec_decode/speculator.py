@@ -76,8 +76,6 @@ class BaseSpeculator(ABC):
     """
 
     num_query_per_req: int = 1
-    # Extra query slots reserved per request outside the regular queries.
-    num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
@@ -126,6 +124,21 @@ class BaseSpeculator(ABC):
         self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
     ) -> None:
         """Prepare draft-side watermarking before `propose`. No-op by default."""
+        return
+
+    def add_request(self, req_index: int) -> None:
+        """A new request was assigned request-state slot `req_index`, e.g. to
+        reset per-slot state. No-op by default."""
+        return
+
+    def on_requests_finished(self, finished_req_ids: set[str]) -> None:
+        """Requests finished (not preempted), before their request-state slots
+        are freed so their token history is still readable. No-op by default."""
+        return
+
+    def reset_state(self) -> None:
+        """Forget anything learned across requests, called after the warmup
+        requests have finished. No-op by default."""
         return
 
 
