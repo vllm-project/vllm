@@ -218,6 +218,8 @@ def test_plan_uses_state_params(monkeypatch, kv_dtype):
     with zero-query padding rows past num_tokens. An fp8 cache plans as
     float8_e4m3fn.
     """
+    # CPU-only torch builds cannot query CUDA stream capture state.
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     wrapper = FakeWrapper()
     plan_info = [0] * sm90_mod._PLAN_INFO_LEN
     plan_info[sm90_mod._PI_KV_INDPTR] = 64 * 4
