@@ -136,8 +136,8 @@ class GatedResidual(nn.Module):
             prefix=maybe_prefix(prefix, "input_mix_weight_up"),
             return_bias=False,
         )
-        self._use_hc_up_gate_mix = hc_up_gate_mix_supported(
-            self.input_mix_weight_up.weight, self.hc_count
+        self._use_hc_up_gate_mix = not envs.VLLM_BATCH_INVARIANT and (
+            hc_up_gate_mix_supported(self.input_mix_weight_up.weight, self.hc_count)
         )
 
     def _down_and_inject(
@@ -168,9 +168,9 @@ class GatedResidual(nn.Module):
         """Up projection, sigmoid gate and gated mean over the HC streams."""
         if (
             self._use_hc_up_gate_mix
-            and not envs.VLLM_BATCH_INVARIANT
             and xn.shape[0] >= MIN_FUSED_UP_M
-            # A LoRA wrapper replaces the module; its delta must not be skipped.
+            # LoRA wraps the module after __init__, so this can't be folded into
+            # _use_hc_up_gate_mix; the wrapper's delta must not be skipped.
             and isinstance(self.input_mix_weight_up, ReplicatedLinear)
         ):
             return hc_up_gate_mix(lowrank, xn, self.input_mix_weight_up.weight)
