@@ -56,6 +56,7 @@ if envs.VLLM_USE_SPINLOOP_EXT:
             "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
         )
 SPINLOOP_TIMEOUT_SECONDS = 0.1
+REMOTE_READABLE_WAIT_MS = 1
 
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
@@ -845,11 +846,8 @@ class MessageQueue:
     ) -> bool:
         """Wait for the current block to be readable by this reader."""
 
-        def check_readable():
-            memory_fence()
-            read_flag = metadata_buffer[self.local_reader_rank + 1]
-            written_flag = metadata_buffer[0]
-            return not (not written_flag or read_flag)
+        def check_readable() -> bool:
+            return self._is_readable(metadata_buffer)
 
         if SPINLOOP_EXT_ENABLED and not check_readable():
             spinloop(
@@ -877,6 +875,27 @@ class MessageQueue:
         if read_timeout.should_warn():
             logger.info(LONG_WAIT_TIME_LOG_MSG, VLLM_RINGBUFFER_WARNING_INTERVAL)
         return False
+
+    def _is_readable(self, metadata_buffer) -> bool:
+        """Whether the current block is written and not yet read by this reader."""
+        memory_fence()
+        read_flag = metadata_buffer[self.local_reader_rank + 1]
+        written_flag = metadata_buffer[0]
+        return bool(written_flag) and not read_flag
+
+    def readable(self) -> bool:
+        """Check whether a message is ready to be dequeued, without consuming it.
+        A local reader doesn't wait; a remote reader waits up to
+        REMOTE_READABLE_WAIT_MS for a message to arrive.
+        Raises RuntimeError if the queue has been shut down."""
+        if self.shutting_down:
+            raise RuntimeError("cancelled")
+        if self._is_local_reader:
+            with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                return self._is_readable(metadata_buffer)
+        if self._is_remote_reader:
+            return bool(self.remote_socket.poll(timeout=REMOTE_READABLE_WAIT_MS))
+        raise RuntimeError("Only readers can check readability")
 
     @contextmanager
     def acquire_read(
