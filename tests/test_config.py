@@ -52,7 +52,7 @@ from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field, hash_config
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
-from vllm.sampling_params import BeamSearchParams
+from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
@@ -2614,25 +2614,27 @@ def test_generation_config_loading():
 def test_override_generation_config_special_tokens():
     model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 
-    # eos_token_id / stop_token_ids are special-token keys consumed via
+    # eos_token_id is a special-token key consumed via
     # try_get_generation_config() (not get_diff_sampling_param's sampling
-    # allow-list). They must honor override_generation_config so that
-    # --override-generation-config can set them. Pick ids that are not already
-    # present in Qwen's generation_config.json so the assertion is meaningful.
-    override_generation_config = {
-        "eos_token_id": [106],
-        "stop_token_ids": [107],
-    }
-
+    # allow-list). It must honor override_generation_config so that
+    # --override-generation-config can register extra stop tokens. Pick an id
+    # that is not already present in Qwen's generation_config.json so the
+    # assertion is meaningful.
     model_config = ModelConfig(
         model_id,
         generation_config="auto",
-        override_generation_config=override_generation_config,
+        override_generation_config={"eos_token_id": [106]},
     )
 
     generation_config = model_config.try_get_generation_config()
     assert generation_config["eos_token_id"] == [106]
-    assert generation_config["stop_token_ids"] == [107]
+
+    # The stop path only consumes eos_token_id from the merged config, so check
+    # the overridden id actually reaches the request's stop-token set rather
+    # than merely being present in the dict.
+    sampling_params = SamplingParams()
+    sampling_params.update_from_generation_config(generation_config, eos_token_id=1)
+    assert 106 in sampling_params.all_stop_token_ids
 
 
 @pytest.mark.parametrize(

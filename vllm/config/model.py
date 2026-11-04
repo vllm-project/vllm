@@ -382,9 +382,8 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used.
 
-    The override applies to the full generation config, including special
-    tokens such as `eos_token_id` and `stop_token_ids`, not only sampling
-    parameters."""
+    The override applies to the full generation config, so keys outside the
+    sampling allow-list (for example `eos_token_id`) are honored as well."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
@@ -1860,8 +1859,8 @@ class ModelConfig:
         to `get_diff_sampling_param`.
 
         `override_generation_config` is applied here so that every consumer of
-        the merged generation config (special tokens such as `eos_token_id` /
-        `stop_token_ids` as well as the sampling parameters surfaced by
+        the merged generation config (special tokens such as `eos_token_id` as
+        well as the sampling parameters surfaced by
         `get_diff_sampling_param`) observes a single, consistent override.
 
         Returns:
