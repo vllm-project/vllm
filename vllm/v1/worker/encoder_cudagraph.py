@@ -553,8 +553,13 @@ class EncoderCudaGraphManager:
                         path=path,
                         axis_keys=axis_keys,
                     )
-                    assert graph_output is not None
-                    output = graph_output
+                    if graph_output is None:
+                        with torch.inference_mode():
+                            output = self.model.encoder_eager_forward(
+                                batch_mm_kwargs, path=path
+                            )
+                    else:
+                        output = graph_output
                 graph_outputs[path] = output
 
             if all_eager:
