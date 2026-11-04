@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing
+import sys
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import chain
 from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+from typing_extensions import TypeIs
 
 from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
@@ -27,6 +28,7 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
     from vllm.reasoning import ReasoningParser
     from vllm.v1.request import Request
 else:
@@ -34,6 +36,17 @@ else:
 
 
 logger = init_logger(__name__)
+
+
+def _is_parser_engine_reasoner(
+    reasoner: "ReasoningParser | None",
+) -> "TypeIs[ParserEngineReasoningAdapter]":
+    # Not imported here: `vllm.parser` pulls in openai and the HTTP layer.
+    # If the module was never loaded, no adapter instance can exist.
+    adapters = sys.modules.get("vllm.parser.engine.adapters")
+    return adapters is not None and isinstance(
+        reasoner, adapters.ParserEngineReasoningAdapter
+    )
 
 
 class ConstraintBounds(NamedTuple):
@@ -270,7 +283,7 @@ class StructuredOutputManager:
         if structured_req.masked_reasoning_end_ids is None:
             masked: tuple[int, ...] = ()
             reasoner = self._get_reasoner(request)
-            if isinstance(reasoner, ParserEngineReasoningAdapter):
+            if _is_parser_engine_reasoner(reasoner):
                 grammar = structured_req.grammar
                 assert isinstance(grammar, StructuredOutputGrammar)
                 masked = tuple(
@@ -324,10 +337,7 @@ class StructuredOutputManager:
             return _NO_SPEC_TOKENS
 
         # Engine-based parsers also report whether the end token is content.
-        if (
-            isinstance(reasoner, ParserEngineReasoningAdapter)
-            and reasoner.reasoning_end_token_ids
-        ):
+        if _is_parser_engine_reasoner(reasoner) and reasoner.reasoning_end_token_ids:
             end = reasoner.find_reasoning_end(spec_tokens)
             if end is not None:
                 constraint_start = end.offset + 1
