@@ -184,8 +184,9 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     return out
 
 
-# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 512;
-# decode-sized batches keep the unfused path.
+# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 32.
+# Decode-sized batches keep the unfused path until they are benchmarked
+# end to end with the fused kernel.
 MIN_FUSED_UP_M = 512
 
 
