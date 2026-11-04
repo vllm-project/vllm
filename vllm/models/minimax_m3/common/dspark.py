@@ -327,8 +327,8 @@ class MiniMaxM3DSparkModel(Qwen3DSparkModel):
         hidden_size, eps = self.config.hidden_size, self.config.rms_norm_eps
         self.hidden_norm = _gemma_rms_norm(hidden_size, eps=eps)
         self.norm = _gemma_rms_norm(hidden_size, eps=eps)
-        # supported draft steps run the draft layers as FlyDSL launches (MI355X);
-        # VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=0 keeps the stock layers
+        # VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1: supported draft steps run the draft
+        # layers as FlyDSL launches (MI355X)
         self._mono_drafter = None
         if current_platform.is_rocm():
             from vllm.models.minimax_m3.amd.mono.envs import envs as mono_envs
