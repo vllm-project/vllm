@@ -335,6 +335,9 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
   endpoint, for example `"http://127.0.0.1:9003/metrics"`. When set, vLLM polls
   it once a second and exports the [store usage gauges](#metrics). Default:
   unset, so no usage gauges are exported.
+- `mooncake_kv_lease_ttl_ms` (int): The master's read-lease TTL, which must
+  match its `--default_kv_lease_ttl`. Used to estimate `read_usage_perc`.
+  Default: `10000`, the Mooncake master's default.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.
@@ -383,24 +386,31 @@ vLLM polls the master once a second from the API server process, so the
 gauges keep updating while the engine is idle. Each is a fraction of
 `master_total_capacity_bytes`, from 0 to 1:
 
-| Metric | Master gauges | Meaning |
+| Metric | Source | Meaning |
 | --- | --- | --- |
-| `vllm:mooncake_store_cache_usage_perc` | `master_mem_processing_bytes` + `master_mem_leased_bytes` + `master_put_start_discarded_staging_size` | Memory eviction cannot reclaim now |
+| `vllm:mooncake_store_cache_usage_perc` | write + read + `master_put_start_discarded_staging_size` | Memory eviction cannot reclaim now |
 | `vllm:mooncake_store_cache_write_usage_perc` | `master_mem_processing_bytes` | Puts in flight |
-| `vllm:mooncake_store_cache_read_usage_perc` | `master_mem_leased_bytes` | Complete data under an unexpired read lease |
+| `vllm:mooncake_store_cache_read_usage_perc` | estimated by vLLM | Data under a read lease this vLLM instance took |
 | `vllm:mooncake_store_cache_occupancy_perc` | `master_allocated_bytes` | All allocated memory, including data eviction can reclaim |
 
-`master_mem_processing_bytes` and `master_mem_leased_bytes` require a Mooncake
-master that publishes them
+`master_mem_processing_bytes` requires a Mooncake master that publishes it
 ([kvcache-ai/Mooncake#5174](https://github.com/kvcache-ai/Mooncake/pull/5174)).
-With an older master, only `occupancy_perc` is exported and vLLM logs a
-warning.
+With an older master, `write_usage_perc` and `usage_perc` are not exported and
+vLLM logs a warning.
+
+The master does not export read-lease memory, so vLLM estimates it. The master
+grants a lease of `mooncake_kv_lease_ttl_ms` on every key it returns and on
+every key an existence check finds; vLLM counts the bytes of the keys it read
+or found already stored while saving, until their leases expire. The estimate
+only covers this vLLM instance, so leases taken by other clients of the same
+Store are missing, and adding the gauges of several instances counts keys they
+share more than once.
 
 These gauges follow `vllm:kv_offload_cpu_cache_{usage,write_usage,read_usage}_perc`
 of the CPU offloading connector, with one difference: the Store holds a read
-lease for `--default_kv_lease_ttl` after each read, so `read_usage_perc`
-includes that whole TTL, not only the transfer time. The CPU offloading
-connector has no occupancy gauge.
+lease for its whole TTL after each read, so `read_usage_perc` includes that
+TTL, not only the transfer time. The CPU offloading connector has no occupancy
+gauge.
 
 ## Standalone EGM over NVLink
 
