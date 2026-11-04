@@ -125,6 +125,9 @@ impl GenerateRequest {
                 reasoning_ended,
                 reasoning_parser_kwargs,
                 abort_immediately: false,
+                // Computed by the engine-core client, which knows the engine's
+                // prefix hash config.
+                block_hashes: None,
             },
         })
     }
