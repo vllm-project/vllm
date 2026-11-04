@@ -55,7 +55,7 @@ For a model to be compatible with the Transformers modeling backend for vLLM it 
 
 - be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
     - The model directory must have the correct structure (e.g. `config.json` is present).
-    - `config.json` must contain `auto_map.AutoModel`.
+    - `config.json` must contain `auto_map.AutoModel`, pointing to the base model (e.g. `MyModel`, not `MyModelForCausalLM`).
 - be a Transformers modeling backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
     - Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
 
@@ -84,6 +84,10 @@ To make your model compatible with the Transformers modeling backend:
         - Inherit from `nn.ModuleList` (naive).
         - Or contain all 3D `nn.Parameters` (packed).
     3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+4. If your model is multimodal:
+    1. The base model (`MyModel`) must implement `get_<modality>_features` (e.g. `get_audio_features`), which accepts `return_dict=True` and returns an output whose `pooler_output` holds the embeddings that replace the placeholder tokens.
+    2. Your processor's `__call__` must reach `ProcessorMixin.get_text_with_replacements` with one replacement per item, which usually means defining the placeholder token (e.g. `audio_token`) and implementing `replace_<modality>_token` (e.g. `replace_audio_token`). vLLM uses the resulting `text_replacement_offsets` to locate each item's placeholder.
+    3. For audio models, the audio config (`audio_config` or `encoder_config`, or the top-level config if neither exists) must define one of `max_source_positions`, `max_position_embeddings` or `max_pos_emb`, which vLLM uses as the maximum number of audio tokens per item.
 
 !!! note
     `MyModel` no longer needs `_supports_attention_backend = True`, and `kwargs` no
