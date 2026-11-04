@@ -602,12 +602,6 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     return logits.masked_fill_(logits < top_k_mask, -float("inf"))
 
 
-def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
-    logits = logits.contiguous()
-    _cpu_topk_sampling_op(logits, k)
-    return logits
-
-
 def apply_top_k_top_p_cpu(
     logits: torch.Tensor,
     k: torch.Tensor | None,
@@ -628,7 +622,9 @@ def apply_top_k_top_p_cpu(
         p = p.float().contiguous()
 
     if p is None:
-        return _apply_top_k_only_cpu(logits, k)
+        logits = logits.contiguous()
+        _cpu_topk_sampling_op(logits, k)
+        return logits
 
     if k is None:
         logits = logits.contiguous()
