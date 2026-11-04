@@ -812,16 +812,16 @@ def test_dspark_speculator_asks_the_draft_model_first():
 
 
 @pytest.mark.parametrize(
-    "arch, monokernel, rows, taken",
+    "cdna, monokernel, rows, taken",
     [
-        ("gfx950", True, 5, True),
-        ("gfx950", True, 6, False),
-        ("gfx942", True, 8, True),
-        ("gfx950", False, 1, False),
+        (4, True, 5, True),
+        (4, True, 6, False),
+        (3, True, 8, True),
+        (4, False, 1, False),
     ],
 )
 def test_dspark_draft_model_samples_with_fused_markov(
-    monkeypatch, arch, monokernel, rows, taken
+    monkeypatch, cdna, monokernel, rows, taken
 ):
     """The DSv4.1 draft model answers the speculator with fused_markov, which
     returns False for a step that the fused launches do not take."""
@@ -834,7 +834,6 @@ def test_dspark_draft_model_samples_with_fused_markov(
     from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
     monkeypatch.setattr(ops, "current_platform", SimpleNamespace(is_rocm=lambda: True))
-    cdna = {"gfx942": 3, "gfx950": 4}[arch]
     monkeypatch.setattr(rocm_platform, "get_cdna_version", lambda: cdna)
     monkeypatch.setattr(ops, "_monokernel", ops._monokernel)
     ops.record_monokernel(_config(monokernel=monokernel))
