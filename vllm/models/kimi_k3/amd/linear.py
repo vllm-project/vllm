@@ -995,10 +995,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 if weight_name not in name:
                     continue
                 # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
+                # Since we load the experts below (load_routed_experts_weight),
                 # we need to skip here BEFORE we update the name, otherwise
                 # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
+                # would then be mapped again below
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue

@@ -270,8 +270,8 @@ class KimiK3MTP(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # Routed experts (``.experts.{i}.w1/w2/w3``) are handled by the
-                # expert mapping below; skip them here. Shared experts
+                # Routed experts (``.experts.{i}.w1/w2/w3``) are loaded below
+                # (load_routed_experts_weight); skip them here. Shared experts
                 # (``.shared_experts.``) use gate/up_proj and fall through.
                 if ".experts." in name:
                     continue
