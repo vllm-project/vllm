@@ -29,6 +29,7 @@ def _lora_shrink_multicta_kernel(
     SPLIT_K: gl.constexpr,
     SLICE_NUM: gl.constexpr,
     CGA_LAYOUT: gl.constexpr,
+    REDUCE_CGA_LAYOUT: gl.constexpr,
 ):
     cta_n_num = gl.cdiv(N, BLOCK_N)
     pid_m_n = gl.program_id(axis=0)
@@ -36,6 +37,8 @@ def _lora_shrink_multicta_kernel(
     pid_n = pid_m_n % cta_n_num
     slice_id = gl.program_id(axis=1)
     lora_idx = gl.program_id(axis=2)
+    # LoRAKernelMeta sorts the optional no-LoRA bucket first.
+    lora_idx += (gl.load(lora_ids) == -1).to(gl.int32)
     lora_id = gl.load(lora_ids + lora_idx)
     if lora_id == -1:
         return
@@ -47,14 +50,14 @@ def _lora_shrink_multicta_kernel(
 
     # The leading dimension represents independent K splits, one per CTA.
     a_layout: gl.constexpr = gl.BlockedLayout(
-        [1, 1, 4],
+        [1, 1, 8],
         [1, 4, 8],
         [1, gl.num_warps(), 1],
         [2, 1, 0],
         cga_layout=CGA_LAYOUT,
     )
     b_layout: gl.constexpr = gl.BlockedLayout(
-        [1, 4, 1],
+        [1, 8, 1],
         [1, 8, 4],
         [1, 1, gl.num_warps()],
         [1, 2, 0],
@@ -117,12 +120,13 @@ def _lora_shrink_multicta_kernel(
         b = gl.convert_layout(b, gl.DotOperandLayout(1, mma_layout, 2))
         accumulator = gl.nvidia.ampere.mma_v2(a, b, accumulator)
 
+    # Reduce K splits within each warp and distribute output rows across CTAs.
     reduce_layout: gl.constexpr = gl.BlockedLayout(
         [1, 1, 2],
-        [1, 4, 8],
+        [SPLIT_K, max(1, 4 // SPLIT_K), min(8, 32 // SPLIT_K)],
         [1, gl.num_warps(), 1],
         [2, 1, 0],
-        cga_layout=CGA_LAYOUT,
+        cga_layout=REDUCE_CGA_LAYOUT,
     )
     partials = gl.convert_layout(accumulator, reduce_layout)
     result = gl.sum(partials, axis=0)
@@ -168,10 +172,14 @@ def launch_lora_shrink_multicta(
     NUM_SLICES, _, N = output_tensor.shape
     assert NUM_CTAS is not None
     CGA_LAYOUT = tuple((1 << bit, 0, 0) for bit in range(NUM_CTAS.bit_length() - 1))
+    REDUCE_CGA_LAYOUT = tuple(
+        (0, 1 << bit, 0) for bit in range(NUM_CTAS.bit_length() - 1)
+    )
+    # LoRAKernelMeta reserves one extra slot for tokens without LoRA.
     grid = (
         triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        num_active_loras,
+        min(num_active_loras, lora_ids.numel() - 1),
     )
     _lora_shrink_multicta_kernel[grid](
         inputs,
@@ -194,6 +202,7 @@ def launch_lora_shrink_multicta(
         SPLIT_K,
         NUM_SLICES,
         CGA_LAYOUT,
+        REDUCE_CGA_LAYOUT,
         num_ctas=NUM_CTAS,
         num_warps=NUM_WARPS,
         enable_fp_fusion=False,
