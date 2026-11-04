@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
 // Host-side launcher of the wvSplitKQ skinny GEMM; kernels in skinny_gemms.cuh.
+#include <stdexcept>
+#include <string>
+
 #include "skinny_gemms.cuh"
 
 #include "dispatch_utils.h"                  // VLLM_DISPATCH_FP8_TYPES

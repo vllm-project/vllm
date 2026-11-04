@@ -3,6 +3,11 @@
 //
 // Host-side launcher of the wvSplitKrc skinny GEMM; kernels in
 // skinny_gemms.cuh.
+#include <map>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+
 #include "skinny_gemms.cuh"
 
 // Pre-allocated split-K workspace pool (see WvSplitKrcPool below):

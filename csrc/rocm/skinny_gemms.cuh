@@ -17,10 +17,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#include <stdexcept>
 #include <algorithm>
-#include <map>
-#include <mutex>
+#include <string>
 #include <utility>
 
 #include "core/cuda_compat.h"
@@ -33,30 +31,30 @@
 //
 // However, it may be possible to fix these kernels to handle both issues.
 
-// Arch macros. Guarded with #ifndef because this is now a header: a second copy
-// of any of them (e.g. from another ROCm kernel header) must not warn or
-// redefine.
-#if !defined(__HIP__GFX9__) && defined(__HIPCC__) && \
+#if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
 #endif
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
-#if !defined(__HIP__GFX1X__) && (defined(__GFX11__) || defined(__GFX12__))
+#if defined(__GFX11__) || defined(__GFX12__)
   #define __HIP__GFX1X__
 #endif
 
-#if !defined(__HIP__MI3XX__) && defined(__HIPCC__) && \
-    (defined(__gfx942__) || defined(__gfx950__))
+#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__MI3XX__
 #endif
 
-#ifndef LDS_SIZE
-  #if defined(__gfx950__)
-    #define LDS_SIZE 160 * 1024
-  #else
-    #define LDS_SIZE 64 * 1024
-  #endif
+// Defined unconditionally: a TU that already has a different LDS_SIZE (e.g.
+// skinny_gemms_int4.cu, which uses 64 KiB and no gfx950 case) must not silently
+// size these kernels' LDS window from it.
+#ifdef LDS_SIZE
+  #error "LDS_SIZE already defined"
+#endif
+#if defined(__gfx950__)
+  #define LDS_SIZE 160 * 1024
+#else
+  #define LDS_SIZE 64 * 1024
 #endif
 
 // Traps unconditionally, so it does not depend on NDEBUG or on <assert.h> being

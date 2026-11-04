@@ -2,6 +2,9 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
 // Host-side launcher of the wvSplitK skinny GEMM; kernels in skinny_gemms.cuh.
+#include <stdexcept>
+#include <string>
+
 #include "skinny_gemms.cuh"
 
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
