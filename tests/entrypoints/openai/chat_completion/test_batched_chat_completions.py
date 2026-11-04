@@ -333,6 +333,7 @@ async def test_batched_echo_does_not_prepend_user_prompt() -> None:
     serving.response_role = "assistant"
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
+    serving._include_reasoning_tokens_details = False
 
     conversations = [[{"role": "user", "content": "USER PROMPT"}]]
     request = BatchChatCompletionRequest(
@@ -363,6 +364,7 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     serving.response_role = "assistant"
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
+    serving._include_reasoning_tokens_details = False
 
     conversations = [
         [
@@ -474,10 +476,14 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
             prefixes.append(self.prompt_token_ids)
             return None, model_output, None
 
+        def count_reasoning_tokens(self, token_ids):
+            return 0
+
     serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
     serving.response_role = "assistant"
     serving.system_fingerprint = None
     serving.enable_prompt_tokens_details = False
+    serving._include_reasoning_tokens_details = False
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}

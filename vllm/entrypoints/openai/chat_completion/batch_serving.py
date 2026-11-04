@@ -20,6 +20,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import (
     OpenAIServingChat,
     _get_mm_token_counts,
+    _make_completion_tokens_details,
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
@@ -251,6 +252,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         choices: list[ChatCompletionResponseChoice] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        total_reasoning_tokens = 0
         cached_tokens: list[int | None] = []
         cache_creation_tokens: list[int | None] = []
 
@@ -307,6 +309,9 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         request=single_request,
                         model_output_token_ids=output.token_ids,
                     )
+                    total_reasoning_tokens += parser.count_reasoning_tokens(
+                        output.token_ids
+                    )
                     if not request.include_reasoning:
                         reasoning = None
                 else:
@@ -358,6 +363,11 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            completion_tokens_details=(
+                _make_completion_tokens_details(total_reasoning_tokens)
+                if self._include_reasoning_tokens_details
+                else None
+            ),
             prompt_tokens_details=_make_prompt_tokens_details(
                 self.enable_prompt_tokens_details,
                 _sum_or_none(cached_tokens),
