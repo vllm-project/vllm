@@ -69,9 +69,8 @@ constexpr uint32_t kExactCandidateOffset = 16 * 1024;
 // use and correctness are independent of coarse-bin occupancy. Recovery can
 // resume at StartRound from a known prefix, and with FinalCandidateCapacity
 // the last round stages its candidates so the output pass skips a row scan.
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
-          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0,
-          typename InT>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
+          uint32_t StartRound, uint32_t FinalCandidateCapacity, typename InT>
 __device__ void exact_topk_rescan(const InT* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
                                   void* _smem, uint32_t initial_prefix,
@@ -245,8 +244,7 @@ template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize, typename InT>
 __device__ __noinline__ void exact_topk_rescan_cold(
     const InT* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* smem) {
-  exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem, 0,
-                                              TopK);
+  exact_topk_rescan<TopK, BlockSize, VecSize>(scores, output, length, smem);
 }
 
 struct CoarseRefineRange {
