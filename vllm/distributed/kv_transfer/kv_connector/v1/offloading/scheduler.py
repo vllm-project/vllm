@@ -33,9 +33,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
     resolve_mamba_align_size,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
-    HANDLER_FOR_TRIGGER,
-    StoreTriggerHandler,
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.factory import (  # noqa: E501
+    StoreHandlerFactory,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
@@ -307,24 +306,14 @@ class OffloadingConnectorScheduler:
             num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
         )
 
-        # The handlers that the KV cache layout requires run first.
-        layout_triggers: tuple[StoreTrigger, ...] = (
-            (StoreTrigger.ON_HANDOFF,) if self.config.supports_handoff else ()
+        self._store_handlers = StoreHandlerFactory.create_handlers(
+            self.config,
+            self.manager.store_triggers,
+            self._events_tracker,
+            vllm_config,
+            kv_cache_config,
+            spec.extra_config,
         )
-        store_triggers = layout_triggers + self.manager.store_triggers
-        if not store_triggers or len(set(store_triggers)) != len(store_triggers):
-            raise ValueError(
-                f"The store triggers of the KV cache layout and of the "
-                f"offloading manager must be unique and not empty: "
-                f"{store_triggers}"
-            )
-        for trigger in store_triggers:
-            HANDLER_FOR_TRIGGER[trigger].check_support(vllm_config, kv_cache_config)
-
-        self._store_handlers: dict[StoreTrigger, StoreTriggerHandler] = {
-            trigger: HANDLER_FOR_TRIGGER[trigger](self.config, self._events_tracker)
-            for trigger in store_triggers
-        }
 
     # Holds the manager lock for the current schedule(), or None between steps.
     # Read and written only by the scheduler thread, so it needs no

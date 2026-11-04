@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
@@ -81,11 +81,22 @@ class StoreTriggerHandler(ABC):
 
     @classmethod
     def check_support(
-        cls, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+        extra_config: Mapping[str, Any],
+        events_tracker: OffloadingEventsTracker,
     ) -> None:
         """Raise ValueError if this handler cannot run with the given config.
 
-        The scheduler calls it before it makes the handler.
+        StoreHandlerFactory calls it before it makes the handler.
+
+        Args:
+            vllm_config: the engine config.
+            kv_cache_config: the KV cache layout of this engine.
+            extra_config: kv_connector_extra_config of this connector.
+            events_tracker: the events tracker that the handler will get.
+
         """
         return
 
