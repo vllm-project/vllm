@@ -196,12 +196,11 @@ async fn render_completion(
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let tokenizer = state.text.tokenizer();
     let text_request = lower_completion_request(
         body,
         &model_resolution(&state),
         request_context,
-        tokenizer.as_ref(),
+        &state.text,
     )?;
     validate_max_output_tokens(
         "max_tokens",

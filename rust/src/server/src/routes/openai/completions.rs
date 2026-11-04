@@ -22,10 +22,9 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
-use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -55,9 +54,9 @@ pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    tokenizer: &dyn Tokenizer,
+    processor: &TextRequestProcessor,
 ) -> Result<TextRequest, ApiError> {
-    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+    prepare_completion_request(request, lora_resolution, ctx, processor)
         .map(|prepared| prepared.text_request)
 }
 
@@ -73,12 +72,11 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
-        tokenizer.as_ref(),
+        state.chat.text().request_processor(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),

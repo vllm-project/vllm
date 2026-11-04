@@ -105,7 +105,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
 
     Ok(())
 }

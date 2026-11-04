@@ -98,7 +98,7 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    validate_generation_prompt_truncation(request.truncate_prompt_tokens, request.echo)?;
+    validate_generation_prompt_truncation(request.truncate_prompt_tokens)?;
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
