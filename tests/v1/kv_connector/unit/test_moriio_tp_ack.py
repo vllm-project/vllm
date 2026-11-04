@@ -340,7 +340,7 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
         dict, {"req": {"layer0": [DoneStatus(), DoneStatus()]}}
     )
     worker._recving_transfers_callback_addr = {
-        "req": ("127.0.0.1", "7000", "tx-release")
+        "req": ("127.0.0.1", ("7000",), "tx-release")
     }
     # Transfer-timeout reaping state consulted by _pop_done_transfers.
     worker._recving_transfers_start = {}
@@ -443,7 +443,7 @@ def test_read_completion_waits_for_every_posted_read():
         dict, {"req": {"kda_layer": [Status(done=True), Status(done=False)]}}
     )
     worker._recving_transfers_callback_addr = {
-        "req": ("127.0.0.1", "7000", "tx-pending")
+        "req": ("127.0.0.1", ("7000",), "tx-pending")
     }
     worker._recving_transfers_start = {"req": float("inf")}
     worker._recving_local_blocks = {"req": [1, 2]}
@@ -655,10 +655,14 @@ def test_step_barrier_timeout_fails_closed_while_reads_in_flight(has_mamba, fake
     moriio_engine.StatusCode is None, reason="mori batched wait unavailable"
 )
 @pytest.mark.parametrize("has_mamba", [False, True])
-def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(has_mamba):
-    engine = SimpleNamespace(
-        wait_all=Mock(return_value=moriio_engine.StatusCode.IN_PROGRESS)
-    )
+def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(
+    has_mamba, fake_clock
+):
+    def wait_all(statuses, timeout_ms):
+        fake_clock.sleep(timeout_ms / 1000)
+        return moriio_engine.StatusCode.IN_PROGRESS
+
+    engine = SimpleNamespace(wait_all=Mock(side_effect=wait_all))
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
@@ -667,7 +671,8 @@ def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(has_mamb
     with pytest.raises(TransferError, match="timed out"):
         worker._await_reads_issued_this_step()
 
-    engine.wait_all.assert_called_once()
+    assert fake_clock.now >= 0.05
+    assert all(c.kwargs["timeout_ms"] <= 10 for c in engine.wait_all.call_args_list)
 
 
 def test_step_barrier_noop_when_no_reads_posted():

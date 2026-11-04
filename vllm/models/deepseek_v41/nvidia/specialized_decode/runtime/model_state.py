@@ -154,6 +154,7 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         # Record the metadata build of every decode step the FULL decode graphs
         # serve, on dummy batches of that step's shape.
@@ -173,5 +174,5 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
                 finally:
                     self._recording = None
         super().capture_inner_cudagraphs(
-            input_buffers, block_tables, attn_groups, kv_cache_config
+            input_buffers, block_tables, attn_groups, kv_cache_config, stream
         )
