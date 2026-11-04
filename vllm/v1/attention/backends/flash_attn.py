@@ -100,6 +100,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         q_stage: int
         dtype: torch.dtype
         qhead_per_kvhead: int
+        num_kv_heads: int
         head_dim: int
         page_size: int
         has_window_left: bool
@@ -131,6 +132,8 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             q_stage=q_stage,
             dtype=dtype,
             qhead_per_kvhead=num_qo_heads // num_kv_heads,
+            # FA4's scheduler-metadata kernel specializes on the head counts.
+            num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             page_size=page_size,
             has_window_left=window_size[0] >= 0,
@@ -172,7 +175,10 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         if major in (10, 11) and head_dim == 256:
             q_stages = WarmupChoices(1, 2)
             single_batches = WarmupChoices(True, False)
-            split_counts = WarmupChoices(1, 2)
+            # 0 = FA4's own split heuristic (num_splits=0), which the builder
+            # passes outside full CUDA graphs. It selects dynamic-split variants
+            # (and their scheduler) that fixed split counts do not compile.
+            split_counts = WarmupChoices(1, 2, 0)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
@@ -201,22 +207,32 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         assert compile_flash_attn_varlen_func_from_specs is not None
         max_seqlen_q = FA4_DENSE_Q_TILE + 1 if compile_key.q_stage == 2 else 1
         batch_size = 1 if compile_key.is_single_batch else 2
+        max_seqlen_k = FA4_DENSE_MAX_SEQLEN_K
+        if (
+            compile_key.num_splits == 0
+            and compile_key.q_stage == 1
+            and not compile_key.is_single_batch
+        ):
+            # Auto split on a mixed batch of short queries (chunked prefill
+            # next to decodes) picks a non-split variant without a tile cumsum.
+            batch_size, max_seqlen_q, max_seqlen_k = 64, 16, 1024
+        num_kv_heads = compile_key.num_kv_heads
         kv_shape = (
             FA4_DENSE_NUM_BLOCKS,
             compile_key.page_size,
-            1,
+            num_kv_heads,
             compile_key.head_dim,
         )
         kv_stride = (
-            2 * compile_key.page_size * compile_key.head_dim,
-            2 * compile_key.head_dim,
-            2 * compile_key.head_dim,
+            2 * compile_key.page_size * num_kv_heads * compile_key.head_dim,
+            2 * num_kv_heads * compile_key.head_dim,
+            compile_key.head_dim,
             1,
         )
         compile_flash_attn_varlen_func_from_specs(
             q_shape=(
                 batch_size * max_seqlen_q,
-                compile_key.qhead_per_kvhead,
+                compile_key.qhead_per_kvhead * num_kv_heads,
                 compile_key.head_dim,
             ),
             k_shape=kv_shape,
@@ -228,17 +244,29 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
             seqused_k_shape=(batch_size,),
             page_table_shape=(
                 batch_size,
-                FA4_DENSE_MAX_SEQLEN_K // compile_key.page_size,
+                -(-max_seqlen_k // compile_key.page_size),
             ),
             max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=FA4_DENSE_MAX_SEQLEN_K,
+            max_seqlen_k=max_seqlen_k,
             causal=True,
             window_size=[
-                1 if compile_key.has_window_left else -1,
-                1 if compile_key.has_window_right else -1,
+                # The split heuristic looks at the window span: give auto-split
+                # keys a window as long as the warmup sequence.
+                (max_seqlen_k - 1 if compile_key.num_splits == 0 else 1)
+                if compile_key.has_window_left
+                else -1,
+                (0 if compile_key.num_splits == 0 else 1)
+                if compile_key.has_window_right
+                else -1,
             ],
             softcap=compile_key.softcap,
-            num_splits=2 if compile_key.num_splits > 1 else 1,
+            num_splits=(
+                0
+                if compile_key.num_splits == 0
+                else 2
+                if compile_key.num_splits > 1
+                else 1
+            ),
             fa_version=4,
             return_softmax_lse=False,
         )
@@ -684,7 +712,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         if (
             vllm_config.kernel_config.enable_jit_warmup
-            and self.model_config.hf_config.model_type in ("gemma4", "gemma4_unified")
             and fa_version == 4
         ):
             _FA4_DENSE_ATTENTION_KERNEL.register_warmup(
