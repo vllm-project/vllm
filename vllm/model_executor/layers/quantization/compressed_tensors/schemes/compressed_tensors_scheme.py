@@ -13,6 +13,8 @@ class CompressedTensorsScheme(ABC):
     of different quantization schemes supported by CompressedTensors.
     """
 
+    supports_pre_processed_weights: bool = False
+
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
