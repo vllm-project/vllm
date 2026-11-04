@@ -377,11 +377,11 @@ def pad_kv_cache_segments(
 ) -> KVCacheConfig:
     """Start every layer's region on a granule.
 
-    Committing the null block then backs each layer's first granule, which
-    kernels may read beyond the blocks they index (FlashMLA sparse prefill
-    reads the first 128 KiB even when every index is invalid). It also lets a
-    defragmenting commit of any block count back each segment with one
-    physical chunk, as RDMA registration requires.
+    Committing the null block then backs each layer's first granule: kernels
+    may touch memory past the blocks they index (FlashMLA sparse prefill
+    reaches up to 128 KiB past a layer's start). It also lets a defragmenting
+    commit of any block count back each segment with one physical chunk, as
+    RDMA registration requires.
 
     Only address space grows: commits already map whole granules per segment.
     Layouts without per-layer segments are returned as is.

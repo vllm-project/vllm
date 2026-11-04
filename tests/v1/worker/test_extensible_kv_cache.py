@@ -510,10 +510,10 @@ def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm, padded
 @requires_cuda
 @pytest.mark.parametrize("padded", [False, True])
 def test_null_block_commit_backs_each_padded_layers_first_granule(vmm, padded):
-    """Kernels may read up to 128 KiB past the blocks they index (FlashMLA
-    sparse prefill). Unpadded, a layer starting one page before a granule
-    boundary has only that page backed after the null block commit; padded,
-    every layer's first granule is."""
+    """Kernels may touch memory past the blocks they index (FlashMLA sparse
+    prefill reaches up to 128 KiB past a layer's start). Unpadded, a layer
+    starting one page before a granule boundary has only that page backed
+    after the null block commit; padded, every layer's first granule is."""
     layout = KVCacheLayout.LBNHC
     granule = _granule(layout)
     page = _make_config(layout)[1].page_size_bytes
