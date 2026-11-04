@@ -10,7 +10,7 @@ use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::tool::{StructuralTagBuilder, Tool};
 
 const TOOL_CALL_START: &str = "<tool_call>";
@@ -178,10 +178,9 @@ impl ToolParser for Qwen3CoderToolParser {
             if matches!(self.mode, QwenCoderMode::ToolCall { .. })
                 || self.buffer.starts_with(self.config.tool_call_start)
             {
-                return Err(parsing_failed!(
-                    "incomplete {} tool call",
-                    self.config.parser_name
-                ));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: self.config.parser_name,
+                });
             }
             output.push_text(&self.buffer);
         }
