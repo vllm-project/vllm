@@ -10,11 +10,13 @@ so each row times the kernel vLLM serves with. The timed region is FP32 router
 logits to MoE output with GLM-5.3 routing (sigmoid, correction bias, grouped
 top-k, routed scaling): monolithic backends route inside the kernel as
 ``DeepSeekV3``, modular backends call ``grouped_topk`` first, as ``FusedMoE``
-does. Before timing, each backend's output is compared with a BF16 MoE on the
+does. Before timing, each backend's output is compared with an FP32 MoE on the
 dequantized weights.
 
 Backends: ``CUTLASS_MXFP4_MXFP4`` (W4A4), ``FLASHINFER_TRTLLM_MXFP4_MXFP8`` and
-``FLASHINFER_TRTLLM_MXFP4_BF16``. Backends the GPU cannot run are skipped.
+``FLASHINFER_TRTLLM_MXFP4_BF16``, plus NVFP4 ``FLASHINFER_TRTLLM`` built the way
+the ModelOpt NVFP4 MoE method does, as a timing reference on its own random
+weights. Backends the GPU cannot run are skipped.
 
 Run from a CUDA-built vLLM checkout, for example:
 
@@ -50,11 +52,20 @@ from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
 from vllm.model_executor.layers.fused_moe.oracle import (  # noqa: E402
     mxfp4 as mxfp4_oracle,
 )
+from vllm.model_executor.layers.fused_moe.oracle import (  # noqa: E402
+    nvfp4 as nvfp4_oracle,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (  # noqa: E402
     Mxfp4MoeBackend,
 )
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (  # noqa: E402
+    NvFp4MoeBackend,
+)
 from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (  # noqa: E402
     grouped_topk,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (  # noqa: E402
+    trtllm_nvfp4_hidden_alignment,
 )
 from vllm.triton_utils import triton  # noqa: E402
 from vllm.v1.worker.workspace import init_workspace_manager  # noqa: E402
@@ -74,6 +85,8 @@ DEFAULT_ROUTED_SCALING_FACTOR = 2.5
 DEFAULT_NUM_TOKENS = (1, 4, 16, 64, 256, 1024, 4096, 8192)
 CHECK_TOKENS = 64
 MXFP4_BLOCK = 32
+NVFP4_BLOCK = 16
+NVFP4_REFERENCE = "NVFP4_FLASHINFER_TRTLLM"
 E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 
 MoEWeights = tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
@@ -172,36 +185,14 @@ def make_moe_config(
     )
 
 
-def make_backend_invoke(
-    backend: Mxfp4MoeBackend,
-    moe_config: FusedMoEConfig,
-    weights: MoEWeights,
+def make_forward(
+    kernel: mk.FusedMoEKernel,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    monolithic: bool,
+    num_experts: int,
     routing: Routing,
 ) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
-    """Build ``backend`` the way the oracle does and return a forward function."""
-    experts_cls = mxfp4_oracle.backend_to_kernel_cls(backend)[0]
-    w13, w2, w13_scale, w2_scale = (w.clone() for w in weights)
-    w13, w2, w13_scale, w2_scale, _, _ = (
-        mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format(
-            backend,
-            torch.nn.Module(),
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            _cache_permute_indices={},
-        )
-    )
-    quant_config = mxfp4_oracle.make_mxfp4_moe_quant_config(
-        backend, w1_scale=w13_scale, w2_scale=w2_scale
-    )
-    assert quant_config is not None
-    kernel = mxfp4_oracle.make_mxfp4_moe_kernel(
-        quant_config, moe_config, experts_cls, backend
-    )
-    num_experts = moe_config.num_experts
-    monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
-
     def forward(hidden: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
         if monolithic:
             out = kernel.apply_monolithic(
@@ -236,6 +227,127 @@ def make_backend_invoke(
         return out
 
     return forward
+
+
+def make_backend_invoke(
+    backend: Mxfp4MoeBackend,
+    moe_config: FusedMoEConfig,
+    weights: MoEWeights,
+    routing: Routing,
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Build ``backend`` the way the oracle does and return a forward function."""
+    experts_cls = mxfp4_oracle.backend_to_kernel_cls(backend)[0]
+    w13, w2, w13_scale, w2_scale = (w.clone() for w in weights)
+    w13, w2, w13_scale, w2_scale, _, _ = (
+        mxfp4_oracle.convert_weight_to_mxfp4_moe_kernel_format(
+            backend,
+            torch.nn.Module(),
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            _cache_permute_indices={},
+        )
+    )
+    quant_config = mxfp4_oracle.make_mxfp4_moe_quant_config(
+        backend, w1_scale=w13_scale, w2_scale=w2_scale
+    )
+    assert quant_config is not None
+    kernel = mxfp4_oracle.make_mxfp4_moe_kernel(
+        quant_config, moe_config, experts_cls, backend
+    )
+    return make_forward(
+        kernel,
+        w13,
+        w2,
+        issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        moe_config.num_experts,
+        routing,
+    )
+
+
+class Nvfp4Layer(torch.nn.Module):
+    """The ``RoutedExperts`` attributes the NVFP4 TRTLLM preparation reads."""
+
+    def __init__(self, moe_config: FusedMoEConfig) -> None:
+        super().__init__()
+        self.activation = MoEActivation.SILU
+        self.moe_config = moe_config
+
+
+def make_nvfp4_invoke(
+    moe_config: FusedMoEConfig, routing: Routing, device: torch.device
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Build NVFP4 FLASHINFER_TRTLLM as the ModelOpt NVFP4 MoE method does.
+
+    Random packed weights with ModelOpt's dummy-weight scale values.
+    """
+    backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
+    experts_cls = nvfp4_oracle.backend_to_kernel_cls(backend)[0]
+    e = moe_config.num_experts
+    n = moe_config.intermediate_size_per_partition
+    k = moe_config.hidden_dim
+    layer = Nvfp4Layer(moe_config)
+    w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale = (
+        nvfp4_oracle.convert_to_nvfp4_moe_kernel_format(
+            nvfp4_backend=backend,
+            layer=layer,  # type: ignore[arg-type]
+            w13=torch.randint(0, 256, (e, 2 * n, k // 2), device=device).byte(),
+            w13_scale=torch.ones(
+                e, 2 * n, k // NVFP4_BLOCK, device=device, dtype=torch.float8_e4m3fn
+            ),
+            w13_scale_2=torch.full((e,), 1e-3, device=device),
+            a13_scale=torch.full((e, 2), 1e-2, device=device),
+            w2=torch.randint(0, 256, (e, k, n // 2), device=device).byte(),
+            w2_scale=torch.ones(
+                e, k, n // NVFP4_BLOCK, device=device, dtype=torch.float8_e4m3fn
+            ),
+            w2_scale_2=torch.full((e,), 1e-3, device=device),
+            a2_scale=torch.full((e,), 1e-2, device=device),
+            is_act_and_mul=True,
+            trtllm_hidden_alignment=trtllm_nvfp4_hidden_alignment(
+                per_token_activation=False, is_act_and_mul=True
+            ),
+        )
+    )
+    assert a13_scale is not None and a2_scale is not None
+    params = {
+        name: torch.nn.Parameter(tensor, requires_grad=False)
+        for name, tensor in (
+            ("w13_weight", w13),
+            ("w13_weight_scale", w13_scale),
+            ("w13_weight_scale_2", w13_scale_2),
+            ("w13_input_scale", a13_scale),
+            ("w2_weight", w2),
+            ("w2_weight_scale", w2_scale),
+            ("w2_weight_scale_2", w2_scale_2),
+            ("w2_input_scale", a2_scale),
+        )
+    }
+    for name, param in params.items():
+        layer.register_parameter(name, param)
+    quant_config = nvfp4_oracle.make_nvfp4_moe_quant_config(
+        backend=backend,
+        w13_scale=params["w13_weight_scale"],
+        w2_scale=params["w2_weight_scale"],
+        w13_scale_2=params["w13_weight_scale_2"],
+        w2_scale_2=params["w2_weight_scale_2"],
+        a13_scale=params["w13_input_scale"],
+        a2_scale=params["w2_input_scale"],
+        layer=layer,
+    )
+    kernel = nvfp4_oracle.make_nvfp4_moe_kernel(
+        quant_config, moe_config, experts_cls, backend
+    )
+    kernel.fused_experts.process_weights_after_loading(layer)
+    return make_forward(
+        kernel,
+        params["w13_weight"],
+        params["w2_weight"],
+        issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        e,
+        routing,
+    )
 
 
 def relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -345,27 +457,38 @@ def main() -> None:
         )
         return hidden, logits
 
-    invokes: dict[Mxfp4MoeBackend, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]]
-    invokes = {}
+    build_errors = (ValueError, NotImplementedError, RuntimeError, ImportError)
+    invokes: dict[str, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = {}
     with set_current_vllm_config(VllmConfig()):
         for backend in BACKENDS:
             try:
-                invokes[backend] = make_backend_invoke(
+                invokes[backend.value] = make_backend_invoke(
                     backend, moe_config, weights, routing
                 )
-            except (ValueError, NotImplementedError, RuntimeError, ImportError) as exc:
+            except build_errors as exc:
                 print(f"skip {backend.value}: {exc}")
 
         if not args.skip_check:
             hidden, logits = make_inputs(CHECK_TOKENS)
             topk_weights, topk_ids = routing.select_experts(hidden, logits)
             expected = reference_moe(hidden, weights, topk_weights, topk_ids)
-            print(f"\nrelative error vs BF16 reference ({CHECK_TOKENS} tokens):")
-            for backend, forward in invokes.items():
+            print(f"\nrelative error vs FP32 reference ({CHECK_TOKENS} tokens):")
+            for name, forward in invokes.items():
                 error = relative_error(forward(hidden, logits), expected)
-                print(f"  {backend.value:32s} {error:.4f}")
+                print(f"  {name:32s} {error:.4f}")
 
-        names = [backend.value for backend in invokes]
+        try:
+            invokes[NVFP4_REFERENCE] = make_nvfp4_invoke(
+                make_moe_config(
+                    args.num_experts, args.topk, args.hidden_size, n, device
+                ),
+                routing,
+                device,
+            )
+        except build_errors as exc:
+            print(f"skip {NVFP4_REFERENCE}: {exc}")
+
+        names = list(invokes)
         print("\nmedian latency (us), router logits to MoE output")
         print(f"{'tokens':>8s}  " + "  ".join(f"{name:>30s}" for name in names))
         for num_tokens in args.num_tokens:
