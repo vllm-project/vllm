@@ -1,0 +1,55 @@
+{
+  "special_token_placeholder": "{special}",
+  "tokenizer_json_overrides": {
+    "truncation": { "direction": "Right", "max_length": 16, "strategy": "LongestFirst", "stride": 0 },
+    "padding": {
+      "strategy": { "Fixed": 8192 },
+      "direction": "Right",
+      "pad_to_multiple_of": null,
+      "pad_id": 0,
+      "pad_type_id": 0,
+      "pad_token": "<pad>"
+    }
+  },
+  "prefixes": {
+    "none": { "text": "", "repeat": 0 },
+    "spaces": { "text": " ", "repeat": 5000 },
+    "prose": {
+      "text": "Tokenizers turn text into the integer ids a model reads. Two frontends that serve the same checkpoint must produce the same ids for the same prompt, or the model sees a different input and no error is raised. Whitespace is the usual trap: a run of spaces, a tab, or a carriage return before a newline can be split into pieces in more than one way, and the split decides which merges apply. Caches that reuse earlier work, parallel scanners that cut long inputs into chunks, and normalizers built from different Unicode tables can each change the result while the decoded text stays the same.\n\n",
+      "repeat": 7
+    }
+  },
+  "cases": [
+    { "name": "whitespace_runs", "prefix": "none", "suffix": "  hello  world \t\r\n", "add_special_tokens": false },
+    { "name": "crlf_lines", "prefix": "none", "suffix": "line one\r\nline two\r\n\r\n  indented\r\n", "add_special_tokens": false },
+    { "name": "lone_cr", "prefix": "none", "suffix": "carriage\rreturn\r", "add_special_tokens": false },
+    { "name": "nfc_unicode9_pair", "prefix": "none", "suffix": "߽۠", "add_special_tokens": false },
+    { "name": "nfc_pair_in_word", "prefix": "none", "suffix": "word߽۠ x", "add_special_tokens": false },
+    { "name": "nfc_marks", "prefix": "none", "suffix": "a࣏͆b", "add_special_tokens": false },
+    { "name": "nfc_two_marks", "prefix": "none", "suffix": "ạ́", "add_special_tokens": false },
+    { "name": "cjk_digits_spaces", "prefix": "none", "suffix": "中文٣１２ a᠎b c　d\r\n", "add_special_tokens": false },
+    { "name": "contractions", "prefix": "none", "suffix": "O'Reilly DON'T we're f'The", "add_special_tokens": false },
+    { "name": "emoji_zwj_flags", "prefix": "none", "suffix": "👩‍👩‍👧 🇹🇼", "add_special_tokens": false },
+    { "name": "mixed_scripts", "prefix": "none", "suffix": "Привет ελληνικά עברית العربية हिन्दी", "add_special_tokens": false },
+    { "name": "control_chars", "prefix": "none", "suffix": "a\u0000b\u0001c\u001fd\u007fe", "add_special_tokens": false },
+    { "name": "not_in_vocab", "prefix": "none", "suffix": "a􏿿b", "add_special_tokens": false },
+    { "name": "special_alone", "prefix": "none", "suffix": "{special}", "add_special_tokens": false },
+    { "name": "special_in_text", "prefix": "none", "suffix": "before{special}after", "add_special_tokens": false },
+    { "name": "special_with_spaces", "prefix": "none", "suffix": "  {special}  \n", "add_special_tokens": false },
+    { "name": "hello_add_special_tokens", "prefix": "none", "suffix": "Hello world", "add_special_tokens": true },
+    { "name": "special_add_special_tokens", "prefix": "none", "suffix": "{special}Hello", "add_special_tokens": true },
+    { "name": "spaces_then_x", "prefix": "spaces", "suffix": "x", "add_special_tokens": false },
+    { "name": "spaces_then_newline", "prefix": "spaces", "suffix": "\n", "add_special_tokens": false },
+    { "name": "spaces_then_tab", "prefix": "spaces", "suffix": "\t", "add_special_tokens": false },
+    { "name": "spaces_then_crlf", "prefix": "spaces", "suffix": "\r\n", "add_special_tokens": false },
+    { "name": "spaces_longer_then_x", "prefix": "spaces", "suffix": "   x", "add_special_tokens": false },
+    { "name": "spaces_only", "prefix": "spaces", "suffix": "", "add_special_tokens": false },
+    { "name": "spaces_then_special", "prefix": "spaces", "suffix": "{special}", "add_special_tokens": false },
+    { "name": "prose_indent4", "prefix": "prose", "suffix": "def f():\n    return 1\n", "add_special_tokens": false },
+    { "name": "prose_indent8", "prefix": "prose", "suffix": "def f():\n        return 1\n", "add_special_tokens": false },
+    { "name": "prose_trailing_spaces_newline", "prefix": "prose", "suffix": "def f():\n    \n", "add_special_tokens": false },
+    { "name": "prose_crlf", "prefix": "prose", "suffix": "def f():\r\n    return 1\r\n", "add_special_tokens": false },
+    { "name": "prose_special", "prefix": "prose", "suffix": "{special}\n", "add_special_tokens": false },
+    { "name": "prose_add_special_tokens", "prefix": "prose", "suffix": "Done.", "add_special_tokens": true }
+  ]
+}
