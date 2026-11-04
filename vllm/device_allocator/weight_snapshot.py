@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Snapshot of post-processed weights held by the cumem allocator.
+"""Snapshot of post-processed model state.
 
-The first start saves every live "weights" allocation after
-process_weights_after_loading. Later starts build the model with dummy
-weights, which repeats the same allocation sequence, and overwrite each
-allocation with its saved bytes, skipping checkpoint reads and conversion.
+The first start saves every CUDA tensor and Python scalar reachable from the
+model modules after process_weights_after_loading. Later starts build the model
+with dummy weights, which gives the same structure, and copy the saved bytes
+back, skipping checkpoint reads and weight conversion.
 """
 
 import json
 import mmap
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import torch
+from torch import nn
 
 from vllm.logger import init_logger
 
@@ -22,104 +24,159 @@ logger = init_logger(__name__)
 
 _ALIGN = 4096
 _CHUNK = 256 << 20
-_MAGIC = "vllm-weight-snapshot-v1"
+_MAGIC = "vllm-weight-snapshot-v2"
+_SCALARS = (bool, int, float)
 
 
 def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
     return Path(root) / f"{config_hash}-rank{rank}.bin"
 
 
-def _weight_allocations(allocator) -> list[tuple[int, int]]:
-    # pointer_to_data keeps insertion order, i.e. allocation order.
-    return [
-        (ptr, data.handle[1])
-        for ptr, data in allocator.pointer_to_data.items()
-        if data.tag == "weights" and not data.is_asleep
-    ]
-
-
 def _round_up(n: int) -> int:
     return (n + _ALIGN - 1) // _ALIGN * _ALIGN
 
 
-def _pinned_buffer() -> torch.Tensor:
+def _walk(value, key: str, depth: int) -> Iterator[tuple[str, object]]:
+    """Yield (key, tensor or scalar) found in an attribute value."""
+    if isinstance(value, (torch.Tensor, *_SCALARS)):
+        yield key, value
+    elif depth == 0:
+        return
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            yield from _walk(v, f"{key}[{i}]", depth - 1)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            if isinstance(k, (str, int)):
+                yield from _walk(v, f"{key}[{k!r}]", depth - 1)
+    elif hasattr(value, "__dict__") and not isinstance(value, (nn.Module, type)):
+        for k, v in vars(value).items():
+            yield from _walk(v, f"{key}.{k}", depth - 1)
+
+
+def collect_state(
+    roots: dict[str, nn.Module],
+) -> tuple[list[tuple[str, torch.Tensor]], dict[str, object]]:
+    """CUDA tensors (deduplicated by storage view) and scalars, in a stable
+    order keyed by module path and attribute name."""
+    tensors: list[tuple[str, torch.Tensor]] = []
+    scalars: dict[str, object] = {}
+    seen: set[tuple] = set()
+    for root_name, root in roots.items():
+        for mod_name, module in root.named_modules():
+            for attr, value in vars(module).items():
+                if attr in ("_modules", "training") or attr.startswith("__"):
+                    continue
+                base = f"{root_name}/{mod_name}/{attr}"
+                for key, v in _walk(value, base, depth=2):
+                    if isinstance(v, torch.Tensor):
+                        if not v.is_cuda or v.numel() == 0:
+                            continue
+                        ident = (v.data_ptr(), v.nbytes, tuple(v.shape), v.dtype)
+                        if ident in seen:
+                            continue
+                        seen.add(ident)
+                        tensors.append((key, v))
+                    else:
+                        scalars[key] = v
+    return tensors, scalars
+
+
+def _describe(tensors) -> list[dict]:
+    return [
+        {"key": k, "dtype": str(t.dtype), "shape": list(t.shape), "nbytes": t.nbytes}
+        for k, t in tensors
+    ]
+
+
+def _as_bytes(t: torch.Tensor) -> torch.Tensor:
+    return t.detach().contiguous().reshape(-1).view(torch.uint8)
+
+
+def _pinned() -> torch.Tensor:
     return torch.empty(_CHUNK, dtype=torch.uint8, pin_memory=True)
 
 
-def save(allocator, path: Path) -> None:
-    from vllm.device_allocator.cumem import libcudart
-
+def save(roots: dict[str, nn.Module], path: Path) -> None:
     torch.accelerator.synchronize()
-    allocs = _weight_allocations(allocator)
+    t0 = time.perf_counter()
+    tensors, scalars = collect_state(roots)
     header = json.dumps(
-        {
-            "magic": _MAGIC,
-            "sizes": [s for _, s in allocs],
-            "ptrs": [p for p, _ in allocs],
-        }
+        {"magic": _MAGIC, "tensors": _describe(tensors), "scalars": scalars}
     ).encode()
-    header_len = _round_up(len(header) + 8)
+    data_off = _round_up(len(header) + 8)
     tmp = path.with_suffix(".tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    buf = _pinned_buffer()
-    t0 = time.perf_counter()
+    buf = _pinned()
     with open(tmp, "wb") as f:
         f.write(len(header).to_bytes(8, "little") + header)
-        f.write(b"\0" * (header_len - 8 - len(header)))
-        for ptr, size in allocs:
-            for off in range(0, size, _CHUNK):
-                n = min(_CHUNK, size - off)
-                libcudart.cudaMemcpy(buf.data_ptr(), ptr + off, n)
+        f.write(b"\0" * (data_off - 8 - len(header)))
+        for _, t in tensors:
+            src = _as_bytes(t)
+            for off in range(0, src.numel(), _CHUNK):
+                n = min(_CHUNK, src.numel() - off)
+                buf[:n].copy_(src[off : off + n])
                 f.write(memoryview(buf.numpy())[:n])
-            f.write(b"\0" * (_round_up(size) - size))
+            f.write(b"\0" * (_round_up(src.numel()) - src.numel()))
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-    total = sum(s for _, s in allocs)
+    total = sum(t.nbytes for _, t in tensors)
     logger.info(
-        "Weight snapshot saved: %d allocations, %.2f GiB in %.1f s to %s",
-        len(allocs),
+        "Weight snapshot saved: %d tensors, %d scalars, %.2f GiB in %.1f s to %s",
+        len(tensors),
+        len(scalars),
         total / 2**30,
         time.perf_counter() - t0,
         path,
     )
 
 
-def restore(allocator, path: Path) -> None:
-    """Overwrite the dummy-initialized weight allocations with the snapshot."""
-    from vllm.device_allocator.cumem import libcudart
+def _read_header(fd: int) -> tuple[dict, int]:
+    head = mmap.mmap(-1, _ALIGN)
+    os.preadv(fd, [head], 0)
+    hlen = int.from_bytes(head[:8], "little")
+    hbuf = mmap.mmap(-1, _round_up(hlen + 8))
+    os.preadv(fd, [hbuf], 0)
+    return json.loads(bytes(hbuf[8 : 8 + hlen])), _round_up(hlen + 8)
 
-    allocs = _weight_allocations(allocator)
+
+def restore(roots: dict[str, nn.Module], path: Path) -> None:
+    """Copy the snapshot into the dummy-initialized model state."""
+    tensors, scalars = collect_state(roots)
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECT", 0))
     try:
-        head = mmap.mmap(-1, _ALIGN)
-        os.preadv(fd, [head], 0)
-        hlen = int.from_bytes(head[:8], "little")
-        hbuf = mmap.mmap(-1, _round_up(hlen + 8))
-        os.preadv(fd, [hbuf], 0)
-        header = json.loads(bytes(hbuf[8 : 8 + hlen]))
-        if header.get("magic") != _MAGIC or header["sizes"] != [s for _, s in allocs]:
+        header, offset = _read_header(fd)
+        saved, now = header.get("tensors", []), _describe(tensors)
+        if header.get("magic") != _MAGIC or saved != now:
+            diff = [(a, b) for a, b in zip(saved, now) if a != b][:4]
             raise RuntimeError(
-                f"weight snapshot {path} does not match this model's allocation "
-                f"sequence ({len(header.get('sizes', []))} saved vs {len(allocs)} "
-                "allocated); delete it to rebuild"
+                f"weight snapshot {path} does not match the model "
+                f"({len(saved)} saved vs {len(now)} tensors, first differences "
+                f"{diff}); delete it to rebuild"
             )
-        if header["ptrs"] != [p for p, _ in allocs]:
-            logger.warning("Weight snapshot restored at different addresses.")
-        buf = _pinned_buffer()
+        buf = _pinned()
         view = memoryview(buf.numpy())
-        offset = _round_up(hlen + 8)
         torch.accelerator.synchronize()
         t0 = time.perf_counter()
-        for ptr, size in allocs:
-            for off in range(0, size, _CHUNK):
-                n = min(_CHUNK, size - off)
+        for _, t in tensors:
+            dst = t.detach()
+            if dst.is_contiguous():
+                target = dst.reshape(-1).view(torch.uint8)
+            else:
+                target = torch.empty(t.nbytes, dtype=torch.uint8, device=t.device)
+            for off in range(0, t.nbytes, _CHUNK):
+                n = min(_CHUNK, t.nbytes - off)
                 os.preadv(fd, [view[: _round_up(n)]], offset + off)
-                libcudart.cudaMemcpy(ptr + off, buf.data_ptr(), n)
-            offset += _round_up(size)
+                target[off : off + n].copy_(buf[:n])
+            if not dst.is_contiguous():
+                dst.copy_(target.view(t.dtype).view(t.shape))
+            offset += _round_up(t.nbytes)
+        torch.accelerator.synchronize()
     finally:
         os.close(fd)
-    total = sum(s for _, s in allocs)
+    _restore_scalars(roots, header.get("scalars", {}), scalars)
+    total = sum(t.nbytes for _, t in tensors)
     elapsed = time.perf_counter() - t0
     logger.info(
         "Weight snapshot restored: %.2f GiB in %.1f s (%.2f GB/s) from %s",
@@ -128,3 +185,16 @@ def restore(allocator, path: Path) -> None:
         total / elapsed / 1e9,
         path,
     )
+
+
+def _restore_scalars(roots, saved: dict, now: dict) -> None:
+    """Data-dependent scalars (e.g. global scales) come from the real weights."""
+    changed = [k for k, v in saved.items() if k in now and now[k] != v]
+    for key in changed:
+        root_name, mod_name, attr = key.split("/", 2)
+        if "." in attr or "[" in attr:
+            logger.warning("Weight snapshot: nested scalar %s not restored", key)
+            continue
+        setattr(roots[root_name].get_submodule(mod_name), attr, saved[key])
+    if changed:
+        logger.info("Weight snapshot: restored %d data-dependent scalars", len(changed))
