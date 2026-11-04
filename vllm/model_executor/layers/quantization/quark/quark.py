@@ -312,9 +312,10 @@ class QuarkConfig(QuantizationConfig):
         ``None`` denotes an unquantized/BF16 activation.
         """
         is_routed_experts = issubclass(layer_type, RoutedExperts)
+        exclude_layers = cast(list[str], self.quant_config.get("exclude")) or []
         if should_ignore_layer(
             prefix,
-            ignore=cast(list[str], self.quant_config.get("exclude")),
+            ignore=exclude_layers,
             fused_mapping=self.packed_modules_mapping,
             check_children=is_routed_experts,
         ):

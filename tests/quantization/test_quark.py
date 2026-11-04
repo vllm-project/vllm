@@ -938,6 +938,67 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
     )
 
 
+def test_quant_method_dispatch_ignored_weight_and_bias_suffixes(default_vllm_config):
+    # Checkpoints (e.g. Quark MXFP4 with MTP speculative decoding) often list
+    # excluded layers by weight tensor name rather than module prefix.
+    config = _make_qtensor_config(
+        None,
+        None,
+        exclude=[
+            "mtp.fc.weight",
+            "model.layers.0.mlp.down_proj.weight",
+            "model.layers.1.mlp.gate_proj.bias",
+        ],
+    )
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    assert config.get_quant_method_target("mtp.fc", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        config.get_quant_method(TestLinear(), "mtp.fc"), UnquantizedLinearMethod
+    )
+
+    assert config.get_quant_method_target(
+        "model.layers.0.mlp.down_proj", LinearBase
+    ) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        config.get_quant_method(TestLinear(), "model.layers.0.mlp.down_proj"),
+        UnquantizedLinearMethod,
+    )
+
+    assert config.get_quant_method_target(
+        "model.layers.1.mlp.gate_proj", LinearBase
+    ) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+
+    # Sharded/fused layers with weight names in exclude list
+    fused_weights = [
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.self_attn.k_proj.weight",
+        "model.layers.0.self_attn.v_proj.weight",
+    ]
+    assert should_ignore_layer(
+        "model.layers.0.self_attn.qkv_proj", fused_weights, FUSED_MAPPING
+    )
+
+    # Regex patterns must not have suffixes stripped
+    assert should_ignore_layer("mtp.fc", ["re:.*mtp\\.fc.*"])
+    assert not should_ignore_layer("mtp.fc", ["re:.*mtp\\.fc\\.weight$"])
+
+
 @pytest.mark.parametrize("case", QTENSOR_CONFIGS, ids=lambda case: case.name)
 def test_quant_method_dispatch_target(case):
     config = _make_qtensor_config(case.weight, case.input_tensors)
@@ -2527,13 +2588,17 @@ class TestQuarkInt4Format:
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_scale",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_scale"
+                        ),
                         torch.zeros(1),
                     ),
                     (
-                        "model.language_model.layers.0.mlp.shared_expert_gate"
-                        ".weight_zero_point",
+                        (
+                            "model.language_model.layers.0.mlp.shared_expert_gate"
+                            ".weight_zero_point"
+                        ),
                         torch.zeros(1),
                     ),
                 ]
