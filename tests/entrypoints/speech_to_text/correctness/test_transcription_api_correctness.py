@@ -315,12 +315,16 @@ def run_longform_evaluation(
 @pytest.mark.parametrize(
     "model_config",
     [
-        ("openai/whisper-large-v3", 12.744980),
+        ("openai/whisper-large-v3", 12.744980, False),
         # CohereASR is used to test the variable encoder length code paths
-        ("CohereLabs/cohere-transcribe-03-2026", 11.92),
+        ("CohereLabs/cohere-transcribe-03-2026", 11.92, False),
+        pytest.param(
+            ("CohereLabs/cohere-transcribe-03-2026", 11.92, True),
+            id="cohere-encoder-graphs",
+        ),
         # fp32: in bf16, batch composition can flip one stuttered utterance
         # ("100, 100") into a repetition loop up to max_model_len (+0.6 WER).
-        ("nvidia/canary-1b-v2", 12.4564, "--dtype=float32"),
+        ("nvidia/canary-1b-v2", 12.4564, False, "--dtype=float32"),
     ],
 )
 # Original dataset is 20GB+ in size, hence we use a pre-filtered slice.
@@ -330,15 +334,18 @@ def run_longform_evaluation(
 def test_wer_correctness(
     model_config, dataset_repo, n_examples=-1, max_concurrent_request=None
 ):
-    model_name, expected_wer, *extra_server_args = model_config
+    model_name, expected_wer, encoder_graph, *extra_server_args = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     server_args = [
-        "--enforce-eager",
         f"--tokenizer_mode={model_info.tokenizer_mode}",
         f"--max_num_seqs={MAX_SEQS_FOR_TRANSCRIPTION_TEST}",
         f"--gpu_memory_utilization={GPU_UTIL_FOR_TRANSCRIPTION_TEST}",
         *extra_server_args,
     ]
+    if encoder_graph:
+        server_args += ["--compilation-config", '{"cudagraph_mm_encoder": true}']
+    else:
+        server_args.append("--enforce-eager")
     if model_info.trust_remote_code:
         server_args.append("--trust-remote-code")
     with RemoteOpenAIServer(

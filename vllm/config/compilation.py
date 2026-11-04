@@ -605,15 +605,15 @@ class CompilationConfig:
     if the encoder is compilable. Disabled by default until more models are
     supported/tested to work."""
 
-    # Vision encoder CUDA graph
+    # Multimodal encoder CUDA graphs
     cudagraph_mm_encoder: bool = False
-    """Enable CUDA graph capture for multimodal encoder (ViT).
-    When enabled, captures full encoder forward as CUDA graph
-    for each token budget level."""
+    """Enable CUDA graph capture for supported multimodal encoders.
+    Models choose the captured stages; Cohere Transcribe captures its audio
+    encoder and projection. Disabled by default."""
 
     encoder_cudagraph_token_budgets: list[int] = field(default_factory=list)
     """Token budget levels for encoder CUDA graph capture.
-    Each budget defines a fixed token capacity. At runtime, a batch replays the
+    Each budget defines a fixed token capacity. At runtime, a replay batch uses the
     smallest budget that holds it, or runs eagerly if none does.
     If empty (default), generated over the model's budget range: quarter-octave
     steps up to 1024 tokens, steps of 128 up to 2560, then 1/8-octave steps,
@@ -623,17 +623,19 @@ class CompilationConfig:
 
     encoder_cudagraph_max_token_budget: int | None = 5120
     """Largest auto-generated encoder CUDA graph token budget; must be positive
-    or None. A batch with more tokens runs eagerly. The default balances graph
+    or None. A replay batch with more tokens runs eagerly. The default balances graph
     memory against replay coverage; performance depends on the model, batch
     shape, and hardware. None captures up to the model's largest budget.
     Ignored when encoder_cudagraph_token_budgets is set."""
 
     encoder_cudagraph_max_vision_items_per_batch: int = 0
-    """Maximum number of images/videos per batch for encoder CUDA graph capture.
+    """Maximum number of items per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
-    auto-inference. A batch with more items runs eagerly in one forward."""
+    auto-inference. Vision batches above the limit run eagerly in one forward.
+    Cohere Transcribe defaults to eight audio items and splits larger scheduled
+    batches into bounded microbatches before replay."""
 
     encoder_cudagraph_max_frames_per_batch: int | None = None
     """Maximum total video frames per batch for encoder CUDA graph capture.
