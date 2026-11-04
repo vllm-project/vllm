@@ -204,6 +204,7 @@ impl RenderArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         RenderConfig {
@@ -211,6 +212,7 @@ impl RenderArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
             skip_model_name_validation: self.skip_model_name_validation,
@@ -815,6 +817,7 @@ impl SharedRuntimeArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         Config {
@@ -834,6 +837,7 @@ impl SharedRuntimeArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
@@ -900,6 +904,7 @@ impl SharedRuntimeArgs {
             model,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
         } = self.model.file_sources();
 
         Config {
@@ -918,6 +923,7 @@ impl SharedRuntimeArgs {
             revision: model.revision,
             tokenizer,
             hf_config,
+            skip_tokenizer_init,
             hf_overrides: self.hf_overrides,
             generation_config: self.generation_config,
             served_model_name: self.served_model_name,
