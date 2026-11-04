@@ -26,7 +26,10 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 logger = init_logger(__name__)
 
@@ -36,8 +39,6 @@ if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
-# fp8_ds_mla KV row: 512 B quantized NoPE + 16 B scales + 128 B RoPE.
-FP8_DS_MLA_ROW_BYTES = 656
 HiSparseTopKResult: TypeAlias = torch.Tensor | tuple[torch.Tensor, torch.Tensor]
 # trtllm-gen sparse MLA reads up to ~250 rows from the start of its KV cache
 # whatever the cache's size: https://github.com/flashinfer-ai/flashinfer/issues/6484
@@ -50,6 +51,17 @@ def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
         and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
         and attn_metadata.max_query_len == 1
         and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+    )
+
+
+def is_hisparse_group_prefetch_batch(attn_metadata: Any | None, max_rows: int) -> bool:
+    """Prefetch historical KV for a pure decode batch, including verification."""
+    return (
+        attn_metadata is not None
+        and 0 < attn_metadata.num_actual_tokens <= max_rows
+        and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
+        and 0 < attn_metadata.num_reqs <= attn_metadata.num_actual_tokens
+        and 0 < attn_metadata.max_query_len <= max_rows
     )
 
 
@@ -247,14 +259,12 @@ class HiSparseHostPool:
             ]
             assert config.hisparse_host_num_blocks is not None
             assert config.hisparse_host_block_stride is not None
-            _, self.pinned, self.shared_region = allocate_hisparse_host_pools(
+            self.pinned, self.shared_region = allocate_hisparse_host_pools(
                 self.vllm_config,
                 tensor_sizes,
                 config.hisparse_host_num_blocks,
                 config.hisparse_host_block_stride,
-                use_shared_host_pool=True,
             )
-            assert self.shared_region is not None
             self.registered = self.shared_region.base_tensor
             self.backing = self.registered[:size]
         else:
@@ -382,19 +392,8 @@ def allocate_hisparse_host_pools(
     tensor_sizes: list[int],
     num_blocks: int,
     host_block_stride: int,
-    *,
-    use_shared_host_pool: bool,
-) -> tuple[list[torch.Tensor], list[torch.Tensor], SharedOffloadRegion | None]:
-    """Allocate private host tensors or one mmap shared by local TP ranks."""
-    if not use_shared_host_pool:
-        check_hisparse_host_memory(sum(tensor_sizes))
-        private_pools = [allocate_pinned_host_pool(size) for size in tensor_sizes]
-        return (
-            [pool for pool, _ in private_pools],
-            [registered for _, registered in private_pools],
-            None,
-        )
-
+) -> tuple[list[torch.Tensor], SharedOffloadRegion]:
+    """Allocate one host mmap shared by local TP ranks."""
     tp_group = get_tp_group()
     region = SharedOffloadRegion(
         engine_id=(
@@ -408,6 +407,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        num_segments=REGION_SEGMENTS,
     )
     pinned: list[torch.Tensor] = []
     try:
@@ -417,17 +417,13 @@ def allocate_hisparse_host_pools(
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)
             pinned.append(tensor)
-        pools = [
-            region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
-        ]
     except Exception:
-        release_pinned_state([], pinned, region)
+        release_pinned_state(pinned, region)
         raise
-    return pools, pinned, region
+    return pinned, region
 
 
 def release_pinned_state(
-    runtimes: list[HiSparseRuntime],
     pinned_host_pools: list[torch.Tensor],
     shared_host_region: SharedOffloadRegion | None = None,
 ) -> None:
@@ -468,12 +464,6 @@ def release_pinned_state(
                 time.perf_counter() - release_start,
             )
 
-    for runtime in runtimes:
-        runtime.cache_ops = None
-        runtime.host_pool = None
-        del runtime._host_cache
-        del runtime.registered_host_pool
-        del runtime.hot_backing
     if shared_host_region is not None:
         shared_host_region.cleanup()
 
@@ -701,10 +691,6 @@ class HiSparseIndexGroup:
         ).to(torch.int16)
         self.lru_slots = self.lru_init.repeat(max_num_reqs, 1).contiguous()
         self.shared_topk = _create_shared_topk_state(device, max_swap_rows, top_k)
-        # Request ids the resolver reads, built on the copy stream: a
-        # compute-stream write would race with its logical_topk_ready wait.
-        self.row_indices = torch.arange(max_swap_rows, dtype=torch.int32, device=device)
-        self.request_ids = torch.empty_like(self.row_indices)
         self.copy_stream = (
             copy_stream if copy_stream is not None else _create_copy_stream(device)
         )
@@ -741,7 +727,6 @@ class HiSparseRuntime:
     ) -> None:
         self.backend = get_hisparse_backend()
         self.backend.check_available()
-        self.cache_ops: Any = None
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
         self.kv_dtype = kv_dtype
@@ -759,9 +744,6 @@ class HiSparseRuntime:
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
             )
 
-        self._layer_ready_event: torch.Event | None = None
-        self._swap_staged = False
-        self._swap_step = 0
         self.is_group_leader = index_group is None
         if index_group is None:
             index_group = HiSparseIndexGroup(
@@ -780,13 +762,33 @@ class HiSparseRuntime:
         index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
-        self.resident_source_index = -1
-        self.request_state_indices: torch.Tensor | None = None
-        self.host_pool: HiSparseHostPool | None = None
+        self._reset_binding_state()
 
     @property
     def host_cache(self) -> torch.Tensor:
         return self._host_cache
+
+    def _reset_binding_state(self) -> None:
+        self.cache_ops: Any = None
+        self.host_pool: HiSparseHostPool | None = None
+        self.request_state_indices: torch.Tensor | None = None
+        self.resident_source_index = -1
+        self._layer_ready_event: torch.Event | None = None
+        self._swap_staged = False
+        self._swap_step = 0
+        for name in (
+            "hot",
+            "hot_backing",
+            "hot_block_table",
+            "_host_cache",
+            "registered_host_pool",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
+    def unbind_cache(self) -> None:
+        """Restore the unbound state without unregistering the host pool."""
+        self._reset_binding_state()
 
     def bind_hot_cache(
         self,
@@ -874,9 +876,6 @@ class HiSparseRuntime:
             plan.row_ids,
             plan.dst_rows,
             plan.miss_mask,
-            None,
-            None,
-            0,
         )
         return staged
 
@@ -906,22 +905,6 @@ class HiSparseRuntime:
         )
         device_global_indices.index_copy_(0, state_indices, active_indices)
 
-    def invalidate_written_slots(
-        self,
-        written_slots: torch.Tensor,
-        req_id_per_token: torch.Tensor,
-    ) -> None:
-        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
-        if num_tokens == 0:
-            return
-        assert self.request_state_indices is not None
-        self.cache_ops.hisparse_invalidate_written_slots(
-            self.index_group.device_global_indices,
-            self.request_state_indices,
-            req_id_per_token[:num_tokens],
-            written_slots[:num_tokens],
-        )
-
     def begin_forward(self) -> None:
         self._swap_step = 0
 
@@ -945,6 +928,7 @@ class HiSparseRuntime:
         *,
         resident: HiSparseCacheHandle | None = None,
         req_id_per_token: torch.Tensor,
+        num_valid_rows: torch.Tensor,
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         block_size: int,
@@ -980,8 +964,8 @@ class HiSparseRuntime:
         swap_device_physical_rows = shared.swap_device_physical_rows[shared_rows]
         swap_counts = shared.swap_counts[shared_rows]
 
-        # Padded rows are skipped by the kernel (request_state_indices) and must
-        # come out as -1 so the attention kernel masks them.
+        # Rows past num_valid_rows and rows without request state come out as
+        # -1 so the attention kernel masks them.
         self.cache_ops.hisparse_resolve_residency(
             host_cache,
             hot.cache,
@@ -993,14 +977,12 @@ class HiSparseRuntime:
             request_state_indices,
             self.region_stride,
             self.max_union_rows,
-            None,
             group.swap_stats,
             physical_topk_indices,
             hot.attention_block_stride,
             req_id_per_token[:num_tokens].contiguous(),
             block_table,
             block_size,
-            None,
             valid_topk_counts,
             swap_host_physical_rows,
             swap_device_physical_rows,
@@ -1009,7 +991,7 @@ class HiSparseRuntime:
             resident.view.block_size
             if resident is not None and resident.view is not None
             else 0,
-            0,
+            num_valid_rows,
         )
 
     def _swap_rows(self, shared_rows: slice) -> None:
@@ -1044,17 +1026,10 @@ class HiSparseRuntime:
         else:
             group.copy_stream.wait_stream(compute_stream)
         with group.copy_stream:
-            # CUDA-graph padding rows past the batch's tokens map to request 0;
-            # mark them -1 so residency resolution skips them.
-            num_tokens = logical_topk_indices.shape[0]
-            request_ids = group.request_ids[:num_tokens]
-            request_ids.copy_(req_id_per_token)
-            request_ids.masked_fill_(
-                group.row_indices[:num_tokens] >= num_valid_rows, -1
-            )
             self._resolve_residency(
                 resident=resident,
-                req_id_per_token=request_ids,
+                req_id_per_token=req_id_per_token,
+                num_valid_rows=num_valid_rows,
                 block_table=block_table,
                 topk_indices=logical_topk_indices,
                 block_size=block_size,
@@ -1064,7 +1039,7 @@ class HiSparseRuntime:
                 valid_counts_out=valid_counts_out,
             )
             runtimes = [self]
-            if resident.decode_batch:
+            if resident.prefetch_decode_group:
                 runtimes.extend(group.followers)
             for runtime in runtimes:
                 runtime._swap_rows(shared_rows)
@@ -1138,6 +1113,43 @@ class HiSparseRuntime:
         return physical_topk_indices
 
 
+class HiSparseSlotInvalidator:
+    """Drop hot copies of rewritten host slots for many index groups at once."""
+
+    def __init__(self, request_state_indices: torch.Tensor) -> None:
+        self.request_state_indices = request_state_indices
+        self._group_tables: dict[tuple[int, ...], torch.Tensor] = {}
+
+    def __call__(
+        self,
+        leaders: list[HiSparseRuntime],
+        written_slots: torch.Tensor,
+        req_id_per_token: torch.Tensor,
+    ) -> None:
+        num_tokens = min(written_slots.numel(), req_id_per_token.numel())
+        if num_tokens == 0 or not leaders:
+            return
+        tables = [leader.index_group.device_global_indices for leader in leaders]
+        key = tuple(table.data_ptr() for table in tables)
+        group_table = self._group_tables.get(key)
+        if group_table is None:
+            if any(table.shape != tables[0].shape for table in tables):
+                raise ValueError("HiSparse index groups must share one hot layout.")
+            group_table = async_tensor_h2d(
+                list(key), self.request_state_indices.device, torch.int64
+            )
+            self._group_tables[key] = group_table
+        num_state_rows, region_stride = tables[0].shape
+        leaders[0].cache_ops.hisparse_invalidate_written_slots(
+            group_table,
+            self.request_state_indices,
+            req_id_per_token[:num_tokens],
+            written_slots[:num_tokens],
+            num_state_rows,
+            region_stride,
+        )
+
+
 def update_hisparse_residency(
     residency: torch.Tensor,
     updates: Mapping[str, SparseKVResidencyUpdate],
@@ -1180,14 +1192,21 @@ class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
+        self.runtime = runtime
+        # Speculator layers write their rows after the target forward.
+        self.draft_layer = False
+        self.index_group_caches: list[HiSparseCacheHandle] = [self]
+        self._reset_binding_state()
+
+    def _reset_binding_state(self) -> None:
         self.view: PagedCacheView | None = None
         self.residency: torch.Tensor | None = None
         self.block_table: torch.Tensor | None = None
         self.source_block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
-        self.runtime = runtime
         self.dummy_batch = False
         self.decode_batch = False
+        self.prefetch_decode_group = False
         self.all_context_pages_resident = True
         self.num_actual_tokens = 0
         self.num_decode_tokens = 0
@@ -1195,9 +1214,11 @@ class HiSparseCacheHandle:
         self.host_mirror_required = False
         self.mirror_slot_mapping: torch.Tensor | None = None
         self.submit_layer_mirror: Callable[[], None] | None = None
-        # Speculator layers write their rows after the target forward.
-        self.draft_layer = False
-        self.index_group_caches: list[HiSparseCacheHandle] = [self]
+
+    def unbind_cache(self) -> None:
+        """Detach KV storage and per-binding metadata, retaining the index group."""
+        self._reset_binding_state()
+        self.runtime.unbind_cache()
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
         assert self.runtime.is_group_leader
@@ -1217,6 +1238,11 @@ class HiSparseCacheHandle:
             attn_metadata.req_id_per_token if attn_metadata is not None else None
         )
         self.decode_batch = is_hisparse_decode_batch(attn_metadata)
+        # Verification can prefetch old host rows without publishing tentative
+        # writes. Resident writes and host mirroring keep their existing policy.
+        self.prefetch_decode_group = self.decode_batch or (
+            is_hisparse_group_prefetch_batch(attn_metadata, self.runtime.max_swap_rows)
+        )
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
@@ -1350,9 +1376,8 @@ def create_hisparse_cache_handle(
         index_group.hisparse_group = runtime.index_group
     logger.info_once(
         "Enabled experimental HiSparse HMA hot cache: top_k=%d, "
-        "device_buffer_size=%d (%d LRU rows), max_num_seqs=%d.",
+        "device_buffer_size=%d, max_num_seqs=%d.",
         config.top_k,
-        config.device_buffer_size,
         config.device_buffer_size,
         max_num_reqs,
     )

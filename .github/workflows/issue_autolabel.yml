@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Label issues based on keywords
         id: label-step
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Configuration: Add new labels and keywords here
@@ -394,6 +394,23 @@ jobs:
               scheduler: {
                 keywords: [{ term: "scheduler", searchIn: "title" }],
               },
+              // Title-only: bodies often use VLLM_BATCH_INVARIANT=1 as a test
+              // control, and backend-selection logs print `use_batch_invariant`.
+              // Bare "deterministic" is left out: issues use it for crashes that
+              // always reproduce.
+              "batch-invariance": {
+                regexPatterns: [
+                  { pattern: "(?:batch|TP)[\\s_-]?invarian", searchIn: "title" },
+                  { pattern: "\\bBI\\b", flags: "g", searchIn: "title" },
+                  { pattern: "\\b(?:non-?)?determinism\\b|\\bnon-?deterministic", searchIn: "title" },
+                  { pattern: "\\bnon-?reproducible\\b|\\bnot reproducible\\b|\\brun-to-run\\b", searchIn: "title" },
+                  { pattern: "\\bbatch[\\s-]?(?:size[\\s-]?)?dependen", searchIn: "title" },
+                  {
+                    pattern: "\\b(?:identical|repeated|same)\\s+(?:greedy\\s+)?(?:runs?|requests?|calls?)\\b",
+                    searchIn: "title",
+                  },
+                ],
+              },
               "kv-cache-manager": {
                 substrings: [
                   { term: "kv cache manager", searchIn: "title" },
@@ -633,7 +650,7 @@ jobs:
 
       - name: CC users for labeled issues
         if: steps.label-step.outputs.labels_added != '[]'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             // Configuration: Map labels to GitHub users to CC
@@ -714,7 +731,7 @@ jobs:
 
       - name: Request missing ROCm info from issue author
         if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const body = (context.payload.issue.body || '').toLowerCase();
