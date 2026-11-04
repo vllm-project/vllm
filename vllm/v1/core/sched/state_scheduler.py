@@ -241,7 +241,7 @@ class StateScheduler(Scheduler):
 
     def _free_blocks(self, request: Request) -> None:
         super()._free_blocks(request)
-        self.stream_admissions.finish(request.request_id)
+        self.stream_admissions.sessions.pop(request.request_id, None)
 
     def _free_request_blocks(self, request: Request) -> None:
         # Retire the slot before the generic block free; it returns to the

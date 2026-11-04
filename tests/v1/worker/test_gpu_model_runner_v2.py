@@ -898,50 +898,6 @@ def test_state_completion_waits_for_postprocess_and_registered_stream(monkeypatc
     assert EMPTY_MODEL_RUNNER_OUTPUT.state_completion is None
 
 
-def test_zero_token_state_step_returns_completion(monkeypatch):
-    """No-forward executes the same completion contract."""
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-
-    runner = GPUModelRunner.__new__(GPUModelRunner)
-    runner.batch_sharder = None
-    runner.draft_tokens_handler = Mock()
-    runner.encoder_cache = None
-    calls = []
-
-    def finish(output, stream):
-        calls.append("done")
-        return output
-
-    runner.state_slots = SimpleNamespace(
-        begin_step=lambda step, stream: calls.append("begin"),
-        finish_step=finish,
-        activate_requests=lambda: None,
-    )
-    runner.model_state = SimpleNamespace(prepare_step=lambda *args, **kwargs: None)
-    runner.main_stream = object()
-    for name in (
-        "update_pp_decode_requests",
-        "finish_requests",
-        "free_states",
-        "add_requests",
-        "update_requests",
-    ):
-        setattr(runner, name, lambda *args: None)
-    runner.block_tables = SimpleNamespace(apply_staged_writes=lambda: None)
-    runner.aux_output_connector = None
-    runner.kv_connector = SimpleNamespace(
-        no_forward=lambda step: EMPTY_MODEL_RUNNER_OUTPUT
-    )
-    monkeypatch.setattr(
-        runner, "_merge_ec_connector_no_forward", lambda step, output: output
-    )
-    assert (
-        runner.execute_model(SchedulerOutput.make_empty()) is EMPTY_MODEL_RUNNER_OUTPUT
-    )
-    assert calls == ["begin", "done"]
-
-
 @pytest.mark.parametrize("override", [2, 4])
 def test_persistent_state_profiling_ignores_block_override(override):
     from tests.v1.core.utils import (

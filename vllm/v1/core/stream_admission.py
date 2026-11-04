@@ -258,9 +258,6 @@ class StreamAdmissions:
             record.deadline = self.clock() + self.config.parked_idle_timeout
             record.deadline_reason = "parked_idle"
 
-    def finish(self, request_id: str) -> None:
-        self.sessions.pop(request_id, None)
-
     def next_deadline(self) -> float | None:
         return min(
             (r.deadline for r in self.sessions.values() if r.deadline is not None),

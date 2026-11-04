@@ -9,7 +9,7 @@ from vllm.v1.kv_cache_interface import PersistentStateSpec
 
 
 class PersistentStateLayerBase(nn.Module):
-    """Purpose-named model declaration, independent of attention and Mamba."""
+    """Base class for layers that hold fixed-size persistent per-session state."""
 
     def __init__(
         self,

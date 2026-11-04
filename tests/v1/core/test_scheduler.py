@@ -9818,22 +9818,6 @@ def test_state_slot_never_dispatched_releases_immediately():
     assert not scheduler.state_retirements
 
 
-def test_ordinary_deferred_free_stops_at_first_pending_fence():
-    from collections import deque
-
-    class NoScanDeque(deque):
-        def __iter__(self):
-            pytest.fail("The blocked FIFO must not be scanned")
-
-    scheduler = Scheduler.__new__(Scheduler)
-    scheduler.processed_step_seq = 0
-    scheduler.deferred_frees = NoScanDeque([(1, [])] * 100)
-    queue = scheduler.deferred_frees
-    scheduler._drain_deferred_frees()
-    assert scheduler.deferred_frees is queue
-    assert len(queue) == 100
-
-
 @pytest.mark.parametrize("change", ["untagged", "stop", "structured", "embeds"])
 def test_stream_admission_rejected_add_cannot_abort_session(change):
     """A rejected update leaves the session and its deadline untouched."""

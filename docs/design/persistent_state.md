@@ -74,13 +74,15 @@ A finished or aborted request does not free its slot immediately. The scheduler
 retires the handle and sends it to the worker as a cleanup handle. The worker
 joins the main stream with every registered state-writing stream, records an
 event, and returns a `StateCompletion` with the model output only after that
-event completes. The slot returns to the free pool only when the scheduler has
-received a completion covering both the request's last scheduled step and its
-cleanup. Until then, admission and scheduling treat the slot as occupied, so a
-new request can never observe writes from the previous owner. Model failures are
-reported through the same completion path, and a scheduled step without a
-matching completion fails its request. A cleanup that is not acknowledged is
-retried once; a second miss is a fatal engine error.
+event completes. The host waits on that event when the step's output is
+collected, once per state step; with synchronous scheduling the wait runs on the
+worker's main thread, at the output boundary. The slot returns to the free pool
+only when the scheduler has received a completion covering both the request's
+last scheduled step and its cleanup. Until then, admission and scheduling treat
+the slot as occupied, so a new request can never observe writes from the
+previous owner. Model failures are reported through the same completion path,
+and a scheduled step without a matching completion fails its request. A cleanup
+that is not acknowledged is retried once; a second miss is a fatal engine error.
 
 ## Stream admission
 
