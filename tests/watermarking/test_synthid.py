@@ -298,17 +298,19 @@ def _cuda_sampler_inputs(num_rows, vocab_size, seed=0):
     generator = torch.Generator(device="cuda").manual_seed(seed)
     logits = 3 * torch.randn(num_rows, vocab_size, device="cuda", generator=generator)
     logits[0] *= 10  # peaked row
-    logits[1, ::3] = float("-inf")  # masked tokens
-    # Increasing logits move the running max in every histogram tile.
-    logits[2] = torch.linspace(-30, 30, vocab_size, device="cuda")
-    # Fully masked leading tiles leave a split's running max at -inf.
-    logits[3, : vocab_size - 100] = float("-inf")
+    if num_rows > 3:
+        logits[1, ::3] = float("-inf")  # masked tokens
+        # Increasing logits move the running max in every histogram tile.
+        logits[2] = torch.linspace(-30, 30, vocab_size, device="cuda")
+        # Fully masked leading tiles leave a split's running max at -inf.
+        logits[3, : vocab_size - 100] = float("-inf")
     contexts = torch.randint(
         0, vocab_size, (num_rows, 4), device="cuda", generator=generator
     )
     # -1 pads the context of a sequence shorter than the context width.
     contexts[4:8, :2] = -1
-    contexts[8] = -1
+    if num_rows > 8:
+        contexts[8] = -1
     temperatures = torch.tensor([0.0, 0.7, 1.0, 1.3], device="cuda")[
         torch.randint(0, 4, (num_rows,), device="cuda", generator=generator)
     ]
@@ -364,6 +366,8 @@ def _sample_fused(watermarker, logits, contexts, random_sampler, skip_mask):
         (32, 12, 131849),
         # More rows than programs and more tiles than one program may histogram.
         (22, 600, 65000),
+        # One row at a production vocabulary size.
+        (22, 1, 151936),
     ],
 )
 def test_synthid_fused_sample_matches_reference(depth, num_rows, vocab_size):
@@ -384,7 +388,7 @@ def test_synthid_fused_sample_matches_reference(depth, num_rows, vocab_size):
     stable = random_sampler(scores + perturbation) == random_sampler(
         scores - perturbation
     )
-    assert stable.float().mean() > 0.9
+    assert stable.float().mean() > 0.99
     assert torch.equal(actual[stable], expected[stable])
 
 

@@ -176,8 +176,9 @@ class SynthIDWatermarker(Watermarker):
     def _use_fused(self, logits: torch.Tensor) -> bool:
         from vllm.v1.worker.gpu.sample.synthid import is_supported
 
-        # Tensors on the CPU, as in tests, keep the torch tournament.
-        return logits.is_cuda and is_supported()
+        # Tensors on the CPU, as in tests, keep the torch tournament, and so do
+        # fp64 logits, which the kernels do not take.
+        return logits.is_cuda and logits.dtype != torch.float64 and is_supported()
 
     def _sample_fused(
         self,
