@@ -123,8 +123,9 @@ class SingleTypeKVCacheManager(ABC):
 
         # Mapping from request ID to blocks to track the blocks allocated
         # for each request, so that we can free the blocks when the request
-        # is finished. The lists hold no cycles, so they are hidden from the
-        # cyclic GC, which would otherwise visit every block of every request.
+        # is finished. Blocks hold no strong reference back to these lists or
+        # their owner, so the lists cannot be part of a cycle and are hidden from
+        # the cyclic GC, which would otherwise visit every block of every request.
         self.req_to_blocks: defaultdict[str, list[KVCacheBlock]] = defaultdict(
             untracked_list
         )

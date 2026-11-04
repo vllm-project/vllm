@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import weakref
 from collections.abc import Callable
 from dataclasses import replace
 from math import lcm
@@ -435,6 +436,37 @@ def test_hisparse_residency_update_sends_only_changed_pages():
 
     assert update[request.request_id].pages == [0]
     assert update[request.request_id].block_ids == ([0],)
+
+
+def test_hisparse_teardown_with_live_request_frees_pools():
+    """Untracked request block lists must not keep the pools alive through
+    block -> pool -> reuse watcher -> coordinator -> manager -> list."""
+    manager = make_hisparse_kv_cache_manager(32, 16)
+    tokens = list(range(6 * HISPARSE_BLOCK_SIZE))
+    request = make_request("request", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator = get_hisparse_coordinator(manager)
+    for hot_manager in coordinator.hot_managers:
+        hot_manager.require_hot(request.request_id)
+    assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+    coordinator.take_residency_updates([request.request_id])
+    _publish_hisparse_pages(manager)
+    pool = manager.block_pool
+    host_pool = coordinator.get_host_block_pool()
+    assert host_pool is not None
+    # The request is never freed, so its lists are alive at teardown.
+    assert pool._reuse_watchers
+    assert not gc.is_tracked(
+        coordinator.resident_managers[0].req_to_blocks[request.request_id]
+    )
+    host_manager = coordinator.host_manager
+    assert host_manager is not None
+    assert not gc.is_tracked(host_manager.req_to_blocks[request.request_id])
+
+    refs = [weakref.ref(obj) for obj in (coordinator, pool, host_pool)]
+    del coordinator, host_manager, hot_manager, host_pool, manager, pool
+    gc.collect()
+    assert [ref() for ref in refs] == [None, None, None]
 
 
 def test_hisparse_readmitted_request_resends_its_full_residency():

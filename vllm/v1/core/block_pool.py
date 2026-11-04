@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
@@ -141,9 +142,10 @@ class BlockPool:
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
         self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
+        self._weak_self = weakref.ref(self)
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
-            KVCacheBlock(idx, pool=self) for idx in range(num_gpu_blocks)
+            KVCacheBlock(idx, pool=self._weak_self) for idx in range(num_gpu_blocks)
         ]
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
@@ -802,8 +804,10 @@ class BlockPool:
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
                 continue
-            if block.pool is not None and block.pool is not self:
-                other_pools.setdefault(block.pool, []).append(block)
+            if block.pool is not None and block.pool is not self._weak_self:
+                pool = block.pool()
+                if pool is not None:
+                    other_pools.setdefault(pool, []).append(block)
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
