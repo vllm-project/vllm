@@ -40,6 +40,9 @@ is_hip_ = current_platform.is_rocm()
 
 logger = logging.getLogger(__name__)
 
+# Query heads per program of the grouped (MLA / GQA) stage-1 kernel.
+GROUPED_BLOCK_H = 16
+
 # Only print the following warnings when triton version < 3.2.0.
 # The issue won't affect performance or accuracy.
 if version.parse(triton.__version__) < version.parse("3.2.0"):
@@ -509,7 +512,7 @@ def _decode_grouped_att_m_fwd(
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
-    BLOCK_H = 16
+    BLOCK_H = GROUPED_BLOCK_H
     NUM_KV_SPLITS = num_kv_splits
     grid = (
         batch,
