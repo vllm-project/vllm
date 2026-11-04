@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe import (
     expert_map_manager,
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.amd import dspark as v4_amd_dspark
 from vllm.models.deepseek_v4.amd import model as v4_amd_model
@@ -343,3 +344,39 @@ def test_v41_amd_expert_scales_follow_the_registered_name(ckpt_suffix, param_suf
     assert torch.equal(getattr(experts, f"w2_{param_suffix}"), scales["w2"])
     prefix = "layers.0.ffn.experts.routed_experts"
     assert loaded == {f"{prefix}.w13_{param_suffix}", f"{prefix}.w2_{param_suffix}"}
+
+
+def test_mega_moe_and_pp_missing_layers_keep_the_model_mapping():
+    """Experts outside a `MoERunner` (MegaMoE) load through the model's own
+    mapping; experts of a PP-missing layer are skipped."""
+    calls = []
+
+    def weight_loader(param, loaded_weight, name, *, shard_id, expert_id, **_):
+        calls.append((name, shard_id, expert_id))
+        return True
+
+    layer = _ffn_layer((1, 0), (1, 0))
+    layer.ffn.use_native_mega_moe = True
+    layer.ffn.experts = nn.Module()
+    for name in ("w13_weight", "w2_weight"):
+        param = nn.Parameter(torch.zeros(1), requires_grad=False)
+        param.weight_loader = weight_loader
+        layer.ffn.experts.register_parameter(name, param)
+    model = MODELS["v4"](layer)
+    model.layers.append(PPMissingLayer())
+    model.end_layer = 2
+    checkpoint = [
+        (f"layers.{i}.ffn.experts.{name}", tensor)
+        for i in (0, 1)
+        for name, tensor in _expert_checkpoint(fused=False)
+    ]
+
+    loaded = model.load_weights(checkpoint)
+
+    assert {
+        "layers.0.ffn.experts.w13_weight",
+        "layers.0.ffn.experts.w2_weight",
+    } <= loaded
+    # Only layer 0's tensors reach a weight loader.
+    assert len(calls) == 3 * E
+    assert ("layers.0.ffn.experts.w13_weight", "w3", E - 1) in calls

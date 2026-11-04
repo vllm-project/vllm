@@ -1042,8 +1042,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 return name
             head, _, suffix = name.rpartition(".")
             layer = name[: name.index(".experts.")]
-            param = _resolve_param_name(f"{layer}.experts.routed_experts.w2_{suffix}")
-            return f"{head}.{param.rpartition('.w2_')[2]}"
+            for experts in ("experts", "experts.base_layer"):  # LoRA-wrapped
+                param = _resolve_param_name(
+                    f"{layer}.{experts}.routed_experts.w2_{suffix}"
+                )
+                if param in params_dict:
+                    return f"{head}.{param.rpartition('.w2_')[2]}"
+            return name
 
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
@@ -1104,7 +1109,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     if expert_params is not None:
                         loaded_params.update(expert_params)
                         continue
-                    # MegaMoE experts are not under a MoERunner: own mapping.
+                    # PP-missing layer: own mapping.
                     name_mapped: str | None = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping

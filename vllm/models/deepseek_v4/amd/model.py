@@ -1386,7 +1386,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     if expert_params is not None:
                         loaded_params.update(expert_params)
                         continue
-                    # MegaMoE experts are not under a MoERunner: own mapping.
+                    # MegaMoE (not a MoERunner) or PP-missing layer: own mapping.
                     name_mapped: str | None = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping

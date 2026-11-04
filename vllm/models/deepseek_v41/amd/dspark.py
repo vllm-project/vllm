@@ -478,7 +478,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
                 if expert_params is not None:
                     loaded_params.update(expert_params)
                     continue
-                # MegaMoE experts are not under a MoERunner: own mapping.
+                # Names the layer does not map: own mapping.
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:
                         continue
