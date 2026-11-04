@@ -109,3 +109,14 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 - **Single-pass fusion** — `y = x * weight[c] + bias[c]` in one kernel launch via `fused_mm_input_norm_triton`; input is read in its native dtype (`uint8`).
 - **float32 compute for free** — arithmetic runs in fp32 inside the kernel regardless of I/O dtypes. Accuracy matches fp32, with no extra bandwidth: intermediates stay in registers, and no global fp32 tensor is materialised.
 - **Preallocated output with batch-dim padding** — callers can pass a larger buffer; only the leading `N` rows are written, so buffers are reusable across calls.
+
+#### Resizing on the Device (Nemotron VL)
+
+With `mm_device_do_normalize`, images and video frames are still resized on the CPU, in `uint8`. Nemotron VL models (`NemotronH_Nano_VL_V2` and the Nemotron Omni architectures above) can move the resize to the GPU with [CV-CUDA](https://github.com/CVCUDA/CV-CUDA):
+
+```bash
+vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
+    --trust-remote-code --mm-processor-kwargs '{"device_resize": true}'
+```
+
+The API server then sends the decoded `uint8` pixels at their source resolution, and the model resizes them in fp32 (bicubic, antialiased, as the CPU path does without `mm_device_do_normalize`) before `FusedMMInputNorm`. This covers dynamic-resolution images and video frames, and requires `mm_device_do_normalize` and CV-CUDA (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).

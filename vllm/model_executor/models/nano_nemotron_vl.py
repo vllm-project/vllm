@@ -97,6 +97,7 @@ from vllm.transformers_utils.processors.nano_nemotron_vl import (
     BaseNanoNemotronVLProcessor,
     DynamicResolutionImageTiler,
     NanoNemotronVLProcessor,
+    cvcuda_bicubic_resize,
     get_video_target_size_and_feature_size,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -401,6 +402,8 @@ class NanoNemotronVLMultiModalProcessor(
 
         return dict(
             pixel_values_flat=pixel_values_flat,
+            # device_resize: the model uploads and resizes these itself.
+            pixel_values_raw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
             num_tokens_per_image=MultiModalFieldConfig.batched(
@@ -416,6 +419,10 @@ class NanoNemotronVLMultiModalProcessor(
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches
             ),
+            pixel_values_raw_video=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
+            video_frame_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             frames_indices=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             frame_duration_ms=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
@@ -1124,6 +1131,14 @@ class NemotronH_Nano_VL_V2(
         normalized = self.input_norm(flattened, self.llm_dtype)
         return normalized.reshape(shape)
 
+    def _resize_raw_pixels(
+        self, frames: torch.Tensor, size: Sequence[int]
+    ) -> torch.Tensor:
+        """Resize decoded uint8 NHWC frames sent with ``device_resize``."""
+        assert self.input_norm is not None, "device_resize requires input_norm"
+        h, w = (int(x) for x in size)
+        return cvcuda_bicubic_resize(frames, (h, w), self.input_norm.weight.device)
+
     def extract_feature_dynamic(
         self, pixel_values: torch.Tensor, imgs_sizes: list[tuple[int, int]]
     ):
@@ -1194,6 +1209,14 @@ class NemotronH_Nano_VL_V2(
             )
 
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
+        if (pixel_values_raw := kwargs.pop("pixel_values_raw", None)) is not None:
+            imgs_sizes = kwargs["imgs_sizes"]
+            assert isinstance(pixel_values_raw, (list, torch.Tensor))
+            assert isinstance(imgs_sizes, list)
+            pixel_values_flat = [
+                self._resize_raw_pixels(image[None], size)[0]
+                for image, size in zip(pixel_values_raw, imgs_sizes, strict=True)
+            ]
         if pixel_values_flat is None:
             return None
 
@@ -1450,10 +1473,22 @@ class NemotronH_Nano_VL_V2(
         self, **kwargs: object
     ) -> NanoNemotronVLVideoInputs | None:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
+        pixel_values_raw_video = kwargs.pop("pixel_values_raw_video", None)
+        video_frame_sizes = kwargs.pop("video_frame_sizes", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("video_embeds", None)
         frames_indices = kwargs.pop("frames_indices", None)
         frame_duration_ms = kwargs.pop("frame_duration_ms", None)
+
+        if pixel_values_raw_video is not None:
+            assert isinstance(pixel_values_raw_video, (list, torch.Tensor))
+            assert isinstance(video_frame_sizes, torch.Tensor)
+            pixel_values_flat_video = [
+                self._resize_raw_pixels(frames, size)
+                for frames, size in zip(
+                    pixel_values_raw_video, video_frame_sizes, strict=True
+                )
+            ]
 
         if pixel_values_flat_video is None and video_embeds is None:
             return None
@@ -1518,12 +1553,13 @@ class NemotronH_Nano_VL_V2(
         # from the order of kwargs.
         for input_key in kwargs:
             if (
-                input_key in ("pixel_values_flat", "image_embeds")
+                input_key in ("pixel_values_flat", "pixel_values_raw", "image_embeds")
                 and "images" not in modalities
             ):
                 modalities["images"] = self._parse_and_validate_image_input(**kwargs)
             if (
-                input_key in ("pixel_values_flat_video", "video_embeds")
+                input_key
+                in ("pixel_values_flat_video", "pixel_values_raw_video", "video_embeds")
                 and "videos" not in modalities
             ):
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
