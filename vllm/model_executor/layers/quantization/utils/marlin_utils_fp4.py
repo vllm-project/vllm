@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_quant_input,
     marlin_repacked_nk,
     marlin_unpad_output,
-    should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -177,14 +176,6 @@ def apply_fp4_marlin_linear(
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=4)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
     inputs = reshaped_x
     a_scales = None
     is_nvfp4 = weight_global_scale is not None
@@ -209,7 +200,7 @@ def apply_fp4_marlin_linear(
         size_m=reshaped_x.size(0),
         size_n=padded_n,
         size_k=padded_k,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=use_fp32_reduce,
     )
 
