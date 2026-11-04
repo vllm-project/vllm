@@ -14,17 +14,6 @@ IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 
-def _validate_decoder_backend(
-    backend: AttentionBackendEnum,
-) -> AttentionBackendEnum:
-    if backend == AttentionBackendEnum.TORCH_SDPA:
-        raise ValueError(
-            "TORCH_SDPA is only supported for multi-modal encoder attention "
-            "and cannot be used as a decoder attention backend."
-        )
-    return backend
-
-
 @config
 class HiSparseConfig:
     """Configuration for HiSparse sparse-MLA KV offloading."""
@@ -208,6 +197,14 @@ class AttentionConfig:
             # The alias selects only MiniMax's sparse decode kernel. Dense
             # layers still use the platform's normal automatic backend.
             self.backend = None
+        if AttentionBackendEnum.TORCH_SDPA in (
+            self.backend,
+            *self.backend_per_kind.values(),
+        ):
+            raise ValueError(
+                "TORCH_SDPA is only supported for multi-modal encoder attention "
+                "and cannot be used as a decoder attention backend."
+            )
         # Checked here rather than at indexer selection, which the two CP
         # backends reach separately: bf16 goes to the Triton indexer and fp8
         # to the AITER MSA one, so neither ever sees the other's dtype and
@@ -255,10 +252,8 @@ class AttentionConfig:
         if isinstance(value, str):
             if value.lower() == "auto":
                 return None
-            value = AttentionBackendEnum[value.upper()]
-        if value is None:
-            return None
-        return _validate_decoder_backend(value)
+            return AttentionBackendEnum[value.upper()]
+        return value
 
     @field_validator("mla_prefill_backend", mode="before")
     @classmethod
@@ -291,5 +286,5 @@ class AttentionConfig:
                 )
             if isinstance(backend, str):
                 backend = AttentionBackendEnum[backend.upper()]
-            parsed[kind] = _validate_decoder_backend(backend)
+            parsed[kind] = backend
         return parsed
