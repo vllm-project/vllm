@@ -10,6 +10,7 @@ probabilities.
 import math
 import string
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -27,6 +28,9 @@ LABELS = tuple(string.ascii_uppercase)
 class Option:
     name: str
     description: str | None = None
+    #: The request's criteria value the option was built from, for question
+    #: types that echo it back in the answer, like a score's legend.
+    raw: Any = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +40,9 @@ class Question:
     instructions: str
     options: tuple[Option, ...]
     labels: tuple[str, ...]
+    #: The request's raw ``instructions`` before coercion, for question
+    #: types that render them themselves, like KnowLine's.
+    raw_instructions: Any = None
     #: The request's instructions and criteria as sent. Holds dicts, so it is
     #: left out of equality and hashing.
     raw: tuple[Any, Any] | None = field(default=None, compare=False, repr=False)
@@ -43,8 +50,9 @@ class Question:
 
 class QuestionType(ABC):
     name: ClassVar[str]
-    #: The labels of a question's options, in option order.
-    label_set: ClassVar[tuple[str, ...]] = LABELS
+    #: The labels of a question's options, in option order. An instance
+    #: attribute, so a strategy can set the set its model was trained with.
+    label_set: tuple[str, ...] = LABELS
     reply_instruction: ClassVar[str] = "Answer with the letter of one option only."
 
     @abstractmethod
@@ -108,10 +116,17 @@ def build_question(
     criteria: Any,
     max_options: int,
     labeled: bool = True,
+    question_types: Mapping[str, QuestionType] | None = None,
 ) -> Question:
     if not qid:
         raise StructuredDecisionError("question ids must be non-empty")
-    qtype = get_question_type(type_name)
+    available = question_types or QUESTION_TYPES
+    try:
+        qtype = available[type_name]
+    except KeyError:
+        raise StructuredDecisionError(
+            f"unknown question type {type_name!r}; supported: {sorted(available)}"
+        ) from None
     options = qtype.parse_options(qid, criteria)
     if not options:
         raise StructuredDecisionError(f"question {qid!r}: needs at least one option")
@@ -132,6 +147,7 @@ def build_question(
         instructions=instructions,
         options=tuple(options),
         labels=qtype.label_set[: len(options)],
+        raw_instructions=raw_instructions,
         raw=(raw_instructions, criteria),
     )
 
