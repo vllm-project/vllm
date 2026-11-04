@@ -2232,7 +2232,12 @@ class VllmConfig:
                     "deepep_high_throughput",
                     "nixl_ep",
                 ]
-            assert a2a_backend in supported_backends, (
+            # SubGPU pipelining without expert parallelism has no all-to-all.
+            no_all2all = (
+                self.parallel_config.subgpu_pipelining
+                and not self.parallel_config.enable_expert_parallel
+            )
+            assert no_all2all or a2a_backend in supported_backends, (
                 "Microbatching currently only supports the "
                 f"{', '.join(supported_backends)} all2all backends on this "
                 f"platform. {a2a_backend} is not supported. To fix use one of "
@@ -3249,6 +3254,10 @@ class VllmConfig:
         if self.watermark_config is not None:
             unsupported.append("watermarking")
 
+        # SubGPU pipelining is implemented only by the V2 model runner.
+        if self.parallel_config.subgpu_pipelining:
+            unsupported.append("SubGPU pipelining")
+
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
@@ -3421,33 +3430,43 @@ class VllmConfig:
         (adapters, pipeline stages, prefill context parallelism, encoders) is
         not handled yet.
         """
-        # TODO: DBO with model runner V2 is under development.
-        # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
-        # Remove it when stable.
-        if envs.VLLM_USE_V2_MODEL_RUNNER is None:
-            return ["dual batch overlap"]
-
-        unsupported: list[str] = []
         model_config = self.model_config
         parallel_config = self.parallel_config
 
+        # TODO: DBO with model runner V2 is under development.
+        # It should be enabled with explicit VLLM_USE_V2_MODEL_RUNNER environ.
+        # Remove it when stable. SubGPU pipelining exists only in the V2
+        # runner, so asking for it is the explicit opt-in.
+        if (
+            envs.VLLM_USE_V2_MODEL_RUNNER is None
+            and not parallel_config.subgpu_pipelining
+        ):
+            return ["dual batch overlap"]
+
+        unsupported: list[str] = []
+        mode = (
+            "SubGPU pipelining"
+            if parallel_config.subgpu_pipelining
+            else "dual batch overlap"
+        )
+
         if self.lora_config is not None:
-            unsupported.append("dual batch overlap with LoRA")
+            unsupported.append(f"{mode} with LoRA")
         if parallel_config.pipeline_parallel_size > 1:
-            unsupported.append("dual batch overlap with pipeline parallelism")
+            unsupported.append(f"{mode} with pipeline parallelism")
         if parallel_config.prefill_context_parallel_size > 1:
-            unsupported.append("dual batch overlap with prefill context parallelism")
+            unsupported.append(f"{mode} with prefill context parallelism")
         if model_config is not None and (
             model_config.is_multimodal_model or model_config.is_encoder_decoder
         ):
-            unsupported.append("dual batch overlap with multimodal models")
+            unsupported.append(f"{mode} with multimodal models")
         if model_config is not None and model_config.is_hybrid:
-            unsupported.append("dual batch overlap with hybrid models")
+            unsupported.append(f"{mode} with hybrid models")
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             # DBO captures FULL graphs only.
-            unsupported.append("dual batch overlap with PIECEWISE CUDA graphs")
+            unsupported.append(f"{mode} with PIECEWISE CUDA graphs")
         if self.is_mm_encoder_only:
-            unsupported.append("dual batch overlap with encoder only models")
+            unsupported.append(f"{mode} with encoder only models")
 
         return unsupported
 

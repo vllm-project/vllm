@@ -2147,6 +2147,39 @@ def test_dbo_thresholds_cover_a_request_per_microbatch(threshold, expected):
     assert parallel_config.dbo_prefill_token_threshold == expected
 
 
+def test_subgpu_pipelining_uses_two_micro_batches():
+    assert not ParallelConfig().use_ubatching
+    config = ParallelConfig(subgpu_pipelining=True)
+    assert config.use_ubatching
+    assert config.num_ubatches == 2
+
+
+def test_subgpu_pipelining_config_validation():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ParallelConfig(subgpu_pipelining=True, enable_dbo=True)
+    with pytest.raises(ValueError, match="multiple of 8"):
+        ParallelConfig(subgpu_pipelining=True, subgpu_attn_sms=66, subgpu_rest_sms=82)
+    # The green-context split needs only one of the two pools 8-SM aligned.
+    ParallelConfig(subgpu_pipelining=True, subgpu_attn_sms=64, subgpu_rest_sms=84)
+    # The DBO thresholds apply to SubGPU pipelining as well.
+    with pytest.raises(ValueError, match="number of microbatches"):
+        ParallelConfig(subgpu_pipelining=True, dbo_decode_token_threshold=1)
+
+
+def test_subgpu_pipelining_selects_the_v2_model_runner(monkeypatch):
+    """Microbatching picks the V1 runner until DBO on V2 is stable; SubGPU
+    pipelining exists only in V2, so asking for it is the opt-in."""
+    monkeypatch.setattr(envs, "VLLM_USE_V2_MODEL_RUNNER", None)
+    config = VllmConfig(
+        model_config=ModelConfig("facebook/opt-125m", dtype="float16", seed=0),
+        parallel_config=ParallelConfig(subgpu_pipelining=True),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY
+        ),
+    )
+    assert config.use_v2_model_runner
+
+
 def test_engram_explicit_config_requires_supported_model():
     """Explicit all-false settings still opt into model validation."""
     with pytest.raises(ValueError, match="requires a model with supported Engram"):
