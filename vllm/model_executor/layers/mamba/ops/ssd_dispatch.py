@@ -160,14 +160,12 @@ class FlashInferSSDBackend(MambaSSDBackend):
         assert seq_idx is not None
         # FlashInfer takes the state dtype from the initial states.
         assert initial_states is not None
-        # FlashInfer reads x, B and C through TMA, which needs a unit innermost
-        # stride; the causal conv output is token-contiguous.
         _, final_states = self._kernel(
-            x.contiguous().unsqueeze(0),
+            x.unsqueeze(0),
             dt.unsqueeze(0),
             A,
-            B.contiguous().unsqueeze(0),
-            C.contiguous().unsqueeze(0),
+            B.unsqueeze(0),
+            C.unsqueeze(0),
             D=D,
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,

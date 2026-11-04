@@ -814,7 +814,7 @@ def test_mamba_ssd_dispatch_preserves_outputs_cache_and_checkpoint_resume(
     assert backend.name == provider
     monkeypatch.setattr(mod, "is_conv_state_dim_first", lambda: True)
     monkeypatch.setattr(
-        mod, "causal_conv1d_fn", lambda values, *args, **kwargs: values.contiguous()
+        mod, "causal_conv1d_fn", lambda values, *args, **kwargs: values.clone()
     )
 
     def forward_context():
