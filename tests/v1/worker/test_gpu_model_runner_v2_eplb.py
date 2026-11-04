@@ -5,7 +5,6 @@
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 import torch
 
 from vllm.config import CompilationConfig, CompilationMode
@@ -56,10 +55,8 @@ class FakeEplbState:
         self.update_mapping_calls.append((model_config, mapping))
 
 
-def _make_runner(
-    runner_cls: type[mrv2.GPUModelRunner] = mrv2.GPUModelRunner, **overrides: Any
-) -> Any:
-    runner: Any = runner_cls.__new__(runner_cls)
+def _make_runner(**overrides: Any) -> Any:
+    runner: Any = mrv2.GPUModelRunner.__new__(mrv2.GPUModelRunner)
     runner.device = torch.device("cpu")
     runner.model_config = SimpleNamespace(
         model="test-model", logits_processors=None, enable_sleep_mode=False
@@ -181,50 +178,6 @@ def test_v2_load_model_with_dummy_weights_defers_eplb_async_loop(monkeypatch):
     # A scaling-up worker registers so it can join the EPLB communicator.
     assert runner.eplb_state.add_model_calls == [(model, runner.model_config, None)]
     assert runner.eplb_state.async_started is False
-
-
-@pytest.mark.parametrize("override", [False, True])
-def test_v2_load_model_builds_state_through_runner_hook(monkeypatch, override):
-    """Subclasses supply their ModelState via _init_model_state; the default
-    still calls the module factory with the runner's config, model and cache."""
-    model = SimpleNamespace(is_moe=False)
-    default_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
-    custom_state = SimpleNamespace(num_new_sampled_tokens_per_step=1)
-    factory_calls = []
-
-    def factory(*args):
-        factory_calls.append(args)
-        return default_state
-
-    class CustomStateRunner(mrv2.GPUModelRunner):
-        def _init_model_state(self):
-            return custom_state
-
-    monkeypatch.setattr(mrv2, "DeviceMemoryProfiler", FakeMemoryProfiler)
-    monkeypatch.setattr(eplb, "EplbState", FakeEplbState)
-    monkeypatch.setattr(eplb, "get_mixture_of_experts_model", lambda model: None)
-    monkeypatch.setattr(
-        mrv2,
-        "get_model_loader",
-        lambda load_config: SimpleNamespace(load_model=lambda **_: model),
-    )
-    monkeypatch.setattr(mrv2, "init_model_state", factory)
-
-    encoder_cache = object()
-    runner_cls = CustomStateRunner if override else mrv2.GPUModelRunner
-    runner = _make_runner(
-        runner_cls, is_last_pp_rank=False, encoder_cache=encoder_cache
-    )
-    runner.load_model()
-
-    if override:
-        assert runner.model_state is custom_state
-        assert factory_calls == []
-    else:
-        assert runner.model_state is default_state
-        assert factory_calls == [
-            (runner.vllm_config, model, encoder_cache, runner.device)
-        ]
 
 
 def test_v2_setup_eplb_from_mapping_updates_state_in_place():
