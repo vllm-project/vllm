@@ -65,20 +65,21 @@ def test_pa_gluon_supports(
 
 
 @pytest.mark.parametrize(
-    ("backend", "heads", "kv_cache_dtype", "shuffle", "parallel", "expected"),
+    ("backend", "heads", "kv_cache_dtype", "shuffle", "parallel", "spec", "expected"),
     [
-        (None, (24, 4), "auto", True, (1, False), "ROCM_AITER_FA_GLUON"),
-        (None, (24, 4), "auto", False, (1, False), None),
-        ("ROCM_ATTN", (24, 4), "auto", True, (1, False), "ROCM_ATTN"),
-        (None, (16, 2), "auto", True, (1, False), None),
-        (None, (24, 4), "fp8", True, (1, False), None),
-        (None, (24, 4), "auto", True, (2, False), None),
-        (None, (24, 4), "auto", True, (1, True), None),
+        (None, (24, 4), "auto", True, (1, False), False, "ROCM_AITER_FA_GLUON"),
+        (None, (24, 4), "auto", False, (1, False), False, None),
+        ("ROCM_ATTN", (24, 4), "auto", True, (1, False), False, "ROCM_ATTN"),
+        (None, (16, 2), "auto", True, (1, False), False, None),
+        (None, (24, 4), "fp8", True, (1, False), False, None),
+        (None, (24, 4), "auto", True, (2, False), False, None),
+        (None, (24, 4), "auto", True, (1, True), False, None),
+        (None, (24, 4), "auto", True, (1, False), True, None),
     ],
-    ids=["qwen38", "plain-kv", "user-backend", "gqa-8", "fp8-kv", "tp2", "ep"],
+    ids=["qwen38", "plain-kv", "user-backend", "gqa-8", "fp8-kv", "tp2", "ep", "spec"],
 )
 def test_qwen3_5_config_selects_gluon_backend(
-    backend, heads, kv_cache_dtype, shuffle, parallel, expected, aiter_env
+    backend, heads, kv_cache_dtype, shuffle, parallel, spec, expected, aiter_env
 ):
     from vllm.config import AttentionConfig
     from vllm.model_executor.models.config import _default_rocm_aiter_fa_gluon
@@ -101,6 +102,7 @@ def test_qwen3_5_config_selects_gluon_backend(
             world_size=parallel[0], enable_expert_parallel=parallel[1]
         ),
         cache_config=SimpleNamespace(cache_dtype=kv_cache_dtype),
+        speculative_config=SimpleNamespace() if spec else None,
     )
     _default_rocm_aiter_fa_gluon(config)
     chosen = config.attention_config.backend
@@ -130,6 +132,7 @@ def test_build_zeroes_null_block(monkeypatch):
 
 
 def test_decode_passes_shuffle_views_to_gluon(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.v1.attention.backends import rocm_aiter_fa_gluon
     from vllm.v1.attention.backends.rocm_aiter_fa_gluon import (
         AiterFlashAttentionGluonImpl,
@@ -144,10 +147,13 @@ def test_decode_passes_shuffle_views_to_gluon(monkeypatch):
         "pa_decode_gluon",
         lambda **kwargs: kernel_args.update(kwargs),
     )
+    monkeypatch.setattr(rocm_aiter_ops, "_SHUFFLE_KV_CACHE_ENABLED", True)
     impl = object.__new__(AiterFlashAttentionGluonImpl)
     impl.use_gluon_decode, impl.scale = True, 256**-0.5
-    key_cache = torch.zeros(3, 16, 4, 256, dtype=torch.bfloat16)
-    value_cache = torch.zeros_like(key_cache)
+    impl.num_kv_heads, impl.head_size = 4, 256
+    kv_cache = torch.zeros(3, 2, 16, 4 * 256, dtype=torch.bfloat16)
+    key_cache, value_cache = impl._split_kv_cache(kv_cache)
+    assert not key_cache.is_contiguous()
     query = torch.zeros(2, 24, 256, dtype=torch.bfloat16)
     metadata = SimpleNamespace(
         seq_lens=torch.tensor([5, 17]), block_table=torch.zeros(2, 2)

@@ -117,6 +117,7 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
             and self.sliding_window[0] == -1
             and self.sinks is None
             and self.alibi_slopes is None
+            and not self.logits_soft_cap
         )
 
     def _decode_shuffle_layout(
@@ -130,12 +131,7 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
         num_decodes: int,
         num_decode_tokens: int,
     ) -> None:
-        num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
-        if (
-            not self.use_gluon_decode
-            or block_size != _BLOCK_SIZE
-            or num_decode_tokens != num_decodes
-        ):
+        if not self.use_gluon_decode:
             super()._decode_shuffle_layout(
                 layer,
                 query,
@@ -147,6 +143,7 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
                 num_decode_tokens,
             )
             return
+        num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
         num_heads = query.shape[1]
         x = 16 // key_cache.element_size()
         splits = get_recommended_splits(num_decodes, num_kv_heads)
