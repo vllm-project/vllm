@@ -272,16 +272,20 @@ class RoutedExperts(PluggableLayer):
             or config.tp_shard_with_padding
         )
 
-    def padding_fill_params(self) -> list[tuple[torch.Tensor, float]]:
-        """(parameter, padding value) pairs a direct reload refills whole
+    def padding_fill_params(self) -> list[tuple[str, float]]:
+        """(parameter name, padding value) pairs a direct reload refills whole
         before the loaders rewrite the checkpoint region: if `has_padding`,
         the quant method's per-element parameters. Weights get 0,
         ones-initialized scales (``padding_value`` attribute) get 1. Direct
         reload reads this once, at cold start before post-load processing."""
         if not self.has_padding():
             return []
-        params = (self._parameters.get(name) for name in self._padding_fill_names)
-        return [(p, getattr(p, "padding_value", 0)) for p in params if p is not None]
+        params = ((n, self._parameters.get(n)) for n in self._padding_fill_names)
+        return [
+            (name, getattr(p, "padding_value", 0))
+            for name, p in params
+            if p is not None
+        ]
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):

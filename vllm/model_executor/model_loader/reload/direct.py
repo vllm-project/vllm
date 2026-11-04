@@ -129,13 +129,13 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
     # Before post-load processing, which may pad only the runtime copy and
-    # record that in the layer's config: refilled by every `begin`.
+    # record that in the layer's config: refilled by every `begin`. By name, so
+    # a parameter post-load processing drops is neither kept alive nor filled.
     model._ckpt_padding_fill = [
-        (t, value)
+        (module, name, value)
         for module in model.modules()
         if hasattr(module, "padding_fill_params")
-        for t, value in module.padding_fill_params()
-        if _owned(model, t)
+        for name, value in module.padding_fill_params()
     ]
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
@@ -227,8 +227,10 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     # Reset the padding the loaders skip (PWAL left its output there; after a
     # dummy cold start it holds random values). Erases the data region too:
     # every checkpoint tensor loaded into these must be resent.
-    for t, value in model._ckpt_padding_fill:
-        t.data.fill_(value)
+    for module, name, value in model._ckpt_padding_fill:
+        t = module._parameters.get(name)
+        if t is not None and _owned(model, t):
+            t.data.fill_(value)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
