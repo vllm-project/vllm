@@ -12,9 +12,79 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.humming.schema import (
     check_and_fallback_input_schema,
 )
+from vllm.model_executor.utils import (
+    get_live_param,
+    kernel_parameters,
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_kernel_parameter,
+)
 
 if TYPE_CHECKING:
     from vllm.utils.humming import BaseInputSchema, LayerConfig
+
+# A param the conversion leaves unused keeps its loaded data, retired, when it is
+# at most this fraction of the largest converted tensor (scalars, per-tensor and
+# per-channel scales); a larger one backs a new tensor (its data is in them).
+_KEEP_UNUSED_FRACTION = 1 / 256
+
+
+def _nbytes(t: torch.Tensor) -> int:
+    return t.numel() * t.element_size()
+
+
+def replace_layer_parameters(
+    layer: torch.nn.Module, tensors: dict[str, torch.Tensor], names: list[str]
+) -> None:
+    """Write ``tensors`` into ``layer``, keeping existing parameter objects.
+
+    A param in ``names`` that gets no new tensor stays registered: an alias of a
+    replaced param follows it; one whose storage a new tensor is in, or a large
+    one, is also registered under a new name (see `move_parameter`); any other
+    keeps its data, retired."""
+    params = layer._parameters
+    replaced = {id(p) for name in tensors if (p := params.get(name)) is not None}
+    leftovers = {
+        name: p
+        for name in names
+        if name not in tensors
+        and (p := params.get(name)) is not None
+        and id(p) not in replaced
+    }
+
+    def adopt(src: str, dst: str) -> None:
+        move_parameter(layer, src, dst)
+        for name in [n for n, p in leftovers.items() if p is params[src]]:
+            del leftovers[name]
+
+    new = [name for name in tensors if name not in params]
+    for name in new:
+        ptr = tensors[name].untyped_storage().data_ptr()
+        src = next(
+            (n for n, p in leftovers.items() if p.untyped_storage().data_ptr() == ptr),
+            None,
+        )
+        if ptr and src is not None:
+            adopt(src, name)
+    limit = _KEEP_UNUSED_FRACTION * max(map(_nbytes, tensors.values()), default=0)
+    large = sorted(
+        (n for n, p in leftovers.items() if _nbytes(p) > limit),
+        key=lambda n: _nbytes(leftovers[n]),
+        reverse=True,
+    )
+    free = sorted(
+        (n for n in new if n not in params),
+        key=lambda n: _nbytes(tensors[n]),
+        reverse=True,
+    )
+    for src, dst in zip(large, free):
+        if src in leftovers:
+            adopt(src, dst)
+    for name in leftovers:
+        retire_parameter(layer, name)
+    for name, tensor in tensors.items():
+        set_kernel_parameter(layer, name, tensor)
 
 
 def convert_linear_layer_to_humming_standard(
@@ -24,12 +94,16 @@ def convert_linear_layer_to_humming_standard(
     layout: ``weight_packed`` int32 + ``weight_scale``) into the parameter names
     and layout humming's weight schema expects (``weight`` / ``weight_scale``)."""
     for name, checkpoint_name in name_map.items():
-        tensor = getattr(layer, checkpoint_name)
-        delattr(layer, checkpoint_name)
+        param = getattr(layer, checkpoint_name)
+        tensor = param.data
 
         if name == "weight":
-            input_dim = getattr(tensor, "input_dim", 1)
-            output_dim = getattr(tensor, "output_dim", 0)
+            # (input_dim, output_dim) after PWAL, if it transposed the weight.
+            input_dim, output_dim = getattr(
+                layer,
+                "processed_weight_dims",
+                (getattr(param, "input_dim", 1), getattr(param, "output_dim", 0)),
+            )
 
             if input_dim == 0 and output_dim == 1:
                 tensor = tensor.transpose(1, 0).contiguous()
@@ -38,19 +112,17 @@ def convert_linear_layer_to_humming_standard(
 
             tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
         elif name in ["weight_scale", "zero_point"]:
-            if getattr(tensor, "output_dim", 0) == 1:
+            if getattr(param, "output_dim", 0) == 1:
                 tensor = tensor.transpose(0, 1).contiguous()
             if tensor.ndim == 1:
                 tensor = tensor.unsqueeze(1)
 
             tensor = tensor.view(torch.int32) if name == "zero_point" else tensor
 
-        if isinstance(tensor, torch.nn.Parameter):
-            param = tensor
-        else:
-            param = torch.nn.Parameter(tensor, requires_grad=False)
-
-        setattr(layer, name, param)
+        if name != checkpoint_name:
+            # One param under both names: the loader keeps its name.
+            move_parameter(layer, checkpoint_name, name)
+        replace_parameter(layer, name, tensor)
 
 
 def prepare_humming_linear_layer_config(
@@ -59,13 +131,13 @@ def prepare_humming_linear_layer_config(
     input_quant_config: dict | None = None,
     *,
     input_schema: "BaseInputSchema | None" = None,
+    allow_input_schema_fallback: bool = True,
 ) -> "LayerConfig":
     from vllm.utils.humming import (
         BaseInputSchema,
         BaseWeightSchema,
         HummingInputSchema,
-        prepare_layer_config,
-        transform_humming_tensors,
+        prepare_and_transform_humming_tensors,
     )
 
     weight_schema = BaseWeightSchema.from_config(quant_config)
@@ -87,7 +159,7 @@ def prepare_humming_linear_layer_config(
     shape_n_stacks = layer.output_partition_sizes
 
     # Step 1: convert weight and input schemas to humming standard format
-    source_tensors = dict(layer.named_parameters(recurse=False))
+    source_tensors = kernel_parameters(layer)
     weight_schema, tensors = weight_schema.convert_humming(
         tensors=source_tensors,
         shape_n_stacks=shape_n_stacks,
@@ -120,6 +192,7 @@ def prepare_humming_linear_layer_config(
         weight_schema=weight_schema,
         input_schema=input_schema,
         param_dtype=layer.params_dtype,
+        allow_fallback=allow_input_schema_fallback,
     )
     for name in ("input_scale", "input_scale_2"):
         if name != input_schema.static_tensor_scale_name:
@@ -127,7 +200,8 @@ def prepare_humming_linear_layer_config(
             input_tensors.pop(name, None)
 
     # Step 2: transform weight (humming standard format) for forwarding.
-    config = prepare_layer_config(
+    config, tensors = prepare_and_transform_humming_tensors(
+        tensors=tensors,
         shape_n=sum(layer.output_partition_sizes),
         shape_k=input_size_per_partition,
         weight_schema=weight_schema,
@@ -138,16 +212,11 @@ def prepare_humming_linear_layer_config(
         torch_dtype=layer.params_dtype,
         device=tensors["weight"].device,
     )
-    tensors = transform_humming_tensors(config, tensors)
     tensors.update(input_tensors)
     if "bias" in tensors:
         zero_bias = torch.zeros_like(tensors["bias"])
         layer.register_buffer("zero_bias", zero_bias)
-    for name, _ in list(layer.named_parameters(recurse=False)):
-        delattr(layer, name)
-    for name, tensor in tensors.items():
-        param = torch.nn.Parameter(tensor, requires_grad=False)
-        setattr(layer, name, param)
+    replace_layer_parameters(layer, tensors, list(layer._parameters))
 
     return config
 
@@ -174,19 +243,19 @@ def apply_humming_linear(
     from vllm.utils.humming import humming_forward
 
     mode = layer_config.input_quant_mode
-    input_scale = getattr(layer, "input_scale", None) if mode.should_quantize else None
+    input_scale = get_live_param(layer, "input_scale") if mode.should_quantize else None
     input_scale_2 = (
-        getattr(layer, "input_scale_2", None) if mode.has_secondary_scale else None
+        get_live_param(layer, "input_scale_2") if mode.has_secondary_scale else None
     )
     flatten_inputs = x.reshape(-1, x.size(-1))
     output = humming_forward(
         layer_config,
         inputs=flatten_inputs,
         weight=layer.weight,
-        weight_scale=getattr(layer, "weight_scale", None),
-        zero_point=getattr(layer, "zero_point", None),
-        bias=getattr(layer, "zero_bias" if skip_bias_add else "bias", None),
-        weight_scale_2=getattr(layer, "weight_scale_2", None),
+        weight_scale=get_live_param(layer, "weight_scale"),
+        zero_point=get_live_param(layer, "zero_point"),
+        bias=get_live_param(layer, "zero_bias" if skip_bias_add else "bias"),
+        weight_scale_2=get_live_param(layer, "weight_scale_2"),
         input_scale=input_scale,
         input_scale_2=input_scale_2,
         hadamard_block_size=layer.weight_schema.hadamard_block_size,

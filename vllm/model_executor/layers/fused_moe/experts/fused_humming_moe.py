@@ -22,6 +22,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_globalize_align_block_size import (
+    fused_globalize_align_block_size,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -63,6 +66,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils.humming import create_humming_locks
 from vllm.utils.import_utils import has_humming
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -137,7 +141,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "w13": humming_quant_config.w1_humming_config,
             "w2": humming_quant_config.w2_humming_config,
         }
-        self.locks = torch.zeros(1024, dtype=torch.int32, device=moe_config.device)
+        self.locks = create_humming_locks(moe_config.device)
         self.num_experts = moe_config.num_local_experts
         self.global_num_experts = moe_config.num_experts
         self.quant_config = humming_quant_config
@@ -710,16 +714,45 @@ class HummingIndexedExperts(HummingExpertsBase):
             num_sms = num_compute_units(topk_ids.get_device())
             use_scatter = topk_ids.numel() > 2 * num_sms
 
-        alignment = moe_align_block_size(
-            topk_ids=topk_ids,
-            block_size=moe_block_size,
-            num_experts=self.global_num_experts,
-            expert_map=expert_map,
-            ignore_invalid_experts=True,
-            return_scatter_idx=use_scatter,
+        # When DeepEP-v2 deferred globalization, fuse globalize + align + sort
+        # into one launch (topk_ids globalized in place); else align only.
+        rank_expert_offset = (
+            expert_tokens_meta.rank_expert_offset
+            if expert_tokens_meta is not None
+            else None
         )
-        sorted_ids, expert_ids, num_tokens_padded = alignment[:3]
-        scatter_idx = alignment[3] if len(alignment) == 4 else None
+        psum = (
+            expert_tokens_meta.psum_recv_per_rank
+            if expert_tokens_meta is not None
+            else None
+        )
+        if (
+            current_platform.is_cuda()
+            and rank_expert_offset is not None
+            and psum is not None
+        ):
+            alignment = fused_globalize_align_block_size(
+                recv_topk_idx=topk_ids,
+                psum_recv_per_rank=psum,
+                rank_expert_offset=rank_expert_offset,
+                global_num_experts=self.global_num_experts,
+                local_num_experts=self.num_experts,
+                block_size=moe_block_size,
+                return_scatter_idx=use_scatter,
+            )
+            _, sorted_ids, expert_ids, num_tokens_padded = alignment[:4]
+            scatter_idx = alignment[4] if use_scatter else None
+        else:
+            alignment = moe_align_block_size(
+                topk_ids=topk_ids,
+                block_size=moe_block_size,
+                num_experts=self.global_num_experts,
+                expert_map=expert_map,
+                ignore_invalid_experts=True,
+                return_scatter_idx=use_scatter,
+            )
+            sorted_ids, expert_ids, num_tokens_padded = alignment[:3]
+            scatter_idx = alignment[3] if len(alignment) == 4 else None
 
         moe_common_kwargs = {
             "sorted_ids": sorted_ids,
@@ -914,7 +947,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             scatter_metadata = moe_prepare_scatter(topk_ids, expert_map, scratch)
             expert_offsets, scatter_idx = scatter_metadata
             inv_perm = scatter_idx.flatten()
-            num_valid_tokens = expert_offsets[-1:] if expert_map is not None else None
+            # Bound the dynamic input quantization to the valid routes. Rows
+            # past expert_offsets[-1] belong to non-local experts or to invalid
+            # routes (e.g. -1 for padding tokens), with or without expert_map.
+            num_valid_tokens = expert_offsets[-1:]
         else:
             # Prequantized inputs skip w13 quantization, so its buffer is free
             # to hold the permuted hidden states.

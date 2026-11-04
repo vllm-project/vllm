@@ -3,24 +3,28 @@
 
 //! Unified parser interface for reasoning and tool-call deltas.
 
+mod beam;
 mod combined;
 mod gemma4;
 mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
+mod muse;
 
+pub use beam::BeamUnifiedParser;
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
-pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
+pub use hf::{HfPosition, HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::KimiK3UnifiedParser;
+pub use muse::MuseUnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningError;
 use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
 use crate::utils::SpecialToken;
@@ -242,6 +246,12 @@ pub trait UnifiedParser: Send {
         false
     }
 
+    /// Return the tool strict level applied when the operator leaves
+    /// `--tool-strict-level` unset.
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        ToolStrictLevel::Auto
+    }
+
     /// Build the request output grammar after prompt-based initialization.
     fn build_output_grammar(
         &self,
@@ -284,10 +294,26 @@ pub enum UnifiedParserError {
     MissingToken { token: String },
     #[error("unified parser parsing failed: {message}")]
     ParsingFailed { message: String },
+    /// The output ended inside a tool call, e.g. at `max_tokens` or a stop
+    /// string: the call's markup is truncated rather than malformed.
+    #[error("incomplete {parser} tool call")]
+    IncompleteToolCall { parser: &'static str },
     #[error(transparent)]
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
     Tool(#[from] ToolParserError),
+}
+
+impl UnifiedParserError {
+    /// Whether the output ended inside a tool call, from this parser or the
+    /// tool parser it drives.
+    pub fn is_incomplete_tool_call(&self) -> bool {
+        matches!(
+            self,
+            Self::IncompleteToolCall { .. }
+                | Self::Tool(ToolParserError::IncompleteToolCall { .. })
+        )
+    }
 }
 
 /// Returns the ID for the given token, or an error if it's not found.

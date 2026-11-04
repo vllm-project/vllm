@@ -47,7 +47,7 @@ class LLBf16SplitK:
 
     :param ab_dtype: Element type for A and B operands.
     :param acc_dtype: Accumulator type used by MMA and reductions.
-    :param out_dtype: Output element type. The public wrapper uses fp32.
+    :param out_dtype: Output element type (fp32 or bf16).
     :param tile_n: CTA tile size in N. M is fixed to 16 for router batches.
     :type tile_n: int
     :param tile_k: K tile size staged through shared memory.
@@ -357,6 +357,9 @@ class LLBf16SplitK:
             consumer_group=consumer_group,
         )
 
+        # Peer CTAs must be running before the epilogue's DSMEM stores.
+        cute.arch.cluster_arrive_relaxed()
+
         # Round-robin split-K: split z handles tiles z, z+split_k, ...
         K_total = cute.size(mA, mode=[1])
         k_tile_count = cute.size(gA, mode=[2])
@@ -402,6 +405,7 @@ class LLBf16SplitK:
                 pred=tApA,
             )
             mainloop_pipeline.producer_commit(producer_state)
+            cute.arch.cluster_wait()
             producer_state.advance()
 
             for k_tile in cutlass.range(
@@ -428,6 +432,7 @@ class LLBf16SplitK:
             mainloop_pipeline.producer_tail(producer_state)
 
         else:
+            cute.arch.cluster_wait()
             # MMA warps with k-phase interleaving
             cute.arch.setmaxregister_increase(232)  # large MMA fragments
 
@@ -580,6 +585,6 @@ class LLBf16SplitK:
                             reduction_profile=0,
                         )
                     )
-                    gC[local_coord] = acc
+                    gC[local_coord] = cutlass.Float32(acc).to(gC.element_type)
 
         cute.arch.sync_threads()

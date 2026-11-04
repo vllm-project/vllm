@@ -125,11 +125,9 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for connector_id, stats_data in transfer_stats_data.items():
-            assert connector_id in self._prom_metrics, (
-                f"{connector_id} is not contained in the list of registered connectors "
-                f"with Prometheus metrics support: {self._prom_metrics.keys()}"
-            )
-            self._prom_metrics[connector_id].observe(stats_data, engine_idx)
+            prom_metrics = self._prom_metrics.get(connector_id)
+            if prom_metrics is not None:
+                prom_metrics.observe(stats_data, engine_idx)
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
@@ -218,9 +216,38 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             c.supports_divergent_local_hybrid_hits for c in self._connectors
         )
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+            "connectors", []
+        )
+        if not connectors_config:
+            return False
+        for conn_config in connectors_config:
+            child_config = KVTransferConfig(
+                **{"engine_id": kv_transfer_config.engine_id, **conn_config}
+            )
+            connector_cls = KVConnectorFactory.get_connector_class(child_config)
+            if not connector_cls.supports_lookahead_block_hashes(child_config):
+                return False
+        return True
+
     @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        children = [
+            KVTransferConfig(**{"engine_id": kv_transfer_config.engine_id, **c})
+            for c in kv_transfer_config.kv_connector_extra_config.get("connectors", [])
+        ]
+        return bool(children) and all(
+            KVConnectorFactory.get_connector_class(c).supports_sleep_mode(c)
+            for c in children
+        )
 
     @classmethod
     def _get_connector_classes_and_configs(
@@ -251,6 +278,14 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def unregister_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.unregister_kv_caches()
+
+    def restore_kv_caches(self) -> None:
+        for c in self._connectors:
+            c.restore_kv_caches()
 
     def bind_kv_cache_manager(self, kv_cache_manager: "KVCacheManager") -> None:
         for connector in self._connectors:
@@ -479,6 +514,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:
             c.on_new_request(request)
+
+    def may_load_async(self, request: "Request") -> bool:
+        return any(c.may_load_async(request) for c in self._connectors)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

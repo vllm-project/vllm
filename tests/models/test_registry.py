@@ -21,6 +21,7 @@ from vllm.model_executor.models.registry import (
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
     _LazyRegisteredModel,
+    _ModelRegistry,
 )
 from vllm.platforms import current_platform
 
@@ -93,6 +94,8 @@ def test_registry_imports(model_arch):
     [
         ("LlamaForCausalLM", False, "bi-encoder"),
         ("LlavaForConditionalGeneration", True, "bi-encoder"),
+        ("Step5ForCausalLM", False, "bi-encoder"),
+        ("Step5ForConditionalGeneration", True, "bi-encoder"),
         ("DeepseekV41ForCausalLM", True, "bi-encoder"),
         ("BertForSequenceClassification", False, "cross-encoder"),
         ("RobertaForSequenceClassification", False, "cross-encoder"),
@@ -113,9 +116,6 @@ def test_registry_model_property(model_arch, is_mm, score_type):
 @pytest.mark.parametrize(
     "model_arch,is_pp",
     [
-        # TODO(woosuk): Re-enable this once the MLP Speculator is supported
-        # in V1.
-        # ("MLPSpeculatorPreTrainedModel", False),
         ("DeepseekV2ForCausalLM", True),
         ("Qwen2VLForConditionalGeneration", True),
     ],
@@ -130,9 +130,9 @@ def test_registry_is_pp(model_arch, is_pp):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        ("Qwen4ExpForCausalLM", not current_platform.is_rocm()),
-        ("Qwen4ExpForConditionalGeneration", not current_platform.is_rocm()),
-        ("Qwen4ExpMTP", not current_platform.is_rocm()),
+        ("Qwen4ExpForCausalLM", True),
+        ("Qwen4ExpForConditionalGeneration", True),
+        ("Qwen4ExpMTP", True),
         ("LlamaForCausalLM", False),
     ],
 )
@@ -171,7 +171,10 @@ def test_registry_inspect_does_not_init_cuda(model_arch):
     [
         # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
-        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        (
+            "KimiLinearForCausalLM",
+            not (current_platform.is_rocm() or current_platform.is_xpu()),
+        ),
         ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
@@ -227,6 +230,21 @@ def test_lazy_modelinfo_package_attempts_cache_load(monkeypatch):
     assert result is cached_model_info
     assert len(loaded_hashes) == 1
     assert loaded_hashes[0]
+
+
+def test_fill_model_info_cache(monkeypatch, tmp_path):
+    """After one fill, inspecting a model reads the cache instead of starting a
+    subprocess."""
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    arch = "LlamaForCausalLM"
+    registry = _ModelRegistry({arch: ModelRegistry.models[arch]})
+    registry.fill_model_info_cache()
+
+    monkeypatch.setattr(
+        "vllm.model_executor.models.registry._run_in_subprocess",
+        lambda _: pytest.fail("Model info should come from the filled cache"),
+    )
+    assert registry.models[arch].inspect_model_cls().is_text_generation_model
 
 
 def test_hf_registry_coverage():

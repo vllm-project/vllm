@@ -101,6 +101,23 @@ class DeviceMemoryProfiler:
         gc.collect()
 
 
+def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
+    """Free and total device memory in bytes, like
+    `torch.accelerator.get_memory_info`, corrected on integrated GPUs.
+
+    On UMA (Unified Memory Architecture) platforms the CPU and GPU share
+    physical memory, so the device runtime's numbers need platform-specific
+    correction; see `Platform.get_integrated_gpu_memory_info`.
+    """
+    free_memory, total_memory = torch.accelerator.get_memory_info(device)
+    index = torch.device(device).index if device is not None else None
+    if current_platform.is_integrated_gpu(index):
+        free_memory, total_memory = current_platform.get_integrated_gpu_memory_info(
+            index, free_memory, total_memory
+        )
+    return free_memory, total_memory
+
+
 @dataclass
 class MemorySnapshot:
     """Memory snapshot."""
@@ -140,16 +157,7 @@ class MemorySnapshot:
         self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
         self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
-        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
-        if current_platform.is_integrated_gpu(device.index):
-            # On UMA (Unified Memory Architecture) platforms the CPU and GPU
-            # share physical memory, so the device runtime's numbers need
-            # platform-specific correction.
-            self.free_memory, self.total_memory = (
-                current_platform.get_integrated_gpu_memory_info(
-                    device.index, self.free_memory, self.total_memory
-                )
-            )
+        self.free_memory, self.total_memory = device_memory_info(device)
 
         self.cuda_memory = self.total_memory - self.free_memory
 

@@ -66,7 +66,7 @@ class DummyKVConnector(KVConnectorBase_V1):
             block_ids_by_req=block_ids_by_req,
         )
 
-    def start_load_kv(self, kv_caches, finished_req_ids):
+    def start_load_kv(self, forward_context, **kwargs) -> None:
         pass
 
     def wait_for_layer_load(self, layer_name):
@@ -99,7 +99,7 @@ def _my_plugin():
         scheduler_output.block_hashes_by_req = block_hashes_by_req  # type: ignore[attr-defined]
         return connector.build_connector_meta(scheduler_output)
 
-    Scheduler._build_kv_connector_meta = _custom_build_kv_connector_meta
+    Scheduler._build_kv_connector_meta = _custom_build_kv_connector_meta  # type: ignore[method-assign]
 
 
 @pytest.fixture

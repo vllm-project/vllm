@@ -7,8 +7,13 @@ import torch
 from vllm_test_utils.monitor import monitor
 
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.utils.mem_constants import GiB_bytes as GiB
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    device_memory_info,
+    memory_profiling,
+)
 
 from ..utils import create_new_process_for_each_test
 
@@ -195,3 +200,45 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
         assert snapshot.free_memory == mock_cuda_free
         assert snapshot.total_memory == mock_cuda_total
         mock_psutil.virtual_memory.assert_not_called()
+
+
+def test_device_memory_info_on_integrated_gpu():
+    """The shared helper applies the platform's UMA correction, so every KV
+    cache sizing path (profiling and the extensible cache) sees the same
+    memory."""
+    mock_cuda_free = 40 * GiB
+    mock_cuda_total = 120 * GiB
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        mock_accelerator.get_memory_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_platform.get_integrated_gpu_memory_info.return_value = (
+            30 * GiB,
+            100 * GiB,
+        )
+
+        assert device_memory_info("cuda:0") == (30 * GiB, 100 * GiB)
+        mock_platform.is_integrated_gpu.assert_called_once_with(0)
+        mock_platform.get_integrated_gpu_memory_info.assert_called_once_with(
+            0, mock_cuda_free, mock_cuda_total
+        )
+
+        mock_platform.is_integrated_gpu.return_value = False
+        assert device_memory_info("cuda:0") == (mock_cuda_free, mock_cuda_total)
+
+
+def test_default_integrated_gpu_memory_info_uses_psutil():
+    """By default (NVIDIA UMA), free memory comes from psutil and total is
+    left as the device runtime reported it."""
+    with patch("vllm.platforms.interface.psutil") as mock_psutil:
+        mock_psutil.virtual_memory.return_value = MagicMock(available=100 * GiB)
+        assert Platform.get_integrated_gpu_memory_info(0, 40 * GiB, 120 * GiB) == (
+            100 * GiB,
+            120 * GiB,
+        )

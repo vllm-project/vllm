@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
     construct_tool_dicts,
+    response_item_status,
 )
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
@@ -43,6 +44,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.utils.gc_utils import untracked_list
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -192,7 +194,7 @@ class SimpleContext(ConversationContext):
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
-        self._accumulated_token_ids: list[int] = []
+        self._accumulated_token_ids: list[int] = untracked_list()
         self._accumulated_logprobs: list = []
         # Items already sent as output_item.done events; the final
         # streaming response reuses them instead of reparsing.
@@ -341,7 +343,7 @@ class ParsableContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
-        self._accumulated_token_ids: list[int] = []
+        self._accumulated_token_ids: list[int] = untracked_list()
         self.kv_transfer_params: dict[str, Any] | None = None
         self.ec_transfer_params: dict[str, Any] | None = None
 
@@ -380,6 +382,7 @@ class ParsableContext(ConversationContext):
                         tool_calls or [], self.request
                     ),
                     tools=self.request.tools,
+                    finish_reason=completion.finish_reason,
                 )
             )
         elif completion.text:
@@ -387,7 +390,7 @@ class ParsableContext(ConversationContext):
                 ResponseOutputMessage(
                     type="message",
                     id=f"msg_{random_uuid()}",
-                    status="completed",
+                    status=response_item_status(completion.finish_reason),
                     role="assistant",
                     content=[
                         ResponseOutputText(
