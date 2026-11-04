@@ -399,6 +399,11 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            ),
             prefix="model.layers.0.self_attn",
         )
         model = torch.nn.Module()
@@ -1605,6 +1610,11 @@ def _run_qsa_hisparse_prefill_case(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            ),
             prefix="model.layers.0.self_attn",
         )
         k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
@@ -2058,6 +2068,11 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
+            topk_indices_buffer=torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+                dtype=torch.int32,
+            ),
             prefix="model.layers.0.self_attn",
         )
         k_scale, v_scale = (0.5, 2.0) if fp8 else (1.0, 1.0)
@@ -2592,11 +2607,17 @@ def _run_qsa_hisparse_worker_case(
         set_default_torch_dtype(torch.bfloat16),
         torch.device(device),
     ):
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+            dtype=torch.int32,
+        )
         owners = [
             Qwen4ExpQSAAttention(
                 vllm_config=vllm_config,
                 config=config,
                 layer_id=layer,
+                topk_indices_buffer=topk_indices_buffer,
                 prefix=f"model.layers.{layer}.self_attn",
             )
             for layer in range(layers)
