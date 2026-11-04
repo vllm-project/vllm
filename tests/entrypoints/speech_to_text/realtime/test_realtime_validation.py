@@ -346,3 +346,92 @@ async def test_commit_without_session_update_returns_error(model_name):
             event = await receive_event(ws, timeout=10.0)
             assert event["type"] == "error"
             assert "model_not_validated" in event.get("code", "")
+
+
+async def _stream_with_turn_detection(
+    ws_url: str,
+    model_name: str,
+    turn_detection: dict,
+    chunks: list[str],
+) -> tuple[list[tuple[str, int]], str]:
+    """One session: turn events and transcription for ``chunks``."""
+    async with websockets.connect(ws_url) as ws:
+        event = await receive_event(ws, timeout=30.0)
+        assert event["type"] == "session.created"
+        await send_event(
+            ws,
+            {
+                "type": "session.update",
+                "model": model_name,
+                "turn_detection": turn_detection,
+            },
+        )
+        await send_event(ws, {"type": "input_audio_buffer.commit"})
+        for chunk in chunks:
+            await send_event(ws, {"type": "input_audio_buffer.append", "audio": chunk})
+        await send_event(ws, {"type": "input_audio_buffer.commit", "final": True})
+
+        turns: list[tuple[str, int]] = []
+        full_text = ""
+        while True:
+            event = await receive_event(ws, timeout=60.0)
+            if event["type"] == "input_audio_buffer.speech_started":
+                turns.append(("start", event["audio_start_ms"]))
+            elif event["type"] == "input_audio_buffer.speech_stopped":
+                turns.append(("stop", event["audio_end_ms"]))
+            elif event["type"] == "transcription.delta":
+                full_text += event["delta"]
+            elif event["type"] == "transcription.done":
+                return turns, full_text
+            elif event["type"] == "error":
+                pytest.fail(f"Received error: {event}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_turn_detection_events_alongside_transcription(
+    model_name, mary_had_lamb_audio_chunks
+):
+    """With turn detection on, the client gets the turn boundaries and the
+    transcription still arrives; an invalid setting is rejected."""
+    server_args = ["--enforce-eager", "--max-model-len", "2048"]
+
+    if model_name.startswith("mistralai"):
+        server_args += MISTRAL_FORMAT_ARGS
+
+    silence = base64.b64encode(np.zeros(1600, dtype=np.int16).tobytes()).decode()
+    # The clip, then 3 s of silence so the last turn ends under either type.
+    chunks = mary_had_lamb_audio_chunks + [silence] * 30
+    clip_ms = len(chunks) * 100
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        ws_url = _get_websocket_url(remote_server)
+
+        async with websockets.connect(ws_url) as ws:
+            await receive_event(ws, timeout=30.0)
+            await send_event(
+                ws,
+                {
+                    "type": "session.update",
+                    "model": model_name,
+                    "turn_detection": {"type": "server_vad", "threshold": 7},
+                },
+            )
+            event = await receive_event(ws, timeout=10.0)
+            assert event["type"] == "error"
+            assert event["code"] == "invalid_turn_detection"
+
+        for turn_detection in (
+            {"type": "server_vad"},
+            {"type": "semantic_vad", "eagerness": "high"},
+        ):
+            turns, full_text = await _stream_with_turn_detection(
+                ws_url, model_name, turn_detection, chunks
+            )
+            # Turns alternate start/stop, in order, the last one closed by the
+            # silence.
+            assert turns, f"no turn events for {turn_detection}"
+            assert [kind for kind, _ in turns] == ["start", "stop"] * (len(turns) // 2)
+            times = [ms for _, ms in turns]
+            assert times == sorted(times)
+            assert times[-1] <= clip_ms
+            assert "Mary had a little lamb" in full_text
