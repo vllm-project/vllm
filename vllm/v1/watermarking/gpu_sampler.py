@@ -90,23 +90,22 @@ class GPUWatermarkSampler(Sampler):
                 expanded_idx_mapping, contexts
             )
 
-        needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
-        skip_mask = None
-        if needs_mixed_sampling and expanded_idx_mapping.is_cuda:
+        if expanded_idx_mapping.is_cuda:
             skip_mask = watermark_skip_mask(
                 expanded_idx_mapping,
                 self.watermarking.gpu,
                 self.sampling_states.temperature.gpu,
+                contexts,
                 repeated_contexts,
             )
-        elif needs_mixed_sampling:
+        else:
             temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
             watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
                 temperatures != 0
             )
+            skip_mask = ~watermarking | (contexts < 0).any(dim=-1)
             if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
+                skip_mask |= repeated_contexts
 
         random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,

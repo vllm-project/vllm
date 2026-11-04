@@ -884,6 +884,13 @@ def _draft_step_kernel(
         req_idx = tl.load(next_req_indices_ptr + row).to(tl.int64)
         temperature = tl.load(temp_ptr + req_idx, mask=req_idx >= 0, other=0.0)
         active = tl.load(enabled_ptr + row) & (temperature != 0)
+        context_offsets = tl.arange(0, BLOCKS_POW2)
+        context = tl.load(
+            contexts_row_ptr + context_offsets,
+            mask=context_offsets < CONTEXT_WIDTH,
+            other=0,
+        )
+        active &= tl.min(context, axis=0) >= 0
         if DEDUPLICATE:
             # The dedup kernel body runs in place on the skip mask buffer.
             tl.store(skip_mask_ptr + row, active)
@@ -1110,13 +1117,23 @@ def _watermark_skip_mask_kernel(
     expanded_idx_mapping_ptr,
     watermarking_ptr,
     temperature_ptr,
+    contexts_ptr,
     repeated_ptr,
+    CONTEXT_WIDTH: tl.constexpr,
+    CONTEXT_BLOCK: tl.constexpr,
     HAS_REPEATED: tl.constexpr,
 ):
     row = tl.program_id(0)
     req_idx = tl.maximum(tl.load(expanded_idx_mapping_ptr + row), 0)
     apply = tl.load(watermarking_ptr + req_idx) != 0
     apply &= tl.load(temperature_ptr + req_idx) != 0.0
+    offsets = tl.arange(0, CONTEXT_BLOCK)
+    context = tl.load(
+        contexts_ptr + row * CONTEXT_WIDTH + offsets,
+        mask=offsets < CONTEXT_WIDTH,
+        other=0,
+    )
+    apply &= tl.min(context, axis=0) >= 0
     if HAS_REPEATED:
         apply &= tl.load(repeated_ptr + row) == 0
     tl.store(skip_ptr + row, ~apply)
@@ -1126,16 +1143,20 @@ def watermark_skip_mask(
     expanded_idx_mapping: torch.Tensor,
     watermarking: torch.Tensor,
     temperature: torch.Tensor,
+    contexts: torch.Tensor,
     repeated_contexts: torch.Tensor | None,
 ) -> torch.Tensor:
-    num_rows = expanded_idx_mapping.shape[0]
+    num_rows, context_width = contexts.shape
     skip_mask = torch.empty(num_rows, dtype=torch.bool, device=watermarking.device)
     _watermark_skip_mask_kernel[(num_rows,)](
         skip_mask,
         expanded_idx_mapping,
         watermarking,
         temperature,
+        contexts,
         repeated_contexts,
+        CONTEXT_WIDTH=context_width,
+        CONTEXT_BLOCK=triton.next_power_of_2(context_width),
         HAS_REPEATED=repeated_contexts is not None,
     )
     return skip_mask

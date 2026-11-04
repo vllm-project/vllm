@@ -50,6 +50,10 @@ and defaults to 4. Larger values make the watermark less robust to
 edits because an insertion, deletion, or substitution changes more subsequent
 contexts for all algorithms. Values above 16 are allowed and trigger a warning.
 
+Watermark contexts use generated tokens only. The first `context_width` tokens
+use ordinary sampling, independently of context deduplication. Prompt tokens
+are not needed for detection.
+
 `allow_target_only_watermarking` defaults to false and only has an effect when
 speculative decoding is enabled. It permits target-only Gumbel-max watermarking
 at the cost of weaker detectability. See

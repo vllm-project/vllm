@@ -16,7 +16,7 @@ from vllm.v1.watermarking import GumbelWatermarkDetector, SynthIDWatermarkDetect
 @pytest.mark.parametrize(
     ("algorithm", "detector_cls", "recorded_p_value"),
     [
-        ("gumbel", GumbelWatermarkDetector, 9.83e-20),
+        ("gumbel", GumbelWatermarkDetector, 2.68e-29),
         # Loose bound (1e-6 after the x10 tolerance) that holds across seeds/paths.
         ("synthid_text", SynthIDWatermarkDetector, 1e-7),
     ],
@@ -42,7 +42,10 @@ def test_llm_generated_sequence_is_watermarked(
         disable_log_stats=False,
     )
     request = "Tell me a story about an explorer who discovers a mysterious island."
-    params_use_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=True)
+    # Openings use ordinary sampling, so the recorded p-value needs a fixed seed.
+    params_use_wm = SamplingParams(
+        temperature=1.0, max_tokens=256, watermarking=True, seed=0
+    )
     params_no_wm = SamplingParams(temperature=1.0, max_tokens=256, watermarking=False)
     params_greedy = SamplingParams(temperature=0.0, max_tokens=16)
 
