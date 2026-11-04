@@ -30,21 +30,27 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
 )
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    quantize_and_insert_k_kernel,
+    remap_flashinfer_index,
+)
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
-# Per-token byte width of the two paged fp8 records. Both put a page's whole
-# data region ahead of its whole scale region, so ``k_cache.shape[-1]`` -- the
+# Per-token byte width of the paged records; ``k_cache.shape[-1]`` -- the
 # width the KV-cache spec publishes -- identifies the record:
 #   V4   (584 B): 448 fp8 e4m3 NoPE + 64 bf16 RoPE, then 7 UE8M0 scales of 64
-#                 dims each plus a pad byte.
+#                 dims each plus a pad byte. A page puts its whole data region
+#                 ahead of its whole scale region.
 #   V4.1 (528 B): all 512 dims as fp8 e4m3 (RoPE included), then 16 UE8M0
 #                 scales of 32 dims each. FlashMLA's ``ModelType::V41``.
 #   V4.1 NVFP4 (288 B): 512 e2m1 values packed two per byte (even element in
 #                 the low nibble), then 32 e4m3 scales of 16 dims each.
 #                 FlashMLA's ``ModelType::V41_FP4``, compressed cache only.
+# The V4.1 records are interleaved: each token's scales follow its own data.
 V4_BYTES_PER_TOKEN = 584
 V41_BYTES_PER_TOKEN = 528
 V41_QUANT_BLOCK = 32
@@ -52,131 +58,6 @@ V41_NUM_SCALES = 512 // V41_QUANT_BLOCK  # 16
 V41_NVFP4_BYTES_PER_TOKEN = 288
 V41_NVFP4_QUANT_BLOCK = 16
 V41_NVFP4_NUM_SCALES = 512 // V41_NVFP4_QUANT_BLOCK  # 32
-
-
-@triton.jit
-def quantize_and_insert_k_kernel(
-    # Input tensors
-    k_ptr,  # [num_tokens, 512] bf16
-    slot_mapping_ptr,  # [num_tokens] int64
-    # Output tensor
-    k_cache_ptr,  # [num_blocks, block_bytes] as uint8 (flattened view)
-    # Dimensions
-    num_tokens,
-    input_dim: tl.constexpr,  # 512
-    fp8_dim: tl.constexpr,  # 448
-    bf16_dim: tl.constexpr,  # 64
-    scale_dim: tl.constexpr,  # 8
-    quant_block: tl.constexpr,  # 64 (quantization block size)
-    cache_block_size: tl.constexpr,  # 64 (paged cache block size)
-    token_data_size: tl.constexpr,  # 576 bytes per token data
-    block_stride: tl.constexpr,  # total bytes per block (padded)
-    fp8_max: tl.constexpr,
-    n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
-    use_fnuz: tl.constexpr = False,
-):
-    """Quantize K tensor and insert into paged K cache.
-
-    K Cache block layout (block_size=64 tokens):
-    - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
-    - [64*576, 64*576 + 64*8): Scales, each token has 8 uint8 scales
-    - [64*576 + 64*8, block_stride): Padding
-
-    One program per token.
-
-    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
-    """
-    pid = tl.program_id(0)
-
-    if pid >= num_tokens:
-        return
-
-    # Get slot mapping
-    slot_idx = tl.load(slot_mapping_ptr + pid)
-    if slot_idx == -1:
-        return
-
-    block_idx = slot_idx // cache_block_size
-    pos_in_block = slot_idx % cache_block_size
-
-    # Input pointer for this token
-    input_row_ptr = k_ptr + pid * input_dim
-
-    # int64: block_idx * block_stride can exceed 2^31 with many KV-cache blocks
-    # (e.g. >= 57K at block_stride ~37K). Matches gather path below.
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-
-    # Token data pointer: token data is stored contiguously at start of block
-    # Each token's data is at offset pos_in_block * token_data_size
-    token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-
-    # Scale pointer: scales are stored after ALL token data in the block
-    # Scale for this token is at offset (64 * 576) + pos_in_block * 8
-    token_scale_ptr = (
-        cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
-    )
-
-    # Token data layout: [0:448] fp8, [448:576] bf16
-    token_fp8_ptr = token_data_ptr
-    token_bf16_ptr = token_data_ptr + fp8_dim
-
-    # ========== Quantize and store FP8 portion (first 448 elements) ==========
-    # Using UE8M0 quantization strategy (scale is power of 2, stored as uint8 exponent)
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
-
-            # Load bf16 input
-            x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
-
-            # Compute absmax scale (same as CUDA kernel)
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)  # Match CUDA: fmaxf(amax, 1e-4)
-
-            # UE8M0: Round scale UP to next power of 2
-            # scale = 2^ceil(log2(block_max / fp8_max))
-            raw_scale = block_max / fp8_max
-            log_scale = tl.log2(raw_scale)
-            exponent = tl.ceil(log_scale)  # Round UP to next integer exponent
-            scale = tl.exp2(exponent)  # scale = 2^exponent (power of 2)
-
-            # Quantize to fp8: fp8_value = bf16_value / scale
-            x_scaled = x / scale
-            x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
-
-            # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
-            if use_fnuz:
-                x_fp8 = x_clamped.to(tl.float8e4b8)
-            else:
-                x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
-
-            # Store as uint8 (1 byte each)
-            tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
-
-            # UE8M0 scale encoding: stored_value = exponent + 127 (bias)
-            # During dequant: scale = 2^(stored_value - 127)
-            encoded_scale = exponent + 127.0
-            encoded_scale = tl.maximum(tl.minimum(encoded_scale, 255.0), 0.0)
-            tl.store(token_scale_ptr + qblock_idx, encoded_scale.to(tl.uint8))
-
-    # Padding scale at index 7
-    tl.store(token_scale_ptr + 7, tl.zeros((), dtype=tl.uint8))
-
-    # ========== Store BF16 portion (last 64 elements, no quantization) ==========
-    bf16_input_offset = fp8_dim
-
-    # Process bf16 in chunks of 16
-    bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-    for i in tl.static_range(bf16_dim // 16):
-        chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
-        tl.store(bf16_out_ptr + chunk_offsets, bf16_vals)
 
 
 @triton.jit
@@ -211,10 +92,8 @@ def _quantize_and_insert_k_mxfp8_kernel(
 
     # int64: block_idx * block_stride can exceed 2^31 with many KV-cache blocks.
     cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-    token_data_ptr = cache_block_ptr + pos_in_block * head_dim
-    token_scale_ptr = (
-        cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
-    )
+    token_data_ptr = cache_block_ptr + pos_in_block * (head_dim + scale_dim)
+    token_scale_ptr = token_data_ptr + head_dim
 
     d = tl.arange(0, head_dim)
     x = tl.load(k_ptr + pid.to(tl.int64) * head_dim + d).to(tl.float32)
@@ -567,10 +446,8 @@ def _dequantize_and_gather_k_mxfp8_kernel(
 
         # int64: physical_block_idx * block_stride can exceed 2^31.
         cache_block_ptr = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
-        token_data_ptr = cache_block_ptr + pos_in_block * head_dim
-        token_scale_ptr = (
-            cache_block_ptr + cache_block_size * head_dim + pos_in_block * scale_dim
-        )
+        token_data_ptr = cache_block_ptr + pos_in_block * (head_dim + scale_dim)
+        token_scale_ptr = token_data_ptr + head_dim
 
         x_uint8 = tl.load(token_data_ptr + d)
         if use_fnuz:
@@ -604,8 +481,12 @@ def _dequantize_and_gather_k_nvfp4_kernel(
     quant_block: tl.constexpr,  # 16
     cache_block_size: tl.constexpr,
     block_stride: tl.constexpr,
+    TILE: tl.constexpr,  # tokens per iteration
 ):
-    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace."""
+    """Gather and dequantize V4.1 NVFP4 rows into a bf16 workspace, TILE tokens
+    per iteration. A nibble placed as fp16 bits (sign at 15, exponent and
+    mantissa at 11:9) reads as e2m1 * 2^-14; times scale * 2^14 the fp32 product
+    is exact, so the bf16 result matches a direct decode."""
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
     num_workers = tl.num_programs(1)
@@ -618,41 +499,52 @@ def _dequantize_and_gather_k_nvfp4_kernel(
     start_pos = seq_len - gather_len
 
     packed_bytes: tl.constexpr = head_dim // 2
+    group_bytes: tl.constexpr = quant_block // 2
+    # Byte b of a record packs elements 2b (low nibble) and 2b + 1, which share
+    # scale b // group_bytes: index the bytes as [scale, byte within group].
+    byte = (
+        tl.arange(0, scale_dim)[:, None] * group_bytes
+        + tl.arange(0, group_bytes)[None, :]
+    )
+    t = tl.arange(0, TILE)
     d = tl.arange(0, head_dim)
-    for i in range(worker_id, gather_len, num_workers):
+    block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
+    out_row_ptr = out_ptr + batch_idx.to(tl.int64) * out_stride0
+    for tile_start in range(worker_id * TILE, gather_len, num_workers * TILE):
+        i = tile_start + t
+        valid = i < gather_len
         pos = start_pos + i
-        block_in_seq = pos // cache_block_size
-        pos_in_block = pos % cache_block_size
-
         physical_block_idx = tl.load(
-            block_table_ptr + batch_idx * max_blocks_per_seq + block_in_seq
+            block_table_row_ptr + pos // cache_block_size, mask=valid, other=0
         )
         page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_ptr = page + (pos % cache_block_size) * (packed_bytes + scale_dim)
 
         packed = tl.load(
-            page + pos_in_block * packed_bytes + tl.arange(0, packed_bytes)
-        )
-        # Even element in the low nibble, odd in the high nibble.
-        codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
-        # e2m1 magnitudes: 0, 0.5, 1, 1.5, 2, 3, 4, 6.
-        mag_code = codes & 7
-        e = (mag_code >> 1).to(tl.float32)
-        m = (mag_code & 1).to(tl.float32)
-        mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
-        vals = tl.where(codes >= 8, -mag, mag)
-
+            token_ptr[:, None, None] + byte[None, :, :],
+            mask=valid[:, None, None],
+            other=0,
+        ).to(tl.int32)
         sf = tl.load(
-            page
-            + cache_block_size * packed_bytes
-            + pos_in_block * scale_dim
-            + tl.arange(0, scale_dim)
+            token_ptr[:, None] + packed_bytes + tl.arange(0, scale_dim)[None, :],
+            mask=valid[:, None],
+            other=0,
         )
-        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
-        tiles = tl.reshape(vals, (scale_dim, quant_block))
-        dequant = tl.reshape(tiles * tl.reshape(scale, (scale_dim, 1)), (head_dim,))
+        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32) * 16384.0
+        scale = scale[:, :, None]
 
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
-        tl.store(output_row_ptr + d, dequant.to(tl.bfloat16))
+        lo = packed & 0xF
+        hi = packed >> 4
+        lo = ((lo & 7) << 9) | ((lo & 8) << 12)
+        hi = ((hi & 7) << 9) | ((hi & 8) << 12)
+        lo = lo.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * scale
+        hi = hi.to(tl.int16).to(tl.float16, bitcast=True).to(tl.float32) * scale
+        dequant = tl.reshape(tl.join(lo, hi), (TILE, head_dim))
+
+        out_ptrs = (
+            out_row_ptr + (offset + i).to(tl.int64)[:, None] * out_stride1 + d[None, :]
+        )
+        tl.store(out_ptrs, dequant.to(tl.bfloat16), mask=valid[:, None])
 
 
 # The per-token loop is a chain of dependent loads, so the grid has to hold
@@ -661,6 +553,7 @@ def _dequantize_and_gather_k_nvfp4_kernel(
 _GATHER_STEPS_PER_WORKER = 8
 _GATHER_MIN_WORKERS = 128
 _GATHER_MAX_WORKERS = 8192
+_NVFP4_GATHER_TILE = 8
 
 
 def gather_num_workers(max_gather_len: int | None) -> int:
@@ -690,9 +583,11 @@ def dequantize_and_gather_k_cache_triton(
     num_reqs = seq_lens.shape[0]
     NUM_WORKERS = 128
     if k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN:
-        # Keep short gathers unchanged; cap total workers for multi-request chunks.
+        # One tile per worker up to the cap: the free width of ``out`` bounds
+        # every request's gather, and the kernel loops over any remainder.
         num_workers = min(
-            max(128, 2048 // max(1, num_reqs)), max(128, out.shape[1] - offset)
+            cdiv(max(1, out.shape[1] - offset), _NVFP4_GATHER_TILE),
+            _GATHER_MAX_WORKERS,
         )
         _dequantize_and_gather_k_nvfp4_kernel[(num_reqs, num_workers)](
             out,
@@ -709,6 +604,8 @@ def dequantize_and_gather_k_cache_triton(
             quant_block=V41_NVFP4_QUANT_BLOCK,
             cache_block_size=block_size,
             block_stride=k_cache.stride(0),
+            TILE=_NVFP4_GATHER_TILE,
+            num_warps=2,
         )
         return
 
@@ -954,6 +851,7 @@ def combine_topk_swa_indices(
         )
     else:
         combined_indices, combined_lens = out
+        combined_indices.fill_(-1)
 
     _COMBINE_TOPK_SWA_INDICES_KERNEL(
         combined_indices,
@@ -997,12 +895,6 @@ _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
 )
 
 
-def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
 def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """One warmup row per v4.1 layer type (compress ratio) in the model.
 
@@ -1010,21 +902,15 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     padded width is the same for all rows; SWA-only layers (ratio 0) pass
     ``TOP_K=0``.
     """
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    compress_ratios = getattr(hf_config, "compress_ratios", None) or [0]
-    topk = _hf_config_int(vllm_config, "index_topk", 0)
+    hf_config = vllm_config.model_config.hf_config
+    compress_ratios = get_compress_ratios(hf_config) or [0]
+    topk = hf_config.index_topk
     return zip_inputs(
         *(
             dict(compress_ratio=ratio, topk=topk if ratio > 0 else 0, topk_width=topk)
             for ratio in sorted({int(ratio) for ratio in compress_ratios})
         )
     )
-
-
-def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
 
 
 class CombineTopkSwaIndicesKernel(
@@ -1089,7 +975,8 @@ class CombineTopkSwaIndicesKernel(
             token_idx_in_query = token_idx - query_start
             pos = start_pos + token_idx_in_query
             if COMPRESS_RATIO > 0:
-                topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
+                # Warmup batches can put pos below zero; keep the length >= 0.
+                topk_len = tl.maximum(tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K), 0)
             else:
                 # SWA-only layers pass TOP_K=0; skip the division entirely
                 # (integer div by constexpr 0 is UB and yields garbage, which
@@ -1100,7 +987,7 @@ class CombineTopkSwaIndicesKernel(
             # start (SWA bounded replay), so the window cannot start before
             # the gathered buffer does.
             swa_start = tl.maximum(swa_start, gather_start)
-            swa_len = pos - swa_start + 1
+            swa_len = tl.maximum(pos - swa_start + 1, 0)
 
             offset = tl.arange(0, PADDED_TOP_K)
             mask = offset < topk_len
@@ -1108,9 +995,12 @@ class CombineTopkSwaIndicesKernel(
                 topk_indices_ptr + token_idx * topk_indices_stride + offset,
                 mask=mask,
             )
+            # A failed (-1) or out-of-pool candidate stays -1 instead of landing
+            # in the previous request's rows or this request's SWA rows.
+            valid = (topk_indices >= 0) & (topk_indices < N)
             tl.store(
                 combined_indices_ptr + token_idx * combined_indices_stride + offset,
-                topk_indices + M * batch_idx,
+                tl.where(valid, topk_indices + M * batch_idx, -1),
                 mask=mask,
             )
             # Index into gathered buffer: N + (position - gather_start)
@@ -1157,10 +1047,7 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        window_size = vllm_config.model_config.hf_config.sliding_window
         return self._trace_dispatch(self.dispatch)(
             _combine_topk_swa_warmup_inputs(vllm_config),
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
@@ -1376,18 +1263,6 @@ def build_flashinfer_mixed_sparse_indices(
     return sparse_indices, sparse_topk_lens
 
 
-@triton.jit
-def _remap_flashinfer_index(values, block_size, block_span):
-    # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
-    # packed pages (#44577) need block*block_size+off -> block*block_span+off.
-    # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
-    is_valid = values >= 0
-    safe_values = tl.where(is_valid, values, 0)
-    values = (safe_values // block_size) * block_span
-    values += safe_values % block_size
-    return tl.where(is_valid, values, -1)
-
-
 @triton.jit(
     do_not_specialize=[
         "sparse_indices_stride",
@@ -1452,7 +1327,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 mask=mask,
                 other=-1,
             )
-            values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+            values = remap_flashinfer_index(values, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 values,
@@ -1486,7 +1361,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 values = block_numbers * compressed_block_size + block_offsets
                 values = tl.where(is_valid, values, -1)
                 compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
-            values = _remap_flashinfer_index(
+            values = remap_flashinfer_index(
                 values, compressed_block_size, compressed_block_span
             )
             tl.store(
@@ -1541,7 +1416,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = pos_offset % swa_block_size
         slot_ids = block_numbers * swa_block_size + block_offsets
         slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
+        slot_ids = remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
         tl.store(
             sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
             slot_ids,
@@ -1568,7 +1443,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = local_idx % compressed_block_size
         slot_ids = block_numbers * compressed_block_size + block_offsets
         slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(
+        slot_ids = remap_flashinfer_index(
             slot_ids, compressed_block_size, compressed_block_span
         )
         tl.store(

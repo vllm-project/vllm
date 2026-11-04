@@ -12,9 +12,6 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
-from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
-)
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
@@ -37,6 +34,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MixtureOfExperts,
     MultiModalEmbeddings,
+    SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
@@ -58,15 +56,18 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
 )
+from vllm.models.common.ops.sequence_parallel import sp_all_gather
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
@@ -74,8 +75,10 @@ from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
+from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
 
@@ -140,9 +143,9 @@ _QWEN4_EXP_IGNORED_MISSING_SUFFIXES = [
     "_input_scale",
 ]
 
-# The checkpoint keeps down and injection projections separate; runtime packs
-# them into adjacent logical shards of one MergedColumnParallelLinear.
-_HC_WEIGHTS_MAPPER = WeightsMapper(
+# The checkpoint stores these projections separately; runtime packs each group
+# into adjacent logical shards of a MergedColumnParallelLinear.
+_EXTRA_WEIGHTS_MAPPER = WeightsMapper(
     orig_to_new_stacked={
         "hyper_connection.input_mix_weight_down.weight": (
             "hyper_connection.input_mix_weight_down_block_inject.weight",
@@ -152,6 +155,8 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
             "hyper_connection.input_mix_weight_down_block_inject.weight",
             1,
         ),
+        "ple.key_proj": ("ple.kv_proj", 0),
+        "ple.value_proj": ("ple.kv_proj", 1),
     }
 )
 
@@ -159,13 +164,19 @@ _HC_WEIGHTS_MAPPER = WeightsMapper(
 class Qwen4ExpSparseMoeBlock(Qwen3NextSparseMoeBlock):
     """Qwen3Next MoE with Qwen4Exp HC validation."""
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
-        parallel_config = vllm_config.parallel_config
-        if parallel_config.use_sequence_parallel_moe:
-            raise NotImplementedError(
-                "Qwen4Exp HC does not support sequence-parallel MoE"
-            )
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__(
+            vllm_config=vllm_config, prefix=prefix, reduce_results=reduce_results
+        )
+        if self.replicate_shared_expert and not self.is_sequence_parallel:
+            # Reduce routed outputs before adding replicated shared outputs.
+            # SP then slices the result to avoid summing shared outputs again via RS.
+            self.experts.moe_config.skip_final_all_reduce = False
         config = vllm_config.model_config.hf_text_config
         self.n_shared_experts = int(config.shared_expert_intermediate_size > 0)
 
@@ -183,11 +194,12 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
         self.config = config
         self.layer_type = layer_type
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.layer_idx = extract_layer_index(prefix)
-        if vllm_config.parallel_config.use_sequence_parallel_moe:
-            raise NotImplementedError(
-                "Qwen4Exp HC does not support sequence-parallel MoE"
-            )
+        self.use_sequence_parallel = (
+            vllm_config.parallel_config.use_sequence_parallel_moe
+        )
         self.ple: Qwen4ExpPLELayer | None = None
         ple_layer_ids = config.ple_layer_ids
         if (self.layer_idx + 1) in ple_layer_ids:
@@ -202,6 +214,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 layer_idx=self.layer_idx,
                 ple_dense_layer_id=ple_dense_layer_id,
                 prefix=f"{prefix}.ple",
+                use_sequence_parallel=self.use_hc_sequence_parallel,
             )
 
         if layer_type == "linear_attention":
@@ -210,6 +223,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.linear_attn",
                 gqa_interleaved_layout=False,
+                reduce_results=not self.use_hc_sequence_parallel,
             )
         elif layer_type in _QSA_LAYER_TYPES:
             use_qsa = getattr(config, "indexer_n_heads", None) is not None
@@ -220,6 +234,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     cache_config=vllm_config.cache_config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
+                    reduce_results=not self.use_hc_sequence_parallel,
                 )
             else:
                 self.self_attn = Qwen4ExpQSAAttention(
@@ -228,12 +243,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
                     layer_id=self.layer_idx,
                     quant_config=quant_config,
                     prefix=f"{prefix}.self_attn",
+                    reduce_results=not self.use_hc_sequence_parallel,
                 )
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
         self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config, prefix=f"{prefix}.mlp"
+            vllm_config=vllm_config,
+            prefix=f"{prefix}.mlp",
+            reduce_results=not self.use_hc_sequence_parallel,
         )
 
         hc_config = HyperConnectionConfig(
@@ -276,7 +294,7 @@ class Qwen4ExpDecoderLayer(nn.Module):
 
             if input_ids is None or query_start_loc is None or ngram_context is None:
                 raise RuntimeError("PLE inputs were not prepared")
-            hidden_states = hidden_states + self.ple(
+            hidden_states = self.ple(
                 hidden_states,
                 input_ids,
                 query_start_loc,
@@ -291,6 +309,9 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             hidden_states, block_input, injection = attn_hc.mix(hidden_states)
 
+        if self.use_hc_sequence_parallel:
+            # Positions retain the full token axis for both text and MRoPE inputs.
+            block_input = sp_all_gather(block_input)[: positions.shape[-1]]
         if self.layer_type == "linear_attention":
             attn_out = self.linear_attn(hidden_states=block_input)
         elif self.layer_type in _QSA_LAYER_TYPES:
@@ -302,10 +323,25 @@ class Qwen4ExpDecoderLayer(nn.Module):
             raise ValueError("Invalid layer_type")
 
         mlp_hc = self.mlp_hyper_connection
+        if self.use_hc_sequence_parallel:
+            attn_out = sp_reduce_scatter(attn_out)
         hidden_states, block_input, injection = mlp_hc.combine_and_mix(
             hidden_states, attn_out, injection
         )
-        mlp_out = self.mlp(block_input)
+        if self.use_sequence_parallel:
+            # MoE consumes local tokens and returns complete local outputs.
+            mlp_out = self.mlp(block_input, already_sequence_parallel=True)
+        else:
+            if self.use_hc_sequence_parallel:
+                block_input = sp_all_gather(block_input)[: positions.shape[-1]]
+            mlp_out = self.mlp(block_input)
+            if self.use_hc_sequence_parallel:
+                assert isinstance(self.mlp, Qwen4ExpSparseMoeBlock)
+                reduce_output = self.mlp.experts.moe_config.skip_final_all_reduce
+                # Only sum partial outputs. Reduced outputs already include all ranks.
+                mlp_out = (
+                    sp_reduce_scatter(mlp_out) if reduce_output else sp_shard(mlp_out)
+                )
         return hidden_states, mlp_out, injection
 
 
@@ -371,7 +407,7 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
     }
 )
 class Qwen4ExpModel(nn.Module):
-    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _HC_WEIGHTS_MAPPER
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper | _EXTRA_WEIGHTS_MAPPER
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -380,6 +416,8 @@ class Qwen4ExpModel(nn.Module):
         self.num_redundant_experts = (
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
+        # MoE SP also enables HC SP, while HC SP can be enabled independently.
+        self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         self.vocab_size = config.vocab_size
         self._qsa_layer_ids = frozenset(
             layer_idx
@@ -387,7 +425,13 @@ class Qwen4ExpModel(nn.Module):
             if layer_type in _QSA_LAYER_TYPES
             and getattr(config, "indexer_n_heads", None) is not None
         )
-        self.embed_tokens = VocabParallelEmbedding(self.vocab_size, config.hidden_size)
+        self.embed_tokens: VocabParallelEmbedding | PPMissingLayer
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size, config.hidden_size
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         def get_layer(prefix: str) -> Qwen4ExpDecoderLayer:
             layer_idx = extract_layer_index(prefix)
@@ -400,10 +444,10 @@ class Qwen4ExpModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             Qwen4ExpSparseMoeBlock,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         intermediate_size = config.hidden_size * config.hc_count
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -468,12 +512,18 @@ class Qwen4ExpModel(nn.Module):
                 if input_ids is None:
                     raise ValueError("input_ids or inputs_embeds is required")
                 hidden_states = self.embed_input_ids(input_ids)
+            if self.use_hc_sequence_parallel:
+                # The MoE padding mask stays unsharded: under torch.compile its
+                # update would land only after the graph has run.
+                hidden_states = sp_shard(hidden_states)
+            # Expand only the local token rows when SP is enabled.
             hidden_states = hidden_states.repeat(1, self.config.hc_count)
         else:
             if intermediate_tensors is None:
                 raise ValueError("pipeline stage requires intermediate tensors")
             hidden_states = intermediate_tensors["hidden_states"]
 
+        full_num_tokens = positions.shape[-1]
         block_output = None
         injection = None
         last_layer = None
@@ -496,6 +546,8 @@ class Qwen4ExpModel(nn.Module):
                 deepstack_embed = deepstack_input_embeds[
                     f"deepstack_input_embeds_{layer_idx}"
                 ]
+                if self.use_hc_sequence_parallel:
+                    deepstack_embed = sp_shard(deepstack_embed)
                 deepstack_embed = (
                     deepstack_embed.unsqueeze(-2)
                     .expand(
@@ -530,6 +582,24 @@ class Qwen4ExpModel(nn.Module):
         multi_hidden, sample_hidden_states, _ = final_mixer.combine_and_mix(
             hidden_states, block_output, injection
         )
+        if self.use_hc_sequence_parallel:
+            if self._mtp_hidden_buffer is not None:
+                # Gather LM-head and MTP states together when both are needed.
+                hidden_size = self.config.hidden_size
+                packed_hidden_states = torch.cat(
+                    [sample_hidden_states, multi_hidden], dim=-1
+                )
+                packed_hidden_states = sp_all_gather(packed_hidden_states)[
+                    :full_num_tokens
+                ]
+                sample_hidden_states, multi_hidden = packed_hidden_states.split(
+                    [hidden_size, self.config.hc_count * hidden_size], dim=-1
+                )
+                sample_hidden_states = sample_hidden_states.contiguous()
+            else:
+                sample_hidden_states = sp_all_gather(sample_hidden_states)[
+                    :full_num_tokens
+                ]
         if self._mtp_hidden_buffer is not None:
             # Capture the pre-final-mixer multi-stream hidden state
             # [T, hc_count*H] for the MTP drafter (zero extra compute:
@@ -548,7 +618,7 @@ class Qwen4ExpModel(nn.Module):
         )
         weights = maybe_fuse_shared_experts(
             weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=getattr(self.config, "num_experts", 0) or 0,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -585,6 +655,7 @@ class Qwen4ExpModel(nn.Module):
 class Qwen4ExpForCausalLM(
     nn.Module,
     HasInnerState,
+    SupportsHCSP,
     SupportsLoRA,
     SupportsMRoPE,
     SupportsPP,
@@ -594,6 +665,7 @@ class Qwen4ExpForCausalLM(
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "kv_proj": ["key_proj", "value_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "input_mix_weight_down_block_inject": [
@@ -618,11 +690,15 @@ class Qwen4ExpForCausalLM(
         self.model = Qwen4ExpModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
+        self.lm_head: ParallelLMHead | PPMissingLayer
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -644,8 +720,6 @@ class Qwen4ExpForCausalLM(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Forward kwargs unchanged so the runner's _maybe_add_ngram_kwargs
-        # path (query_start_loc / ngram_context) reaches Qwen4ExpModel.
         return self.model(
             input_ids,
             positions,
@@ -818,6 +892,7 @@ class Qwen4ExpProcessingInfo(Qwen3VLProcessingInfo):
 class Qwen4ExpForConditionalGeneration(
     Qwen3_5ForConditionalGeneration,
     HasInnerState,
+    SupportsHCSP,
     Qwen4ExpMixtureOfExperts,
 ):
     """Qwen3-VL vision tower backed by the Qwen4Exp language model."""
@@ -825,11 +900,12 @@ class Qwen4ExpForConditionalGeneration(
     requires_raw_input_tokens = True
 
     packed_modules_mapping = Qwen3_5ForConditionalGeneration.packed_modules_mapping | {
+        "kv_proj": ["key_proj", "value_proj"],
         "input_mix_weight_down_block_inject": [
             "input_mix_weight_down",
             "block_inject_weight",
             "_input_mix_padding",
-        ]
+        ],
     }
 
     @staticmethod
@@ -906,7 +982,9 @@ class Qwen4ExpForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if not get_pp_group().is_first_rank and self.use_deepstack:
+        if not get_pp_group().is_first_rank and hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ):
             assert self.language_model.model.start_layer >= len(
                 config.vision_config.deepstack_visual_indexes
             ), (

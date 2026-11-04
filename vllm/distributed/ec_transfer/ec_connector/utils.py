@@ -84,7 +84,9 @@ def collect_ec_item_metadata(
                     # Some metadata (e.g. Qwen3-VL video timestamps) is
                     # produced as a plain list rather than a tensor.
                     metadata[key] = value
-        entry = items.setdefault(feature.identifier, {"item_indices": []})
+        entry = items.setdefault(
+            feature.identifier, {"modality": feature.modality, "item_indices": []}
+        )
         entry["metadata"] = metadata
         entry["item_indices"].append(index)
     return items

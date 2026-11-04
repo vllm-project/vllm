@@ -45,6 +45,7 @@ def _run_dummy_batch(
         max_num_tokens=2048,
         decode_query_len=1,
         speculator=speculator,
+        speculative_config=SimpleNamespace(max_num_new_slots_for_drafting=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
         is_first_pp_rank=True,
         lora_config=None,

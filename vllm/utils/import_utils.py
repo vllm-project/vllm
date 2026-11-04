@@ -12,10 +12,9 @@ import os
 import sys
 from functools import cache
 from types import ModuleType
-from typing import Any
+from typing import Any, Never
 
 import regex as re
-from typing_extensions import Never
 
 from vllm.logger import init_logger
 
@@ -470,31 +469,44 @@ def _format_nccl_raw_version(raw: int) -> str:
     return f"{s[0]}.{s[1:3].lstrip('0') or '0'}.{s[3:].lstrip('0') or '0'}"
 
 
-def has_deep_ep_v2() -> bool:
-    """Whether deep_ep with ElasticBuffer (v2 API) is available.
+def deep_ep_v2_unavailable_reason() -> str | None:
+    """Why the deep_ep v2 (ElasticBuffer) API cannot be used, or None if it can.
 
     Requires both the ElasticBuffer class in the deep_ep module and
     NCCL >= 2.30.4 (GIN backend), checked against the runtime library.
     """
+    install_doc = "See tools/ep_kernels/README.md."
     if not _has_module("deep_ep"):
-        return False
+        return f"DeepEP is not installed. {install_doc}"
     import deep_ep  # type: ignore[import-not-found]
 
     if not hasattr(deep_ep, "ElasticBuffer"):
-        return False
+        return f"The installed DeepEP predates v2 (no ElasticBuffer). {install_doc}"
+    nccl_ver = _get_runtime_nccl_version()
+    if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
+        import torch
+
+        min_version = _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW)
+        cuda_major = (torch.version.cuda or "13").split(".")[0]
+        return (
+            f"DeepEP v2 requires NCCL >= {min_version} but found "
+            f"{_format_nccl_raw_version(nccl_ver) if nccl_ver else 'unknown'}. "
+            "PyTorch pins an older NCCL; upgrade it with "
+            f'`pip install "nvidia-nccl-cu{cuda_major}>={min_version}" --no-deps` '
+            f"and rebuild DeepEP against it. {install_doc}"
+        )
+    return None
+
+
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available."""
     try:
-        nccl_ver = _get_runtime_nccl_version()
-        if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
-            logger.info_once(
-                "DeepEP v2 requires NCCL >= %s but found %s. "
-                "deepep_v2 backend will not be available.",
-                _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW),
-                _format_nccl_raw_version(nccl_ver) if nccl_ver else "unknown",
-            )
-            return False
+        reason = deep_ep_v2_unavailable_reason()
     except Exception:
         return False
-    return True
+    if reason is not None and _has_module("deep_ep"):
+        logger.info_once("deepep_v2 backend will not be available: %s", reason)
+    return reason is None
 
 
 def has_deep_gemm() -> bool:
@@ -625,6 +637,32 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+# First release with single-node CCO windows (ROCm/mori#704).
+MORI_EPV2_MIN_VERSION = "1.2.4"
+
+
+def mori_epv2_unavailable_reason() -> str | None:
+    """Why the installed MoRI cannot run EPv2, or None if it can.
+
+    Requires the cco and dispatch_combine_v2 modules and MoRI >= 1.2.4.
+    """
+    if not _has_module("mori"):
+        return "MoRI is not installed"
+    if not (_has_module("mori.cco") and _has_module("mori.ops.dispatch_combine_v2")):
+        return "the installed MoRI has no EPv2 modules"
+    import mori  # type: ignore[import-not-found]
+    from packaging.version import InvalidVersion, Version
+
+    version = getattr(mori, "__version__", "unknown")
+    try:
+        too_old = Version(version) < Version(MORI_EPV2_MIN_VERSION)
+    except InvalidVersion:
+        too_old = True
+    if too_old:
+        return f"MoRI {version} is older than {MORI_EPV2_MIN_VERSION}"
+    return None
 
 
 def has_fbgemm_gpu() -> bool:

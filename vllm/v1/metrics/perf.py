@@ -10,12 +10,11 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 import prometheus_client
 import torch
 from pydantic import BaseModel, Field, ValidationError, model_validator
-from typing_extensions import Self
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -52,7 +51,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "fp8": 1,
     "fbgemm_fp8": 1,
     "ptpc_fp8": 1,
-    "fp_quant": 1,
     "modelopt": 1,
     "modelopt_mxfp8": 1,
     # FP4 / INT4 methods (0.5 bytes per weight)
