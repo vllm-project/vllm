@@ -1383,14 +1383,15 @@ def small_down(g, s, lds, w, b, sc, xch):
     previous phase: output rows ``16 t ..`` of every unit into LDS by
     (row, slot), their slot-order sum
     with the routing weights to ``y``; the line group's last owner pushes its
-    lines."""
+    lines. The first units' down weights depend only on the schedule: they
+    are issued with the activation rows' loads (``stage_acts``)."""
     A, rows = s.assignments, s.rows
     assert A <= THREADS, "a thread an assignment"
     tile = g.bid
     if tile < OWNERS:
-        stage_acts(g, s, lds, sc)
+        pending = stage_acts(g, s, lds, sc, lambda: down_issue(g, s, lds, w))
         fx.barrier()
-        down_units(g, s, lds, w)
+        down_units(g, s, lds, w, pending)
         fx.barrier()
         if g.tid < rows * TILE:
             r, c = g.tid // TILE, g.tid % TILE
@@ -1408,9 +1409,12 @@ def small_down(g, s, lds, w, b, sc, xch):
 
 
 @traced
-def stage_acts(g, s, lds, sc):
+def stage_acts(g, s, lds, sc, between):
     """Every assignment's MXFP4 activation row (``act4``, ``act4s``) into
-    LDS (``lds.acts``: codes then scale words), whole 16-byte loads first."""
+    LDS (``lds.acts``: codes then scale words), whole 16-byte loads first;
+    ``between()`` runs after them and before the stores, held there (the
+    stores wait for these loads only, and its loads are in flight under
+    them), its result returned."""
     quads = -(-s.assignments * (RI // 8 + AGROUPS) // 4)
     rounds = -(-quads // THREADS)
     loads = [
@@ -1425,10 +1429,14 @@ def stage_acts(g, s, lds, sc):
         )
         for r in range(rounds)
     ]
+    sched_barrier()
+    out = between()
+    sched_barrier()
     for r in range_constexpr(rounds):
         at = g.tid + i32(r * THREADS)
         if at < quads:
             lds_st(lds.acts + at * 4, loads[r])
+    return out
 
 
 def _down_unit(g, s, lds, i):
@@ -1490,21 +1498,34 @@ def _down_acts(g, s, lds, i):
     return xb, xc, a, count
 
 
+def _wave_units(s) -> int:
+    """A down wave's units, of the step's <= rows * TOPK + 1."""
+    return -(-(s.rows * TOPK + 1) // WAVES)
+
+
+def down_issue(g, s, lds, w):
+    """The down weights of the wave's first ``DOWN_AHEAD`` units of output
+    tile ``bid``, for ``down_units``."""
+    return [
+        _down_weights(g, s, lds, w, i) for i in range(min(DOWN_AHEAD, _wave_units(s)))
+    ]
+
+
 @traced
-def down_units(g, s, lds, w):
+def down_units(g, s, lds, w, pending):
     """Wave ``w``: units ``w, w + 4, ..`` of output tile ``bid``, each a K
     chain over its tokens' activation rows in LDS, ``DOWN_AHEAD`` units'
-    operands loaded ahead; a token's 16 results to ``lds.contrib[(row,
-    slot)]``."""
+    operands loaded ahead (``pending``: the first units' weights, issued by
+    ``down_issue``); a token's 16 results to ``lds.contrib[(row, slot)]``."""
     lane = g.lane
     group = lane // TILE
     odd = g.bid % 2
-    units = -(-(s.rows * TOPK + 1) // WAVES)  # a wave's, of <= rows * TOPK + 1
+    units = _wave_units(s)
 
     def issue(i):
         return _down_weights(g, s, lds, w, i), _down_acts(g, s, lds, i)
 
-    ring = [issue(i) for i in range(min(DOWN_AHEAD, units))]
+    ring = [(p, _down_acts(g, s, lds, i)) for i, p in enumerate(pending)]
     for i in range_constexpr(units):
         if const_expr(i + DOWN_AHEAD < units):
             ring.append(issue(i + DOWN_AHEAD))
