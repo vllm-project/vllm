@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from torch import nn
@@ -61,6 +61,7 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
+from vllm.model_executor.layers.fused_moe.router.base_router import get_moe_padding_mask
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
@@ -68,6 +69,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.models.interfaces import MixtureOfExperts, SupportsLoRA
@@ -132,6 +134,9 @@ from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
 from vllm.models.muse_spark.nvidia.ops.prepare_trtllm_nvfp4 import (
     norm_quant_trtllm_nvfp4,
 )
+from vllm.models.muse_spark.nvidia.specialized_decode.runtime import (
+    specialized_decode_config,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.third_party.flash_linear_attention.ops.fused_norm_gate import (
@@ -144,6 +149,12 @@ from vllm.transformers_utils.configs.muse_spark import (
 from vllm.utils.math_utils import cdiv
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
+
+if TYPE_CHECKING:
+    from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+        SpecializedDecode,
+    )
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 logger = init_logger(__name__)
 
@@ -414,10 +425,7 @@ class MuseSpark1xMoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.n_shared_experts = config.num_shared_experts
 
-        self.fp32_router_input = (
-            getattr(config, "muse_spark_fp32_router_input", True)
-            and torch.backends.cuda.matmul.allow_tf32
-        )
+        self.fp32_router_input = torch.backends.cuda.matmul.allow_tf32
         if self.fp32_router_input and not HAS_ROUTER_OUTPUT:
             raise RuntimeError(
                 "FP32 router input requires FlashInfer dual-norm router output"
@@ -439,14 +447,16 @@ class MuseSpark1xMoE(nn.Module):
 
         self.route_scale = config.routed_scaling_factor
 
+        # folded into the router weight as it loads (`_load_router_weight`)
         self.router_output_multiplier = config.output_multiplier
+        self.router.weight.weight_loader = self._load_router_weight
 
         self.moe_router = MuseSpark1xRouter(
             top_k=config.num_experts_per_tok,
             num_experts=config.num_local_experts,
             expert_bias=self.expert_bias,
             route_scale=self.route_scale,
-            router_output_multiplier=self.router_output_multiplier,
+            router_output_multiplier=None,
             router_score_normalization="sigmoid",
             router_score_division_eps=1e-15,
         )
@@ -529,17 +539,13 @@ class MuseSpark1xMoE(nn.Module):
             and parallel_config.data_parallel_size == 1
             and not envs.VLLM_BATCH_INVARIANT
         )
-        tep_default = (
+        use_tep_optimizations = (
             replicated_tokens
             and current_platform.is_cuda()
             and current_platform.has_device_capability(100)
         )
-        self.shard_pooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_pooler", tep_default
-        )
-        self.shard_unpooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_unpooler", tep_default
-        )
+        self.shard_pooler = use_tep_optimizations
+        self.shard_unpooler = use_tep_optimizations
         if self.shard_pooler or self.shard_unpooler:
             logger.info_once(
                 "Sharding MuseSpark projection outputs over TP: pooler=%s, "
@@ -559,12 +565,8 @@ class MuseSpark1xMoE(nn.Module):
         # NVFP4 TRT-LLM layers can take inputs prepared outside the experts:
         # the pre-expert norm fused with the FP4 quant, and/or top-k routing
         # finished on the router's aux stream.
-        self.fused_input_quant = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_fused_moe_input_quant", tep_default
-        )
-        self.aux_stream_routing = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_aux_stream_routing", tep_default
-        )
+        self.fused_input_quant = not self.use_mega_moe and use_tep_optimizations
+        self.aux_stream_routing = not self.use_mega_moe and use_tep_optimizations
         self.all_gather_norm_quant: Any | None = None
         if self.use_mega_moe and self.tp_size > 1 and not self.is_sequence_parallel:
             raise NotImplementedError(
@@ -654,9 +656,7 @@ class MuseSpark1xMoE(nn.Module):
             runner_cls=self.post_norm_runner_cls,
             runner_args={
                 "post_expert_norm": self.post_expert_norm,
-                "fuse_all_reduce": getattr(
-                    config, "muse_spark_tep_fused_moe_all_reduce", tep_default
-                ),
+                "fuse_all_reduce": use_tep_optimizations,
             },
             moe_config_cls=MuseSparkMoEConfig,
         )
@@ -665,14 +665,13 @@ class MuseSpark1xMoE(nn.Module):
         if self.use_mega_moe:
             self.experts.finalize_weights()
 
-    def fold_router_output_multiplier(self) -> None:
-        """Fold the router output multiplier into the gate weight; idempotent."""
-        if self.router_output_multiplier is None:
-            return
-        with torch.no_grad():
-            self.router.weight.mul_(self.router_output_multiplier)
-        self.router_output_multiplier = None
-        self.moe_router.router_output_multiplier = None
+    def _load_router_weight(
+        self, param: nn.Parameter, loaded_weight: torch.Tensor
+    ) -> None:
+        self.router.weight_loader(param, loaded_weight)
+        if self.router_output_multiplier is not None:
+            with torch.no_grad():
+                param.mul_(self.router_output_multiplier)
 
     def _can_shard_projection(self, num_tokens: int, sp_active: bool) -> bool:
         return num_tokens <= _SHARDED_PROJECTION_MAX_TOKENS and (
@@ -953,8 +952,13 @@ class MuseSpark1xMoE(nn.Module):
             logits, _ = self.router(router_input)
             if not self.aux_stream_routing:
                 return logits
+            # This path calls TRTLLM's routed experts directly, which skip -1.
+            # An SP all-gather can add rows beyond the runner's padding mask.
+            padding = get_moe_padding_mask(num_tokens)
+            if padding is not None and padding.shape[0] != num_tokens:
+                padding = None
             weights, ids = self.moe_router._compute_routing(
-                hidden_states, logits, torch.int32
+                hidden_states, logits, torch.int32, is_padding=padding
             )
             return ids, weights
 
@@ -1159,8 +1163,18 @@ class MuseSpark1xAttention(nn.Module):
         self.sp_min_tokens = 0
         self.gemm_rs = None
 
-        self.rotary_emb = (
-            RotaryEmbedding(
+        # get_rope caches by key, so target layers share one fp32 table.
+        self.rotary_emb: RotaryEmbedding | None = None
+        if self.use_rope and not is_draft:
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=max_position_embeddings,
+                is_neox_style=False,
+                rope_parameters={"rope_theta": rope_theta, "rope_type": "default"},
+                dtype=torch.float,
+            )
+        elif self.use_rope:
+            self.rotary_emb = RotaryEmbedding(
                 head_size=self.head_dim,
                 rotary_dim=self.head_dim,
                 max_position_embeddings=max_position_embeddings,
@@ -1168,13 +1182,10 @@ class MuseSpark1xAttention(nn.Module):
                 is_neox_style=False,
                 dtype=(
                     torch.float
-                    if not is_draft or config.rope_use_fp32_in_outer_product
+                    if config.rope_use_fp32_in_outer_product
                     else self.default_dtype
                 ),
             )
-            if self.use_rope
-            else None
-        )
 
         sliding_window = None
         if is_draft:
@@ -1399,9 +1410,13 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
         self.self_attn = MuseSpark1xAttention(
             config=config,
-            max_position_embeddings=max(
-                config.max_position_embeddings,
-                vllm_config.model_config.max_model_len,
+            max_position_embeddings=(
+                max(
+                    config.max_position_embeddings,
+                    vllm_config.model_config.max_model_len,
+                )
+                if is_draft
+                else vllm_config.model_config.max_model_len
             ),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -1669,16 +1684,12 @@ class MuseSpark1xModel(LlamaModel):
             if isinstance(layer.feed_forward, MuseSpark1xMoE)
             and layer.feed_forward.shard_unpooler
         ]
-        if (
-            not sharded
-            or not self.fuse_across_layers
-            or not getattr(self.config, "muse_spark_tep_fused_boundary", True)
-        ):
+        if not sharded or not self.fuse_across_layers:
             return
         all_gather = maybe_create_all_gather_dual_norm(
             self.config.hidden_size,
             _SHARDED_PROJECTION_MAX_TOKENS,
-            enable_pdl=getattr(self.config, "muse_spark_tep_fused_boundary_pdl", True),
+            enable_pdl=True,
         )
         if all_gather is None:
             return
@@ -1903,6 +1914,44 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             self.logits_processor.scale = 1.0
 
         self.set_moe_parameters()
+        # decode_backend=latency_specialized: a specialized decode executor over
+        # self.model, built by the model state once the weights are loaded.
+        self.specialized_decode_config = specialized_decode_config(vllm_config)
+        self.specialized_decode: SpecializedDecode | None = None
+
+    def build_specialized_decode(self) -> None:
+        from vllm.models.muse_spark.nvidia.specialized_decode.runtime.decode import (
+            SpecializedDecode,
+        )
+
+        assert self.specialized_decode_config is not None
+        self.specialized_decode = SpecializedDecode(
+            self.model, self.specialized_decode_config
+        )
+
+    def get_model_state_cls(self) -> "type[ModelState]":
+        if self.specialized_decode_config is None:
+            # decode_backend=auto: the runner's default state for this model.
+            from vllm.v1.worker.gpu.model_states.default import DefaultModelState
+
+            return DefaultModelState
+        from vllm.models.muse_spark.nvidia.model_state import MuseSparkModelState
+
+        return MuseSparkModelState
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+        decode = self.specialized_decode
+        if decode is not None:
+            step = decode.plan(positions, intermediate_tensors)
+            if step is not None:
+                return decode.run(step, input_ids, inputs_embeds)
+        return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def _init_model(
         self,
@@ -2009,6 +2058,13 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
+        if self.specialized_decode is not None:
+            # Runs again after a weight reload; the captured decode steps read
+            # the kernels' constants and buffers built from the loaded weights.
+            raise RuntimeError(
+                "The Muse Spark specialized decode does not support reloading "
+                "the model's weights"
+            )
         self.model.finalize_mega_moe_weights()
         n_gates = materialize_residual_path_constants(self)
         logger.info(
