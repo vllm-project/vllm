@@ -27,13 +27,30 @@ def test_chat_completion_request_with_no_tools():
     )
     assert request.tool_choice == "none"
 
-    # tools key present but empty -- should be rejected
-    with pytest.raises(VLLMValidationError, match="must not be an empty array"):
+
+@pytest.mark.parametrize("tool_choice", [None, "none", "auto", "required"])
+def test_chat_completion_request_with_empty_tools(tool_choice):
+    """OpenAI treats `tools: []` like an omitted field, with no tool to call."""
+    payload = {
+        "messages": [{"role": "user", "content": "Hello"}],
+        "model": "facebook/opt-125m",
+        "tools": [],
+    }
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    request = ChatCompletionRequest.model_validate(payload)
+    assert request.tools is None
+    assert request.tool_choice == "none"
+
+
+def test_chat_completion_request_with_empty_tools_and_named_tool_choice():
+    with pytest.raises(VLLMValidationError, match="The tool `f` specified"):
         ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
                 "model": "facebook/opt-125m",
                 "tools": [],
+                "tool_choice": {"type": "function", "function": {"name": "f"}},
             }
         )
 

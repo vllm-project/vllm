@@ -11,7 +11,7 @@ use xgrammar_structural_tag::format::Format;
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput};
 use crate::output_grammar::{self, OutputGrammarContext, OutputGrammarError};
 use crate::tool::{StructuralTagBuilder, Tool};
 
@@ -175,7 +175,9 @@ impl ToolParser for MinimaxM2ToolParser {
                 output.push_text(&self.buffer);
             }
             MinimaxM2Mode::ToolBlock { .. } => {
-                return Err(parsing_failed!("incomplete MiniMax M2 tool call"));
+                return Err(ToolParserError::IncompleteToolCall {
+                    parser: "MiniMax M2",
+                });
             }
             MinimaxM2Mode::Done => {}
         }
