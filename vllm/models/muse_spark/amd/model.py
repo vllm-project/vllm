@@ -100,15 +100,15 @@ def _supports_router_bf16x3_device() -> bool:
 
 
 @functools.cache
-def _use_aiter_tuned_gemm() -> bool:
+def _unpooler_uses_default_gemm() -> bool:
     if not current_platform.is_rocm():
         return False
 
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.platforms.rocm import get_cdna_version
+    # Importing a foreign platform can reload torch extension libraries.
+    from vllm.platforms.rocm import on_gfx950
 
-    # AITER's tuned BF16 table falls back to PyTorch linear for untuned shapes.
-    return get_cdna_version() in (3, 4) and rocm_aiter_ops.is_linear_enabled()
+    # The default ROCm GEMM dispatch is benchmarked against F.linear on gfx950 only.
+    return on_gfx950()
 
 
 def norm_residual_then_norm(
@@ -160,22 +160,6 @@ class MuseSparkTorchLinearMethod(UnquantizedLinearMethod):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return F.linear(x, layer.weight, bias)
-
-
-class MuseSparkTunedLinearMethod(MuseSparkTorchLinearMethod):
-    """PyTorch linear, or AITER's tuned BF16 GEMM table on CDNA3 and CDNA4."""
-
-    def apply(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if _use_aiter_tuned_gemm():
-            from aiter.tuned_gemm import tgemm
-
-            return tgemm.mm(x, layer.weight, bias)
-        return super().apply(layer, x, bias)
 
 
 class MuseSpark1xMoE(nn.Module):
@@ -257,7 +241,8 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.unpooler",
         )
-        self.unpooler.quant_method = MuseSparkTunedLinearMethod()
+        if not _unpooler_uses_default_gemm():
+            self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
         if self.pooler is not None:
             self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
@@ -1252,6 +1237,5 @@ __all__ = [
     "MuseSpark1xMoE",
     "MuseSpark1xModel",
     "MuseSparkTorchLinearMethod",
-    "MuseSparkTunedLinearMethod",
     "norm_residual_then_norm",
 ]
