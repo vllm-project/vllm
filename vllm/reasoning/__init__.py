@@ -189,6 +189,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "inkling_reasoning_parser",
         "InklingParserReasoningAdapter",
     ),
+    "zaya": (
+        "zaya_engine_reasoning_parser",
+        "ZayaParserReasoningAdapter",
+    ),
 }
 
 

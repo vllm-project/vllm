@@ -262,6 +262,15 @@ _TOOL_PARSERS_TO_REGISTER = {
         "apertus_tool_parser",
         "ApertusToolParser",
     ),
+    "zaya": (
+        "zaya_engine_tool_parser",
+        "ZayaEngineToolParser",
+    ),
+    # Alias of "zaya", the name Zyphra's model cards use.
+    "zaya_xml": (
+        "zaya_engine_tool_parser",
+        "ZayaEngineToolParser",
+    ),
 }
 
 
