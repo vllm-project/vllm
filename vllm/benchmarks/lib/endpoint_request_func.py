@@ -401,7 +401,8 @@ def _choice_has_streamed_output(choice: dict[str, Any]) -> bool:
         return False
     if (
         delta.get("content")
-        or delta.get("reasoning")
+        or delta.get("reasoning")  # vLLM spec
+        or delta.get("reasoning_content")  # SGLang spec
         or delta.get("tool_calls")
         or delta.get("function_call")
     ):
