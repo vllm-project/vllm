@@ -310,6 +310,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::backends::NO_VALID_CHUNK_ERROR;
 
     fn mm_input() -> RequestFuncInput {
         let frag: Arc<str> =
@@ -622,6 +623,33 @@ mod tests {
             (decode_time - itl_sum).abs() < 1e-6,
             "latency - ttft ({decode_time}s) != sum(itl) ({itl_sum}s)"
         );
+    }
+
+    /// A clean 200 stream that never carries a token must fail, as in the
+    /// completions backend and Python; otherwise it counts as a success with
+    /// zero TTFT and E2EL.
+    #[tokio::test]
+    async fn test_tokenless_stream_is_failed() {
+        let input = RequestFuncInput {
+            api_url: spawn_sse_server(0, std::time::Duration::ZERO, None),
+            model: "test-model".to_string(),
+            output_len: 3,
+            ..Default::default()
+        };
+
+        let output = OpenAIChatBackend.send_request(&input, &reqwest::Client::new()).await.unwrap();
+
+        assert!(!output.success);
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
+    }
+
+    /// What vLLM actually streams when it generates nothing: the opening role
+    /// chunk, then usage. The role chunk carries no token, so this must fail too.
+    #[tokio::test]
+    async fn test_role_only_stream_is_failed() {
+        let output = run_chat(&[ROLE, USAGE]).await;
+        assert!(!output.success);
+        assert_eq!(output.error, NO_VALID_CHUNK_ERROR);
     }
 
     /// ignore_eos and extra_body must survive the raw-splice path.
