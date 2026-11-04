@@ -1310,9 +1310,10 @@ class Gemma4ForConditionalGeneration(
     ) -> torch.Tensor:
         # With mm_device_do_normalize the processor skips the rescale, so
         # pixel_values hold raw uint8 patches; the patch embedder expects
-        # [0, 1] floats.
+        # [0, 1] floats. Patches are channel-last, so normalize per pixel.
+        num_channels = getattr(self.vision_tower.config, "num_channels", 3)
         pixel_values = self.vision_input_norm(
-            pixel_values.flatten(0, -2), torch.float32
+            pixel_values.reshape(-1, num_channels), torch.float32
         ).view(pixel_values.shape)
         return self.vision_tower.patch_embedder(
             pixel_values, pixel_position_ids, padding_positions
