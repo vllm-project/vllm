@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
 import pickle
 import struct
+from array import array
 
 import numpy as np
 import pytest
@@ -70,11 +70,11 @@ def test_mp_client_sends_prompt_as_int32_array():
     assert engine_request.prompt_token_ids == ids
 
 
-def test_request_token_ids_hold_no_int_references():
-    """Long prompts must not add per-token objects for the cyclic GC to walk."""
+def test_request_stores_token_ids_as_int32_buffers():
+    """Prompts stay one int32 buffer, with no per-token Python objects."""
     request = Request("r", list(range(1024)), SamplingParams(max_tokens=4), None)
     for tokens in (request.prompt_token_ids, request._all_token_ids):
-        assert not any(isinstance(r, int) for r in gc.get_referents(tokens))
+        assert isinstance(tokens, array) and tokens.typecode == "i"
     assert request.all_token_ids.copy() == list(range(1024))
 
 
