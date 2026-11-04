@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.utils.gc_utils import untrack_long_lists
 
 if TYPE_CHECKING:
     import numpy as np
@@ -80,6 +81,18 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+        )
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Workers receive these by pickle and keep them only for this step.
+        untrack_long_lists(
+            (
+                self.prompt_token_ids,
+                self.prefill_token_ids,
+                self.prompt_is_token_ids,
+                *self.block_ids,
+            )
         )
 
     @property
@@ -315,10 +328,6 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
-    # Deprecated: cascade attention has been removed, so this is always empty.
-    # Kept for out-of-tree schedulers and workers.
-    num_common_prefix_blocks: list[int] = field(default_factory=list)
-
     # Whether no scheduled request can use the drafts proposed after this step
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
@@ -344,8 +353,3 @@ class GrammarOutput:
     structured_output_request_ids: list[str]
     # Bitmask ordered as structured_output_request_ids.
     grammar_bitmask: "npt.NDArray[np.int32]"
-    # Per request, ordered as structured_output_request_ids: how many leading
-    # drafts the bitmask constrained. `grammar_bitmask` fills every row after
-    # the first -1 placeholder with the all-permissive `_full_mask`, so drafts
-    # from this index on must not be accepted. None invalidates every draft.
-    num_acceptable_drafts: list[int] | None = None

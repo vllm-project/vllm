@@ -26,6 +26,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.kv_cache_interface import CircularBufferSpec, KVCacheSpec
 
@@ -97,7 +98,17 @@ def _ring_slot_mapping_kernel(
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        # Decode replays use device request boundaries; prefill metadata is
+        # not graph-safe.
+        return max_decode_query_len(vllm_config)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -260,6 +271,14 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
@@ -310,7 +329,7 @@ class DeepseekCompressor(nn.Module):
         wkv_wgate_sizes = (
             [self.head_dim, self.head_dim] if self.has_gate else [self.head_dim]
         )
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        self.fused_wkv_wgate = DeepseekV4CompressorKVScoreLinear(
             self.hidden_size,
             wkv_wgate_sizes,
             bias=False,
