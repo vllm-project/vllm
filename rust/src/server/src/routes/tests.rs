@@ -59,8 +59,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{
-    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_scale_out_endpoints, render::build_router as build_render_router,
+    RouteGates, build_router, build_router_with_gates, render::build_router as build_render_router,
     strip_root_path, with_root_path,
 };
 use crate::config::{
@@ -804,12 +803,16 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    build_router_with_dev_mode(
+    build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        dev_mode_enabled,
+        RouteGates {
+            dev_mode: dev_mode_enabled,
+            scale_out: true,
+            ..RouteGates::default()
+        },
     )
 }
 
@@ -894,9 +897,72 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
+        ("POST", "/generative_scoring"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cohere_routes_follow_the_python_gates() {
+    const CHAT: &str = "/cohere/v2/chat";
+    const RENDER: &str = "/cohere/v2/chat/render";
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-cohere-routes",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    async fn post_status(app: &axum::Router, uri: &str) -> StatusCode {
+        app.clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app")
+            .status()
+    }
+
+    let enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            cohere_api: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_route_not_supported(&enabled, "POST", CHAT, CHAT).await;
+    assert_route_not_supported(&enabled, "POST", RENDER, RENDER).await;
+
+    let no_scale_out = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            cohere_api: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_route_not_supported(&no_scale_out, "POST", CHAT, CHAT).await;
+    assert_eq!(
+        post_status(&no_scale_out, RENDER).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let disabled = build_router_with_gates(
+        state,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+    assert_eq!(post_status(&disabled, CHAT).await, StatusCode::NOT_FOUND);
+    assert_eq!(post_status(&disabled, RENDER).await, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -943,9 +1009,12 @@ async fn scale_out_generate_route_can_be_enabled() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(vec!["model".to_string()], chat)),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -983,12 +1052,18 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
     .await;
     let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
 
-    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    let enabled = build_router_with_gates(
+        state.clone(),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
     for uri in ROUTES {
         assert_route_not_supported(&enabled, "POST", uri, uri).await;
     }
 
-    let disabled = build_router_with_scale_out_endpoints(state, false);
+    let disabled = build_router_with_gates(state, RouteGates::default());
     for uri in ROUTES {
         let response = disabled
             .clone()
@@ -1071,12 +1146,15 @@ async fn test_dev_mode_app_with_ready(
     .expect("connect client");
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
-    let app = build_router_with_dev_mode(
+    let app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
     );
     (app, engine_task)
 }
@@ -1195,7 +1273,15 @@ where
 {
     let (state, engine_task) = test_admin_state_with_ready_and_engine_script(ready, script).await;
     (
-        build_router_with_dev_mode_and_lora(state, true, true),
+        build_router_with_gates(
+            state,
+            RouteGates {
+                dev_mode: true,
+                runtime_lora_updating: true,
+                scale_out: true,
+                ..RouteGates::default()
+            },
+        ),
         engine_task,
     )
 }
@@ -1290,7 +1376,13 @@ async fn static_lora_module_loads_and_lists_with_parent() {
     assert_eq!(request.lora_name, "alice");
     assert_eq!(request.lora_int_id, 1);
 
-    let mut app = build_router_with_dev_mode_and_lora(state, true, false);
+    let mut app = build_router_with_gates(
+        state,
+        RouteGates {
+            dev_mode: true,
+            ..RouteGates::default()
+        },
+    );
     let models = app
         .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
         .await
@@ -1387,12 +1479,15 @@ async fn test_app_with_stream_output_specs(
     )
     .await;
     (
-        build_router_with_scale_out_endpoints(
+        build_router_with_gates(
             Arc::new(AppState::new(
                 vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
                 chat,
             )),
-            true,
+            RouteGates {
+                scale_out: true,
+                ..RouteGates::default()
+            },
         ),
         engine_task,
     )
@@ -1937,9 +2032,12 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
         Arc::new(FakeChatBackend::new()),
     )
     .await;
-    let mut generate_app = build_router_with_scale_out_endpoints(
+    let mut generate_app = build_router_with_gates(
         Arc::new(AppState::new(vec!["render-model".to_string()], chat)),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
     let generate_response = generate_app
         .call(
@@ -4903,9 +5001,12 @@ async fn engine_request_errors_map_to_http_status() {
                 Arc::new(FakeChatBackend::new()),
             )
             .await;
-            let mut app = build_router_with_scale_out_endpoints(
+            let mut app = build_router_with_gates(
                 Arc::new(AppState::new(vec![model.to_string()], chat)),
-                true,
+                RouteGates {
+                    scale_out: true,
+                    ..RouteGates::default()
+                },
             );
             let response = app
                 .call(
@@ -6204,12 +6305,15 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -6331,12 +6435,15 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     .await
     .expect("connect client");
     let chat = ChatLlm::from_shared_backend(Llm::new(client), Arc::new(FakeChatBackend::new()));
-    let mut app = build_router_with_scale_out_endpoints(
+    let mut app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        true,
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
     );
 
     let response = app
@@ -8621,12 +8728,12 @@ async fn abort_requests_route_accepts_empty_id_list() {
 #[serial]
 async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
-    let app = build_router_with_dev_mode(
+    let app = build_router_with_gates(
         Arc::new(AppState::new(
             vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
             chat,
         )),
-        false,
+        RouteGates::default(),
     );
 
     for (method, uri) in [
