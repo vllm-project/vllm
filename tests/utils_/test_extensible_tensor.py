@@ -230,6 +230,41 @@ def test_release_physical_keeps_addresses() -> None:
         et.free()
 
 
+@pytest.mark.skipif(torch.version.hip is not None, reason="CUDA driver export")
+@pytest.mark.parametrize("exportable", [False, True])
+@create_new_process_for_each_test("spawn")
+def test_only_exportable_memory_exports_a_posix_fd(exportable: bool) -> None:
+    """LMCache MP imports the committed memory through POSIX file descriptors;
+    every other extensible tensor keeps the driver's unexportable default."""
+    _skip_unless_vmm()
+    import ctypes
+    import os
+
+    from vllm.utils.vmm_driver import get_vmm_driver
+
+    driver = get_vmm_driver()
+    et = ExtensibleTensor(4096, device="cuda", exportable=exportable)
+    try:
+        et.resize_per_segment_(4096)
+        handle = ctypes.c_ulonglong()
+        assert (
+            driver._lib.cuMemRetainAllocationHandle(
+                ctypes.byref(handle), ctypes.c_void_p(et.base_ptr)
+            )
+            == 0
+        )
+        fd = ctypes.c_int(-1)
+        result = driver._lib.cuMemExportToShareableHandle(
+            ctypes.byref(fd), handle, ctypes.c_int(1), ctypes.c_ulonglong(0)
+        )
+        driver.release(handle.value)
+        if result == 0:
+            os.close(fd.value)
+        assert (result == 0) is exportable
+    finally:
+        et.free()
+
+
 class _FailingDriver:
     """Delegates to the real driver, recording access grants and failing the
     n-th physical allocation with an error `_map_chunk_at` does not retry."""
@@ -246,11 +281,11 @@ class _FailingDriver:
     def __getattr__(self, name):
         return getattr(self._driver, name)
 
-    def create(self, size: int, device_index: int) -> int:
+    def create(self, size: int, device_index: int, exportable: bool = False) -> int:
         self.creates += 1
         if self.creates == self._fail_on_create:
             raise self.Failure("simulated allocation failure")
-        return self._driver.create(size, device_index)
+        return self._driver.create(size, device_index, exportable)
 
     def set_access(self, ptr: int, size: int, device_index: int) -> None:
         self.access_grants.append((ptr, size))

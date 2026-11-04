@@ -434,8 +434,8 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
 def test_kv_transfer_registers_kv_cache_memory(
     connector, buffer_device, registers, multi
 ):
-    """Connectors whose workers register the device KV cache with UCX or RDMA,
-    also when nested in MultiConnector."""
+    """Connectors whose workers register the device KV cache with UCX, RDMA or
+    another process (LMCache MP), also when nested in MultiConnector."""
     from vllm.config.kv_transfer import KVTransferConfig
 
     if multi:
@@ -505,13 +505,15 @@ def test_extensible_kv_cache_with_lmcache_mp(
     monkeypatch, multi, requested, use_vmm_api
 ):
     """LMCacheMPConnector shares the KV cache through legacy CUDA IPC, which
-    cannot export driver-mapped memory on any platform, unless
-    `lmcache.mp.use_vmm_api` makes it share VMM handles instead."""
+    cannot export driver-mapped memory on any platform, unless its own
+    `lmcache.mp.use_vmm_api` makes it share exported VMM handles instead; in
+    MultiConnector, only the child's config reaches it."""
     from types import SimpleNamespace
 
     import vllm.platforms
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.config.vllm import VllmConfig
+    from vllm.v1.worker.extensible_kv_cache import exports_kv_cache_memory
 
     lmcache = {
         "kv_connector": "LMCacheMPConnector",
@@ -522,7 +524,10 @@ def test_extensible_kv_cache_with_lmcache_mp(
         KVTransferConfig(
             kv_connector="MultiConnector",
             kv_role="kv_both",
-            kv_connector_extra_config={"connectors": [lmcache]},
+            kv_connector_extra_config={
+                "connectors": [lmcache],
+                "lmcache.mp.use_vmm_api": True,
+            },
         )
         if multi
         else KVTransferConfig(**lmcache)
@@ -544,8 +549,8 @@ def test_extensible_kv_cache_with_lmcache_mp(
         parallel_config=SimpleNamespace(enable_elastic_ep=False),
         kv_transfer_config=transfer,
     )
-    # Only a direct LMCacheMPConnector's extra config is consulted.
-    if use_vmm_api and not multi:
+    assert exports_kv_cache_memory(config) is use_vmm_api
+    if use_vmm_api:
         VllmConfig._resolve_extensible_kv_cache(config)
         assert config.cache_config.enable_extensible_kv_cache is True
     elif requested:

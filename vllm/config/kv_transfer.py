@@ -47,8 +47,9 @@ def hisparse_host_pool_gib(
     return host_pool_gib
 
 
-# Connectors that register the device KV cache with an RDMA engine whatever
-# their buffer device; NIXL is checked separately as it can stage through host.
+# Connectors that register the device KV cache with an RDMA engine or another
+# process (LMCache MP) whatever their buffer device; NIXL is checked separately
+# as it can stage through host.
 _KV_CACHE_REGISTERING_CONNECTORS = frozenset(
     {
         "MooncakeConnector",
@@ -163,6 +164,19 @@ class KVTransferConfig:
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
+
+    def connector_extra_configs(self, connector_name: str) -> list[dict[str, Any]]:
+        """The kv_connector_extra_config of each ``connector_name``, directly or
+        in MultiConnector, whose connectors receive only their own."""
+        if self.kv_connector == "MultiConnector":
+            return [
+                child.get("kv_connector_extra_config", {})
+                for child in self.kv_connector_extra_config.get("connectors", [])
+                if child.get("kv_connector") == connector_name
+            ]
+        if self.kv_connector == connector_name:
+            return [self.kv_connector_extra_config]
+        return []
 
     def uses_custom_mem_pool(self) -> bool:
         """Whether a connector allocates the KV cache from its own memory pool
