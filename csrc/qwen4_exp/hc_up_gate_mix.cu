@@ -40,6 +40,7 @@
 #include <cute/arch/tmem_allocator_sm100.hpp>
 #include <cutlass/arch/barrier.h>
 #include <cutlass/bfloat16.h>
+#include <cutlass/cutlass.h>
 
 #include <algorithm>
 #include <type_traits>
@@ -172,7 +173,9 @@ __global__ void __launch_bounds__(Cfg::kThreads, 1)
   constexpr uint32_t kCtas = Cfg::kCtas;
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   auto& sm = *reinterpret_cast<typename Cfg::SharedStorage*>(smem_raw);
-  const uint32_t warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+  // Warp-uniform for the compiler, so role branches compile to uniform code.
+  const uint32_t warp = cutlass::canonical_warp_idx_sync(),
+                 lane = threadIdx.x % 32;
   // A tile spans kCtas * 128 rows; CTA `rank` of the pair owns 128 of them.
   const uint32_t rank = kCtas == 2 ? cute::block_rank_in_cluster() : 0;
   const uint32_t first_tile = blockIdx.x / kCtas, tile_step = gridDim.x / kCtas;
