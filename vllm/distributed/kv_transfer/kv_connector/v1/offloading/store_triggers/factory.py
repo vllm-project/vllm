@@ -82,7 +82,7 @@ class StoreHandlerFactory:
         handler_classes = [cls._get_handler_cls(trigger) for trigger in triggers]
         for handler_cls in handler_classes:
             handler_cls.check_support(
-                vllm_config, kv_cache_config, extra_config, events_tracker
+                config, vllm_config, kv_cache_config, extra_config, events_tracker
             )
         return {
             trigger: handler_cls(config, events_tracker)
