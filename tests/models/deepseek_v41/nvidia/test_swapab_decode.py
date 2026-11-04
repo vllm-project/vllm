@@ -584,6 +584,7 @@ def test_warmup_key_matches_launch(
     layer._register_swapab_warmup()
 
     (kernel_block,) = layer.backend_cls.get_supported_kernel_block_sizes()
+    assert isinstance(kernel_block, int)
     spec = MLAAttentionSpec(
         block_size=2 * kernel_block,
         num_kv_heads=1,
