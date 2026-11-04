@@ -158,6 +158,9 @@ following is configured:
 - sleep mode or the CuMem allocator
 - HiSparse
 
+The extensible KV cache, on by default with the V2 model runner, is turned
+off with a warning; the KV cache is then sized from profiling estimates.
+
 ## Observability
 
 When persistent state is enabled, `SchedulerStats` carries:

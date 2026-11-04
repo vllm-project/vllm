@@ -357,6 +357,18 @@ def test_extensible_kv_cache_falls_back_when_driver_unsupported():
     assert fake.extensible_kv_cache_unsupported_reason([{}]) is not None
 
 
+def test_extensible_kv_cache_falls_back_for_persistent_state():
+    """Warmup commits only the null block, so state slots need a sized cache."""
+    from tests.v1.core.utils import create_state_spec
+
+    def collective_rpc(method: str):
+        raise AssertionError(f"decided without asking the workers: {method}")
+
+    fake = _fake_executor(None, collective_rpc)
+    specs = [{"attn": object(), "state": create_state_spec()}]
+    assert fake.extensible_kv_cache_unsupported_reason(specs) is not None
+
+
 def test_all_reduce_int(monkeypatch):
     """A MIN all-reduce by default; without a group or with a single rank, the
     value stands."""
