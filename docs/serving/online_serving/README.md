@@ -29,23 +29,6 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
-On `/v1/messages`, the vLLM-specific `repetition_detection` parameter stops
-generation early when output tokens form a repeating pattern. It is disabled
-by default. Enable it with
-`extra_body={"repetition_detection": {"max_pattern_size": 32, "min_count": 16}}`
-in `client.messages.create`, or put `repetition_detection` directly in the HTTP
-request body. This detects patterns of 1–32 tokens repeated at least 16 times. See
-[RepetitionDetectionParams][vllm.sampling_params.RepetitionDetectionParams] for
-parameter definitions.
-
-Repetition termination is reported as the vLLM-specific `stop_reason: "repetition"`
-with no stop sequence, including in streaming `message_delta` events.
-In non-streaming responses, tool arguments whose JSON was cut short by repetition
-detection are preserved as text blocks instead of `tool_use` blocks. In streaming
-responses, previously emitted tool argument fragments may be incomplete when this
-stop reason is received. Repetition detection also applies to reasoning tokens;
-reasoning content is preserved when generation stops.
-
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
