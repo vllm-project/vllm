@@ -414,6 +414,9 @@ class RerankModelInfo(ModelInfo):
 class GenerateModelInfo(ModelInfo):
     hf_dtype: str = "auto"
     hf_ppl: float | None = None
+    pixel_factor: int = 0
+    extra_kwargs: dict | None = None
+    image_token_id: int | None = None
 
 
 def get_vllm_extra_kwargs(model_info: ModelInfo, vllm_extra_kwargs):
@@ -560,6 +563,13 @@ def dummy_hf_overrides(
     # HY V4 uses this to decide which sparse-attention indexers are shared.
     if indexer_types := getattr(text_config, "indexer_types", None):
         text_config.update({"indexer_types": indexer_types[:num_hidden_layers]})
+
+    if (
+        sparse := getattr(hf_config, "sparse_attention_config", None)
+    ) and "sparse_attention_freq" in sparse:
+        sparse["sparse_attention_freq"] = sparse["sparse_attention_freq"][
+            :num_hidden_layers
+        ]
 
     # Update n_layers and moe configs for Moondream3 model
     if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
