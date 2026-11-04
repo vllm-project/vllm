@@ -1390,6 +1390,18 @@ class Scheduler(SchedulerInterface):
                         request, num_computed_tokens, num_new_tokens
                     )
 
+                    if (
+                        request.has_encoder_inputs
+                        and not self.scheduler_config.enable_chunked_prefill
+                        and not self.is_mm_encoder_only
+                        and num_new_tokens > 0
+                        and num_new_tokens < request.num_tokens - num_computed_tokens
+                    ):
+                        # Encoder cache pressure must not split a prompt that
+                        # requires full prefill. Release references acquired by hits.
+                        self.encoder_cache_manager.free(request)
+                        num_new_tokens = 0
+
                     if num_new_tokens == 0:
                         # The request cannot be scheduled. Requeue it so it does
                         # not stall the requests behind it.
@@ -2038,7 +2050,6 @@ class Scheduler(SchedulerInterface):
         If an encoder input cannot be scheduled due to cache or budget
         limitations, the method adjusts `num_new_tokens` to schedule only the
         decoder tokens up to just before the unschedulable encoder input.
-        If chunked prefill is disabled, the request is deferred instead.
 
         Note that num_computed_tokens includes both locally cached
         blocks and externally cached blocks (via KVConnector).
@@ -2200,18 +2211,6 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule[item_identifier] = num_encoder_embeds
             encoder_inputs_to_schedule.append(i)
-
-        if (
-            not self.scheduler_config.enable_chunked_prefill
-            and not self.is_mm_encoder_only
-            and num_new_tokens > 0
-            and num_new_tokens < request.num_tokens - num_computed_tokens
-        ):
-            # The prompt may fit the token budget but not the remaining encoder cache,
-            # causing encoder scheduling to split a bidirectional prompt that
-            # must be processed in full.
-            self.encoder_cache_manager.free(request)
-            return [], 0, encoder_compute_budget, [], []
 
         return (
             encoder_inputs_to_schedule,
