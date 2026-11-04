@@ -50,6 +50,15 @@ class OnlineRequantizationMixin:
             raise NotImplementedError(
                 f"activation override is not supported for online {cls.__name__}"
             )
+        if activation_quant_key is not None and activation_quant_key.scale.static:
+            # Online quantization quantizes activations at runtime, so the
+            # calibrated scales a static activation key describes do not exist.
+            raise NotImplementedError(
+                f"online {cls.__name__} cannot honour "
+                f"activation={activation_quant_key}: online quantization cannot "
+                "provide calibrated static activation scales. Use a dynamic "
+                "activation key, or 'activation: null'."
+            )
 
         return activation_quant_key
 

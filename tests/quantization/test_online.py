@@ -27,6 +27,7 @@ from vllm.config.kernel import KernelConfig
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import (
+    QUANT_KEY_NAMES,
     QuantizationConfigArgs,
     QuantSpec,
     resolve_quantization_config,
@@ -45,7 +46,14 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, RoutedExperts
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    activation_quant_dtype,
+)
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    _backend_activation_key,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -125,6 +133,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp6E2M3Dynamic,
+    kMxfp6E3M2Dynamic,
     kMxfp8Dynamic,
     kMxfp8Static,
     kNvfp4Dynamic,
@@ -152,6 +162,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_trtllm_fused_moe,
 )
+from vllm.utils.import_utils import has_quark
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -297,6 +308,112 @@ def test_online_activation_override(
 
     resolved = config.resolve_quant_method_cls(layer_cls, layer_kind)
     assert resolved is not None and resolved[3].activation == activation_quant_key
+
+
+# Activation keys an online MXFP4 layer honours on this platform, and the
+# emulated activation format each one maps to. Listed explicitly so that a
+# request silently served by another format fails the test instead of passing.
+_EMULATED_ACTIVATION_DTYPES: dict = {
+    None: None,  # weight-only
+    kMxfp4Dynamic: "mxfp4",
+    kMxfp6E3M2Dynamic: "mxfp6_e3m2",
+    kMxfp6E2M3Dynamic: "mxfp6_e2m3",
+}
+_MXFP4_LINEAR_ACTIVATION_KEYS = {None, kMxfp4Dynamic}
+_MXFP4_MOE_ACTIVATION_KEYS = {None, kMxfp4Dynamic}
+if current_platform.is_cuda():
+    # B12X / FlashInfer MXFP4 x MXFP8 kernels.
+    _MXFP4_LINEAR_ACTIVATION_KEYS.add(kMxfp8Dynamic)
+    _MXFP4_MOE_ACTIVATION_KEYS.add(kMxfp8Dynamic)
+if has_quark():
+    # The OCP MX emulation QDQs MXFP4/MXFP6 activations for both layer kinds, and
+    # FP8 activations per tensor for MoE only (the linear FP8 kernels are
+    # per-token).
+    _MXFP4_LINEAR_ACTIVATION_KEYS.update({kMxfp6E3M2Dynamic, kMxfp6E2M3Dynamic})
+    _MXFP4_MOE_ACTIVATION_KEYS.update(
+        {kMxfp6E3M2Dynamic, kMxfp6E2M3Dynamic, kFp8DynamicTensorSym}
+    )
+
+
+@pytest.mark.parametrize(
+    "activation_quant_key",
+    [
+        None,
+        *dict.fromkeys(QUANT_KEY_NAMES.values()),
+        # No online shorthand, but valid `QuantSpec` activation keys.
+        kMxfp6E3M2Dynamic,
+        kMxfp6E2M3Dynamic,
+    ],
+    ids=lambda key: "null" if key is None else str(key),
+)
+@pytest.mark.parametrize(
+    ("layer_kind", "method_cls", "supported_keys", "raises", "error_match"),
+    [
+        (
+            "linear",
+            Mxfp4OnlineLinearMethod,
+            _MXFP4_LINEAR_ACTIVATION_KEYS,
+            (NotImplementedError, ValueError),
+            "Failed to find a kernel that can implement the MXFP4 linear layer"
+            "|cannot honour activation=",
+        ),
+        (
+            "moe",
+            Mxfp4OnlineMoEMethod,
+            _MXFP4_MOE_ACTIVATION_KEYS,
+            (NotImplementedError, ValueError),
+            "No MXFP4 MoE backend supports the deployment configuration"
+            "|cannot honour activation=",
+        ),
+    ],
+)
+def test_online_mxfp4_activation_key_is_honoured_or_rejected(
+    default_vllm_config,
+    layer_kind: str,
+    method_cls: type,
+    supported_keys: set,
+    raises: type[Exception] | tuple[type[Exception], ...],
+    error_match: str,
+    activation_quant_key: quant_utils.QuantKey | None,
+) -> None:
+    """Each activation key either dispatches to a kernel that computes it, or is
+    rejected; it is never silently replaced by another format."""
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=None,
+        dtype=torch.bfloat16,
+    )
+    kwargs = {"moe": _TestRoutedExperts().moe_config} if layer_kind == "moe" else {}
+
+    if activation_quant_key not in supported_keys:
+        with pytest.raises(raises, match=error_match):
+            method_cls(activation_quant_key=activation_quant_key, **kwargs)
+        return
+
+    method = method_cls(activation_quant_key=activation_quant_key, **kwargs)
+    assert method.activation_quant_key == activation_quant_key
+    if layer_kind == "linear":
+        assert method.kernel.config.activation_quant_key == activation_quant_key
+        return
+
+    if method.mxfp4_backend != Mxfp4MoeBackend.EMULATION:
+        assert _backend_activation_key(method.mxfp4_backend) == activation_quant_key
+        return
+
+    # The emulation must build a config for the requested format, not another one.
+    layer = torch.nn.Module()
+    layer.w13_weight_scale = torch.empty(1)
+    layer.w2_weight_scale = torch.empty(1)
+    layer.w13_input_scale = None
+    layer.w2_input_scale = None
+    quant_config = method.get_fused_moe_quant_config(layer)
+    assert quant_config is not None
+    if activation_quant_key in _EMULATED_ACTIVATION_DTYPES:
+        expected_dtype = _EMULATED_ACTIVATION_DTYPES[activation_quant_key]
+    else:  # FP8, emulated with per-tensor dynamic scales
+        expected_dtype = current_platform.fp8_dtype()
+        assert quant_config.per_act_token_quant is False
+        assert quant_config.block_shape is None
+    assert activation_quant_dtype(quant_config.ocp_mx_scheme) == expected_dtype
 
 
 def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
@@ -1308,10 +1425,15 @@ def test_online_requantized_moe_reload(
         "int8": (Int8OnlineMoEMethod, "int8"),
     }
     method_cls, module_name = target_methods[online_target]
+    # Real backends here: the online MXFP4 method validates that the selected
+    # backend computes the activation format it was asked for.
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+
+    selected_backend = Mxfp4MoeBackend.EMULATION if module_name == "mxfp4" else object()
     monkeypatch.setattr(
         f"vllm.model_executor.layers.quantization.online.{module_name}."
         f"select_{module_name}_moe_backend",
-        lambda **kwargs: (object(), object()),
+        lambda **kwargs: (selected_backend, object()),
     )
     source = _make_nvfp4_moe_source(source_format, moe, monkeypatch)
 
@@ -2007,36 +2129,11 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
         pytest.param(
             GRANITE_MODEL_NAME,
             "mxfp4",
-            {"moe": {"weight": "mxfp4", "activation": "mxfp8"}},
-            Mxfp4OnlineLinearMethod,
-            Mxfp4OnlineMoEMethod,
-            {},
-            id="mxfp4_activation_override",
-        ),
-        pytest.param(
-            GRANITE_MODEL_NAME,
-            "mxfp4",
             {"moe": {"weight": "mxfp4", "activation": None}},
             Mxfp4OnlineLinearMethod,
             Mxfp4OnlineMoEMethod,
             {},
             id="mxfp4_null_activation_override",
-        ),
-        pytest.param(
-            GRANITE_MODEL_NAME,
-            "online",
-            {
-                "targets": {
-                    "*experts*": {
-                        "weight": "mxfp4",
-                        "activation": "mxfp8",
-                    },
-                },
-            },
-            UnquantizedLinearMethod,
-            Mxfp4OnlineMoEMethod,
-            {},
-            id="targets_activation_override",
         ),
         pytest.param(
             "mgoin/Qwen3-0.6B-MXFP8",
@@ -2090,11 +2187,6 @@ def test_online_quantization(
     """
     # TODO: Relax this condition once there is a native MXFP4_MXFP4
     # linear/moe backend supported on cuda.
-    target_specs = (
-        online_quant_args.get("targets", {})
-        if isinstance(online_quant_args, dict)
-        else {}
-    )
     if (quant_scheme == "mxfp4" or expected_moe_cls is Mxfp4OnlineMoEMethod) and not (
         on_gfx950() or on_gfx942()
     ):
@@ -2248,13 +2340,8 @@ def test_online_quantization(
     moe_args = (
         online_quant_args.get("moe") if isinstance(online_quant_args, dict) else None
     )
-    if isinstance(moe_args, dict) and moe_args.get("activation") == "mxfp8":
-        assert moe._quant_method.activation_quant_key == quant_utils.kMxfp8Dynamic
-    elif isinstance(moe_args, dict) and "activation" in moe_args:
+    if isinstance(moe_args, dict) and "activation" in moe_args:
         assert moe._quant_method.activation_quant_key is None
-    elif isinstance(target_specs.get("*experts*"), dict):
-        assert moe._quant_method.activation_quant_key == quant_utils.kMxfp8Dynamic
-
     if model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME and isinstance(
         o_proj.quant_method.kernel, (MarlinMxfp8LinearKernel, HummingMxfp8LinearKernel)
     ):
@@ -2265,8 +2352,6 @@ def test_online_quantization(
         assert o_proj.weight.dtype == torch.bfloat16
     elif model_name == PARTIALLY_PREQUANTIZED_MODEL_NAME:
         assert o_proj.weight.dtype == MXFP8_VALUE_DTYPE
-    elif expected_linear_cls is UnquantizedLinearMethod:
-        assert o_proj.weight.dtype == torch.bfloat16
     elif (
         model_name
         in (

@@ -18,10 +18,20 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+    mxfp4_w4a8_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config,
+    ocp_mx_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    _EMULATED_ACTIVATIONS,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    _backend_activation_key,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -37,8 +47,22 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    _ACTIVATION_QUANT_KEY_MAP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.utils import replace_parameter
+
+# OCP MX dtype name of each emulated activation key, e.g. kMxfp4Dynamic ->
+# "mxfp4". The FP8 activation keys have no OCP MX name; they emulate as
+# `w_mxfp4_a_fp8`.
+_ACTIVATION_OCP_MX_DTYPES: dict[QuantKey, str] = {
+    activation_key: name for name, activation_key in _ACTIVATION_QUANT_KEY_MAP.items()
+}
 
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
 # and MoE oracle paths.
@@ -166,6 +190,21 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
             config=self.moe, activation_key=self.activation_quant_key
         )
+        # The oracle falls back to a BF16 backend (with a warning) when no backend
+        # computes the requested format, and `activation_key=None` means "no
+        # preference" for checkpoint methods but an explicit BF16 request here.
+        # EMULATION emulates whatever this layer asked for (see
+        # `_emulation_quant_config`); any other backend computes a fixed format.
+        if (
+            self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
+            and self.activation_quant_key != _backend_activation_key(self.mxfp4_backend)
+        ):
+            raise NotImplementedError(
+                f"online MXFP4 MoE backend '{self.mxfp4_backend}' cannot honour "
+                f"activation={self.activation_quant_key}; it computes activation="
+                f"{_backend_activation_key(self.mxfp4_backend)}. Drop the "
+                "activation override, or use a backend that computes it."
+            )
 
     def maybe_roundup_sizes(
         self,
@@ -276,6 +315,14 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
+        """Quant config for the activation format this layer was configured with.
+
+        Only the backends whose activation format is fixed by the backend itself
+        can defer to `make_mxfp4_moe_quant_config`; the OCP MX emulation computes
+        whatever format `activation_quant_key` asks for.
+        """
+        # TODO: Much of this should be moved to oracle/mxfp4.py / generic oracle
+        # activation quant key handling.
         if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
             Mxfp4MoeBackend.AITER_MXFP4_FP8,
         ):
@@ -284,13 +331,48 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         else:
             w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
             w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        w1_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
+
+        if self.mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+            if self.activation_quant_key is None:  # BF16 activations
+                return mxfp4_w4a16_moe_quant_config(
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    w1_bias=w1_bias,
+                    w2_bias=w2_bias,
+                )
+            # The emulation table decides which formats it can compute; an FP8 key
+            # has no OCP MX dtype name and emulates as `w_mxfp4_a_fp8`.
+            assert self.activation_quant_key in _EMULATED_ACTIVATIONS[kMxfp4Static], (
+                self.activation_quant_key
+            )
+            emulated_dtype = _ACTIVATION_OCP_MX_DTYPES.get(self.activation_quant_key)
+            if emulated_dtype is not None:
+                return ocp_mx_moe_quant_config(
+                    quant_dtype=emulated_dtype,
+                    weight_dtype="mxfp4",
+                    w1_scale=w1_scale,
+                    w2_scale=w2_scale,
+                    w1_bias=w1_bias,
+                    w2_bias=w2_bias,
+                )
+            return mxfp4_w4a8_moe_quant_config(
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                w1_bias=w1_bias,
+                w2_bias=w2_bias,
+                block_shape=None,
+            )
 
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
-            w1_bias=getattr(layer, "w13_bias", None),
-            w2_bias=getattr(layer, "w2_bias", None),
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),

@@ -480,7 +480,12 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
 
 
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
-    """Map backend to its activation key (FP8, MXFP8, or None for BF16)."""
+    """Map backend to its activation key (FP8, MXFP8, MXFP4, or None for BF16).
+
+    EMULATION is not listed and therefore reads as `None`: its activation format
+    is chosen by the quant config, not fixed by the backend. Callers that weigh
+    it up against the BF16 backends must use `_emulation_supports_activation`.
+    """
     if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         return kFp8Dynamic128Sym
     if backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
@@ -630,24 +635,44 @@ def _return_or_raise(
     raise ValueError(_make_log_unsupported(backend, reason))
 
 
+def _emulation_supports_activation(activation_key: QuantKey | None) -> bool:
+    """Whether the OCP MX emulation can compute `activation_key`."""
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+
+    return OCP_MXQuantizationEmulationTritonExperts._supports_quant_scheme(
+        kMxfp4Static, activation_key
+    )
+
+
 def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching ``requested_activation_key``, followed by BF16
-    variants as a higher-precision fallback; without one, prefer BF16 if the
-    list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
-    the ``_afp8`` aliases) still land."""
+    """Pick variants matching ``requested_activation_key``, followed by EMULATION
+    when it can compute that key, followed by BF16 variants as a higher-precision
+    fallback; without a request, prefer BF16 if the list has any, else keep the
+    list as-is so explicit non-BF16 picks (e.g. the ``_afp8`` aliases) still
+    land."""
+    # EMULATION has no fixed activation format: keep it out of the BF16 bucket and
+    # only offer it, where the platform lists it, for formats it can compute.
+    emulation_listed = Mxfp4MoeBackend.EMULATION in backends
+    backends = [b for b in backends if b != Mxfp4MoeBackend.EMULATION]
+    emulation = (
+        [Mxfp4MoeBackend.EMULATION]
+        if emulation_listed and _emulation_supports_activation(requested_activation_key)
+        else []
+    )
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
             b
             for b in backends
             if _backend_activation_key(b) == requested_activation_key
-            or b == Mxfp4MoeBackend.EMULATION
         ]
-        return matching + [b for b in bf16 if b not in matching]
-    return bf16 if bf16 else backends
+        return matching + emulation + [b for b in bf16 if b not in matching]
+    return bf16 + emulation if bf16 or emulation else backends
 
 
 def _get_requested_backends(
@@ -707,6 +732,8 @@ def select_mxfp4_moe_backend(
             )
         last_error: Exception | None = None
         for requested_backend in requested_backends:
+            # EMULATION takes the requested key: what it computes depends on the
+            # quant config the caller builds, so it validates against the request.
             act_key = (
                 requested_activation_key
                 if requested_backend == Mxfp4MoeBackend.EMULATION
