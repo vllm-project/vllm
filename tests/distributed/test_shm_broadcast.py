@@ -726,6 +726,48 @@ def test_acquire_read_releases_slot_when_reader_raises():
         reader.shutdown()
 
 
+def test_readable_reports_pending_message_without_consuming():
+    writer = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=2,
+    )
+    reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        assert not reader.readable()
+        writer.enqueue("first")
+        writer.enqueue("second")
+        # Checking readability doesn't consume the message.
+        assert reader.readable()
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "first"
+        assert reader.readable()
+        assert reader.dequeue(timeout=5) == "second"
+        assert not reader.readable()
+
+        reader.shutdown()
+        with pytest.raises(RuntimeError, match="cancelled"):
+            reader.readable()
+    finally:
+        writer.shutdown()
+        reader.shutdown()
+
+
+def test_readable_sleeps_on_remote_socket():
+    reader = mock.Mock(
+        shutting_down=False, _is_local_reader=False, _is_remote_reader=True
+    )
+    reader.remote_socket.poll.return_value = 0
+    assert MessageQueue.readable(reader) is False
+    reader.remote_socket.poll.assert_called_once_with(
+        timeout=shm_broadcast.REMOTE_READABLE_WAIT_MS
+    )
+
+
 def test_reader_in_reference_cycle_is_collected_without_blocking():
     writer = MessageQueue(
         n_reader=1,

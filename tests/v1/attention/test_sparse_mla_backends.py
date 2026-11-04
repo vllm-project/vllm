@@ -2369,6 +2369,58 @@ def _make_hisparse_cache_handle(
     return HiSparseCacheHandle(runtime)
 
 
+@requires_hisparse_ops
+def test_hisparse_profiling_releases_device_storage():
+    """Live attention handles must not retain the temporary profiling KV slab."""
+    import gc
+    import weakref
+
+    from vllm.v1.hisparse.binding import unbind_hisparse_caches
+
+    cache = _make_hisparse_cache_handle()
+    layer = torch.nn.Module()
+    layer.hisparse_cache = cache
+    context = {"layer": layer}
+    block_table = torch.zeros((2, 1), dtype=torch.int32, device=DEVICE_TYPE)
+    slot_mapping = torch.zeros(4, dtype=torch.int64, device=DEVICE_TYPE)
+    backing = torch.empty(64 * 2**20, dtype=torch.int8, device=DEVICE_TYPE)
+    cache.runtime.bind_hot_cache(
+        backing,
+        byte_offset=0,
+        block_stride=64 * 8 * 4,
+        num_blocks=backing.numel() // (64 * 8 * 4),
+        block_size=64,
+        block_table=block_table,
+    )
+    cache.bind_cache(
+        backing,
+        byte_offset=0,
+        block_stride=64 * 8 * 4,
+        num_blocks=backing.numel() // (64 * 8 * 4),
+        block_size=64,
+        block_table=block_table,
+        slot_mapping=slot_mapping,
+    )
+    assert cache.view is not None
+    views = [
+        weakref.ref(cache.view.cache),
+        weakref.ref(cache.view.attention_cache),
+        weakref.ref(cache.runtime.hot.cache),
+        weakref.ref(cache.runtime.hot.attention_cache),
+    ]
+    del backing
+    torch.accelerator.synchronize()
+    bound = torch.accelerator.memory_allocated()
+    try:
+        unbind_hisparse_caches(context)
+        gc.collect()
+        torch.accelerator.synchronize()
+        assert all(reference() is None for reference in views)
+        assert bound - torch.accelerator.memory_allocated() >= 64 * 2**20
+    finally:
+        unbind_hisparse_caches(context)
+
+
 def _valid_rows(num_rows: int) -> torch.Tensor:
     return torch.tensor([num_rows], dtype=torch.int32, device=DEVICE_TYPE)
 
@@ -3436,36 +3488,11 @@ def test_hisparse_gather_zeroes_unaligned_destination():
         global_indices,
         hot_indices,
         miss_mask,
-        None,
     )
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(hot_cache[1, 0], torch.zeros_like(hot_cache[1, 0]))
     assert storage[row_bytes].item() == 7
-
-
-@requires_hisparse_ops
-def test_hisparse_gather_rejects_short_attention_block_stride():
-    """Reject a stride that would let the gather kernel cross block bounds."""
-    device = torch.device(DEVICE_TYPE)
-    host_cache = torch.ones(1, 16, dtype=torch.uint8).pin_memory()
-    hot_cache = torch.empty((1, 2, 16), dtype=torch.uint8, device=device)
-    global_indices = torch.zeros((1, 1), dtype=torch.int32, device=device)
-    hot_indices = torch.zeros_like(global_indices)
-    miss_mask = torch.ones_like(global_indices)
-    attention_indices = torch.empty_like(global_indices)
-
-    with pytest.raises(RuntimeError, match="stride must cover one hot block"):
-        torch.ops._C_cache_ops.hisparse_gather_plan(
-            host_cache,
-            hot_cache,
-            global_indices,
-            hot_indices,
-            miss_mask,
-            None,
-            attention_indices,
-            1,
-        )
 
 
 @requires_hisparse_ops
