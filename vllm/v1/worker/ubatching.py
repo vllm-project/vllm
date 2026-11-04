@@ -146,6 +146,20 @@ class UBatchContext:
         self.update_stream(self.compute_stream)
         self._wait_comm_done()
 
+    def subgpu_ensure_attn(self):
+        """Under SubGPU pipelining, move to the attention pool (the compute
+        stream) unless already there."""
+        if self.schedule != "subgpu" or self.current_stream == self.compute_stream:
+            return
+        self.yield_and_switch_from_comm_to_compute()
+
+    def subgpu_ensure_rest(self):
+        """Under SubGPU pipelining, move to the rest pool (the comm stream)
+        unless already there."""
+        if self.schedule != "subgpu" or self.current_stream == self.comm_stream:
+            return
+        self.yield_and_switch_from_compute_to_comm()
+
 
 def dbo_enabled() -> bool:
     return len(_THREAD_ID_TO_CONTEXT) > 0
@@ -192,6 +206,8 @@ dbo_switch_to_comm_sync = _register_ubatch_function(UBatchContext.switch_to_comm
 dbo_switch_to_compute_sync = _register_ubatch_function(
     UBatchContext.switch_to_compute_sync
 )
+dbo_subgpu_ensure_attn = _register_ubatch_function(UBatchContext.subgpu_ensure_attn)
+dbo_subgpu_ensure_rest = _register_ubatch_function(UBatchContext.subgpu_ensure_rest)
 
 
 def dbo_register_recv_hook(recv_hook):
@@ -218,7 +234,14 @@ def make_ubatch_contexts(
     ready_barrier: threading.Barrier,
     schedule: str = "default",
     token_offsets: list[int] | None = None,
+    comm_streams: list[torch.cuda.Stream] | None = None,
 ) -> list[UBatchContext]:
+    """Create the contexts of one microbatched step, one per thread.
+
+    `comm_streams` gives each microbatch its own comm stream (SubGPU pipelining
+    runs each micro-batch's rest stage on its own stream of the rest pool);
+    otherwise all share `comm_stream`.
+    """
     global _NUM_UBATCHES, _CURRENT_CONTEXTS
     assert num_micro_batches > 1, "num_micro_batches must be greater than 1"
 
@@ -227,9 +250,6 @@ def make_ubatch_contexts(
     if len(_CURRENT_CONTEXTS) < num_micro_batches:
         _CURRENT_CONTEXTS.extend([None] * (num_micro_batches - len(_CURRENT_CONTEXTS)))
 
-    """
-    Create a context manager for micro-batching synchronization.
-    """
     cpu_events = [threading.Event() for _ in range(num_micro_batches)]
     gpu_comm_done_events = [torch.Event() for _ in range(num_micro_batches)]
     gpu_compute_done_events = [torch.Event() for _ in range(num_micro_batches)]
@@ -239,7 +259,9 @@ def make_ubatch_contexts(
         ctx = UBatchContext(
             id=i,
             compute_stream=compute_stream,
-            comm_stream=comm_stream,
+            comm_stream=comm_streams[i % len(comm_streams)]
+            if comm_streams
+            else comm_stream,
             forward_context=forward_contexts[i],
             ready_barrier=ready_barrier,
             cpu_wait_event=cpu_events[i],

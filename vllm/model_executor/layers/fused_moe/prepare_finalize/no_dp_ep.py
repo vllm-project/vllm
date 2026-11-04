@@ -44,6 +44,12 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         # which is exactly the work a deferring consumer takes over.
         return True
 
+    def supports_dbo(self) -> bool:
+        # No communication: prepare() and finalize() run on the microbatch's
+        # current stream, so microbatching (SubGPU pipelining on one rank)
+        # needs no compute/comm handoff here.
+        return True
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
