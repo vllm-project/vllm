@@ -11,13 +11,16 @@ use vllm_engine_core_client::protocol::utility::PauseMode;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{deserialize_query_bool, utility_call_error};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct PauseParams {
     #[serde(default)]
     mode: PauseMode,
-    #[serde(default = "default_clear_cache")]
+    #[serde(
+        default = "default_clear_cache",
+        deserialize_with = "deserialize_query_bool"
+    )]
     clear_cache: bool,
 }
 
@@ -48,7 +51,7 @@ pub async fn pause(
 
     state
         .engine_core_client()
-        .pause_scheduler(params.mode, params.clear_cache)
+        .pause_generation(params.mode, params.clear_cache)
         .await
         .map_err(|error| utility_call_error("pause", error))?;
 

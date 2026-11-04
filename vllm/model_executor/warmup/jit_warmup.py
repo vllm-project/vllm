@@ -1082,6 +1082,10 @@ class JitWarmupRegistry:
         from tqdm import tqdm
 
         from vllm.distributed import is_global_first_rank
+        from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+            VllmTritonJitKernel,
+            compile_triton_warmup,
+        )
 
         kernel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
         for kernel, registrations in self._registrations.items():
@@ -1102,17 +1106,40 @@ class JitWarmupRegistry:
         if not kernel_items:
             return
 
+        parallel_items: list[tuple[VllmJitKernel[Any], dict[Any, None]]] = []
+        serial_items = []
+        for kernel, compile_keys in kernel_items:
+            if (
+                isinstance(kernel, VllmTritonJitKernel)
+                and kernel.supports_parallel_compile
+            ):
+                parallel_items.append((kernel, compile_keys))
+            else:
+                serial_items.append((kernel, compile_keys))
+
         total_keys = sum(len(compile_keys) for _, compile_keys in kernel_items)
         with tqdm(
-            kernel_items,
+            total=len(kernel_items),
             desc=f"JIT kernel warmup ({total_keys} compile keys)",
             disable=not is_global_first_rank(),
             dynamic_ncols=True,
             unit="kernel",
         ) as progress:
-            for kernel, compile_keys in progress:
-                progress.set_postfix_str(
-                    f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
-                    refresh=False,
+
+            def compile_kernels(
+                items: list[tuple[VllmJitKernel[Any], dict[Any, None]]],
+            ) -> None:
+                for kernel, compile_keys in items:
+                    progress.set_postfix_str(
+                        f"{kernel.__class__.__name__} ({len(compile_keys)} keys)",
+                        refresh=False,
+                    )
+                    kernel.compile_many(compile_keys)
+                    progress.update()
+
+            if parallel_items:
+                compile_triton_warmup(
+                    lambda: compile_kernels(parallel_items),
+                    sum(len(keys) for _, keys in parallel_items),
                 )
-                kernel.compile_many(compile_keys)
+            compile_kernels(serial_items)
