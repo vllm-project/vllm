@@ -100,13 +100,16 @@ def test_non_fi_backend_ignores_architectures():
     validate_flashinfer_moe_ep_model("auto", ["MixtralForCausalLM"])
 
 
+@pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
-def test_token_sharding_backends_enable_dsv4_sequence_parallel(moe_backend: str):
+def test_token_sharding_backends_enable_dsv4_sequence_parallel(
+    moe_backend: str, pipeline_parallel_size: int
+):
     from vllm.models.deepseek_v4.nvidia.model import _use_sequence_parallel
 
     vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pipeline_parallel_size,
             enable_expert_parallel=True,
             tensor_parallel_size=8,
             data_parallel_size=1,
