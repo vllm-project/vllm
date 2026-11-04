@@ -297,7 +297,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.layer_id = layer_id
 
         self.prefix = prefix  # Alias for compatibility with compressor
-        self.use_pcp = vllm_config.parallel_config.pcp_execution_size > 1
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
@@ -545,7 +544,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_bounded_replay = False
         if (
             swa_bounded_replay
-            and vllm_config.parallel_config.pcp_execution_size > 1
+            and vllm_config.parallel_config.prefill_context_parallel_size > 1
             and not cache_config.enable_prefix_caching
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
@@ -703,6 +702,17 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             attn_out,
         )
         return self._o_proj(attn_out, positions)
+
+    @property
+    def use_pcp(self) -> bool:
+        metadata = get_forward_context().attn_metadata
+        if not isinstance(metadata, dict):
+            return False
+        swa_metadata = cast(
+            "DeepseekSparseSWAMetadata | None",
+            metadata.get(self.swa_cache_layer.prefix),
+        )
+        return swa_metadata is not None and swa_metadata.cache_slot_mapping is not None
 
     def forward_kv(self, positions: torch.Tensor, hidden_states: torch.Tensor) -> None:
         """Write only the KV ``forward`` writes (SWA KV, compressed KV, index K),

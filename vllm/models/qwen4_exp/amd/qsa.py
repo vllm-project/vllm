@@ -408,7 +408,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise NotImplementedError("Qwen4Exp QSA does not support KV quantization")
         parallel_config = vllm_config.parallel_config
         if (
-            parallel_config.pcp_execution_size > 1
+            parallel_config.prefill_context_parallel_size > 1
             or parallel_config.decode_context_parallel_size > 1
         ):
             raise NotImplementedError(

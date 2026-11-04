@@ -257,6 +257,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         query_pre_quantized: bool = False,
+        use_pcp: bool | None = None,
         **extra_impl_args,
     ) -> None:
         """The KV cache is stored inside this class and is accessed via
@@ -357,6 +358,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size,
                 dtype,
                 kv_cache_dtype,
+                use_pcp=use_pcp,
                 use_mla=False,
                 has_sink=self.has_sink,
                 use_mm_prefix=self.use_mm_prefix,

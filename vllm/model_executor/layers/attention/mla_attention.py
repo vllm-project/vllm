@@ -462,6 +462,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         topk_indices_buffer: torch.Tensor | None = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
+        use_pcp: bool | None = None,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
@@ -518,6 +519,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                use_pcp=use_pcp,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -688,7 +690,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
         if (
-            parallel_config.uses_pcp_partitioning
+            self.use_pcp
+            and use_pcp is not False
             and self.impl.dcp_world_size > 1
             and not self.supports_pcp_dcp
         ):

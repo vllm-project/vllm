@@ -151,7 +151,7 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
 
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the ROCm sparse-MLA implementation for DeepSeek V4.1."""
-    if vllm_config.parallel_config.pcp_execution_size > 1:
+    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
         raise NotImplementedError(
             "DeepSeek-V4.1 PCP currently supports NVIDIA CUDA only."
         )
@@ -987,7 +987,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         elif (
             self.use_sequence_parallel
-            or parallel_config.pcp_execution_size > 1
+            or parallel_config.prefill_context_parallel_size > 1
             or parallel_config.use_ubatching
         ):
             reason = (

@@ -885,26 +885,17 @@ def test_parallel_config_manages_decode_sharding(
     "tp,pcp,dcp,head_factor",
     [(1, 4, 4, 1), (2, 4, 4, 1), (2, 4, 8, 2), (8, 1, 8, 8), (1, 4, 1, 1)],
 )
-def test_replicated_attention_preserves_parallel_topology(tp, pcp, dcp, head_factor):
+def test_dcp_query_heads_count_distinct_tp_shards(tp, pcp, dcp, head_factor):
     target = ParallelConfig(
         tensor_parallel_size=tp,
         prefill_context_parallel_size=pcp,
         decode_context_parallel_size=dcp,
         distributed_executor_backend="mp",
     )
-    draft = replace(target, pcp_execution_mode="replicated")
-    assert draft.world_size == target.world_size == tp * pcp
-    assert draft.prefill_context_parallel_size == target.prefill_context_parallel_size
-    assert draft.decode_context_parallel_size == dcp
-    assert draft.dcp_query_head_multiplier == head_factor
-    assert draft.pcp_execution_size == 1
-    assert not draft.pcp_shard_decode_requests
-    assert target.pcp_execution_size == pcp
-    assert draft.compute_hash() != target.compute_hash()
-    # The execution policy cannot make an invalid process topology legal.
+    assert target.dcp_query_head_multiplier == head_factor
     with pytest.raises(ValueError):
         replace(
-            draft,
+            target,
             tensor_parallel_size=1,
             prefill_context_parallel_size=1,
             decode_context_parallel_size=4,
@@ -982,7 +973,6 @@ def test_dspark_mla_constructor_keeps_pcp_topology(tmp_path):
     assert draft_parallel.world_size == parallel.world_size == 4
     assert draft_parallel.prefill_context_parallel_size == 4
     assert draft_parallel.decode_context_parallel_size == 4
-    assert draft_parallel.pcp_execution_size == 1
-    assert parallel.pcp_execution_size == 4
+    assert draft_parallel.compute_hash() == parallel.compute_hash()
     assert drafter.hidden_states.shape == (128, 256)
     assert drafter.num_query_per_req == 2

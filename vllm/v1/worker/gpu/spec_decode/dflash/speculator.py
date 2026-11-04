@@ -45,7 +45,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         vllm_config = copy.copy(vllm_config)
         vllm_config.parallel_config = replace(
             parallel_config,
-            pcp_execution_mode="replicated",
             decode_context_parallel_size=(
                 parallel_config.decode_context_parallel_size
                 if speculative_config.draft_model_config.use_mla

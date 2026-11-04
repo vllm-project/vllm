@@ -145,6 +145,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         aux_stream: torch.cuda.Stream | None = None,
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
+        use_pcp: bool | None = None,
         run_gemm_rs_ar: bool = False,
     ) -> None:
         super().__init__()
@@ -329,6 +330,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             use_mla=True,
             use_sparse=False,
             num_heads=self.num_local_heads,
+            use_pcp=use_pcp,
         )
         _init_kv_cache_quant(self, quant_config, prefix)
         # Unit (1.0) scale for the fused fp8 prefill path: q/k/v are cast
@@ -368,7 +370,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        assert not parallel_config.uses_pcp_partitioning, (
+        assert use_pcp is False or parallel_config.prefill_context_parallel_size == 1, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
             "parallelism."
         )
@@ -654,6 +656,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         attn_metadata = cast(
             "MLACommonMetadata", attn_metadata_by_layer[self.layer_name]
         )
+        if attn_metadata.uses_pcp_sharded_layout:
+            raise NotImplementedError("Kimi-K3 attention requires rank-local queries.")
 
         num_actual_toks = attn_metadata.num_actual_tokens
         slot_mapping_by_layer = forward_context.slot_mapping

@@ -20,11 +20,12 @@ Both approaches are under active development.
 
 `ParallelConfig.prefill_context_parallel_size` describes the physical PCP group.
 It participates in world-size and DCP topology validation even when a draft
-model repeats its queries on every PCP rank. DFlash and DSpark use
-`pcp_execution_mode="replicated"` in their model-local configuration; the target
-retains the default `"partitioned"` policy. The derived `pcp_execution_size` is
-one for replicated execution. It is a model capability/layout view, not a
-process-group size or a replacement for the global PCP setting.
+model repeats its queries on every PCP rank. Attention layers declare whether
+their backend needs to support PCP-partitioned inputs through the layer's
+`use_pcp` constructor argument. Replicated draft layers select a rank-local
+backend with `use_pcp=False`, while retaining the physical PCP and DCP groups.
+This argument constrains backend selection; metadata describes each forward's
+actual input layout.
 
 Each partitioned forward carries `CommonAttentionMetadata.pcp_context`, including
 capture and profiling forwards. Builders propagate this into backend metadata,

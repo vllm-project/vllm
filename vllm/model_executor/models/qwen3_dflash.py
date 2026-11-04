@@ -275,6 +275,7 @@ class DFlashQwen3Attention(nn.Module):
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
             query_pre_quantized=query_pre_quantized,
+            use_pcp=False,
         )
         self.causal = causal
         if current_platform.is_rocm():

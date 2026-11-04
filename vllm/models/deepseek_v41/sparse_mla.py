@@ -19,6 +19,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    PCPAttentionContext,
     max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
@@ -63,7 +64,7 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pcp_size = self.vllm_config.parallel_config.pcp_execution_size
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         if self.pcp_size > 1:
             self.no_replay_start = self.no_replay_start.new_zeros(
@@ -84,11 +85,14 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
         replay_start: torch.Tensor | None = None,
     ) -> DeepseekSparseSWAMetadata:
         cm = common_attn_metadata
-        if self.pcp_size > 1:
-            local_slots = cm.slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
+        pcp_context = cm.pcp_context
+        if pcp_context is not None:
+            local_slots = cm.slot_mapping.chunk(pcp_context.world_size)[
+                pcp_context.rank
+            ]
             cm = cm.replace(slot_mapping=local_slots)
         metadata = super().build(common_prefix_len, cm, fast_build, replay_start)
-        if self.pcp_size > 1:
+        if pcp_context is not None:
             metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
             assert cm.positions is not None
             metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
@@ -166,6 +170,7 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int
     topk_tokens: int
+    pcp_context: PCPAttentionContext | None = None
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -182,7 +187,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
-        self.pcp_size = vllm_config.parallel_config.pcp_execution_size
+        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Classify single-token queries (plus num_speculative_tokens via
         # supports_spec_as_decode=True) as decodes; longer queries go to prefill.
@@ -219,12 +224,15 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> DeepseekV4FlashMLAMetadata:
         cm = common_attn_metadata
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
+        pcp_context = cm.pcp_context
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
             local_slots = slot_mapping
-            if self.pcp_size > 1:
-                local_slots = slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
+            if pcp_context is not None:
+                local_slots = slot_mapping.chunk(pcp_context.world_size)[
+                    pcp_context.rank
+                ]
             slot_mapping = get_compressed_slot_mapping(
                 cm.num_actual_tokens,
                 local_slots,
@@ -235,7 +243,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
-            if self.pcp_size > 1:
+            if pcp_context is not None:
                 slot_mapping = get_pcp_group().all_gather(
                     self.compressed_slot_mapping_buffer[: local_slots.numel()], dim=0
                 )
@@ -251,6 +259,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            pcp_context=pcp_context,
         )
 
 

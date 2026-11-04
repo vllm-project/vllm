@@ -45,6 +45,25 @@ def clear_cache():
     _cached_get_attn_backend.cache_clear()
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA backend selection")
+def test_layer_pcp_requirement_is_independent_of_process_topology():
+    config = VllmConfig(
+        parallel_config=ParallelConfig(
+            prefill_context_parallel_size=2,
+            distributed_executor_backend="mp",
+        ),
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
+    )
+    with set_current_vllm_config(config):
+        for _ in range(2):
+            local_backend = get_attn_backend(128, torch.bfloat16, "auto", use_pcp=False)
+            assert local_backend.get_name() == "FLASH_ATTN"
+            with pytest.raises(ValueError, match="PCP|pcp"):
+                get_attn_backend(128, torch.bfloat16, "auto", use_pcp=True)
+        assert config.parallel_config.prefill_context_parallel_size == 2
+        assert config.parallel_config.world_size == 2
+
+
 # Define MLA and non-MLA backends separately
 DEVICE_MLA_BACKENDS = {
     "cuda": [

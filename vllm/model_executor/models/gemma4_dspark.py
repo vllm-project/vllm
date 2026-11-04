@@ -67,6 +67,7 @@ class Gemma4DSparkAttention(Gemma4MTPAttention):
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=getattr(config, "attn_logit_softcapping", None),
+            use_pcp=False,
             prefix=prefix,
         )
         self.is_kv_shared_layer = False

@@ -143,7 +143,7 @@ def unsupported(vllm_config) -> list[str]:
             pc.decode_context_parallel_size not in DCP_SIZES,
             f"decode context parallelism other than 1 or {DCP} (over the TP group)",
         ),
-        (pc.pcp_execution_size != 1, "prefill context parallelism"),
+        (pc.prefill_context_parallel_size != 1, "prefill context parallelism"),
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
