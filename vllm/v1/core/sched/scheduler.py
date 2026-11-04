@@ -233,6 +233,10 @@ class Scheduler(SchedulerInterface):
         # self.waiting: a block-holder must never sit behind a request whose
         # failed allocation would stop the scheduling scan.
         self.kv_holding_waiting = create_request_queue(self.policy)
+        # With --max-num-inflight-kv-loads, requests that may load KV async but
+        # haven't started, kept apart so their loads can start while the batch
+        # is full without scanning past requests that need a running slot.
+        self.async_kv_waiting = create_request_queue(self.policy)
         # Waiting requests that are deferred, i.e. were skipped by the scheduling
         # scan or enqueued in a blocked status.
         self.deferred_waiting: set[Request] = set()
@@ -492,11 +496,15 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills: set[Request] = set()
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
-        # None when not tracked (stats disabled or no KV connector).
+        # None when not tracked (no KV connector, or no stats or load cap).
         self._kv_fetch_stages: dict[Request, str] | None = (
-            {} if self.log_stats and self.connector is not None else None
+            {}
+            if self.connector is not None
+            and (self.log_stats or self.scheduler_config.max_num_inflight_kv_loads)
+            else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        self._aborted_kv_loads: set[str] = set()
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -1049,27 +1057,47 @@ class Scheduler(SchedulerInterface):
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
             step_skipped_kv_holding: deque[Request] = deque()
+            step_skipped_async_kv: deque[Request] = deque()
+            # Async loads started this step: newer than any block-holder.
+            step_started_kv_loads: list[Request] = []
 
             def skip_request(from_queue: RequestQueue) -> None:
                 request_to_skip = from_queue.pop_request()
                 self.deferred_waiting.add(request_to_skip)
-                if self._holds_kv_blocks(request_to_skip):
+                holds_blocks = self._holds_kv_blocks(request_to_skip)
+                if holds_blocks and from_queue is not self.kv_holding_waiting:
+                    step_started_kv_loads.append(request_to_skip)
+                elif holds_blocks:
                     step_skipped_kv_holding.appendleft(request_to_skip)
+                elif from_queue is self.async_kv_waiting:
+                    step_skipped_async_kv.appendleft(request_to_skip)
                 else:
                     step_skipped_waiting.appendleft(request_to_skip)
 
-            while token_budget > 0:
-                # Requests holding KV blocks are always drained first, and are
-                # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
-                request_queue = self.kv_holding_waiting
-                if not request_queue and self._pause_state == PauseState.UNPAUSED:
-                    request_queue = self.waiting
-                if not request_queue or input_budget <= draft_slots:
-                    break
+            # Cleared once self.async_kv_waiting's head can't start a load.
+            take_async_kv = True
+            while True:
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_active_reqs:
+                loads_only = (
+                    num_running >= self.max_num_active_reqs or token_budget <= 0
+                )
+                if not loads_only:
+                    # Requests holding KV blocks are always drained first, and are
+                    # the only ones admitted under PAUSED_NEW (e.g. async KV loads).
+                    request_queue = self.kv_holding_waiting
+                    if not request_queue and self._pause_state == PauseState.UNPAUSED:
+                        request_queue = self._next_waiting_queue(take_async_kv)
+                elif take_async_kv and self._pause_state == PauseState.UNPAUSED:
+                    # No running slot or token budget left: start async KV loads
+                    # only, which take neither until their KV has arrived.
+                    request_queue = self.async_kv_waiting
+                else:
+                    break
+                if not request_queue or (
+                    not loads_only and input_budget <= draft_slots
+                ):
                     break
 
                 request = request_queue.peek_request()
@@ -1281,6 +1309,17 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if (load_kv_async and not self._admits_inflight_kv_load()) or (
+                    loads_only and not load_kv_async
+                ):
+                    # Past --max-num-inflight-kv-loads, or needs a running slot
+                    # while none is free. It waits at the head of its queue;
+                    # other queues may still admit.
+                    if request_queue is not self.async_kv_waiting:
+                        break
+                    take_async_kv = False
+                    continue
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -1605,8 +1644,12 @@ class Scheduler(SchedulerInterface):
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_kv_holding:
                 self.kv_holding_waiting.prepend_requests(step_skipped_kv_holding)
+            for request in step_started_kv_loads:
+                self.kv_holding_waiting.add_request(request)
             if step_skipped_waiting:
                 self.waiting.prepend_requests(step_skipped_waiting)
+            if step_skipped_async_kv:
+                self.async_kv_waiting.prepend_requests(step_skipped_async_kv)
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
@@ -1645,7 +1688,7 @@ class Scheduler(SchedulerInterface):
                 NewRequestData.from_request(
                     req,
                     req_to_new_blocks[req.request_id].get_block_ids(),
-                    req._all_token_ids,
+                    req.prefill_token_ids,
                     uses_mrope=self.model_uses_mrope,
                 )
                 for req in scheduled_new_reqs
@@ -2552,6 +2595,7 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
+            self.async_kv_waiting.remove_requests(stopped_preempted_reqs)
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
         for request in continuing_reqs:
             self._enqueue_waiting_request(request)
@@ -2718,8 +2762,36 @@ class Scheduler(SchedulerInterface):
             self.deferred_waiting.add(request)
         if self._holds_kv_blocks(request):
             self.kv_holding_waiting.add_request(request)
+        elif (
+            self.connector is not None
+            and self.scheduler_config.max_num_inflight_kv_loads
+            and self.connector.may_load_async(request)
+        ):
+            self.async_kv_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
+
+    def _next_waiting_queue(self, take_async_kv: bool) -> RequestQueue:
+        """self.waiting or self.async_kv_waiting, whichever head goes first."""
+        async_kv = self.async_kv_waiting
+        if not take_async_kv or not async_kv:
+            return self.waiting
+        if not self.waiting:
+            return async_kv
+        async_head, head = async_kv.peek_request(), self.waiting.peek_request()
+        if self.policy == SchedulingPolicy.PRIORITY:
+            return async_kv if async_head < head else self.waiting
+        return async_kv if async_head.arrival_time < head.arrival_time else self.waiting
+
+    def _admits_inflight_kv_load(self) -> bool:
+        """Whether a new async KV load stays within --max-num-inflight-kv-loads."""
+        limit = self.scheduler_config.max_num_inflight_kv_loads
+        return limit is None or (
+            self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
+            + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+            + len(self._aborted_kv_loads)
+            < limit
+        )
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
@@ -2923,7 +2995,11 @@ class Scheduler(SchedulerInterface):
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting) + len(self.kv_holding_waiting)
+        return len(self.running), (
+            len(self.waiting)
+            + len(self.kv_holding_waiting)
+            + len(self.async_kv_waiting)
+        )
 
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
@@ -2949,6 +3025,9 @@ class Scheduler(SchedulerInterface):
         else:
             if request.resumable:
                 request.streaming_queue = deque()
+            if self.connector is not None:
+                # Before enqueueing: may_load_async can use what this records.
+                self.connector.on_new_request(request)
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
             if self.spec_decode_metrics_level != "none":
@@ -2956,7 +3035,6 @@ class Scheduler(SchedulerInterface):
                     self.num_spec_tokens
                 )
             if self.connector is not None:
-                self.connector.on_new_request(request)
                 kv_transfer_params = request.kv_transfer_params
                 if kv_transfer_params and kv_transfer_params.get("do_remote_prefill"):
                     # Count P/D requests on arrival: connector matching is
@@ -3013,6 +3091,7 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
             self.kv_holding_waiting.remove_requests(waiting_requests_to_remove)
+            self.async_kv_waiting.remove_requests(waiting_requests_to_remove)
             self.deferred_waiting.difference_update(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
@@ -3029,6 +3108,8 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if delay_free_blocks:
+                self._aborted_kv_loads.add(request.request_id)
 
         return valid_requests
 
@@ -3579,6 +3660,7 @@ class Scheduler(SchedulerInterface):
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
+                self._aborted_kv_loads.discard(req_id)
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
