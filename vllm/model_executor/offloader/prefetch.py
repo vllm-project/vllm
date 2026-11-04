@@ -124,6 +124,21 @@ class StaticBufferPool:
         return self._buffers[key][slot_idx % self.slot_capacity]
 
 
+def _get_next_prefetch_index(
+    index: int,
+    prefetch_step: int,
+    module_count: int,
+) -> int:
+    """Return a refill target that preserves static-buffer slot ownership."""
+    next_index = (index + prefetch_step) % module_count
+    if (
+        prefetch_step < module_count
+        and next_index % prefetch_step != index % prefetch_step
+    ):
+        next_index = index % prefetch_step
+    return next_index
+
+
 class PrefetchOffloader(BaseOffloader):
     """Prefetching-based offloader with group-based layer selection.
 
@@ -136,6 +151,7 @@ class PrefetchOffloader(BaseOffloader):
         num_in_group: Offload this many layers per group (last N of each group).
         prefetch_step: Number of layers to prefetch ahead.
         mode: Offload mode ("cpu" is currently supported).
+
     """
 
     def __init__(
@@ -163,11 +179,15 @@ class PrefetchOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
+        prefix: str = "",
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
             "wrap_modules should only be called once"
         )
+
+        if prefix:
+            prefix = f"{prefix}."
 
         all_modules = []
         offload_modules = []
@@ -182,7 +202,9 @@ class PrefetchOffloader(BaseOffloader):
                     whitelist = [
                         name
                         for name, _ in module.named_parameters()
-                        if any(f".{p}." in f".{name}." for p in self.offload_params)
+                        if any(
+                            f".{p}." in f".{prefix}{name}." for p in self.offload_params
+                        )
                     ]
                 else:
                     whitelist = [name for name, _ in module.named_parameters()]
@@ -225,7 +247,11 @@ class PrefetchOffloader(BaseOffloader):
 
             # Start prefetch for next layer (circular)
             # mutates_args on output_tensor creates ordering dependency
-            next_index = (index + self.prefetch_step) % len(self.module_offloaders)
+            next_index = _get_next_prefetch_index(
+                index,
+                self.prefetch_step,
+                len(self.module_offloaders),
+            )
             # Handle tuple output (e.g., (hidden_states, residual))
             if isinstance(output, tuple):
                 torch.ops.vllm.start_prefetch(output[0], next_index)
@@ -441,7 +467,7 @@ class _ModuleOffloader:
             param_offloader.sync_cpu_storage()
 
         # Remove offloaders whose parameter was deleted during
-        # process_weights_after_loading (e.g. k_scale / v_scale).
+        # process_weights_after_loading (e.g. online requantization sources).
         deleted = [
             name
             for name, offloader in self._param_offloaders.items()
@@ -613,9 +639,8 @@ class _CpuParamOffloader(_BaseParamOffloader):
         self._cpu_storage: torch.Tensor | None = None
         self._gpu_buffer: torch.Tensor | None = None  # Store reference to GPU buffer
         # Set to True if the underlying nn.Parameter was deleted by
-        # process_weights_after_loading (e.g. transient KV-cache scale params
-        # such as k_scale/v_scale created by BaseKVCacheMethod.create_weights
-        # and deleted after copying into permanent _k_scale buffers).
+        # process_weights_after_loading (e.g. online requantization source
+        # params released after conversion).
         self._param_deleted: bool = False
 
         # Offload to CPU immediately to free GPU memory during model loading
@@ -724,12 +749,10 @@ class _CpuParamOffloader(_BaseParamOffloader):
         2. device_loading_context creates NEW CPU tensors when moving back
         3. Our old _cpu_storage would have pre-processed or stale data
 
-        If the parameter no longer exists on the module (e.g. transient
-        KV-cache scale parameters such as k_scale/v_scale that are created
-        by BaseKVCacheMethod.create_weights() and then deleted by
-        process_weights_after_loading() after copying their values into
-        permanent _k_scale buffers), the offloader marks itself as deleted
-        and skips the sync.  The caller (_ModuleOffloader.sync_cpu_storage)
+        If the parameter no longer exists on the module (e.g. online
+        requantization source parameters released by
+        process_weights_after_loading()), the offloader marks itself as
+        deleted and skips the sync.  The caller (_ModuleOffloader.sync_cpu_storage)
         is responsible for removing these stale entries.
         """
         try:

@@ -4,9 +4,18 @@
 
 import pytest
 import torch
+from transformers import Gemma3Config, PreTrainedConfig, Qwen2Config
 
-from vllm.model_executor.models.adapters import _create_pooling_model_cls
-from vllm.model_executor.models.utils import AutoWeightsLoader, StageMissingLayer
+from vllm.config import LoadConfig, VllmConfig
+from vllm.model_executor.models.adapters import (
+    _create_pooling_model_cls,
+    _resolve_num_labels,
+)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    StageMissingLayer,
+    WeightsMapper,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -89,10 +98,11 @@ def _buffer_reusing_iterator(weight_dict):
         yield name, view
 
 
-def _make_pooling_model(base_cls=SimpleModel):
+def _make_pooling_model(base_cls=SimpleModel, load_format="fastsafetensors"):
     PoolingModel = _create_pooling_model_cls(base_cls)
     model = base_cls()
     model.__class__ = PoolingModel
+    model.vllm_config = VllmConfig(load_config=LoadConfig(load_format=load_format))
     model.lm_head = StageMissingLayer("output", model.lm_head)
     return model
 
@@ -146,3 +156,154 @@ def test_pooling_load_weights_clones_probed_weights():
     expected = {n: p.data.clone() for n, p in ground_truth.named_parameters()}
 
     _load_and_compare(_make_pooling_model(PackedWeightModel), ref, expected)
+
+
+class _LanguageModelInner(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = torch.nn.Linear(4, 8, bias=False)
+        self.layer0 = torch.nn.Linear(8, 8, bias=False)
+
+
+class _LanguageModelWrapper(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = _LanguageModelInner()
+
+
+class ModelWithWeightsMapper(torch.nn.Module):
+    """Stand-in for models whose keys only align after hf_to_vllm_mapper.
+
+    Checkpoint keys like ``model.language_model.*`` never match
+    ``""`` / ``model.`` + raw name against ``language_model.model.*`` params.
+    The pooling prefix probe must consult the mapper so it can early-exit.
+    """
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+        }
+    )
+
+    def __init__(self):
+        super().__init__()
+        self.language_model = _LanguageModelWrapper()
+        self.lm_head = torch.nn.Linear(8, 16, bias=False)
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters())
+        loaded = set()
+        self.seen_names = []
+        for name, tensor in weights:
+            self.seen_names.append(name)
+            mapped = self.hf_to_vllm_mapper._map_name(name)
+            if mapped is not None and mapped in params:
+                params[mapped].data.copy_(tensor)
+                loaded.add(mapped)
+        return loaded
+
+
+def test_pooling_prefix_probe_uses_hf_to_vllm_mapper(monkeypatch):
+    """Mapper lets the prefix probe early-exit without cloning the full ckpt.
+
+    Checkpoint keys only align after ``hf_to_vllm_mapper``. The probe must use
+    the mapped name for membership, keep forwarding original names to the
+    parent loader, and stop after the first hit instead of cloning everything.
+    """
+    ref = {
+        "model.language_model.embed.weight": torch.randn(8, 4),
+        "model.language_model.layer0.weight": torch.randn(8, 8),
+        "model.language_model.extra0.weight": torch.randn(8, 8),
+        "model.language_model.extra1.weight": torch.randn(8, 8),
+        "model.language_model.extra2.weight": torch.randn(8, 8),
+    }
+
+    # Sanity: none of these keys match the generic "" / "model." probe.
+    model = _make_pooling_model(ModelWithWeightsMapper)
+    params = dict(model.named_parameters())
+    for name in ref:
+        assert name not in params
+        assert f"model.{name}" not in params
+
+    clone_count = 0
+    original_clone = torch.Tensor.clone
+
+    def counting_clone(self, *args, **kwargs):
+        nonlocal clone_count
+        clone_count += 1
+        return original_clone(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", counting_clone)
+
+    loaded = model.load_weights(iter(ref.items()))
+
+    # First key maps onto a param, so the probe clones once and breaks.
+    assert clone_count == 1
+    assert clone_count < len(ref)
+    # Parent still receives original (unmapped, unprefixed) checkpoint names.
+    assert model.seen_names == list(ref.keys())
+    assert loaded == {
+        "language_model.model.embed.weight",
+        "language_model.model.layer0.weight",
+    }
+
+
+def test_pooling_load_weights_skips_clone_for_owned_tensor_formats(monkeypatch):
+    """Whitelisted load formats yield owned tensors, so probing must not clone."""
+    ref = _make_reference_weights()
+    model = _make_pooling_model(load_format="runai_streamer")
+
+    clone_count = 0
+    original_clone = torch.Tensor.clone
+
+    def counting_clone(self, *args, **kwargs):
+        nonlocal clone_count
+        clone_count += 1
+        return original_clone(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "clone", counting_clone)
+    model.load_weights(iter(ref.items()))
+
+    assert clone_count == 0
+
+
+def _composite_config(outer_labels=None, inner_labels=None):
+    """Build a multimodal-style config whose text_config is a separate object."""
+    config = Gemma3Config(text_config={"num_hidden_layers": 1})
+    if outer_labels is not None:
+        config.num_labels = outer_labels
+    if inner_labels is not None:
+        config.get_text_config().num_labels = inner_labels
+    return config
+
+
+def test_resolve_num_labels_text_only_config():
+    config = Qwen2Config(num_labels=7)
+    assert config.get_text_config() is config
+    assert _resolve_num_labels(config, config.get_text_config()) == 7
+
+
+def test_resolve_num_labels_defaults_when_undeclared():
+    config = _composite_config()
+    assert (
+        _resolve_num_labels(config, config.get_text_config())
+        == PreTrainedConfig().num_labels
+    )
+
+
+def test_resolve_num_labels_declared_on_outer_config():
+    """Multimodal checkpoints keep id2label/problem_type on the top-level config."""
+    config = _composite_config(outer_labels=20)
+    assert config.get_text_config().num_labels == PreTrainedConfig().num_labels
+    assert _resolve_num_labels(config, config.get_text_config()) == 20
+
+
+def test_resolve_num_labels_declared_on_text_config():
+    """Overrides written into text_config keep working."""
+    config = _composite_config(inner_labels=5)
+    assert _resolve_num_labels(config, config.get_text_config()) == 5
+
+
+def test_resolve_num_labels_outer_wins_when_both_declared():
+    config = _composite_config(outer_labels=20, inner_labels=5)
+    assert _resolve_num_labels(config, config.get_text_config()) == 20

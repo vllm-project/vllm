@@ -37,14 +37,7 @@ do not need a transformers dependency for output parsing.
 
 import regex as re
 
-# Tool call delimiter tokens as they appear in decoded text.
-# Standard format: <|tool_call>call:name{args}<tool_call|>
-_TOOL_CALL_START_TAG = "<|tool_call>"
-_TOOL_CALL_END_TAG = "<tool_call|>"
 _TOOL_RESPONSE_START_TAG = "<|tool_response>"
-
-# Gemma4 escape token as it appears in decoded text.
-_ESCAPE_TOKEN = '<|"|>'
 
 
 def _parse_tool_arguments(args_str: str) -> dict[str, str]:
@@ -59,6 +52,7 @@ def _parse_tool_arguments(args_str: str) -> dict[str, str]:
 
     Returns:
         Dictionary of argument name → string value.
+
     """
     if not args_str or not args_str.strip():
         return {}
@@ -102,6 +96,7 @@ def parse_tool_calls(text: str, *, strict: bool = False) -> list[dict]:
         >>> tool_calls = parse_tool_calls(output)
         >>> for tc in tool_calls:
         ...     print(f"Call: {tc['name']}({tc['arguments']})")
+
     """
     results = []
 
@@ -157,6 +152,7 @@ def has_tool_response_tag(text: str) -> bool:
         >>> if not has_tool_response_tag(model_output):
         ...     # Model used <eos> instead — inject <|tool_response> manually
         ...     next_prompt = "<|tool_response>" + tool_result
+
     """
     stripped = text.rstrip()
     return stripped.endswith(_TOOL_RESPONSE_START_TAG)

@@ -1,0 +1,2 @@
+# H200 configuration for Qwen3.8-Flash-Next-FP8 accuracy evaluation
+Qwen3.8-Flash-Next-FP8.yaml

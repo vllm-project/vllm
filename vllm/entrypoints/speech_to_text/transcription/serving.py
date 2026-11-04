@@ -5,19 +5,18 @@ from collections.abc import AsyncGenerator
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    RequestResponseMetadata,
-)
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 
+from ...serve.engine.protocol import ErrorResponse
 from ..base.serving import SpeechToTextBaseServing
 from .protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
+    TranscriptionResponseDiarized,
     TranscriptionResponseStreamChoice,
     TranscriptionResponseVerbose,
     TranscriptionStreamResponse,
@@ -55,6 +54,7 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
     ) -> (
         TranscriptionResponse
         | TranscriptionResponseVerbose
+        | TranscriptionResponseDiarized
         | AsyncGenerator[str, None]
         | ErrorResponse
     ):
@@ -70,6 +70,8 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
             response_class=(
                 TranscriptionResponseVerbose
                 if request.response_format == "verbose_json"
+                else TranscriptionResponseDiarized
+                if request.response_format == "diarized_json"
                 else TranscriptionResponse
             ),
             stream_generator_method=self.transcription_stream_generator,

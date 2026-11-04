@@ -58,6 +58,6 @@ class InklingDenseMLP(nn.Module):
         x = silu_and_mul_triton(gate_up)
         x, _ = self.down_proj(x)
         if self.global_scale is not None:
-            x = x * self.global_scale
+            x.mul_(self.global_scale)
         # TP-partial output: the layer's reduce-scatter fallback consumes it.
         return x

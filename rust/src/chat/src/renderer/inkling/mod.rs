@@ -8,8 +8,10 @@ use thiserror_ext::AsReport as _;
 use vllm_text::Prompt;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
+use crate::EffortValue;
 use crate::error::{Error, Result};
+use crate::reasoning::ReasoningControl;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool};
 use crate::{AssistantContentBlock, AssistantToolCall};
 
@@ -35,6 +37,7 @@ const MAX_REASONING_EFFORT: f64 = 0.99;
 pub struct InklingChatRenderer {
     tokenizer: DynTokenizer,
     special: InklingSpecialTokenIds,
+    default_template_kwargs: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,9 +81,16 @@ impl InklingSpecialTokenIds {
 }
 
 impl InklingChatRenderer {
-    pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
+    pub fn new(
+        tokenizer: DynTokenizer,
+        default_template_kwargs: HashMap<String, Value>,
+    ) -> Result<Self> {
         let special = InklingSpecialTokenIds::resolve(tokenizer.as_ref())?;
-        Ok(Self { tokenizer, special })
+        Ok(Self {
+            tokenizer,
+            special,
+            default_template_kwargs,
+        })
     }
 
     fn write_text_tokens(&self, out: &mut Vec<u32>, text: &str) -> Result<()> {
@@ -150,11 +160,6 @@ impl InklingChatRenderer {
     }
 
     fn write_reasoning_effort(&self, out: &mut Vec<u32>, effort: f64) -> Result<()> {
-        if !(0.0..=MAX_REASONING_EFFORT).contains(&effort) {
-            return Err(Error::ChatTemplate(format!(
-                "Inkling reasoning_effort must be in [0.0, 0.99], got {effort}"
-            )));
-        }
         let formatted = format!("{effort:.2}");
         let effort = formatted.trim_end_matches('0').trim_end_matches('.');
         let effort = if matches!(effort, "0" | "-0") {
@@ -170,7 +175,7 @@ impl InklingChatRenderer {
         )
     }
 
-    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[&ChatTool]) -> Result<()> {
+    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[ChatTool]) -> Result<()> {
         if tools.is_empty() {
             return Ok(());
         }
@@ -294,11 +299,17 @@ impl ChatRenderer for InklingChatRenderer {
 
         let mut out = Vec::new();
         let mut tool_call_id_to_name = HashMap::new();
-        let effective_template_kwargs = request_template_kwargs(request);
-        let tools = rendered_tools(request);
-        self.write_tool_declarations(&mut out, &tools)?;
-        let mut reasoning_effort =
-            resolve_reasoning_effort(effective_template_kwargs.get("reasoning_effort"));
+        let reasoning = resolve_reasoning(ReasoningControl::resolve(
+            request,
+            &self.default_template_kwargs,
+        )?)?;
+        let effective_template_kwargs = reasoning.template_kwargs(request);
+        self.write_tool_declarations(&mut out, request.tools())?;
+        let mut reasoning_effort = if reasoning.is_enabled() {
+            reasoning.effort().and_then(EffortValue::as_f64)
+        } else {
+            Some(0.0)
+        };
 
         for message in &request.messages {
             if !matches!(
@@ -333,6 +344,9 @@ impl ChatRenderer for InklingChatRenderer {
                         &tool_call_id_to_name,
                     )?;
                 }
+                ChatMessage::Custom { role, .. } => {
+                    return Err(Error::UnsupportedChatRole { role: role.clone() });
+                }
             }
         }
 
@@ -346,17 +360,39 @@ impl ChatRenderer for InklingChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(out),
+            media_order: None,
             effective_template_kwargs,
         })
     }
 }
 
-fn resolve_reasoning_effort(value: Option<&Value>) -> Option<f64> {
+fn resolve_reasoning(control: ReasoningControl) -> Result<ReasoningControl> {
+    let control = control.fallback(ReasoningControl::enabled("high"));
+    if !control.is_enabled() {
+        return Ok(control);
+    }
+    let effort = resolve_reasoning_effort(control.effort());
+    if let Some(effort) = effort {
+        if !(0.0..=MAX_REASONING_EFFORT).contains(&effort) {
+            return Err(Error::InvalidReasoningEffort(format!(
+                "Inkling reasoning_effort must be in [0.0, 0.99], got {effort}"
+            )));
+        }
+        if effort == 0.0 {
+            return Ok(ReasoningControl::Disabled);
+        }
+    }
+    Ok(ReasoningControl::Enabled {
+        effort: effort.map(EffortValue::try_from).transpose()?,
+    })
+}
+
+fn resolve_reasoning_effort(value: Option<&EffortValue>) -> Option<f64> {
     let Some(value) = value else {
         return Some(0.9);
     };
     match value {
-        Value::String(name) => match name.as_str() {
+        EffortValue::String(name) => match name.as_str() {
             "none" => Some(0.0),
             "minimal" => Some(0.1),
             "low" => Some(0.2),
@@ -365,8 +401,7 @@ fn resolve_reasoning_effort(value: Option<&Value>) -> Option<f64> {
             "xhigh" | "max" => Some(0.99),
             _ => None,
         },
-        Value::Number(number) => number.as_f64(),
-        _ => None,
+        EffortValue::Number(number) => number.as_f64(),
     }
 }
 
@@ -378,42 +413,10 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
     })
 }
 
-fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
-    if !request.tool_parsing_enabled() {
-        return Vec::new();
-    }
-
-    let mut tools = Vec::with_capacity(request.tools.len());
-    tools.extend(request.tools.iter());
-    for message in &request.messages {
-        if let ChatMessage::Developer {
-            tools: Some(local_tools),
-            ..
-        } = message
-        {
-            tools.extend(local_tools.iter());
-        }
-    }
-    tools
-}
-
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {
     let name_json = serde_json::to_string(&tool_call.name)
         .map_err(|error| Error::ChatTemplate(error.as_report().to_string()))?;
-    let arguments = if tool_call.arguments.trim().is_empty() {
-        Value::Object(Map::new())
-    } else {
-        serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "Inkling tool call arguments must decode to a JSON object: {error}"
-            ))
-        })?
-    };
-    let Value::Object(_) = arguments else {
-        return Err(Error::ChatTemplate(
-            "Inkling tool call arguments must decode to a JSON object".to_string(),
-        ));
-    };
+    let arguments = Value::Object(tool_call_arguments_or_empty(&tool_call.arguments));
     let args_json = compact_json(&sort_json(&arguments))?;
     Ok(format!("{{\"name\":{name_json},\"args\":{args_json}}}"))
 }

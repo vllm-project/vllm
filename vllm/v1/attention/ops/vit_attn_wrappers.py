@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This file contains ops for ViT attention to be compatible with torch.compile
+"""This file contains ops for ViT attention to be compatible with torch.compile
 as there are operations here not supported by torch.compile (for instance,
 `.item()` in flash attention)
 
@@ -18,7 +17,9 @@ import einops
 import torch
 import torch.nn.functional as F
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -49,9 +50,23 @@ def flash_attn_maxseqlen_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `flash_attn_varlen_func` needs a Python int for kernel launch bounds.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    supports_out = not current_platform.is_rocm()
+    if supports_out:
+        if current_platform.is_cuda() and torch.cuda.is_current_stream_capturing():
+            # workaround for encoder CUDA-graph replay paddings with NaNs edge case
+            kwargs["out"] = torch.zeros(
+                q.shape[0], q.shape[1], v.shape[-1], dtype=q.dtype, device=q.device
+            )
+        else:
+            kwargs["out"] = torch.empty_like(q, memory_format=torch.contiguous_format)
     output = flash_attn_varlen_func(
         q,
         k,
@@ -65,6 +80,8 @@ def flash_attn_maxseqlen_wrapper(
         softmax_scale=scale,
         **kwargs,
     )
+    if not supports_out:
+        output = output.contiguous()
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
     return context_layer
 
@@ -80,7 +97,7 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -114,6 +131,34 @@ def vit_flash_attn_wrapper(
     )
 
 
+def vit_aiter_fp8_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    q_descale: torch.Tensor,
+    k_descale: torch.Tensor,
+    v_descale: torch.Tensor,
+    batch_size: int,
+    output_dtype: torch.dtype,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return rocm_aiter_ops.fp8_attn_wrapper(
+        q,
+        k,
+        v,
+        q_descale,
+        k_descale,
+        v_descale,
+        batch_size,
+        output_dtype,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )
+
+
 def triton_attn_wrapper(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -130,10 +175,15 @@ def triton_attn_wrapper(
         cu_seqlens = torch.arange(
             0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
         )
-    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+    if max_seqlen is None:
+        max_seqlen = q_len
+    else:
+        # `context_attention_fwd` needs a Python int.
+        with gpu_sync_allowed():
+            max_seqlen = max_seqlen.item()
 
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-    output = torch.empty_like(q)
+    output = torch.empty_like(q, memory_format=torch.contiguous_format)
     context_attention_fwd(
         q,
         k,
@@ -161,7 +211,7 @@ def triton_attn_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -198,14 +248,21 @@ def apply_sdpa(
     scale: float | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    """
-    Input shape:
+    """Input shape:
     (batch_size x seq_len x num_heads x head_size)
     """
     q, k, v = (einops.rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
-    output = F.scaled_dot_product_attention(
-        q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
-    )
+    if current_platform.is_zen_cpu() and hasattr(torch.ops.zentorch, "zentorch_sdpa"):
+        # Schema: (query, key, value, dropout_p=0., is_causal=False, *,
+        # attn_mask=None, scale=None) -> (attention, logsumexp).
+        # No enable_gqa: GQA is inferred from key.size(1) vs query.size(1).
+        output, _ = torch.ops.zentorch.zentorch_sdpa(
+            q, k, v, dropout_p=0.0, is_causal=False, scale=scale
+        )
+    else:
+        output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=0.0, scale=scale, enable_gqa=enable_gqa
+        )
     output = einops.rearrange(output, "b h s d -> b s h d ")
     return output
 
@@ -228,11 +285,13 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa)
+        return apply_sdpa(q, k, v, scale=scale, enable_gqa=enable_gqa).contiguous()
 
     outputs = []
 
-    lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    # `torch.split` needs Python int sizes.
+    with gpu_sync_allowed():
+        lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
     q_chunks = torch.split(q, lens, dim=1)
     k_chunks = torch.split(k, lens, dim=1)
     v_chunks = torch.split(v, lens, dim=1)
@@ -247,11 +306,11 @@ def torch_sdpa_wrapper_fake(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    scale: float | None,
-    cu_seqlens: torch.Tensor | None,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     enable_gqa: bool = False,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, memory_format=torch.contiguous_format)
 
 
 direct_register_custom_op(
@@ -308,8 +367,16 @@ def flashinfer_wrapper(
     batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
     batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
-    max_seqlen = max_seqlen.item()
+    # `cudnn_batch_prefill_with_kv_cache` needs Python ints for the
+    # max-token-per-seq bounds.
+    with gpu_sync_allowed():
+        max_seqlen = max_seqlen.item()
 
+    output_buffer = torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
     output, _ = cudnn_batch_prefill_with_kv_cache(
         q,
         k,
@@ -330,6 +397,7 @@ def flashinfer_wrapper(
         k_scale=k_scale,
         v_scale=v_scale,
         o_data_type=o_data_type,
+        out=output_buffer,
     )
 
     if is_reshaped:
@@ -352,7 +420,11 @@ def vit_flashinfer_wrapper_fake(
     v_scale: torch.Tensor | None = None,
     o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q, dtype=o_data_type or q.dtype)
+    return torch.empty_like(
+        q,
+        dtype=o_data_type,
+        memory_format=torch.contiguous_format,
+    )
 
 
 direct_register_custom_op(

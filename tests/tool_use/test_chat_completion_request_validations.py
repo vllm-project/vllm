@@ -4,6 +4,7 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 
 
 def test_chat_completion_request_with_no_tools():
@@ -26,13 +27,30 @@ def test_chat_completion_request_with_no_tools():
     )
     assert request.tool_choice == "none"
 
-    # tools key present but empty -- should be rejected
-    with pytest.raises(ValueError, match="must not be an empty array"):
+
+@pytest.mark.parametrize("tool_choice", [None, "none", "auto", "required"])
+def test_chat_completion_request_with_empty_tools(tool_choice):
+    """OpenAI treats `tools: []` like an omitted field, with no tool to call."""
+    payload = {
+        "messages": [{"role": "user", "content": "Hello"}],
+        "model": "facebook/opt-125m",
+        "tools": [],
+    }
+    if tool_choice is not None:
+        payload["tool_choice"] = tool_choice
+    request = ChatCompletionRequest.model_validate(payload)
+    assert request.tools is None
+    assert request.tool_choice == "none"
+
+
+def test_chat_completion_request_with_empty_tools_and_named_tool_choice():
+    with pytest.raises(VLLMValidationError, match="The tool `f` specified"):
         ChatCompletionRequest.model_validate(
             {
                 "messages": [{"role": "user", "content": "Hello"}],
                 "model": "facebook/opt-125m",
                 "tools": [],
+                "tool_choice": {"type": "function", "function": {"name": "f"}},
             }
         )
 
@@ -40,7 +58,7 @@ def test_chat_completion_request_with_no_tools():
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])
 def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
     with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
+        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
     ):
         ChatCompletionRequest.model_validate(
             {
@@ -51,7 +69,7 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
         )
 
     with pytest.raises(
-        ValueError, match="When using `tool_choice`, `tools` must be set."
+        VLLMValidationError, match="When using `tool_choice`, `tools` must be set."
     ):
         ChatCompletionRequest.model_validate(
             {
@@ -134,7 +152,7 @@ SAMPLE_TOOL = {
 def test_structured_outputs_with_named_tool_choice_rejected():
     """structured_outputs cannot be combined with a named tool_choice."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="structured outputs or tools, not both",
     ):
         ChatCompletionRequest.model_validate(
@@ -168,7 +186,7 @@ def test_structured_outputs_with_auto_tool_choice_allowed():
 def test_multiple_structured_outputs_rejected():
     """Only one kind of structured output constraint is allowed."""
     with pytest.raises(
-        ValueError,
+        VLLMValidationError,
         match="You can only use one kind of constraints",
     ):
         ChatCompletionRequest.model_validate(

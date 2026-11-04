@@ -17,8 +17,12 @@ use crate::metrics::calculator::{calculate_embedding_metrics, calculate_metrics}
 use crate::metrics::steady_state;
 use crate::output::console::print_results;
 use crate::output::json::{append_result, build_result_json, compute_result_filename, save_result};
-use crate::rate_control::compute_schedule;
-use crate::ready_checker::wait_for_endpoint;
+use crate::rate_control::{compute_schedule, trace_schedule};
+use crate::ready_checker::{get_first_model, wait_for_endpoint};
+
+/// Past this first-arrival offset a self-timed run is almost certainly a
+/// wrongly scaled or epoch-anchored trace rather than a real idle head.
+const TRACE_START_WARN_SECONDS: f64 = 3600.0;
 
 /// Pre-resolve the hostname in `base_url` and pin all resolved IPs on the
 /// client builder via [`reqwest::ClientBuilder::resolve_to_addrs`].  This
@@ -134,6 +138,17 @@ pub(crate) async fn fetch_spec_decode_metrics(
         Err(_) => return None,
     };
 
+    parse_spec_decode_metrics(&text)
+}
+
+/// Parse spec decode counters from Prometheus text exposition format.
+///
+/// Matches on the metric name (the part before any labels) rather than the
+/// whole line so label values cannot be mistaken for metric names, and only
+/// reads `_total` counter samples — skipping e.g. `_created` timestamp series,
+/// which would otherwise be summed into the counts (mirrors the Python fix
+/// in vllm#41916).
+pub(crate) fn parse_spec_decode_metrics(text: &str) -> Option<SpecDecodeMetrics> {
     let mut num_drafts: u64 = 0;
     let mut num_draft_tokens: u64 = 0;
     let mut num_accepted_tokens: u64 = 0;
@@ -145,24 +160,25 @@ pub(crate) async fn fetch_spec_decode_metrics(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !line.starts_with("vllm:spec_decode") {
+        let first_token = match line.split_whitespace().next() {
+            Some(t) => t,
+            None => continue,
+        };
+        let metric_name = first_token.split('{').next().unwrap_or(first_token);
+        if !metric_name.starts_with("vllm:spec_decode") || !metric_name.ends_with("_total") {
             continue;
         }
         found_spec_decode = true;
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let val = match parts.last().and_then(|s| s.parse::<f64>().ok()) {
+        let val = match line.split_whitespace().last().and_then(|s| s.parse::<f64>().ok()) {
             Some(v) => v as u64,
             None => continue,
         };
 
-        if line.contains("num_drafts") {
+        if metric_name.contains("num_drafts") {
             num_drafts += val;
-        } else if line.contains("num_draft_tokens") {
+        } else if metric_name.contains("num_draft_tokens") {
             num_draft_tokens += val;
-        } else if line.contains("num_accepted_tokens_per_pos") {
+        } else if metric_name.contains("num_accepted_tokens_per_pos") {
             // Parse position label: position="N"
             if let Some(start) = line.find("position=\"") {
                 let start = start + "position=\"".len();
@@ -172,7 +188,7 @@ pub(crate) async fn fetch_spec_decode_metrics(
                     *accepted_per_pos.entry(pos).or_insert(0) += val;
                 }
             }
-        } else if line.contains("num_accepted_tokens") {
+        } else if metric_name.contains("num_accepted_tokens") {
             num_accepted_tokens += val;
         }
     }
@@ -281,40 +297,6 @@ pub(crate) fn assign_lora_modules(
     Some(out)
 }
 
-/// Fetch the first model from the server's /v1/models endpoint.
-async fn get_first_model_from_server(
-    base_url: &str,
-    client: &reqwest::Client,
-    extra_headers: &Option<std::collections::HashMap<String, String>>,
-) -> Result<(String, String)> {
-    let url = format!("{base_url}/v1/models");
-    let mut request = client.get(&url);
-    if let Some(headers) = extra_headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-    // Add API key from environment
-    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request.send().await?;
-    let data: serde_json::Value = response.json().await?;
-
-    if let Some(models) = data.get("data").and_then(|d| d.as_array())
-        && let Some(first) = models.first()
-    {
-        let id = first.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-        let root = first.get("root").and_then(|v| v.as_str()).unwrap_or(&id).to_string();
-        return Ok((id, root));
-    }
-
-    Err(BenchError::Config(format!(
-        "No models found on the server at {base_url}"
-    )))
-}
-
 /// Run the complete benchmark.
 ///
 /// This is the core orchestrator matching Python's benchmark() + main_async().
@@ -348,8 +330,13 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m.clone(), config.model_name.clone())
     } else {
         tracing::info!(base_url = %config.base_url, "fetching first model from server");
-        let (name, id) =
-            get_first_model_from_server(&config.base_url, &client, &config.extra_headers).await?;
+        let (name, id) = get_first_model(
+            &config.base_url,
+            &client,
+            &config.extra_headers,
+            config.ready_check_timeout_sec,
+        )
+        .await?;
         tracing::info!(
             model_name = name,
             model_id = id,
@@ -364,7 +351,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     } else {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
-        let server_info = Some((config.base_url.as_str(), model_id.as_str()));
+        let server_info = Some((
+            config.base_url.as_str(),
+            model_id.as_str(),
+            config.ready_check_timeout_sec,
+        ));
         let t =
             crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
@@ -382,14 +373,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             "{} prompts from ShareGPT ({})",
             config.num_prompts,
             config.dataset_path.as_deref().unwrap_or("auto-download")
-        ),
-        DatasetName::Sonnet => format!(
-            "{} prompts from Sonnet ({}, isl={}, osl={}, prefix={})",
-            config.num_prompts,
-            config.dataset_path.as_deref().unwrap_or("built-in"),
-            config.sonnet_input_len,
-            config.sonnet_output_len,
-            config.sonnet_prefix_len,
         ),
         DatasetName::SpeedBench => {
             let truncate_info = config
@@ -424,6 +407,12 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         DatasetName::RandomRerank => format!(
             "{} random rerank requests (batch={}, reranker={})",
             config.num_prompts, config.random_batch_size, config.is_reranker,
+        ),
+        DatasetName::TimedTrace => format!(
+            "{} requests from timed trace ({}, chunk_hash_size={})",
+            config.num_prompts,
+            config.dataset_path.as_deref().unwrap_or("unknown"),
+            config.timed_trace_chunk_hash_size,
         ),
     };
     tracing::info!(
@@ -497,21 +486,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 config.disable_shuffle,
             )?
         }
-        DatasetName::Sonnet => {
-            let tok = tokenizer
-                .as_ref()
-                .ok_or_else(|| BenchError::Config("Sonnet dataset requires a tokenizer".into()))?;
-            crate::datasets::sonnet::load_sonnet_dataset(
-                tok,
-                config.dataset_path.as_deref(),
-                config.num_prompts,
-                config.sonnet_input_len,
-                config.sonnet_output_len,
-                config.sonnet_prefix_len,
-                config.seed,
-                &config.request_id_prefix,
-            )?
-        }
         DatasetName::SpeedBench => {
             let tok = tokenizer.as_ref().ok_or_else(|| {
                 BenchError::Config("SPEED-Bench dataset requires a tokenizer".into())
@@ -527,12 +501,11 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     downloaded.as_str()
                 }
             };
-            let output_len = config.sharegpt_output_len.unwrap_or(config.random_output_len);
             crate::datasets::speed_bench::load_speed_bench_dataset(
                 tok,
                 path,
                 config.num_prompts,
-                output_len,
+                config.speed_bench_output_len,
                 config.seed,
                 &config.request_id_prefix,
                 config.speed_bench_category.as_deref(),
@@ -548,17 +521,18 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let dataset_id = config.dataset_path.as_deref().ok_or_else(|| {
                 BenchError::Config("--dataset-path is required for --dataset-name hf".into())
             })?;
-            let (downloaded_path, _config, _split) =
-                crate::datasets::hf_dataset::download_hf_dataset(
-                    dataset_id,
-                    config.hf_subset.as_deref(),
-                    config.hf_split.as_deref(),
-                    config.num_prompts,
-                )
-                .await?;
+            let (entries, _config, _split) = crate::datasets::hf_dataset::download_hf_dataset(
+                dataset_id,
+                config.hf_subset.as_deref(),
+                config.hf_split.as_deref(),
+                config.num_prompts,
+                config.seed,
+                config.disable_shuffle,
+            )
+            .await?;
             crate::datasets::hf_dataset::load_hf_dataset(
                 tok,
-                &downloaded_path,
+                &entries,
                 config.num_prompts,
                 config.hf_output_len,
                 config.seed,
@@ -617,6 +591,30 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 config.is_reranker,
             )?
         }
+        DatasetName::TimedTrace => {
+            let tok = tokenizer.as_ref().ok_or_else(|| {
+                BenchError::Config("Timed trace dataset requires a tokenizer".into())
+            })?;
+            let path = config.dataset_path.as_deref().ok_or_else(|| {
+                BenchError::Config(
+                    "--dataset-path is required for --dataset-name timed_trace".into(),
+                )
+            })?;
+            crate::datasets::timed_trace::load_timed_trace_dataset(
+                tok,
+                path,
+                config.num_prompts,
+                &config.request_id_prefix,
+                &crate::datasets::timed_trace::TimedTraceOptions {
+                    chunk_size: config.timed_trace_chunk_hash_size,
+                    sec_multiplier: config.timed_trace_sec_multiplier,
+                    label_timestamp: &config.timed_trace_label_timestamp,
+                    label_input_length: &config.timed_trace_label_input_length,
+                    label_output_length: &config.timed_trace_label_output_length,
+                    label_hash_ids: &config.timed_trace_label_hash_ids,
+                },
+            )?
+        }
     };
 
     let gen_elapsed = gen_start.elapsed();
@@ -647,7 +645,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         let total_output_tokens: usize = input_requests.iter().map(|r| r.expected_output_len).sum();
         println!("Dry run stats:");
         println!("  Total prompts: {}", input_requests.len());
-        println!("  Total input tokens: {total_input_tokens}");
+        println!("  Estimated total input tokens: {total_input_tokens}");
         println!("  Total expected output tokens: {total_output_tokens}");
         println!(
             "  Avg input tokens: {:.1}",
@@ -836,20 +834,30 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         tracing::info!("detected speculative decoding; collecting metrics");
     }
 
-    // Main benchmark
-    let distribution = if config.burstiness == 1.0 {
-        "Poisson process"
+    // Main benchmark. Self-timed runs ignore --request-rate/--burstiness
+    // entirely (config.rs rejects them), so don't report a rate that isn't used.
+    if config.self_timed {
+        tracing::info!(
+            timing = "trace",
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run; firing requests at their trace timestamps"
+        );
     } else {
-        "Gamma distribution"
-    };
-    tracing::info!(
-        request_rate = config.request_rate,
-        burstiness = config.burstiness,
-        distribution,
-        max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
-        prompts = config.num_prompts,
-        "starting main benchmark run"
-    );
+        let distribution = if config.burstiness == 1.0 {
+            "Poisson process"
+        } else {
+            "Gamma distribution"
+        };
+        tracing::info!(
+            request_rate = config.request_rate,
+            burstiness = config.burstiness,
+            distribution,
+            max_concurrency = config.max_concurrency.unwrap_or(config.num_prompts),
+            prompts = config.num_prompts,
+            "starting main benchmark run"
+        );
+    }
 
     // Pre-assign LoRA adapters to each request (None when --lora-modules not set).
     let lora_assignments = assign_lora_modules(
@@ -868,14 +876,40 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         );
     }
 
-    // Compute request schedule
-    let schedule = compute_schedule(
-        input_requests.len(),
-        config.request_rate,
-        config.burstiness,
-        config.seed,
-        config.ramp_up.as_ref(),
-    );
+    // Compute request schedule: the trace's recorded arrival offsets when
+    // self-timed, synthetic gamma inter-arrivals otherwise. Either way the
+    // dispatch loop below sleeps to benchmark_start + delay, an absolute
+    // deadline, so trace replay does not accumulate drift.
+    let schedule = if config.self_timed {
+        let schedule = trace_schedule(input_requests.iter().map(|r| r.timestamp));
+        let first = schedule.delays.first().copied().unwrap_or(0.0);
+        let last = schedule.delays.iter().copied().fold(0.0, f64::max);
+        tracing::info!(
+            first_arrival_seconds = first,
+            last_arrival_seconds = last,
+            "replaying trace arrival schedule"
+        );
+        // Timestamps are absolute offsets from now, never normalized (Python
+        // does the same). An unscaled millisecond trace or an epoch-anchored
+        // one parks every request past any plausible run length, so say so
+        // rather than sitting at 0/N.
+        if first > TRACE_START_WARN_SECONDS {
+            tracing::warn!(
+                first_arrival_seconds = first,
+                "first trace arrival is far in the future; check \
+                 --timed-trace-sec-multiplier or re-anchor the trace timestamps"
+            );
+        }
+        schedule
+    } else {
+        compute_schedule(
+            input_requests.len(),
+            config.request_rate,
+            config.burstiness,
+            config.seed,
+            config.ramp_up.as_ref(),
+        )
+    };
 
     // Progress bar
     let pb = if config.disable_tqdm {
@@ -896,6 +930,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     let semaphore = config.max_concurrency.map(|mc| Arc::new(Semaphore::new(mc)));
 
     let benchmark_start = Instant::now();
+    // Wall-clock anchor for `rps_change_events` timestamps.
+    let benchmark_start_local = chrono::Local::now();
 
     // Arc-wrap shared data to avoid cloning per request
     let shared_api_url = Arc::new(config.api_url.clone());
@@ -981,63 +1017,32 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     prompt_list,
                 };
 
-                // Send request, retry on connection errors
-                let max_retries = 3;
-                let mut output = None;
-
-                for attempt in 0..=max_retries {
-                    // Capture monotonic start time right before sending,
-                    // relative to benchmark_start. Python uses perf_counter()
-                    // for both start_time and ttft/itl, keeping them on the
-                    // same clock. We do the same with Instant.
-                    let request_instant = Instant::now();
-                    let result = backend.send_request(&input, &client).await;
-
-                    match result {
-                        Ok(mut o) => {
-                            // Override SystemTime-based start_time with monotonic offset
-                            o.start_time =
-                                request_instant.duration_since(bench_start).as_secs_f64();
-
-                            // Retry on connection-level failures reported as !success
-                            if !o.success && attempt < max_retries && is_connection_error(&o.error)
-                            {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(o);
-                            break;
-                        }
-                        Err(e) => {
-                            if attempt < max_retries {
-                                tokio::time::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ))
-                                .await;
-                                continue;
-                            }
-                            output = Some(RequestFuncOutput {
-                                success: false,
-                                error: e.to_string(),
-                                prompt_len: input.prompt_len,
-                                start_time: request_instant
-                                    .duration_since(bench_start)
-                                    .as_secs_f64(),
-                                ..Default::default()
-                            });
-                            break;
-                        }
+                // Capture monotonic start time right before sending,
+                // relative to benchmark_start. Python uses perf_counter()
+                // for both start_time and ttft/itl, keeping them on the
+                // same clock. We do the same with Instant.
+                let request_instant = Instant::now();
+                let output = match backend.send_request(&input, &client).await {
+                    Ok(mut output) => {
+                        // Override SystemTime-based start_time with monotonic offset
+                        output.start_time =
+                            request_instant.duration_since(bench_start).as_secs_f64();
+                        output
                     }
-                }
+                    Err(error) => RequestFuncOutput {
+                        success: false,
+                        error: format!("{}", error.as_report()),
+                        prompt_len: input.prompt_len,
+                        start_time: request_instant.duration_since(bench_start).as_secs_f64(),
+                        ..Default::default()
+                    },
+                };
 
                 if let Some(pb) = pb {
                     pb.inc(1);
                 }
 
-                output.unwrap()
+                output
             }),
         ));
     }
@@ -1084,7 +1089,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m, Vec::new())
     } else {
         calculate_metrics(
-            &input_requests,
             &outputs,
             benchmark_duration,
             &config.selected_percentiles,
@@ -1094,7 +1098,10 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     };
 
     // Attach steady-state metrics when the closed-loop scope gate passes.
+    // Trace replay is open-loop: an in-flight plateau there reflects a burst
+    // in the trace, not a saturated server, so it is out of scope.
     let scope_ok = !config.no_steady_state
+        && !config.self_timed
         && config.max_concurrency.is_some()
         && config.request_rate.is_infinite();
     if scope_ok {
@@ -1111,7 +1118,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         ) {
             let ss = steady_state::compute(
                 &outputs,
-                &input_requests,
                 &window,
                 &config.selected_percentiles,
                 config.backend.is_pooling(),
@@ -1145,7 +1151,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
     // Build result JSON
     let date_iso = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let dt_filename = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let result_json = build_result_json(
+    let mut result_json = build_result_json(
         config,
         &metrics,
         &actual_output_lens,
@@ -1154,6 +1160,22 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         &date_iso,
         spec_decode_stats.as_ref(),
     );
+    if let Some(ramp_up) = &config.ramp_up {
+        // Same shape as Python: local time, ISO 8601 with microseconds.
+        let events: Vec<serde_json::Value> = schedule
+            .rps_change_offsets(ramp_up.start_rps)
+            .into_iter()
+            .map(|(rps, delay)| {
+                let at =
+                    benchmark_start_local + chrono::Duration::microseconds((delay * 1e6) as i64);
+                serde_json::json!({
+                    "rps": rps,
+                    "timestamp": at.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                })
+            })
+            .collect();
+        result_json["rps_change_events"] = events.into();
+    }
 
     // Save if requested
     if config.save_result || config.append_result {
@@ -1355,7 +1377,7 @@ pub(crate) async fn send_profile_request(
     Ok(resp.status().is_success())
 }
 
-/// Parse `vllm:num_requests_running` from the server's `/metrics` Prometheus endpoint.
+/// Fetch total `vllm:num_requests_running` across engines from `/metrics`.
 pub(crate) async fn fetch_num_requests_running(
     client: &reqwest::Client,
     base_url: &str,
@@ -1363,18 +1385,35 @@ pub(crate) async fn fetch_num_requests_running(
     let url = format!("{base_url}/metrics");
     let resp = client.get(&url).send().await.ok()?;
     let text = resp.text().await.ok()?;
+
+    parse_num_requests_running(&text)
+}
+
+/// Parse total running requests across the engine series in `/metrics`.
+fn parse_num_requests_running(text: &str) -> Option<usize> {
+    let mut total: Option<usize> = None;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("vllm:num_requests_running") {
-            // Line format: `vllm:num_requests_running{model_name="..."} 42`
-            // The value is after the last space.
-            if let Some(val_str) = rest.rsplit(' ').next()
-                && let Ok(v) = val_str.parse::<f64>()
-            {
-                return Some(v as usize);
-            }
+        let Some(rest) = line.trim().strip_prefix("vllm:num_requests_running") else {
+            continue;
+        };
+        let sample = if rest.trim_start().starts_with('{') {
+            let Some((_, sample)) = rest.rsplit_once('}') else {
+                continue;
+            };
+            sample
+        } else if rest.starts_with(char::is_whitespace) {
+            rest
+        } else {
+            continue;
+        };
+        if let Some(value) = sample.split_whitespace().next().and_then(|s| s.parse::<f64>().ok())
+            && value.is_finite()
+            && value >= 0.0
+        {
+            total = Some(total.unwrap_or(0).saturating_add(value as usize));
         }
     }
-    None
+    total
 }
 
 /// Poll `/metrics` until `num_requests_running >= threshold`, then start the
@@ -1771,21 +1810,6 @@ async fn server_detokenize(
     unreachable!()
 }
 
-/// Check if an error message indicates a transient connection error worth retrying.
-fn is_connection_error(error: &str) -> bool {
-    let patterns = [
-        "connection reset",
-        "Connection reset",
-        "connection error",
-        "broken pipe",
-        "connect error",
-        "timed out",
-        "connection refused",
-        "Connection refused",
-    ];
-    patterns.iter().any(|p| error.contains(p))
-}
-
 // --- Tokenizer verification cache ---
 
 /// Build a cache key from base_url + model_id.
@@ -1884,7 +1908,178 @@ async fn sample_verify_prompts(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use clap::Parser;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
+    use crate::cli::BenchServeArgs;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BenchServeArgs,
+    }
+
+    async fn read_request_path(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        let (header_end, content_length) = loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request headers");
+            request.extend_from_slice(&buffer[..read]);
+
+            let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::parse::<usize>)
+                })
+                .transpose()
+                .unwrap()
+                .unwrap_or(0);
+            break (header_end + 4, content_length);
+        };
+
+        while request.len() < header_end + content_length {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "connection closed before request body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+
+        String::from_utf8_lossy(&request).split_whitespace().nth(1).unwrap().to_string()
+    }
+
+    #[allow(
+        deprecated,
+        reason = "zero linger deterministically resets the regression-test connection"
+    )]
+    async fn spawn_connection_reset_server()
+    -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let workload_requests = Arc::new(AtomicUsize::new(0));
+        let request_count = workload_requests.clone();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let path = read_request_path(&mut stream).await;
+                if path != "/v1/completions" {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\
+                              connection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+
+                let attempt = request_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    stream.set_linger(Some(std::time::Duration::ZERO)).unwrap();
+                    continue;
+                }
+
+                let body = concat!(
+                    "data: {\"choices\":[{\"text\":\"ok\"}]}\n\n",
+                    "data: {\"choices\":[],\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":1}}\n\n",
+                    "data: [DONE]\n\n",
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        (format!("http://{addr}"), workload_requests, server)
+    }
+
+    #[tokio::test]
+    async fn test_measured_request_does_not_retry_connection_failure() {
+        let (base_url, workload_requests, server) = spawn_connection_reset_server().await;
+        let dataset_path = crate::datasets::test_support::write_temp_jsonl(
+            "measured-request-no-retry",
+            r#"{"prompt":"hello","output_tokens":1}"#,
+        );
+        let cli = TestCli::parse_from([
+            "vllm-bench",
+            "--backend",
+            "openai",
+            "--base-url",
+            &base_url,
+            "--model",
+            "test-model",
+            "--tokenizer",
+            "gpt2",
+            "--dataset-name",
+            "custom",
+            "--dataset-path",
+            &dataset_path,
+            "--custom-output-len",
+            "-1",
+            "--num-prompts",
+            "1",
+            "--disable-tqdm",
+        ]);
+        let config = BenchConfig::from_args(&cli.args).unwrap();
+
+        let result = run_benchmark(&config).await.unwrap();
+        server.abort();
+
+        assert_eq!(workload_requests.load(Ordering::SeqCst), 1);
+        assert_eq!(result["completed"], 0);
+        assert_eq!(result["failed"], 1);
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_sums_dp_engines() {
+        let metrics: String = (0..8)
+            .map(|engine| {
+                format!("vllm:num_requests_running{{model_name=\"m\",engine=\"{engine}\"}} 16.0\n")
+            })
+            .collect();
+
+        assert_eq!(parse_num_requests_running(&metrics), Some(128));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_matches_exact_metric_name() {
+        let metrics = "\
+vllm:num_requests_running_total{engine=\"0\"} 1024
+vllm:num_requests_running{engine=\"0\"} 16
+vllm:num_requests_waiting{model_name=\"vllm:num_requests_running\"} 256
+vllm:num_requests_running{engine=\"1\"} 16
+";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(32));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_distinguishes_zero_and_missing() {
+        for (metrics, expected) in [("vllm:num_requests_running 0\n", Some(0)), ("", None)] {
+            assert_eq!(parse_num_requests_running(metrics), expected);
+        }
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_reads_sample_before_timestamp() {
+        let metrics =
+            "vllm:num_requests_running {model_name=\"model with spaces\"}\t4.2e1 123456\n";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(42));
+    }
 
     fn make_metrics(
         drafts: u64,
@@ -1898,6 +2093,52 @@ mod tests {
             num_accepted_tokens: accepted_tokens,
             accepted_per_pos: per_pos.iter().copied().collect(),
         }
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_sums_counters_across_engines() {
+        let text = "\
+# TYPE vllm:spec_decode_num_drafts_total counter
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"0\"} 100.0
+vllm:spec_decode_num_drafts_total{model_name=\"m\",engine=\"1\"} 50.0
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\",engine=\"0\"} 700.0
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"m\",engine=\"0\"} 300.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\",engine=\"0\"} 80.0
+vllm:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\",engine=\"0\"} 40.0
+vllm:num_requests_running{model_name=\"m\"} 0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 150);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+        assert_eq!(m.accepted_per_pos, [(0, 80), (1, 40)].into_iter().collect());
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_skips_created_series_and_label_values() {
+        // `_created` timestamps must not be summed into counters, and metric
+        // matching must key off the metric name, not substrings inside label
+        // values (vllm#41916).
+        let text = "\
+vllm:spec_decode_num_drafts_total{model_name=\"m\"} 100.0
+vllm:spec_decode_num_drafts_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_draft_tokens_total{model_name=\"m\"} 700.0
+vllm:spec_decode_num_draft_tokens_created{model_name=\"m\"} 1.7863e+09
+vllm:spec_decode_num_accepted_tokens_total{model_name=\"num_drafts\"} 300.0
+";
+        let m = parse_spec_decode_metrics(text).unwrap();
+        assert_eq!(m.num_drafts, 100);
+        assert_eq!(m.num_draft_tokens, 700);
+        assert_eq!(m.num_accepted_tokens, 300);
+    }
+
+    #[test]
+    fn test_parse_spec_decode_metrics_none_without_spec_metrics() {
+        let text = "\
+vllm:num_requests_running{model_name=\"m\"} 0
+vllm:prefix_cache_queries_total{model_name=\"m\"} 0
+";
+        assert!(parse_spec_decode_metrics(text).is_none());
     }
 
     #[test]

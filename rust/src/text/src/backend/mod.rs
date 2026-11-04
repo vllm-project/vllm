@@ -3,11 +3,55 @@
 
 pub mod hf;
 
+use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use serde_with::{DeserializeFromStr, SerializeDisplay};
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
+
+/// Select which sampling defaults to inherit from generation config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr, SerializeDisplay)]
+pub enum GenerationConfigMode {
+    /// Inherit sampling defaults from the model's generation config.
+    #[default]
+    Auto,
+    /// Use vLLM's neutral sampling defaults.
+    Vllm,
+}
+
+impl GenerationConfigMode {
+    pub const AUTO_LITERAL: &str = "auto";
+    pub const VLLM_LITERAL: &str = "vllm";
+}
+
+impl FromStr for GenerationConfigMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case(Self::VLLM_LITERAL) {
+            Ok(Self::Vllm)
+        } else {
+            Err(format!(
+                "generation config source `{value}` is not implemented yet \
+                 (expected one of: auto, vllm)"
+            ))
+        }
+    }
+}
+
+impl fmt::Display for GenerationConfigMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str(Self::AUTO_LITERAL),
+            Self::Vllm => f.write_str(Self::VLLM_LITERAL),
+        }
+    }
+}
 
 /// Tokenizer/model-derived defaults used to enrich text-generation requests
 /// before they are lowered into engine-core.
@@ -20,6 +64,8 @@ pub struct SamplingHints {
     pub default_top_k: Option<u32>,
     pub default_min_p: Option<f32>,
     pub default_repetition_penalty: Option<f32>,
+    pub default_presence_penalty: Option<f32>,
+    pub default_frequency_penalty: Option<f32>,
     pub default_max_tokens: Option<u32>,
 }
 
@@ -59,6 +105,13 @@ impl SamplingLimits {
 pub trait TextBackend: Send + Sync {
     /// Return the tokenizer used by this backend.
     fn tokenizer(&self) -> DynTokenizer;
+
+    /// Return whether a real tokenizer is loaded. Under
+    /// `--skip-tokenizer-init` it is not: [`Self::tokenizer`] fails every text
+    /// operation, and requests are served token IDs only.
+    fn has_tokenizer(&self) -> bool {
+        true
+    }
 
     /// Return whether the loaded model is a mixture-of-experts model.
     fn is_moe(&self) -> bool {

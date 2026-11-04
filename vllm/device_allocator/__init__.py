@@ -13,6 +13,9 @@ from vllm.platforms import current_platform
 # py_handle has type list[int] on ROCm and int otherwise
 HandleType: TypeAlias = tuple[int, int, int, list[int] | int]
 
+# Selective wake may defer only these; any wake restores every other tag.
+DEFERRABLE_TAGS: tuple[str, ...] = ("weights", "kv_cache")
+
 
 @dataclasses.dataclass
 class AllocationData:
@@ -26,6 +29,8 @@ class MemAllocator(Protocol):
     def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
+
+    def discard(self, tags: tuple[str, ...] | str) -> None: ...
 
     def wake_up(self, tags: list[str] | None = None) -> None: ...
 

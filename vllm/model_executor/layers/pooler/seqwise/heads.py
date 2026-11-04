@@ -171,16 +171,24 @@ class ClassifierPoolerHead(SequencePoolerHead):
             pooled_data = pooled_data.to(self.head_dtype)
 
         if self.classifier is not None:
-            logits = self.classifier(pooled_data)
+            logits: SequencePoolerHeadOutput = self.classifier(pooled_data)
         else:
             logits = pooled_data
 
         # logits shape: [batchsize, num_labels]
         # Affine score calibration: activation((logit - mean) / sigma)
         if self.logit_mean is not None:
-            logits = logits - self.logit_mean
+            logits = (
+                [value - self.logit_mean for value in logits]
+                if isinstance(logits, list)
+                else logits - self.logit_mean
+            )
         if self.logit_sigma is not None:
-            logits = logits / self.logit_sigma
+            logits = (
+                [value / self.logit_sigma for value in logits]
+                if isinstance(logits, list)
+                else logits / self.logit_sigma
+            )
 
         if self.activation is not None:
             flags = [p.use_activation for p in pooling_params]

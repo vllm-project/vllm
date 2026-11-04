@@ -22,9 +22,12 @@ from vllm.config.compilation import CompilationConfig, CompilationMode
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
+from vllm.platforms import current_platform
 
 BATCH_SIZE = 64
 MLP_SIZE = 128
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @support_torch_compile
@@ -66,7 +69,7 @@ class PostGradRangeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
-def test_compile_ranges(use_fresh_inductor_cache):
+def test_compile_ranges(disable_vllm_compile_cache):
     post_grad_range_checker = PostGradRangeChecker(
         [
             Range(start=1, end=8),
@@ -77,7 +80,7 @@ def test_compile_ranges(use_fresh_inductor_cache):
             Range(start=33, end=8192),
         ]
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -168,11 +171,11 @@ class PostGradStaticShapeChecker(InductorPass):
         return InductorPass.hash_dict(state)
 
 
-def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
+def test_compile_sizes_produce_static_shapes(disable_vllm_compile_cache):
     """Verify that compile_sizes entries are compiled with fully concrete
     shapes (no SymInts), while compile_ranges entries retain dynamic shapes."""
     checker = PostGradStaticShapeChecker()
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -209,10 +212,9 @@ def test_compile_sizes_produce_static_shapes(use_fresh_inductor_cache):
     )
 
 
-def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
-    # To force multiple compilations, we disable the compile cache
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
+def test_inductor_cache_compile_ranges(disable_vllm_compile_cache):
+    # disable_vllm_compile_cache sets VLLM_DISABLE_COMPILE_CACHE=1 to force
+    # multiple compilations by disabling vLLM's on-disk compile cache.
     post_grad_range_checker = PostGradRangeChecker(
         ranges=[
             Range(start=1, end=8),
@@ -224,7 +226,7 @@ def test_inductor_cache_compile_ranges(monkeypatch, use_fresh_inductor_cache):
         max_model_len=8192,
         is_encoder_decoder=False,
     )
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     def create_vllm_config():
         return VllmConfig(

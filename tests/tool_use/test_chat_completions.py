@@ -4,6 +4,8 @@
 import openai
 import pytest
 
+import vllm.envs as envs
+
 from .utils import (
     MESSAGES_WITHOUT_TOOLS,
     SEED,
@@ -82,6 +84,32 @@ async def test_chat_completion_without_tools(
     assert finish_reason_count == 1
     assert len(chunks)
     assert "".join(chunks) == output_text
+
+
+# test: `tools: []` is served like a request without tools, as OpenAI does,
+# instead of being rejected with HTTP 400.
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend still rejects `tools: []` with HTTP 400",
+)
+async def test_chat_completion_with_empty_tools(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+    chat_completion = await client.chat.completions.create(
+        messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
+        temperature=0,
+        max_completion_tokens=50,
+        model=model_name,
+        seed=SEED,
+        tools=[],
+    )
+    choice = chat_completion.choices[0]
+    assert choice.message.content
+    assert choice.finish_reason != "tool_calls"
+    assert not choice.message.tool_calls
 
 
 # test: conversation with tools enabled and provided that should not invoke
@@ -166,8 +194,7 @@ async def test_chat_completion_with_tools(
 async def test_response_format_with_tool_choice_required(
     client: openai.AsyncOpenAI, server_config: ServerConfig
 ):
-    """
-    Test that combining response_format: json_object with tool_choice: required
+    """Test that combining response_format: json_object with tool_choice: required
     doesn't crash the engine.
 
     Before the fix, this would cause a validation error:

@@ -52,7 +52,7 @@ def stop_sign_image_url():
 
 @pytest.mark.asyncio
 async def test_translategemma_extra_lang_code_fields(client: openai.AsyncOpenAI):
-    """en -> es translation through TranslateGemma's bundled chat template's
+    """En -> es translation through TranslateGemma's bundled chat template's
     ``text`` content branch, which depends on ``source_lang_code`` /
     ``target_lang_code`` extra fields being preserved on the content part."""
     completion = await client.chat.completions.create(
@@ -92,7 +92,7 @@ async def test_translategemma_image_extra_lang_code_fields(
     client: openai.AsyncOpenAI,
     stop_sign_image_url: str,
 ):
-    """en -> es OCR-translation through TranslateGemma's bundled chat
+    """En -> es OCR-translation through TranslateGemma's bundled chat
     template's ``image`` content branch. Exercises the multimodal branch of
     ``_collect_extra_fields`` in ``_parse_chat_message_content_part``: the
     ``source_lang_code`` / ``target_lang_code`` extras must survive parsing

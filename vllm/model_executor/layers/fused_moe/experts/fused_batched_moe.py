@@ -5,13 +5,19 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_masked_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    has_configured_moe_config,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -19,7 +25,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
-    swiglu_limit_func,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -32,7 +37,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, triton, use_tensor_descriptor
+from vllm.triton_utils.allocation import set_triton_allocator
+
+
+def _is_capturing_or_compiling() -> bool:
+    # The accelerator API dispatches to the active backend.
+    return (
+        torch.compiler.is_compiling()
+        or torch.accelerator.current_stream().is_capturing()
+    )
 
 
 @triton.jit
@@ -71,9 +85,32 @@ def moe_mmk(
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
+    # TD: a_base_ptr/b_base_ptr are the expert/CTA-offset bases of A[M,K]/B[N,K].
+    a_base_ptr=None,
+    b_base_ptr=None,
+    M=0,
+    N=0,
+    stride_am: tl.int64 = 0,
+    stride_bn: tl.int64 = 0,
+    USE_TD: tl.constexpr = False,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
+    if USE_TD:
+        # make_tensor_descriptor requires the last (K) stride to be a
+        # compile-time 1; the launcher only enables USE_TD for K-contiguous A/B.
+        a_desc = tl.make_tensor_descriptor(
+            a_base_ptr,
+            shape=[M, K],
+            strides=[stride_am, 1],
+            block_shape=[BLOCK_M, BLOCK_K],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            b_base_ptr,
+            shape=[N, K],
+            strides=[stride_bn, 1],
+            block_shape=[BLOCK_N, BLOCK_K],
+        )
     if use_w8a16:
         b_scale_ptrs = (
             b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
@@ -110,12 +147,17 @@ def moe_mmk(
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        a = tl.load(
-            a_ptrs,
-            mask=mask_m[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        if USE_TD:
+            # B is [N, K]; tile is [BLOCK_N, BLOCK_K], transposed for dot.
+            a = a_desc.load([0, k * BLOCK_K])
+            b = tl.trans(b_desc.load([0, k * BLOCK_K]))
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=mask_m[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+                other=0.0,
+            )
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
         # We accumulate along the K dimension.
         if use_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -193,6 +235,7 @@ def expert_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -238,6 +281,13 @@ def expert_triton_kernel(
         use_fp8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
+        a_ptr,
+        b_ptr,
+        M,
+        N,
+        stride_am,
+        stride_bn,
+        USE_TD,
     )
 
     # store in C
@@ -292,6 +342,7 @@ def batched_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -372,7 +423,157 @@ def batched_triton_kernel(
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
+        USE_TD,
     )
+
+
+@triton.jit
+def batched_triton_kernel_swapped(
+    a_ptr,  # [E, max_num_tokens, K]
+    b_ptr,  # [E, K, N]
+    c_ptr,  # [E, max_num_tokens, N]
+    expert_num_tokens,  # [E]
+    compute_type: tl.constexpr,
+    # Dimensions
+    max_num_tokens,
+    K,
+    N,
+    # Quantization data
+    a_scale_ptr,
+    b_scale_ptr,
+    b_zp_ptr,
+    # The stride variables represent how much to increase the ptr by when
+    # moving by 1 element in a particular dimension. E.g. `stride_am` is
+    # how much to increase `a_ptr` by to get the element one row down
+    # (A has M rows).
+    stride_ae: tl.int64,
+    stride_am: tl.int64,
+    stride_ak: tl.int64,
+    stride_be: tl.int64,
+    stride_bk: tl.int64,
+    stride_bn: tl.int64,
+    stride_ce: tl.int64,
+    stride_cm: tl.int64,
+    stride_cn: tl.int64,
+    stride_ase: tl.int64,
+    stride_asm: tl.int64,
+    stride_ask: tl.int64,
+    stride_bse: tl.int64,
+    stride_bsk: tl.int64,
+    stride_bsn: tl.int64,
+    # Blockwise quantization data
+    group_n: tl.constexpr,
+    group_k: tl.constexpr,
+    # Quantization schemes
+    use_fp8_w8a8: tl.constexpr,
+    use_int8_w8a16: tl.constexpr,
+    per_act_token_quant: tl.constexpr,
+    # Kernel config
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
+):
+    # axis 0 is M_blocks * N_blocks
+    pid_mn = tl.program_id(axis=0)
+    expert_id = tl.program_id(axis=1)
+    e_num_tokens = tl.load(expert_num_tokens + expert_id)
+    if e_num_tokens == 0:
+        # Early exit
+        return
+
+    # num_pid_m = tl.cdiv(max_num_tokens, BLOCK_M)
+    num_pid_n = tl.cdiv(N, BLOCK_N)
+    pid_m = pid_mn // num_pid_n
+    pid_n = pid_mn % num_pid_n
+
+    cta_m_start = pid_m * BLOCK_M
+    cta_n_start = pid_n * BLOCK_N
+    if cta_m_start >= e_num_tokens:
+        # Early exit
+        return
+
+    cta_m_size = min(BLOCK_M, e_num_tokens - cta_m_start)
+    cta_n_size = min(BLOCK_N, N - cta_n_start)
+
+    a_ptr = a_ptr + expert_id * stride_ae + cta_m_start * stride_am
+    b_ptr = b_ptr + expert_id * stride_be + cta_n_start * stride_bn
+    c_ptr = (
+        c_ptr
+        + expert_id * stride_ce
+        + cta_m_start * stride_cm
+        + cta_n_start * stride_cn
+    )
+
+    offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
+
+    if use_fp8_w8a8:
+        a_scale_ptr = a_scale_ptr + expert_id * stride_ase
+        b_scale_ptr = b_scale_ptr + expert_id * stride_bse
+
+        # block-wise
+        if group_k > 0 and group_n > 0 or per_act_token_quant:
+            a_scale_ptr = a_scale_ptr + cta_m_start * stride_asm
+
+    expert_triton_kernel(
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        expert_id,
+        compute_type,
+        cta_m_size,  # M
+        cta_n_size,  # N
+        K,  # K
+        a_scale_ptr,
+        b_scale_ptr,
+        b_zp_ptr,
+        # Strides
+        stride_am,
+        stride_ak,
+        stride_bk,
+        stride_bn,
+        stride_cm,
+        stride_cn,
+        stride_ase,
+        stride_asm,
+        stride_ask,
+        stride_bse,
+        stride_bsk,
+        stride_bsn,
+        # offsets
+        offs_bn,
+        # Blockwise quantization data
+        group_n,
+        group_k,
+        # Quantization schemes
+        use_fp8_w8a8,
+        use_int8_w8a16,
+        per_act_token_quant,
+        # Kernel config
+        BLOCK_M,
+        BLOCK_N,
+        BLOCK_K,
+        USE_TD,
+    )
+
+
+def resize_batched_config_tiles(
+    config: dict[str, int], block_shape: list[int] | None
+) -> dict[str, int]:
+    """Narrow a default config's N/K tiles for the expert-batched layout.
+
+    The shared heuristic sizes tiles for one large [M, K] x [K, N] GEMM, but this
+    layout runs E small GEMMs of at most max_num_tokens rows, where wide N/K tiles
+    are mostly masked-off work.
+    """
+    # Configs without num_warps come from paths that pin their own tiles.
+    if "num_warps" not in config:
+        return config
+
+    # Narrower N/K is faster on XPU; quantized N/K must match the scale groups.
+    if block_shape is None and current_platform.is_xpu():
+        config = config | {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32}
+    return config
 
 
 def invoke_moe_batched_triton_kernel(
@@ -401,11 +602,14 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_M = config["BLOCK_SIZE_M"]
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
+    if block_shape is not None:
+        BLOCK_K = min(BLOCK_K, min(block_shape[0], block_shape[1]))
 
-    grid = (
-        expert_num_tokens.size(0),
-        triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
-    )
+    # Consecutive programs share an expert's weight tile, which is faster on XPU.
+    swap_grid = current_platform.is_xpu()
+    num_experts = expert_num_tokens.size(0)
+    num_tiles = triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N)
+    grid = (num_tiles, num_experts) if swap_grid else (num_experts, num_tiles)
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
 
@@ -428,7 +632,7 @@ def invoke_moe_batched_triton_kernel(
         else:
             stride_bse = B_scale.stride(0)
             stride_bsk = B_scale.stride(2)
-            stride_bsn = B_scale.stride(1)
+            stride_bsn = B_scale.stride(1) if B_scale.size(1) > 1 else 0
 
     else:
         stride_bse = 0
@@ -444,7 +648,20 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    batched_triton_kernel[grid](
+    use_td = (
+        use_tensor_descriptor()
+        and A.stride(2) == 1
+        and B.stride(2) == 1
+        and (K * A.element_size()) % 16 == 0
+        and (BLOCK_M & (BLOCK_M - 1)) == 0
+        and (BLOCK_N & (BLOCK_N - 1)) == 0
+        and (BLOCK_K & (BLOCK_K - 1)) == 0
+    )
+    if use_td:
+        set_triton_allocator(A.device)
+
+    kernel = batched_triton_kernel_swapped if swap_grid else batched_triton_kernel
+    kernel[grid](
         A,
         B,
         C,
@@ -485,12 +702,12 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        USE_TD=use_td,
     )
 
 
 class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
-    """
-    A reference MoE expert class that operates on expert batched format,
+    """A reference MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
@@ -608,6 +825,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
         assert hidden_states.dim() == 3
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
+        assert expert_num_tokens is not None
 
         num_local_experts = w1.size(0)
         assert num_local_experts == w1.size(0), f"{num_local_experts} == {w1.size(0)}"
@@ -616,10 +834,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
-            if (
-                torch.compiler.is_compiling()
-                or torch.cuda.is_current_stream_capturing()
-            ):
+            if _is_capturing_or_compiling():
                 num = hidden_states.shape[1]
             else:
                 num = int(expert_num_tokens[expert].item())
@@ -659,7 +874,7 @@ def batched_moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+    if _is_capturing_or_compiling():
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
@@ -715,8 +930,7 @@ def batched_moe_kernel_quantize_input(
 
 
 class BatchedTritonExperts(mk.FusedMoEExpertsModular):
-    """
-    A Triton based MoE expert class that operates on expert batched format,
+    """A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
@@ -745,7 +959,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike()
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
@@ -758,13 +972,13 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9
+            from vllm.platforms.rocm import get_cdna_version, on_rdna4
 
-            is_rocm_on_gfx9 = on_gfx9()
+            is_rocm_fp8_supported = get_cdna_version() > 2 or on_rdna4()
         else:
-            is_rocm_on_gfx9 = False
+            is_rocm_fp8_supported = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or (
+        device_supports_fp8 = is_rocm_fp8_supported or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
@@ -781,16 +995,18 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        if current_platform.is_xpu():
+            return activation in [
+                MoEActivation.SILU,
+                MoEActivation.GELU,
+                MoEActivation.GELU_TANH,
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SILU_NO_MUL,
+                MoEActivation.GELU_NO_MUL,
+                MoEActivation.GELU_TANH_NO_MUL,
+                MoEActivation.RELU2_NO_MUL,
+            ]
+        return apply_moe_activation_masked_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -799,20 +1015,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
-
-    def activation(
-        self,
-        activation: MoEActivation,
-        output: torch.Tensor,
-        input: torch.Tensor,
-        **kwargs,
-    ) -> None:
-        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
-        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
-            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
-            return
-
-        super().activation(activation, output, input)
 
     def workspace_shapes(
         self,
@@ -893,6 +1095,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             max_num_tokens,
             block_shape=self.block_shape,
         )
+        if not has_configured_moe_config(
+            w2.size(), config_dtype, max_num_tokens, self.block_shape
+        ):
+            config = resize_batched_config_tiles(config, self.block_shape)
 
         if hidden_states.dtype == torch.bfloat16:
             compute_type = tl.bfloat16
@@ -940,11 +1146,19 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
         intermediate_cache2.fill_(0)
 
         # TODO (bnell): use triton utility from batched deep gemm.
-        self.activation(
-            activation,
-            intermediate_cache2.view(-1, activation_out_dim),
-            intermediate_cache1.view(-1, N),
-        )
+        if current_platform.is_xpu():
+            self.activation(
+                activation,
+                intermediate_cache2.view(-1, activation_out_dim),
+                intermediate_cache1.view(-1, N),
+            )
+        else:
+            self.activation(
+                activation,
+                intermediate_cache2,
+                intermediate_cache1,
+                valid_token_counts=expert_num_tokens,
+            )
 
         qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
             intermediate_cache2,
