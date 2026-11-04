@@ -395,14 +395,20 @@ def test_qsa_fp8_loaded_scales_reach_writer_and_attention(
         set_default_torch_dtype(torch.bfloat16),
         device,
     ):
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+            dtype=torch.int32,
+        )
         owner = Qwen4ExpQSAAttention(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
-            topk_indices_buffer=torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
-                dtype=torch.int32,
+            topk_indices_buffer=topk_indices_buffer,
+            physical_topk_indices_buffer=(
+                _qwen4_exp_model.make_physical_topk_indices_buffer(
+                    vllm_config, topk_indices_buffer
+                )
             ),
             prefix="model.layers.0.self_attn",
         )
@@ -1606,14 +1612,20 @@ def _run_qsa_hisparse_prefill_case(
         set_default_torch_dtype(torch.bfloat16),
         torch.device("cuda"),
     ):
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+            dtype=torch.int32,
+        )
         owner = Qwen4ExpQSAAttention(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
-            topk_indices_buffer=torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
-                dtype=torch.int32,
+            topk_indices_buffer=topk_indices_buffer,
+            physical_topk_indices_buffer=(
+                _qwen4_exp_model.make_physical_topk_indices_buffer(
+                    vllm_config, topk_indices_buffer
+                )
             ),
             prefix="model.layers.0.self_attn",
         )
@@ -2064,14 +2076,20 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         set_default_torch_dtype(torch.bfloat16),
         torch.device(device),
     ):
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            _qwen4_exp_model.get_qsa_topk_buffer_width(config),
+            dtype=torch.int32,
+        )
         owner = Qwen4ExpQSAAttention(
             vllm_config=vllm_config,
             config=config,
             layer_id=0,
-            topk_indices_buffer=torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                _qwen4_exp_model.get_qsa_topk_buffer_width(config),
-                dtype=torch.int32,
+            topk_indices_buffer=topk_indices_buffer,
+            physical_topk_indices_buffer=(
+                _qwen4_exp_model.make_physical_topk_indices_buffer(
+                    vllm_config, topk_indices_buffer
+                )
             ),
             prefix="model.layers.0.self_attn",
         )
@@ -2612,12 +2630,18 @@ def _run_qsa_hisparse_worker_case(
             _qwen4_exp_model.get_qsa_topk_buffer_width(config),
             dtype=torch.int32,
         )
+        physical_topk_indices_buffer = (
+            _qwen4_exp_model.make_physical_topk_indices_buffer(
+                vllm_config, topk_indices_buffer
+            )
+        )
         owners = [
             Qwen4ExpQSAAttention(
                 vllm_config=vllm_config,
                 config=config,
                 layer_id=layer,
                 topk_indices_buffer=topk_indices_buffer,
+                physical_topk_indices_buffer=physical_topk_indices_buffer,
                 prefix=f"model.layers.{layer}.self_attn",
             )
             for layer in range(layers)

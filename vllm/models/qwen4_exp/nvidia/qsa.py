@@ -385,6 +385,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         config: Qwen4ExpTextConfig,
         layer_id: int,
         topk_indices_buffer: torch.Tensor,
+        physical_topk_indices_buffer: torch.Tensor | None = None,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
@@ -567,11 +568,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             )
         )
         if self.hisparse_cache is not None:
-            self.register_buffer(
-                "physical_topk_indices_buffer",
-                torch.empty_like(self.topk_indices_buffer),
-                persistent=False,
-            )
+            assert physical_topk_indices_buffer is not None
+            self.physical_topk_indices_buffer = physical_topk_indices_buffer
 
         static_context = vllm_config.compilation_config.static_forward_context
         if self.layer_name in static_context:
