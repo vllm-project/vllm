@@ -2719,10 +2719,11 @@ class DPEngineCoreProc(EngineCoreProc):
         # DP-global gate: between cadence steps, release on every rank once
         # enough ranks have prefill work, and otherwise on none, so that one
         # backlogged rank cannot force a long mixed step while its peers wait.
-        return (
-            not self.prefill_release_min_dp_ranks
-            or self.num_dp_ranks_with_prefill_work < self.prefill_release_min_dp_ranks
-        )
+        if not self.prefill_release_min_dp_ranks:
+            return True
+        # Clamp to the current DP group, which an elastic EP scale-down shrinks.
+        min_ranks = min(self.prefill_release_min_dp_ranks, self.dp_group.size())
+        return self.num_dp_ranks_with_prefill_work < min_ranks
 
     @fault_tolerant_wrapper
     def run_busy_loop(self):

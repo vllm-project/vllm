@@ -247,10 +247,13 @@ class SchedulerConfig:
     prefill_release_min_dp_ranks: int = Field(default=0, ge=0)
     """With `prefill_schedule_interval` > 1, gate prefills on all DP ranks
     together: between cadence steps, release prefills on every rank when at
-    least this many DP ranks have prefill work, and otherwise defer them on
-    every rank, including a rank whose last release could not drain its queue.
-    This adds one CPU all-reduce over the DP group per engine step. 0 (the
-    default) keeps the per-rank release of capacity-bound ranks."""
+    least this many DP ranks have prefill work (capped at the current DP size),
+    and otherwise defer them on every rank, including a rank whose last release
+    could not drain its queue. A rank whose releases leave its queue backed up
+    for 8 in a row (at most 8 intervals) is released on its own again until a
+    release drains it. This adds one CPU all-reduce over the DP group per
+    engine step. 0 (the default) keeps the per-rank release of capacity-bound
+    ranks."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
