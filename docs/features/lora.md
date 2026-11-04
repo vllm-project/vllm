@@ -248,6 +248,32 @@ Now, you can specify a base_model_name alongside the name and path using JSON fo
 
 To provide the backward compatibility support, you can still use the old key-value format (name=path), but the `base_model_name` will remain unspecified in that case.
 
+## MoE LoRA intermediate masking
+
+The fused MoE LoRA kernels can skip zero-padded rank tiles in the expand step
+by recording which intermediate tiles are nonzero during the shrink step.
+This optimization is off by default. Set the environment variable for your
+GPU before starting the engine:
+
+| Environment variable | GPU path |
+| --- | --- |
+| `VLLM_MOE_LORA_INTERMEDIATE_MASK=1` | A100 (SM 8.0, non-TMA) |
+| `VLLM_MOE_LORA_TMA_INTERMEDIATE_MASK=1` | H100 (SM 9.0, TMA) |
+
+For example, on an A100:
+
+```bash
+VLLM_MOE_LORA_INTERMEDIATE_MASK=1 vllm serve <model> \
+    --enable-lora --max-lora-rank 256 --lora-modules <name>=<path>
+```
+
+The optimized path applies only when the fused MoE LoRA kernel uses a single
+slice, sorted tokens, and compatible tile sizes without fully sharded LoRA.
+Other cases use the existing kernel path. Benchmark your workload before
+enabling either option; serving throughput depends on the model and batch mix.
+The masked path assumes finite activations and LoRA weights: skipping a zero
+intermediate tile can change how `NaN` or infinity propagates.
+
 ## Mixing 2D and 3D MoE LoRA Adapters
 
 To serve 2D-format(based on `megatron`) and 3D-format (based on `peft`) adapters from the same engine instance, start the server with `--enable-mixed-moe-lora-format`
