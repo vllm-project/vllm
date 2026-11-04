@@ -123,7 +123,7 @@ def _is_remote_disconnect(error: Exception) -> bool:
     )
 
 
-def _new_agent(name: str, *, sleep_mode: bool = False):
+def _new_agent(name: str, *, remaps_kv_cache: bool = False):
     from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 
     if NixlWrapper is None:
@@ -132,9 +132,12 @@ def _new_agent(name: str, *, sleep_mode: bool = False):
             "several nodes; install the nixl package."
         )
     agent = NixlWrapper(name, nixl_agent_config(backends=[]))
-    # As in the NIXL connector: with sleep mode, UCX must not cache VRAM
-    # registrations, or slept pages stay pinned; UCX_* env vars win.
-    params = {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"} if sleep_mode else {}
+    # As the NIXL connector does in sleep mode: when the KV cache memory can be
+    # released and remapped, UCX must not cache VRAM registrations, or released
+    # pages stay pinned; UCX_* env vars win.
+    params = (
+        {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"} if remaps_kv_cache else {}
+    )
     agent.create_backend("UCX", params)
     return agent
 
@@ -179,12 +182,12 @@ class RegionMirrorClient:
         name: str,
         *,
         timeout_s: float = _TRANSFER_TIMEOUT_S,
-        sleep_mode: bool = False,
+        remaps_kv_cache: bool = False,
     ):
         self._timeout_s = timeout_s
         self._stopped = threading.Event()
         self._stop_reason = "is shutting down"
-        self._agent = _new_agent(name, sleep_mode=sleep_mode)
+        self._agent = _new_agent(name, remaps_kv_cache=remaps_kv_cache)
         self._head = self._agent.add_remote_agent(head_metadata)
         self._device = gpu_ranges[0][2]
         self._gpu_ranges = gpu_ranges
@@ -254,14 +257,15 @@ class RegionMirrorClient:
         self._stopped.set()
 
     def unregister_kv_caches(self) -> None:
-        """Release the GPU memory registration, which sleep mode's remap
-        would leave pointing at stale pages."""
+        """Release the GPU memory registration, which a remap of the KV cache
+        (sleep mode, or lending it to a weight update) would leave pointing at
+        stale pages."""
         if self._reg is not None:
             self._agent.deregister_memory(self._reg)
             self._reg = None
 
     def restore_kv_caches(self) -> None:
-        """Register the GPU memory again, at its addresses after wake-up."""
+        """Register the GPU memory again, at its addresses after the remap."""
         if self._reg is None:
             self._reg = self._agent.register_memory(
                 [(addr, size, dev, "") for addr, size, dev in self._gpu_ranges],
@@ -570,7 +574,7 @@ class RegionMirrorWorker(OffloadingWorker):
         self._drain_completed()
 
     def unregister_kv_caches(self) -> None:
-        # sleep() synchronizes the device, not this thread: finish
+        # The remap synchronizes the device, not this thread: finish
         # queued copies while the GPU memory is still mapped.
         self.wait(set(self._copies))
         self._client.unregister_kv_caches()
@@ -656,7 +660,7 @@ def attach_region_mirror(
     engine_id: str,
     *,
     timeout_s: float = _TRANSFER_TIMEOUT_S,
-    sleep_mode: bool = False,
+    remaps_kv_cache: bool = False,
 ) -> OffloadingWorker:
     """Connect this worker to the head region through the mirror.
 
@@ -673,8 +677,9 @@ def attach_region_mirror(
         topology: This worker's placement.
         engine_id: Names the NIXL agents of this engine.
         timeout_s: Wait for one transfer before the mirror counts it stuck.
-        sleep_mode: The engine remaps GPU memory in sleep mode, so the
-            client's UCX backend must not cache its VRAM registrations.
+        remaps_kv_cache: The engine may release and remap the GPU KV cache
+            memory, so the client's UCX backend must not cache its VRAM
+            registrations.
 
     """
     name = f"kv-offload-mirror-{engine_id}-{topology.rank}"
@@ -723,7 +728,7 @@ def attach_region_mirror(
                     head_metadata,
                     name,
                     timeout_s=timeout_s,
-                    sleep_mode=sleep_mode,
+                    remaps_kv_cache=remaps_kv_cache,
                 )
                 metadata = client.metadata
             except Exception as e:

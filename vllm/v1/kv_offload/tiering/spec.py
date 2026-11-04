@@ -617,7 +617,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 topology,
                 self._engine_id,
                 timeout_s=self._mirror_timeout_s(),
-                sleep_mode=self.config.sleep_mode,
+                remaps_kv_cache=self.config.remaps_kv_cache,
             )
         except BaseException:
             if worker is not None:

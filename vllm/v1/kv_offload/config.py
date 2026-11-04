@@ -122,5 +122,6 @@ class OffloadingConfig:
     canonical_layout: bool = False
     # Resolved KVCacheLayout name of the worker KV cache.
     kv_cache_layout: str | None = None
-    # Whether the engine runs with sleep mode, which remaps the GPU KV caches.
-    sleep_mode: bool = False
+    # Whether the engine may release and remap the GPU KV cache memory: in
+    # sleep mode, or when the extensible KV cache lends it to a weight update.
+    remaps_kv_cache: bool = False

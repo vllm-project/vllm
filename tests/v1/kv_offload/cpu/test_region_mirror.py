@@ -203,16 +203,16 @@ def test_strided_views_register_their_whole_storage():
 
 
 @pytest.mark.parametrize(
-    "sleep_mode, params",
+    "remaps_kv_cache, params",
     [(False, {}), (True, {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"})],
 )
-def test_sleep_mode_agents_do_not_cache_vram_registrations(
-    monkeypatch, sleep_mode, params
+def test_remapping_agents_do_not_cache_vram_registrations(
+    monkeypatch, remaps_kv_cache, params
 ):
     agent = MagicMock()
     monkeypatch.setattr(nixl_utils, "NixlWrapper", MagicMock(return_value=agent))
     monkeypatch.setattr(nixl_utils, "nixl_agent_config", MagicMock())
-    assert region_mirror._new_agent("a", sleep_mode=sleep_mode) is agent
+    assert region_mirror._new_agent("a", remaps_kv_cache=remaps_kv_cache) is agent
     agent.create_backend.assert_called_once_with("UCX", params)
 
 

@@ -1411,3 +1411,21 @@ def test_only_mp_and_uni_report_worker_placement(
     parallel = build_offloading_config(config, _make_kv_cache_config()).parallel
     assert parallel.placement_known is placement_known
     assert parallel.spans_nodes is (not placement_known)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "sleep_mode, extensible_kv_cache, remaps_kv_cache",
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+def test_kv_cache_remapping_reaches_the_offloading_config(
+    sleep_mode: bool, extensible_kv_cache: bool, remaps_kv_cache: bool
+) -> None:
+    """Sleep mode and the extensible KV cache's weight-update lending both
+    release and remap the GPU KV cache memory the mirror registers."""
+    config = _make_vllm_config()
+    config.model_config.enable_sleep_mode = sleep_mode
+    config.cache_config.enable_extensible_kv_cache = extensible_kv_cache
+    offloading = build_offloading_config(config, _make_kv_cache_config())
+    assert offloading.remaps_kv_cache is remaps_kv_cache
+
