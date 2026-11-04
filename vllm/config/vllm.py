@@ -1663,6 +1663,7 @@ class VllmConfig:
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()
+        self._validate_nixl_dcp()
 
         if self.model_config is not None:
             # Normalize EPLB num_redundant_experts before verification.
@@ -3910,6 +3911,26 @@ class VllmConfig:
                 "backend) for MLA models such as DeepSeek."
             )
         return self
+
+    def _validate_nixl_dcp(self) -> None:
+        if not envs.VLLM_USE_NIXL_DCP_A2A:
+            return
+        # ParallelConfig is also instantiated to discover CLI defaults. Validate
+        # the assembled engine config after model hooks resolve DCP defaults.
+        parallel = self.parallel_config
+        if envs.VLLM_USE_DIRECT_DCP_A2A is True:
+            raise ValueError("NIXL and direct DCP A2A cannot both be enabled")
+        if (
+            not 2 <= parallel.decode_context_parallel_size <= 8
+            or parallel.prefill_context_parallel_size != 1
+            or parallel.dcp_comm_backend != "a2a"
+        ):
+            raise ValueError(
+                "VLLM_USE_NIXL_DCP_A2A requires --dcp-comm-backend a2a, "
+                "DCP size 2..8 and PCP size 1"
+            )
+        if self.model_config is not None and not self.model_config.use_mla:
+            raise ValueError("VLLM_USE_NIXL_DCP_A2A currently supports MLA models only")
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":

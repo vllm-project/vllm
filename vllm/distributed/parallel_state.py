@@ -26,6 +26,7 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
+import sys
 import weakref
 from collections import deque, namedtuple
 from collections.abc import Callable
@@ -2498,6 +2499,11 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
+    # NIXL owns registered peer buffers. Quiesce them while the CPU groups used
+    # for collective teardown still exist, without importing an optional SDK.
+    nixl_dcp = sys.modules.get("vllm.v1.attention.ops.nixl_dcp")
+    if nixl_dcp is not None:
+        nixl_dcp.close_nixl_dcp_a2a_workspaces()
     global _TP, _ETP
 
     if _ETP and _ETP is not _TP:

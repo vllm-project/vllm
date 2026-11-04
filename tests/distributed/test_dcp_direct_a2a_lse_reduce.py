@@ -3,6 +3,7 @@
 """Tests for direct symmetric-memory DCP collectives."""
 
 import functools
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import multiprocess as mp
@@ -16,6 +17,23 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
+
+
+def test_nixl_setup_propagates_empty_exception(monkeypatch):
+    from vllm.v1.attention.ops.nixl_dcp import NixlDCPA2AWorkspace
+
+    def empty_cuda_failure():
+        raise RuntimeError
+
+    def gather_peer_error(errors, error, *, group):
+        errors[:] = [error, None]
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", empty_cuda_failure)
+    monkeypatch.setattr(dist, "all_gather_object", gather_peer_error)
+    group = SimpleNamespace(world_size=2, rank_in_group=0, cpu_group=object())
+    with pytest.raises(RuntimeError, match="setup failed across ranks"):
+        NixlDCPA2AWorkspace(group, torch.device("cuda:0"), 1, 1, 512, torch.bfloat16)
 
 
 def _has_multicast_support() -> bool:
@@ -332,13 +350,130 @@ def _manager_config(dcp_comm_backend: str = "a2a"):
     return config
 
 
+@pytest.mark.parametrize("direct", [None, False])
+def test_mla_nixl_selection_overrides_auto_and_reserves_prefill(monkeypatch, direct):
+    from vllm.v1.attention.ops import nixl_dcp
+
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", direct)
+    group = MagicMock(world_size=2)
+    monkeypatch.setattr(dcp, "get_dcp_group", lambda: group)
+    monkeypatch.setattr(dcp, "get_dcp_workspace_max_num_tokens", lambda _: 4)
+    monkeypatch.setattr(dcp, "get_direct_dcp_q_gather_workspace", lambda *args: None)
+    direct_factory = MagicMock(side_effect=AssertionError("direct path selected"))
+    monkeypatch.setattr(dcp, "get_direct_dcp_a2a_workspace", direct_factory)
+    factory = MagicMock()
+    monkeypatch.setattr(nixl_dcp, "get_nixl_dcp_a2a_workspace", factory)
+    manager = dcp.MLADCPManager(
+        _manager_config(),
+        torch.device("cpu"),
+        2,
+        8,
+        4,
+        torch.bfloat16,
+        torch.bfloat16,
+        None,
+        True,
+        False,
+    )
+    factory.assert_called_once_with(
+        group,
+        torch.device("cpu"),
+        16,
+        2,
+        4,
+        torch.bfloat16,
+        1,
+    )
+    output, lse = torch.empty(8, 4, 4), torch.empty(8, 4)
+    manager.combine(output, lse, seq_lens=None, query_start_loc=None)
+    factory.return_value.lse_reduce.assert_called_once_with(
+        output,
+        lse,
+        is_lse_base_on_e=True,
+        seq_lens=None,
+        query_start_loc=None,
+    )
+    # SDK/setup errors must propagate instead of silently selecting NCCL.
+    factory.side_effect = RuntimeError("SDK unavailable")
+    with pytest.raises(RuntimeError, match="SDK unavailable"):
+        manager._init_combine(2, 4, torch.bfloat16, True, False)
+
+
+@pytest.mark.parametrize(
+    "direct,a2a,pcp,message",
+    [
+        (True, True, False, "cannot both"),
+        (False, False, False, "a2a backend"),
+        (False, True, True, "without PCP"),
+    ],
+)
+def test_mla_nixl_rejects_conflicting_configuration(
+    monkeypatch,
+    direct,
+    a2a,
+    pcp,
+    message,
+):
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", direct)
+    manager = object.__new__(dcp.MLADCPManager)
+    manager.use_a2a = a2a
+    with pytest.raises(ValueError, match=message):
+        manager._init_combine(2, 128, torch.bfloat16, True, pcp)
+
+
+@pytest.mark.parametrize(
+    "backend,dcp_size,pcp", [("ag_rs", 2, 1), ("a2a", 1, 1), ("a2a", 2, 2)]
+)
+def test_nixl_config_rejects_unused_flag(monkeypatch, backend, dcp_size, pcp):
+    from vllm.config import DeviceConfig, ParallelConfig, VllmConfig
+
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
+    with pytest.raises(ValueError, match="VLLM_USE_NIXL_DCP_A2A requires"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=dcp_size,
+                prefill_context_parallel_size=pcp,
+                dcp_comm_backend=backend,
+                distributed_executor_backend="mp",
+            ),
+        )
+
+
+def test_nixl_rejects_models_that_do_not_use_mla(monkeypatch, tmp_path):
+    from transformers import OPTConfig
+
+    from vllm.config import DeviceConfig, ModelConfig, ParallelConfig, VllmConfig
+
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_NIXL_DCP_A2A", True)
+    monkeypatch.setattr(dcp.envs, "VLLM_USE_DIRECT_DCP_A2A", False)
+    OPTConfig(architectures=["OPTForCausalLM"]).save_pretrained(tmp_path)
+    with pytest.raises(ValueError, match="MLA models only"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            model_config=ModelConfig(
+                model=str(tmp_path), skip_tokenizer_init=True, max_model_len=128
+            ),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=2,
+                dcp_comm_backend="a2a",
+                distributed_executor_backend="mp",
+            ),
+        )
+
+
 def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     import vllm.v1.attention.ops.dcp as dcp_manager
 
     group = MagicMock(world_size=2)
     monkeypatch.setattr(dcp_manager, "get_dcp_group", lambda: group)
-    direct_a2a = MagicMock()
-    direct_query = MagicMock()
+    direct_a2a = MagicMock(max_num_tokens=16)
+    direct_query = MagicMock(max_num_tokens=16)
     direct_kv = MagicMock()
     monkeypatch.setattr(
         dcp_manager, "get_direct_dcp_a2a_workspace", MagicMock(return_value=direct_a2a)
@@ -368,7 +503,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     workspace = torch.empty(96, 8)
 
-    assert manager.query_gather == direct_query.gather
+    local_query = torch.empty(2, 2, 8)
+    assert manager.query_gather(local_query) == direct_query.gather.return_value
+    direct_query.gather.assert_called_once_with(local_query)
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
     manager.kv_gather(gathered_kv, local_kv)
@@ -385,9 +522,9 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     direct_a2a.lse_reduce.assert_called_once_with(
         output,
         lse,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
-        is_lse_base_on_e=False,
+        False,
+        seq_lens,
+        query_start_loc,
     )
 
 
@@ -522,6 +659,8 @@ def test_dcp_chunk_workspace_alignment_covers_interleave():
 def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     import vllm.model_executor.layers.attention.sparse_mla_attention as sparse_mla
 
+    monkeypatch.setattr(sparse_mla, "PIN_MEMORY", False)
+
     monkeypatch.setattr(
         sparse_mla.AttentionMetadataBuilder,
         "__init__",
@@ -544,7 +683,7 @@ def test_sparse_mla_builder_initializes_dcp_manager(monkeypatch):
     config = MagicMock()
     config.model_config.dtype = torch.bfloat16
     config.model_config.max_model_len = 64
-    config.model_config.hf_config.index_topk = 8
+    config.model_config.hf_text_config.index_topk = 8
     config.scheduler_config.max_num_batched_tokens = 64
     config.scheduler_config.max_num_seqs = 2
     config.cache_config.block_size = 4
@@ -574,7 +713,7 @@ def test_sparse_mla_workspace_preserves_non_dcp_size():
 
     config = MagicMock()
     config.model_config.max_model_len = 1
-    config.model_config.hf_config.index_topk = 7
+    config.model_config.hf_text_config.index_topk = 7
     config.scheduler_config.max_num_seqs = 3
     config.cache_config.block_size = 4
     config.parallel_config.decode_context_parallel_size = 1
@@ -834,6 +973,8 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(local_rank)
     dist.init_process_group(backend="nccl")
+    use_nixl = env.get("TEST_DCP_TRANSPORT") == "nixl"
+    workspace = None
     try:
         from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
@@ -847,15 +988,53 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         total_heads = world_size * heads_per_rank
         active_ubatch = [0]
         dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
-        workspace = dcp.DirectDCPA2AWorkspace(
-            dist.group.WORLD,
+        workspace_type = dcp.DirectDCPA2AWorkspace
+        workspace_group = dist.group.WORLD
+        workspace_options = {}
+        if use_nixl:
+            from vllm.distributed.parallel_state import GroupCoordinator
+            from vllm.v1.attention.ops import nixl_dcp
+
+            nixl_dcp.dbo_current_ubatch_id = lambda: active_ubatch[0]
+            workspace_type = nixl_dcp.NixlDCPA2AWorkspace
+            workspace_group = GroupCoordinator(
+                [list(range(world_size))],
+                local_rank,
+                "nccl",
+                use_device_communicator=False,
+            )
+            workspace_options = {
+                "num_channels": int(env.get("TEST_NIXL_CHANNELS", "4")),
+                "tile_bytes": int(env.get("TEST_NIXL_TILE_BYTES", "32768")),
+            }
+        workspace = workspace_type(
+            workspace_group,
             device,
             max_num_tokens,
             heads_per_rank,
             head_dim,
             dtype,
             num_ubatches=2,
+            **workspace_options,
         )
+        if use_nixl and env.get("TEST_REQUIRE_RDMA") == "1":
+            assert any(
+                "rc_mlx5_gda" in transports for transports in workspace.peer_transports
+            ), workspace.peer_transports
+            assert "nixl_put" in workspace.peer_copy_paths
+        if use_nixl:
+            remote_paths = [
+                path
+                for peer, path in enumerate(workspace.peer_copy_paths)
+                if peer != rank
+            ]
+            if env.get("TEST_REQUIRE_MAPPED_P2P") == "1":
+                assert all(path == "mapped_p2p" for path in remote_paths), remote_paths
+            if env.get("TEST_REQUIRE_MIXED") == "1":
+                assert set(remote_paths) == {"mapped_p2p", "nixl_put"}, remote_paths
+            # Mapped destinations must bypass send staging throughout eager
+            # calls and graph replay, as well as deliver the correct payload.
+            workspace.send.fill_(0xA5)
 
         def lse_layout(value: torch.Tensor) -> torch.Tensor:
             if env["TEST_LSE_LAYOUT"] == "transposed":
@@ -895,8 +1074,83 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 assert not partial_lse.is_contiguous()
             partial_lse = lse_layout(partial_lse)
             active_ubatch[0] = iteration % 2
-            actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
+            if use_nixl:
+                actual, actual_lse = workspace.lse_reduce(
+                    partial_output, partial_lse, is_lse_base_on_e, return_lse=True
+                )
+            else:
+                actual = workspace.lse_reduce(
+                    partial_output, partial_lse, is_lse_base_on_e
+                )
             torch.accelerator.synchronize()
+
+            if use_nixl:
+                # Independently pack and exchange through NCCL, then compare
+                # every received output/LSE bit before either slot is reused.
+                packed_send = torch.empty(
+                    (world_size, num_tokens, heads_per_rank, head_dim + 2),
+                    device=device,
+                    dtype=dtype,
+                )
+                dcp._dcp_a2a_pack_send(
+                    partial_output,
+                    partial_lse,
+                    packed_send,
+                    world_size,
+                    heads_per_rank,
+                    head_dim,
+                    2,
+                )
+                expected_recv = torch.empty_like(packed_send)
+                dist.all_to_all_single(expected_recv, packed_send)
+                parity = int(workspace.epoch[active_ubatch[0], 0].item()) & 1
+                received = workspace.receive[active_ubatch[0]]
+                for source in range(world_size):
+                    for first in range(0, num_tokens, workspace.tile_tokens):
+                        rows = min(workspace.tile_tokens, num_tokens - first)
+                        offset = (
+                            (parity * world_size + source) * workspace.peer_bytes
+                            + first // workspace.tile_tokens * workspace.tile_stride
+                        )
+                        output_bytes = rows * heads_per_rank * head_dim * 2
+                        lse_offset = (output_bytes + 15) // 16 * 16
+                        received_out = received[offset : offset + output_bytes]
+                        received_lse = received[
+                            offset + lse_offset : offset
+                            + lse_offset
+                            + rows * heads_per_rank * 4
+                        ]
+                        expected_tile = expected_recv[source, first : first + rows]
+                        torch.testing.assert_close(
+                            received_out.view(torch.int16).reshape(
+                                rows, heads_per_rank, head_dim
+                            ),
+                            expected_tile[..., :head_dim]
+                            .contiguous()
+                            .view(torch.int16),
+                            rtol=0,
+                            atol=0,
+                        )
+                        torch.testing.assert_close(
+                            received_lse.view(torch.int32).reshape(
+                                rows, heads_per_rank
+                            ),
+                            expected_tile[..., head_dim:]
+                            .contiguous()
+                            .view(torch.int32)
+                            .squeeze(-1),
+                            rtol=0,
+                            atol=0,
+                        )
+                nccl_output, nccl_lse = dcp._dcp_a2a_unpack_combine(
+                    expected_recv,
+                    head_dim,
+                    2,
+                    True,
+                    is_lse_base_on_e,
+                )
+                torch.testing.assert_close(actual, nccl_output, rtol=0, atol=0)
+                torch.testing.assert_close(actual_lse, nccl_lse, rtol=0, atol=0)
 
             # Layout alone must not alter even one output bit.
             packed = workspace.lse_reduce(
@@ -1063,9 +1317,57 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
-        for _ in range(3):
+        replays = int(env.get("TEST_NIXL_REPLAYS", "1024")) if use_nixl else 6
+        if use_nixl:
+            history = torch.empty((replays, 8), device=device, dtype=dtype)
+            output_history = torch.empty(
+                (replays, world_size, 8), device=device, dtype=dtype
+            )
+            lse_history = torch.empty(
+                (replays, world_size), device=device, dtype=lse_dtype
+            )
+        for iteration in range(replays):
+            if use_nixl:
+                partial_output.fill_(iteration % 23 + rank + 1)
+                partial_lse.fill_(((iteration + rank) % 7) * 0.25)
+            else:
+                partial_output.mul_(0.5).add_((rank + 1) * 0.01)
+                partial_lse.add_((rank + 1) * 0.1)
             graph.replay()
+            if use_nixl:
+                history[iteration].copy_(actual[0, 0, :8])
+                output_history[iteration].copy_(partial_output[0, ::heads_per_rank, :8])
+                lse_history[iteration].copy_(partial_lse[0, ::heads_per_rank])
+            if iteration % 2:
+                # Replay epochs must also work after eager calls and use of
+                # another ubatch, with no host-side epoch bookkeeping.
+                for ubatch in (1, 0):
+                    active_ubatch[0] = ubatch
+                    # Smaller eager calls change the active channel count while
+                    # the captured graph retains the larger shape's schedule.
+                    eager_tokens = 1 if use_nixl else partial_output.shape[0]
+                    workspace.lse_reduce(
+                        partial_output[:eager_tokens],
+                        partial_lse[:eager_tokens],
+                        is_lse_base_on_e,
+                    )
+                active_ubatch[0] = 1
         torch.accelerator.synchronize()
+        if use_nixl:
+            # Check every replay's sample after the stress loop; NCCL reference
+            # collectives must not add hidden rendezvous between replays.
+            reference_send = torch.empty(
+                (world_size, replays, 1, 10), device=device, dtype=dtype
+            )
+            dcp._dcp_a2a_pack_send(
+                output_history, lse_history, reference_send, world_size, 1, 8, 2
+            )
+            reference_recv = torch.empty_like(reference_send)
+            dist.all_to_all_single(reference_recv, reference_send)
+            reference_history = dcp._dcp_a2a_unpack_combine(
+                reference_recv, 8, 2, False, is_lse_base_on_e
+            )
+            torch.testing.assert_close(history, reference_history[:, 0], rtol=0, atol=0)
 
         packed = workspace.lse_reduce(
             partial_output, partial_lse.contiguous(), is_lse_base_on_e
@@ -1089,7 +1391,17 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             outputs, lses, is_lse_base_on_e=is_lse_base_on_e
         )
         _assert_close(actual, expected, dtype)
+        if use_nixl:
+            for peer, path in enumerate(workspace.peer_copy_paths):
+                if path == "mapped_p2p":
+                    staged = workspace.send[:, peer]
+                    torch.testing.assert_close(
+                        staged, torch.full_like(staged, 0xA5), rtol=0, atol=0
+                    )
     finally:
+        if use_nixl and workspace is not None:
+            workspace.close()
+            workspace_group.destroy()
         dist.destroy_process_group()
 
 
@@ -1126,6 +1438,34 @@ def test_distributed_direct_a2a_matches_reference(
             "TEST_LSE_DTYPE": lse_dtype,
             "TEST_LSE_LAYOUT": lse_layout,
             "LSE_BASE_E": lse_base_e,
+        },
+    )
+
+
+@pytest.mark.parametrize("world_size", [2, 8])
+@pytest.mark.parametrize("num_channels", [1, 4])
+@pytest.mark.parametrize(
+    "dtype,lse_layout,lse_base_e",
+    [("bfloat16", "transposed", "1"), ("float16", "packed", "0")],
+)
+def test_distributed_nixl_a2a_matches_reference(
+    world_size, dtype, lse_layout, lse_base_e, num_channels
+):
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need {world_size} CUDA GPUs")
+    if not hasattr(torch.ops._C, "nixl_dcp_a2a_dispatch"):
+        pytest.skip("Build vLLM with VLLM_BUILD_NIXL_DCP=ON")
+    _distributed_run(
+        _distributed_direct_a2a_worker,
+        world_size=world_size,
+        extra_env={
+            "TEST_DCP_TRANSPORT": "nixl",
+            "TEST_DTYPE": dtype,
+            "TEST_LSE_DTYPE": "float32",
+            "TEST_LSE_LAYOUT": lse_layout,
+            "LSE_BASE_E": lse_base_e,
+            "TEST_NIXL_CHANNELS": str(num_channels),
+            "TEST_REQUIRE_MAPPED_P2P": "1",
         },
     )
 

@@ -206,6 +206,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_DCP_Q_REPLICATE: bool = False
     VLLM_USE_DIRECT_DCP_A2A: bool | None = None
+    VLLM_USE_NIXL_DCP_A2A: bool = False
     VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
     VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_DEEP_GEMM_WARMUP: Literal[
@@ -2347,6 +2348,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
     ),
+    # Experimental NIXL GPU Device API DCP exchange; requires an opt-in build.
+    "VLLM_USE_NIXL_DCP_A2A": lambda: bool(int(os.getenv("VLLM_USE_NIXL_DCP_A2A", "0"))),
     # Direct DCP ops default on when applicable; set to 1 to enforce or 0 to disable.
     "VLLM_USE_DIRECT_DCP_A2A": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_DIRECT_DCP_A2A")

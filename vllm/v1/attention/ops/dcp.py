@@ -1468,6 +1468,12 @@ class MLADCPManager:
         self.device = torch.device(device)
         self.num_ubatches = max(parallel_config.num_ubatches, 1)
         self.max_num_tokens = get_dcp_workspace_max_num_tokens(vllm_config)
+        # The explicit NIXL path also handles oversized MQA/prefill combines;
+        # reserve their full capacity before capture instead of falling back.
+        self.nixl_max_num_tokens = max(
+            self.max_num_tokens,
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
         self.use_a2a = parallel_config.dcp_comm_backend == "a2a"
         self.padded_num_heads = padded_num_heads
 
@@ -1504,6 +1510,30 @@ class MLADCPManager:
         is_lse_base_on_e: bool,
         use_pcp: bool,
     ) -> DCPCombine:
+        if envs.VLLM_USE_NIXL_DCP_A2A:
+            if envs.VLLM_USE_DIRECT_DCP_A2A is True:
+                raise ValueError(
+                    "VLLM_USE_NIXL_DCP_A2A and VLLM_USE_DIRECT_DCP_A2A "
+                    "cannot both be enabled"
+                )
+            if not self.use_a2a or use_pcp:
+                raise ValueError("NIXL DCP requires the a2a backend without PCP")
+            from vllm.v1.attention.ops.nixl_dcp import get_nixl_dcp_a2a_workspace
+
+            workspace = get_nixl_dcp_a2a_workspace(
+                self.group,
+                self.device,
+                self.nixl_max_num_tokens,
+                num_heads,
+                head_dim,
+                dtype,
+                self.num_ubatches,
+            )
+            logger.info_once("Using NIXL GPU Device API DCP A2A for MLA.")
+            return functools.partial(
+                workspace.lse_reduce,
+                is_lse_base_on_e=is_lse_base_on_e,
+            )
         direct_workspace = None
         if self.use_a2a:
             direct_workspace = get_direct_dcp_a2a_workspace(
