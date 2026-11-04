@@ -70,7 +70,8 @@ the row count is inside the kernel build. The builds cover 1–8 rows at
 TP1 and 1–16 rows at TP2.
 
 Serving defaults are narrower than the builds. K1 and K2 each default to
-4 rows at TP1 and 8 rows at TP2. Override either cap with
+4 rows at TP1 and 8 rows at TP2; with speculative decoding at TP1 to 8
+rows (verify steps of up to two requests with three draft tokens). Override either cap with
 `VLLM_ROCM_QWEN38_DENSE_MONO_K1_MAX_ROWS` or
 `VLLM_ROCM_QWEN38_DENSE_MONO_K2_MAX_ROWS`. A value outside 1..8 at TP1 or
 1..16 at TP2 is clamped and a warning is logged.
