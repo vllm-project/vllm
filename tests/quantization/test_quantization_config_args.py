@@ -12,6 +12,7 @@ from vllm.config.quantization import (
     QuantSpec,
     resolve_quantization_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static32,
     kInt8StaticChannelSym,
+    kMxfp4Static,
     kMxfp8Dynamic,
     kNvfp4DynamicTensor,
     kNvfp4DynamicToken,
@@ -317,6 +319,15 @@ def test_mxfp8_shorthand_keeps_weight_with_phase():
     )
     assert resolved is not None
     assert resolved[-1] is Mxfp8OnlineLinearMethod
+    # Other linear fields survive the inherited weight.
+    args = resolve_quantization_config(
+        "mxfp8", {"linear": {"phase": phase, "hadamard_size": 32}}
+    )
+    assert args is not None and args.linear is not None
+    assert (args.linear.weight, args.linear.hadamard_size) == (kMxfp8Dynamic, 32)
+    args = resolve_quantization_config("mxfp4_hadamard32", {"linear": {"phase": phase}})
+    assert args is not None and args.linear is not None
+    assert args.linear.hadamard_size == 32
 
 
 def test_phase_enters_model_config_hash():
@@ -410,3 +421,56 @@ def test_targets_reject_moe_only_shorthand_for_linear_layer():
 
     with pytest.raises(ValueError, match="does not define a QuantSpec"):
         config.resolve_quant_method_cls(LinearBase, "model.layers.0.self_attn.o_proj")
+
+
+# ---- hadamard_size ---------------------------------------------------------
+
+
+def test_mxfp4_hadamard32_target_resolves_to_rotated_mxfp4_linear():
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4OnlineLinearMethod,
+    )
+
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(
+            targets={"re:.*linear_attn\\.out_proj": "mxfp4_hadamard32"}
+        )
+    )
+    resolved = config.resolve_quant_method_cls(
+        LinearBase, "model.layers.0.linear_attn.out_proj"
+    )
+    assert resolved is not None
+    _, quant_key_str, _, spec, method_cls = resolved
+    assert quant_key_str == "mxfp4_hadamard32"
+    assert spec.hadamard_size == 32
+    assert method_cls is Mxfp4OnlineLinearMethod
+
+
+def test_rocm_platform_supports_mxfp4_hadamard32():
+    """`--quantization mxfp4_hadamard32` reaches the ROCm allowlist unchanged."""
+    try:
+        from vllm.platforms.rocm import RocmPlatform
+    except ImportError:
+        pytest.skip("vllm.platforms.rocm not importable outside a ROCm stack")
+
+    RocmPlatform.verify_quantization("mxfp4_hadamard32")
+
+
+@pytest.mark.parametrize("size", [0, 24, 33])
+def test_hadamard_size_must_be_power_of_two(size):
+    with pytest.raises(ValueError, match="power of two"):
+        quant_config_args(linear={"weight": kMxfp4Static, "hadamard_size": size})
+
+
+@pytest.mark.parametrize(
+    "linear,moe",
+    [
+        ({"weight": "fp8_per_block_static", "hadamard_size": 32}, None),
+        (None, {"weight": kMxfp4Static, "hadamard_size": 32}),
+    ],
+)
+def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
+    config = OnlineQuantizationConfig(quant_config_args(linear=linear, moe=moe))
+    layer_cls = LinearBase if linear is not None else RoutedExperts
+    with pytest.raises(NotImplementedError, match="hadamard_size"):
+        config.resolve_quant_method_cls(layer_cls, "model.layers.0.mlp.down_proj")

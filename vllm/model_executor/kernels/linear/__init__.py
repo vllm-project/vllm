@@ -165,6 +165,7 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferTrtllmNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.humming import (
+    HummingHadamardNvFp4LinearKernel,
     HummingNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
@@ -1470,6 +1471,7 @@ def register_linear_kernel(
 
 
 __all__ = [
+    "HummingHadamardNvFp4LinearKernel",
     "fp8_scaled_mm_is_batch_invariant",
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",

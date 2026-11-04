@@ -52,6 +52,7 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
+| `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
 
 ## Advanced Configuration
 
@@ -64,6 +65,7 @@ quantization_config:
   linear:
     weight: <name>      # see QUANT_KEY_NAMES in vllm/config/quantization.py
     activation: <name>
+    hadamard_size: 32   # optional power of two, so far mxfp4 only: see `mxfp4_hadamard32`
     phase: {decode: <format>, prefill: <format>, max_decode_tokens: <rows>, scale: <scale>}
   moe:
     weight: <name>
@@ -113,10 +115,11 @@ vllm serve <mxfp4-model> --quantization-config.linear.activation int8_per_group_
 
 `linear.phase` sets the activations of small linear calls (decode) and large
 ones (prefill) separately, served from one weight copy. A call with at most
-`max_decode_tokens` input rows uses `decode`; under CUDA graphs the rows are
-the padded capture size. Rows count every token in the call, so decode tokens
-scheduled with a long prefill use the `prefill` format. Each phase is `unquantized` (the model dtype) or the
-quantized format of the weights:
+`max_decode_tokens` input rows uses `decode`. Rows count every token in the
+call, so decode tokens scheduled with a long prefill use the `prefill` format,
+and under CUDA graphs the padded capture size picks the phase: graphs captured
+above `max_decode_tokens` run the `prefill` format. Each phase is `unquantized`
+(the model dtype) or the quantized format of the weights:
 
 | Weights | Linear backend | `decode` | `prefill` | `scale` |
 | ------- | -------------- | -------- | --------- | ------- |
@@ -143,8 +146,8 @@ no linear does, for example in an unquantized model. Other linears keep their
 own activations: unquantized linears and `draft_lm_head_quantization` lm_head
 copies use the model dtype. A checkpoint lm_head in a served format follows the
 phase like other linears, so prefill-sized lm_head calls (e.g. prompt logprobs)
-use the `prefill` format. Linears whose per-GPU input size is not a multiple of
-128 keep BF16 activations. `phase` cannot be combined with `activation`,
+use the `prefill` format. NVFP4 linears whose per-GPU input size is not a
+multiple of 128 keep BF16 activations. `phase` cannot be combined with `activation`,
 `moe.phase` is not supported, and online-quantized linears reject it unless
 their weights are MXFP8 (`--quantization mxfp8`). For an MXFP8 checkpoint, pass
 the phase with `--quantization-config` alone: adding `--quantization mxfp8`
@@ -159,7 +162,8 @@ decode calls run in CUDA graphs and take the scale from the rows the model
 runner marks as real, which requires `VLLM_MOE_SKIP_PADDING=1` (the default);
 CUDA graph capture fails for forward passes that do not mark them, such as
 draft models. With unquantized decode and NVFP4 prefill, `max_decode_tokens`
-must be at least the largest CUDA graph capture size. NVFP4 phases do not
+must be at least the largest CUDA graph capture size, which keeps NVFP4 out of
+CUDA graphs and so needs no padding mask. NVFP4 phases do not
 support data parallelism, encoder CUDA graphs or `VLLM_BATCH_INVARIANT`.
 Phases need `VLLM_USE_LAYERNAME=1`, the default on torch 2.11 and later.
 MXFP8 activations have per-block scales, so padding rows cannot affect other
@@ -284,7 +288,7 @@ llm = LLM(
 
 ### Fine-Grained Per-Layer Quantization Schemes
 
-Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
 
 Example:
 

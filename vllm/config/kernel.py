@@ -365,9 +365,9 @@ class KernelConfig:
 
     Explicit values raise RuntimeError when their constraints are not met.
 
-    On SM100 decode without DCP, persistent (including auto selecting it)
-    reads BF16 logits directly and widens scores inside the kernel, avoiding
-    a full FP32 logits copy. Cooperative still requires FP32 logits.
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
     """
 
     linear_backend: LinearBackend = "auto"
@@ -426,15 +426,17 @@ class KernelConfig:
     """Largest input, in rows (normally the tokens in a step), that keeps BF16
     activations in NVFP4 W4A16 (weight-only) linear layers on the b12x linear
     backend. Larger inputs are quantized to NVFP4 with one scale per call,
-    computed from their absolute maximum and shared by every request in the
-    step, and run the FP4 GEMM, which speeds up long prefills but is lossy.
-    Outputs therefore depend on batch composition. Must be at least the largest
-    CUDA graph capture size; not supported with data parallelism or encoder CUDA
-    graphs. None (default) keeps BF16 activations for every input. Alias for
+    computed from the absolute maximum of its real rows and shared by every
+    request in the step, and run the FP4 GEMM, which speeds up long prefills
+    but is lossy. Outputs therefore depend on batch composition. Must be at
+    least the largest CUDA graph capture size; not supported with data
+    parallelism or encoder CUDA graphs, and requires VLLM_USE_LAYERNAME=1 (the
+    default on torch >= 2.11). None (default) keeps BF16 activations for every
+    input. Alias for
     quantization_config.linear.phase with decode "unquantized", prefill "nvfp4",
-    max_decode_tokens set to this value and scale "dynamic_tensor", so it is
-    also rejected with VLLM_BATCH_INVARIANT. The lm_head copies of
-    draft_lm_head_quantization keep BF16 activations."""
+    max_decode_tokens set to this value and scale "dynamic_tensor". It has no
+    effect with VLLM_BATCH_INVARIANT, which selects another kernel. The lm_head
+    copies of draft_lm_head_quantization keep BF16 activations."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod

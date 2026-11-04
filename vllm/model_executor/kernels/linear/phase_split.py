@@ -97,6 +97,20 @@ class DualActivationKernel:
         raise NotImplementedError
 
 
+def _check_batch_invariance(phase: PhaseSpec, option: str) -> None:
+    """Checked before kernel support: VLLM_BATCH_INVARIANT selects its own
+    NVFP4 kernels, which would otherwise be reported as unable to serve the
+    phase."""
+    decode, prefill = phase.activation_modes()
+    if envs.VLLM_BATCH_INVARIANT and (
+        decode != prefill or kNvfp4DynamicTensor in (decode, prefill)
+    ):
+        raise ValueError(
+            f"{option.removesuffix('.max_decode_tokens')} makes outputs depend "
+            "on the rows in a step and is not supported with VLLM_BATCH_INVARIANT"
+        )
+
+
 def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
     """NVFP4 activations share one scale per call, so uninitialized padding
     rows (CUDA graphs, data parallelism) must never reach it. ``option`` names
@@ -104,11 +118,6 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
     decode, prefill = phase.activation_modes()
     name = option.removesuffix(".max_decode_tokens")
     shares_scale = kNvfp4DynamicTensor in (decode, prefill)
-    if envs.VLLM_BATCH_INVARIANT and (decode != prefill or shares_scale):
-        raise ValueError(
-            f"{name} makes outputs depend on the rows in a step and is not "
-            "supported with VLLM_BATCH_INVARIANT"
-        )
     config = get_current_vllm_config()
     if not torch_utils._USE_LAYERNAME:
         # A plain-string layer name is baked into the graph, so a compiled
@@ -237,16 +246,20 @@ def maybe_phase_split(
     ``option`` names the row-count setting the user set."""
     if phase is None:
         return kernel
+    _check_batch_invariance(phase, option)
+    if not (isinstance(kernel, DualActivationKernel) and _serves(type(kernel), phase)):
+        capable = [cls.__name__ for cls in candidates if _serves(cls, phase)]
+        selected = (
+            " (selected by VLLM_BATCH_INVARIANT)" if envs.VLLM_BATCH_INVARIANT else ""
+        )
+        raise NotImplementedError(
+            f"quantization_config.linear.phase ({phase}) with weight={weight} on "
+            f"{current_platform.device_name}: {type(kernel).__name__}{selected} "
+            "cannot serve it from one weight copy. Kernels that can, where supported "
+            f"(--linear-backend b12x): {', '.join(capable) or 'none'}."
+        )
     _check_phase_split_config(phase, option)
-    if isinstance(kernel, DualActivationKernel) and _serves(type(kernel), phase):
-        return PhaseSplitLinearKernel(kernel, phase)
-    capable = [cls.__name__ for cls in candidates if _serves(cls, phase)]
-    raise NotImplementedError(
-        f"quantization_config.linear.phase ({phase}) with weight={weight} on "
-        f"{current_platform.device_name}: {type(kernel).__name__} cannot serve "
-        "it from one weight copy. Kernels that can, where supported "
-        f"(--linear-backend b12x): {', '.join(capable) or 'none'}."
-    )
+    return PhaseSplitLinearKernel(kernel, phase)
 
 
 def _phase_split_linear(
@@ -257,7 +270,11 @@ def _phase_split_linear(
 ) -> torch.Tensor:
     layer = _LAYERS[_resolve_layer_name(layer_name)]
     output = layer.phase_split_kernel.forward(layer, x, bias)
-    assert output.shape == (x.shape[0], out_features), output.shape
+    if output.shape != (x.shape[0], out_features):
+        raise RuntimeError(
+            f"{type(layer.phase_split_kernel.kernel).__name__} returned shape "
+            f"{tuple(output.shape)}, expected {(x.shape[0], out_features)}"
+        )
     return output
 
 

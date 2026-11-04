@@ -300,14 +300,50 @@ def test_phase_split_requires_layer_name_inputs(
         maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
 
 
+def test_phase_split_reports_batch_invariance_first(
+    vllm_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """VLLM_BATCH_INVARIANT selects its own kernels; the error names it rather
+    than the kernel it selected."""
+
+    class _A16OnlyKernel(_DualKernel):
+        @classmethod
+        def activation_modes(cls):
+            return frozenset((None,))
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    with pytest.raises(ValueError, match="VLLM_BATCH_INVARIANT"):
+        maybe_phase_split(_A16OnlyKernel(), _phase(), weight="nvfp4", candidates=[])
+
+
+@torch.inference_mode()
+def test_phase_split_op_rejects_wrong_output_shape(vllm_config) -> None:
+    """The op's output feeds a traced graph, so a kernel returning the wrong
+    shape raises even under ``python -O``."""
+
+    class _WrongShapeKernel(_DualKernel):
+        def apply_weights(self, layer, x, bias=None, *, mode=None):
+            return super().apply_weights(layer, x, bias, mode=mode)[:, :-1]
+
+    kernel = maybe_phase_split(_WrongShapeKernel(), _phase(), weight="nvfp4")
+    layer = _layer(prefix="wrong.shape")
+    kernel.process_weights_after_loading(layer)
+    name = _encode_layer_name(layer.phase_split_layer_name)
+    with pytest.raises(RuntimeError, match="returned shape"):
+        torch.ops.vllm.phase_split_linear(torch.randn(3, 4), None, name, 6)
+
+
 def test_phase_split_rejects_kernel_without_both_modes(vllm_config) -> None:
     class _A16OnlyKernel(_DualKernel):
         @classmethod
         def activation_modes(cls):
             return frozenset((None,))
 
+    # Unsupported kernels are reported before settings that would also fail.
+    vllm_config.parallel_config.data_parallel_size = 2
     with pytest.raises(NotImplementedError) as error:
         maybe_phase_split(_A16OnlyKernel(), _phase(), weight="nvfp4", candidates=[])
+    vllm_config.parallel_config.data_parallel_size = 1
     message = str(error.value)
     assert "weight=nvfp4" in message
     assert "decode=unquantized, prefill=nvfp4, max_decode_tokens=8" in message

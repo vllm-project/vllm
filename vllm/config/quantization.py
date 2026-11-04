@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from typing import Annotated, Any, Literal
 
 import regex as re
@@ -164,10 +165,24 @@ class QuantSpec:
     activation: QuantKeyField = None
     """Activation quantization key, or a name from QUANT_KEY_NAMES."""
 
+    hadamard_size: int | None = None
+    """Block size (a power of two) of an orthonormal Hadamard rotation applied
+    along the input dimension of both the weight and the activation before
+    quantization (see `InputHadamardLinearMethod`). The GEMM result is
+    unchanged up to quantization error, which the rotation shrinks by spreading
+    outliers across each block. Linear layers only; validated with MXFP4."""
+
     phase: PhaseSpec | None = None
     """Separate decode and prefill activation formats for one weight copy.
     Linear only; mutually exclusive with `activation`. Online-quantized linears
     only support it with MXFP8 weights."""
+
+    @field_validator("hadamard_size")
+    @classmethod
+    def _check_hadamard_size(cls, size: int | None) -> int | None:
+        if size is not None and (size <= 0 or size & (size - 1)):
+            raise ValueError(f"hadamard_size must be a power of two, got {size}")
+        return size
 
     @model_validator(mode="after")
     def _validate_phase(self) -> "QuantSpec":
@@ -188,7 +203,10 @@ class QuantSpec:
                 str(quant_key),
             )
 
-        return quant_key_str(self.weight)
+        name = quant_key_str(self.weight)
+        if self.hadamard_size is not None:
+            name = f"{name}_hadamard{self.hadamard_size}"
+        return name
 
 
 @config
@@ -305,6 +323,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
     ),
+    # MXFP4 linear with a 32-wide Hadamard rotation of weights and activations;
+    # MoE stays unquantized (no `moe` field).
+    "mxfp4_hadamard32": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
+    ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
@@ -376,8 +399,12 @@ def resolve_quantization_config(
         and linear.activation is None
         and linear.phase is not None
     ):
-        # A spec that only sets the phase keeps the shorthand's weight format.
-        linear = QuantSpec(weight=base.linear.weight, phase=linear.phase)
+        # A spec that sets a phase but no format keeps the shorthand's format.
+        linear = dataclasses.replace(
+            linear,
+            weight=base.linear.weight,
+            hadamard_size=linear.hadamard_size or base.linear.hadamard_size,
+        )
     return QuantizationConfigArgs(
         linear=linear or base.linear,
         moe=quantization_config.moe or base.moe,
