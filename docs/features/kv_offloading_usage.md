@@ -170,7 +170,7 @@ The layout is chosen once at startup:
 | --- | --- | --- | --- | --- |
 | `LBHNC` | Supported (the default) | Supported | Supported | `test_offloading_connector.py::test_cpu_offloading`, `::test_tiering_offloading`, `::test_fs_tiering_offloading` (end to end, GPU); `offloading_connector/test_canonical_mapping.py` (`split_hnd`, `packed_hnd`) |
 | `LBNHC` | Registration is tested; not verified end to end | Not verified | Supported | `offloading_connector/test_worker.py::test_register_kv_caches`; `offloading_connector/test_canonical_mapping.py` (`split_nhd`, `packed_nhd`) |
-| `LHBNC` | Wrong output after a reload from CPU ([#60004](https://github.com/vllm-project/vllm/issues/60004)); not rejected at startup yet | Not verified | Not verified | None |
+| `LHBNC` | Wrong output after a reload from CPU ([#60004](https://github.com/vllm-project/vllm/issues/60004)); the connector doesn't reject it at startup yet | Not verified | Not verified | None |
 | `BLHNC` | Tested with HiSparse only | Not verified | Not supported (cross-layer); not verified that startup rejects it | `tests/v1/e2e/general/test_hisparse.py::test_hisparse_spill_and_prefix_restore` (GPU) |
 | `BLNHC` | Not verified | Not verified | Not supported (cross-layer); not verified that startup rejects it | None |
 | `BHLNC` | Not verified | Not verified | Not supported (cross-layer); not verified that startup rejects it | None |
