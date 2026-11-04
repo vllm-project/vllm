@@ -13,6 +13,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    get_num_attn_modules_per_layer,
 )
 from vllm.platforms import current_platform
 
@@ -357,3 +358,27 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
 
     # The halves merge into "e.w", which the suffix mapping then doubles.
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
+
+
+@pytest.mark.parametrize(
+    "layer_names,expected",
+    [
+        # One attention module per decoder layer.
+        (["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"], 1),
+        # Non-attention layers never set the stride, whatever their integers.
+        (["model.layers.0.mixer", "model.layers.1.self_attn.attn"], 1),
+        # LongCat-Flash: two attention modules per layer.
+        (["model.layers.0.self_attn.0.attn", "model.layers.0.self_attn.1.attn"], 2),
+        # A looped model on the Transformers backend, named by module path.
+        (
+            [
+                f"model.layers.{layer}.self_attn.loop_attns.{loop}.attn"
+                for layer in range(2)
+                for loop in range(3)
+            ],
+            3,
+        ),
+    ],
+)
+def test_get_num_attn_modules_per_layer(layer_names, expected):
+    assert get_num_attn_modules_per_layer(layer_names) == expected

@@ -1245,6 +1245,28 @@ def map_draft_quant_config(
             exclusions.append(global_exclusion)
 
 
+def get_num_attn_modules_per_layer(layer_names: Iterable[str]) -> int:
+    """Infer the number of attention modules per decoder layer from layer names.
+
+    A layer holding several attention modules in a numbered list names them
+    with a second integer (``model.layers.3.self_attn.1.attn``).
+
+    Returns:
+        One more than the largest such index, or 1 if no name carries one.
+
+    """
+    num_attn_module = 1
+    for layer_name in layer_names:
+        if "attn" not in layer_name:
+            continue
+        int_vals = [
+            int(subname) for subname in layer_name.split(".") if subname.isdigit()
+        ]
+        if len(int_vals) == 2:
+            num_attn_module = max(num_attn_module, int_vals[1] + 1)
+    return num_attn_module
+
+
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
     """Extract the layer index from the module name.
 
