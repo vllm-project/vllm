@@ -27,45 +27,11 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kFp8DynamicTensorSym,
-    kFp8StaticTensorSym,
-    kMxfp4Dynamic,
-    kMxfp4Static,
-    kMxfp6E2M3Dynamic,
-    kMxfp6E2M3Static,
-    kMxfp6E3M2Dynamic,
-    kMxfp6E3M2Static,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_quark
 
 logger = init_logger(__name__)
-
-# FP8 activation keys OCP MX checkpoints pair with MXFP4/MXFP6 weights. The
-# emulation config (`mxfp4_w4a8_moe_quant_config`) quantizes activations per
-# tensor, so it only honours the per-tensor keys; token/block keys would be
-# silently relabelled.
-_FP8_ACTIVATION_KEYS = (
-    kFp8StaticTensorSym,
-    kFp8DynamicTensorSym,
-)
-
-# Activation keys the emulation can fake-quantize per weight key: the ones
-# `OCP_MX_Scheme` resolves to a scheme and `activation_quant_dtype` emits an
-# activation dtype for. Anything else has to come from a native kernel.
-# BF16 (`None`) is weight-only, and the emulated FP8 keys are fake-quantized with
-# dynamic scales whatever their own granularity.
-_EMULATED_ACTIVATIONS: dict[QuantKey, tuple[QuantKey | None, ...]] = {
-    kMxfp4Static: (
-        None,
-        kMxfp4Dynamic,
-        kMxfp6E3M2Dynamic,
-        kMxfp6E2M3Dynamic,
-        *_FP8_ACTIVATION_KEYS,
-    ),
-    kMxfp6E3M2Static: (None, kMxfp6E3M2Dynamic, *_FP8_ACTIVATION_KEYS),
-    kMxfp6E2M3Static: (None, kMxfp6E2M3Dynamic, *_FP8_ACTIVATION_KEYS),
-}
 
 
 def activation_quant_dtype(
@@ -185,8 +151,9 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         weight_key,
         activation_key,
     ) -> bool:
-        """Only the OCP MX schemes `activation_quant_dtype` can emulate."""
-        return activation_key in _EMULATED_ACTIVATIONS.get(weight_key, ())
+        # This class is used for emulation only - the oracle selects it
+        # directly rather than via quant scheme matching.
+        return True
 
     def _dequantize_weights(
         self,

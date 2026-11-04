@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe import (
     RoutedExperts,
     SharedExperts,
 )
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
 from vllm.model_executor.layers.quantization.online.requantization import (
@@ -28,6 +29,9 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     """
 
     uses_meta_device: bool = True
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
 
     def create_weights(
         self,

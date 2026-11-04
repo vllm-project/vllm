@@ -287,6 +287,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
             quantization.
 
         """
+        if spec is not None and spec.fields_set and "weight" not in spec.fields_set:
+            # Without a weight key, online quantization would silently no-op;
+            # an explicit `weight: null` leaves the layer unquantized.
+            raise ValueError(
+                f"{spec!r} does not set a weight quantization key, which online "
+                "quantization requires."
+            )
         if spec is None or spec.weight is None:
             return None
         # Load-time gfx942 requant, not online conversion. Mxfp4MoEMethod owns it.
@@ -361,36 +368,22 @@ class OnlineQuantizationConfig(QuantizationConfig):
         quant_method_cls = self._get_method_cls(quant_spec, table, layer_cls)
         if quant_method_cls is None:
             return None
-
         assert quant_spec is not None
-
-        if issubclass(layer_cls, RoutedExperts):
-            assert issubclass(quant_method_cls, OnlineMoEMethodBase)
-        else:
-            assert issubclass(layer_cls, LinearBase)
-            assert issubclass(quant_method_cls, OnlineLinearBase)
-
+        assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
         explicit = "activation" in quant_spec.fields_set
         quant_spec = QuantSpec(
             weight=quant_spec.weight,
             activation=quant_method_cls.resolve_activation_quant_key(
                 quant_spec.activation
                 if explicit
-                else quant_method_cls.default_activation_quant_key,
+                else getattr(quant_method_cls, "activation_quant_key", None),
                 explicit=explicit,
             ),
             # Carried so `get_quant_method` can wrap the method in
             # `InputHadamardLinearMethod`.
             hadamard_size=quant_spec.hadamard_size,
         )
-
-        return (
-            source,
-            quant_key_str,
-            target_pattern,
-            quant_spec,
-            quant_method_cls,
-        )
+        return source, quant_key_str, target_pattern, quant_spec, quant_method_cls
 
     def _resolve_targets_quant_method_metadata(
         self, prefix: str, layer_cls: type[torch.nn.Module]
@@ -461,11 +454,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 f"not define a QuantSpec for {layer_cls.__name__} layers "
                 f"(matched at {prefix})."
             )
-        if quant_spec.weight is None:
-            raise ValueError(
-                f"targets pattern {target_pattern} = {target} does not set a "
-                "weight quantization key, which online quantization requires."
-            )
         return (
             OnlineQuantizationSource.targets,
             quant_key_str,
@@ -480,32 +468,30 @@ class OnlineQuantizationConfig(QuantizationConfig):
         # `targets` takes precedence over `moe` and `linear` and is exclusive.
         resolved = self.resolve_quant_method_cls(type(layer), prefix)
         if resolved is not None:
-            (
-                source,
-                quant_key_str,
-                target_pattern,
-                quant_spec,
-                quant_method_cls,
-            ) = resolved
+            source, quant_key_str, target_pattern, quant_spec, quant_method_cls = (
+                resolved
+            )
             self.quantized_layers[prefix] = (
                 source.value,
                 quant_key_str,
                 target_pattern,
             )
+            assert issubclass(quant_method_cls, (OnlineMoEMethodBase, OnlineLinearBase))
+            kwargs = {}
+            if quant_method_cls.accepts_activation_override:
+                kwargs["activation_quant_key"] = quant_spec.activation
             if isinstance(layer, RoutedExperts):
                 assert issubclass(quant_method_cls, OnlineMoEMethodBase)
-                return quant_method_cls(
-                    moe=layer.moe_config,
-                    activation_quant_key=quant_spec.activation,
-                )
+                return quant_method_cls(moe=layer.moe_config, **kwargs)
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            quant_method = quant_method_cls(activation_quant_key=quant_spec.activation)
             if quant_spec.hadamard_size is not None:
                 return InputHadamardLinearMethod(
-                    quant_method, quant_spec.hadamard_size, rotate_weight=True
+                    quant_method_cls(**kwargs),
+                    quant_spec.hadamard_size,
+                    rotate_weight=True,
                 )
-            return quant_method
+            return quant_method_cls(**kwargs)
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()

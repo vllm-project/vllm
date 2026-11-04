@@ -326,20 +326,6 @@ def get_quant_config(
     # is not set yet.
     if quant_cls is OnlineQuantizationConfig and online_args is not None:
         assert isinstance(online_args, QuantizationConfigArgs)
-        # Activation-only overrides apply to pre-quantized checkpoints; without
-        # a weight key, standalone online quantization would silently no-op.
-        # An explicit `weight: null` is how a layer kind is left unquantized.
-        for kind in ("linear", "moe"):
-            spec = getattr(online_args, kind)
-            if (
-                spec is not None
-                and spec.weight is None
-                and (spec.activation is not None or spec.hadamard_size is not None)
-            ):
-                raise ValueError(
-                    f"quantization_config.{kind} = {spec!r} does not set a weight "
-                    "quantization key, which online quantization requires."
-                )
         return OnlineQuantizationConfig(args=online_args)
 
     model_name_or_path = (

@@ -116,9 +116,7 @@ def test_qwen38_tep8_selects_native_aiter(requested_backend, monkeypatch):
     config.moe_backend = requested_backend
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
-    monkeypatch.setattr(
-        mxfp4_oracle, "_user_moe_activation_override", lambda: (None, False)
-    )
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
     monkeypatch.setattr(
         mxfp4_oracle, "backend_to_kernel_cls", lambda backend: [SupportedExperts]
     )

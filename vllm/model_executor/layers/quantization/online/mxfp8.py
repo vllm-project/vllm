@@ -18,7 +18,6 @@ if TYPE_CHECKING:
         RoutedExperts,
     )
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
@@ -34,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 
 
@@ -44,7 +42,7 @@ class Mxfp8OnlineLinearMethod(OnlineLinearBase):
     FP8 with block-32 scales) during weight loading.
     """
 
-    default_activation_quant_key = kMxfp8Dynamic
+    activation_quant_key: QuantKey | None = None
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
@@ -123,15 +121,9 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
 
     fp8_backend: "Fp8MoeBackend"
     experts_cls: "type[mk.FusedMoEExperts] | None"
-    default_activation_quant_key = kMxfp8Dynamic
 
-    def __init__(
-        self,
-        *,
-        moe: FusedMoEConfig,
-        activation_quant_key: "QuantKey | None",
-    ):
-        super().__init__(moe=moe, activation_quant_key=activation_quant_key)
+    def __init__(self, *, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 

@@ -353,9 +353,7 @@ def test_online_mxfp4_moe_matches_quark(
             weight_quant_key=kMxfp4Static,
             activation_quant_key=kMxfp4Dynamic,
         )
-        online_method = Mxfp4OnlineMoEMethod(
-            moe=online_layer.moe_config, activation_quant_key=kMxfp4Dynamic
-        )
+        online_method = Mxfp4OnlineMoEMethod(moe=online_layer.moe_config)
 
         # `RoutedExperts.__init__` applies this round-up in production; these
         # layers are built without a quant config, so it is applied explicitly.
@@ -587,7 +585,7 @@ def test_online_mxfp4_dense_matches_quark(
         # Online path: feed the *same* raw bf16 source weight and let
         # `Mxfp4OnlineLinearMethod` quantize it during
         # `process_weights_after_loading`.
-        online_method = Mxfp4OnlineLinearMethod(activation_quant_key=kMxfp4Dynamic)
+        online_method = Mxfp4OnlineLinearMethod()
         online_method.create_weights(
             layer=online_layer,
             input_size_per_partition=input_size,

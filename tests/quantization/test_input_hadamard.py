@@ -191,7 +191,7 @@ def _online_mxfp4(
     weight: torch.Tensor, x: torch.Tensor, kernel_cls: type, hadamard_size: int | None
 ) -> torch.Tensor:
     output_size, input_size = weight.shape
-    inner = Mxfp4OnlineLinearMethod(activation_quant_key=kMxfp4Dynamic)
+    inner = Mxfp4OnlineLinearMethod()
     inner.kernel = kernel_cls(
         MxFp4LinearLayerConfig(activation_quant_key=kMxfp4Dynamic)
     )

@@ -7,7 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
@@ -480,12 +480,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
 
 
 def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
-    """Map backend to its activation key (FP8, MXFP8, MXFP4, or None for BF16).
-
-    EMULATION is not listed and therefore reads as `None`: its activation format
-    is chosen by the quant config, not fixed by the backend. Callers that weigh
-    it up against the BF16 backends must use `_emulation_supports_activation`.
-    """
+    """Map backend to its activation key (FP8, MXFP8, or None for BF16)."""
     if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         return kFp8Dynamic128Sym
     if backend == Mxfp4MoeBackend.B12X_MXFP4_MXFP8:
@@ -506,12 +501,24 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     return None  # BF16 activation
 
 
-def _user_moe_activation_override() -> tuple[QuantKey | None, bool]:
-    """Return the configured MXFP4 MoE activation key and whether it was set."""
+def _user_moe_activation_override() -> QuantKey | None:
+    """User's MoE activation override from quantization_config, or None."""
     args = get_current_vllm_config().model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None, False
-    return args.moe.activation, "activation" in args.moe.fields_set
+        return None
+    return args.moe.activation
+
+
+def _user_moe_activation_override_is_set() -> bool:
+    """Whether the user set the MoE activation, explicit `null` included."""
+    config = get_current_vllm_config_or_none()
+    model_config = config.model_config if config else None
+    args = model_config.quantization_config if model_config else None
+    return (
+        isinstance(args, QuantizationConfigArgs)
+        and args.moe is not None
+        and "activation" in args.moe.fields_set
+    )
 
 
 def _resolve_activation_key(
@@ -519,8 +526,8 @@ def _resolve_activation_key(
 ) -> QuantKey | None:
     """Combine the model-supplied activation key with the user override.
     Raises on conflict (both set and disagreeing)."""
-    user_override, has_user_override = _user_moe_activation_override()
-    if not has_user_override:
+    user_override = _user_moe_activation_override()
+    if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
     if model_activation_key is None or model_activation_key == user_override:
         return user_override
@@ -540,7 +547,7 @@ def _humming_input_schema(model_activation_key: QuantKey | None):
         return None
     if (
         activation_key == kMxfp8Dynamic
-        and not _user_moe_activation_override()[1]
+        and _user_moe_activation_override() is None
         and current_platform.is_device_capability_family(90)
     ):
         # Humming's SM90 W4A8 kernels are tuned for block FP8 activations, so
@@ -565,11 +572,9 @@ def _warn_on_bf16_fallback(
     backend: Mxfp4MoeBackend, requested_activation_key: QuantKey | None
 ) -> None:
     # Humming quantizes activations itself to the user's override.
-    user_override, has_user_override = _user_moe_activation_override()
     applies_request = backend == Mxfp4MoeBackend.EMULATION or (
         backend == Mxfp4MoeBackend.HUMMING
-        and has_user_override
-        and requested_activation_key == user_override
+        and requested_activation_key == _user_moe_activation_override()
     )
     if (
         requested_activation_key is not None
@@ -635,44 +640,24 @@ def _return_or_raise(
     raise ValueError(_make_log_unsupported(backend, reason))
 
 
-def _emulation_supports_activation(activation_key: QuantKey | None) -> bool:
-    """Whether the OCP MX emulation can compute `activation_key`."""
-    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
-        OCP_MXQuantizationEmulationTritonExperts,
-    )
-
-    return OCP_MXQuantizationEmulationTritonExperts._supports_quant_scheme(
-        kMxfp4Static, activation_key
-    )
-
-
 def _filter_by_activation(
     backends: list[Mxfp4MoeBackend],
     requested_activation_key: QuantKey | None,
 ) -> list[Mxfp4MoeBackend]:
-    """Pick variants matching ``requested_activation_key``, followed by EMULATION
-    when it can compute that key, followed by BF16 variants as a higher-precision
-    fallback; without a request, prefer BF16 if the list has any, else keep the
-    list as-is so explicit non-BF16 picks (e.g. the ``_afp8`` aliases) still
-    land."""
-    # EMULATION has no fixed activation format: keep it out of the BF16 bucket and
-    # only offer it, where the platform lists it, for formats it can compute.
-    emulation_listed = Mxfp4MoeBackend.EMULATION in backends
-    backends = [b for b in backends if b != Mxfp4MoeBackend.EMULATION]
-    emulation = (
-        [Mxfp4MoeBackend.EMULATION]
-        if emulation_listed and _emulation_supports_activation(requested_activation_key)
-        else []
-    )
+    """Pick variants matching ``requested_activation_key``, followed by BF16
+    variants as a higher-precision fallback; without one, prefer BF16 if the
+    list has any, else keep the list as-is so explicit non-BF16 picks (e.g.
+    the ``_afp8`` aliases) still land."""
     bf16 = [b for b in backends if _backend_activation_key(b) is None]
     if requested_activation_key is not None:
         matching = [
             b
             for b in backends
             if _backend_activation_key(b) == requested_activation_key
+            or b == Mxfp4MoeBackend.EMULATION
         ]
-        return matching + emulation + [b for b in bf16 if b not in matching]
-    return bf16 + emulation if bf16 or emulation else backends
+        return matching + [b for b in bf16 if b not in matching]
+    return bf16 if bf16 else backends
 
 
 def _get_requested_backends(
@@ -732,8 +717,6 @@ def select_mxfp4_moe_backend(
             )
         last_error: Exception | None = None
         for requested_backend in requested_backends:
-            # EMULATION takes the requested key: what it computes depends on the
-            # quant config the caller builds, so it validates against the request.
             act_key = (
                 requested_activation_key
                 if requested_backend == Mxfp4MoeBackend.EMULATION

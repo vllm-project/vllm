@@ -66,8 +66,6 @@ class _LMHeadNvfp4Method(OnlineLinearBase):
     """Weight-only NVFP4 lm_head copy on the platform's W4A16 kernel;
     activations stay in the model dtype."""
 
-    default_activation_quant_key = None
-
     def process_weights_after_loading(self, layer: Module) -> None:
         packed, scales, global_scale = _quantize_nvfp4(layer.weight)
         replace_parameter(layer, "weight", packed)
@@ -104,7 +102,6 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
     with set_default_torch_dtype(dtype):
-        method_cls = _LM_HEAD_METHODS[quantization]
         head = ParallelLMHead(
             lm_head.num_embeddings,
             lm_head.embedding_dim,
@@ -113,7 +110,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=method_cls(method_cls.default_activation_quant_key),
+            quant_method=_LM_HEAD_METHODS[quantization](),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)

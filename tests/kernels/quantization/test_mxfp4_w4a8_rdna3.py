@@ -193,7 +193,7 @@ def test_linear_kernel_dispatch(M):
 def test_init_selects_w4a8_only_for_int8_activations(monkeypatch):
     pytest.importorskip("quark")
     monkeypatch.setattr(
-        linear_kernels, "_user_linear_activation_override", lambda: (None, False)
+        linear_kernels, "_user_linear_activation_override", lambda: None
     )
     kernel = init_mxfp4_linear_kernel(activation_quant_key=kInt8Dynamic32Sym)
     assert isinstance(kernel, Rdna3W4A8MxFp4LinearKernel)
@@ -209,30 +209,34 @@ def test_init_selects_w4a8_from_user_override(monkeypatch):
     checkpoint selects the W4A8 kernel."""
     pytest.importorskip("quark")
     monkeypatch.setattr(
-        linear_kernels,
-        "_user_linear_activation_override",
-        lambda: (kInt8Dynamic32Sym, True),
+        linear_kernels, "_user_linear_activation_override", lambda: kInt8Dynamic32Sym
     )
     kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
     assert isinstance(kernel, Rdna3W4A8MxFp4LinearKernel)
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize(
-    ("override", "explicit"),
-    [(None, False), (kMxfp4Dynamic, True), (kInt8Dynamic32Sym, True), (None, True)],
-)
+@pytest.mark.parametrize("override", [None, kMxfp4Dynamic, kInt8Dynamic32Sym])
 @pytest.mark.parametrize("checkpoint", [None, kMxfp4Dynamic])
-def test_resolve_linear_activation_key(override, explicit, checkpoint, monkeypatch):
+def test_resolve_linear_activation_key(override, checkpoint, monkeypatch):
     monkeypatch.setattr(
-        linear_kernels,
-        "_user_linear_activation_override",
-        lambda: (override, explicit),
+        linear_kernels, "_user_linear_activation_override", lambda: override
     )
     resolved = linear_kernels._resolve_linear_activation_key(checkpoint)
-    # An unset override keeps the checkpoint's key; an explicit one (including
-    # `null`, i.e. weight-only) wins.
-    assert resolved == (override if explicit else checkpoint)
+    assert resolved == (override if override is not None else checkpoint)
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("checkpoint", [None, kMxfp4Dynamic])
+def test_resolve_linear_activation_key_explicit_null(checkpoint, monkeypatch):
+    """An explicit `activation: null` runs the layer weight-only."""
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override_is_set", lambda: True
+    )
+    monkeypatch.setattr(
+        linear_kernels, "_user_linear_activation_override", lambda: None
+    )
+    assert linear_kernels._resolve_linear_activation_key(checkpoint) is None
 
 
 @pytest.mark.cpu_test

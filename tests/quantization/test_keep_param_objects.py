@@ -32,9 +32,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     _LOCALIZED_SHARD_PARAMS,
     _shard_nvfp4_moe_weights_per_die,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kMxfp4Dynamic,
-)
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
@@ -99,7 +96,7 @@ def _online_linear():
     layer.input_size = layer.input_size_per_partition = SIZE
     layer.output_size = layer.output_size_per_partition = SIZE
     layer.params_dtype = torch.bfloat16
-    method = Mxfp4OnlineLinearMethod(activation_quant_key=kMxfp4Dynamic)
+    method = Mxfp4OnlineLinearMethod()
     method.create_weights(
         layer,
         input_size_per_partition=SIZE,
@@ -128,9 +125,7 @@ def _moe(quant_config: QuantizationConfig | None, **kwargs):
 
 def _online_moe():
     layer, _ = _moe(None)
-    method = Mxfp4OnlineMoEMethod(
-        moe=layer.moe_config, activation_quant_key=kMxfp4Dynamic
-    )
+    method = Mxfp4OnlineMoEMethod(moe=layer.moe_config)
     method.create_weights(
         layer=layer,
         num_experts=8,

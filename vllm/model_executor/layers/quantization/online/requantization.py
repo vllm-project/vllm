@@ -35,7 +35,6 @@ def is_requantization_source() -> bool:
 class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
 
-    default_activation_quant_key: QuantKey | None
     # Only the MXFP4 online methods honor an activation override for now.
     accepts_activation_override: bool = False
 
@@ -51,26 +50,17 @@ class OnlineRequantizationMixin:
                 f"activation override is not supported for online {cls.__name__}"
             )
         if activation_quant_key is not None and activation_quant_key.scale.static:
-            # Online quantization quantizes activations at runtime, so the
-            # calibrated scales a static activation key describes do not exist.
+            # Online quantization has no calibrated static activation scales.
             raise NotImplementedError(
                 f"online {cls.__name__} cannot honour "
-                f"activation={activation_quant_key}: online quantization cannot "
-                "provide calibrated static activation scales. Use a dynamic "
-                "activation key, or 'activation: null'."
+                f"activation={activation_quant_key}: static activation scales are "
+                "not supported. Use a dynamic activation key, or 'activation: null'."
             )
 
         return activation_quant_key
 
-    def __init__(self, *args, activation_quant_key: QuantKey | None, **kwargs) -> None:
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # A direct caller may only pass a key this class resolves for itself.
-        default_key = self.resolve_activation_quant_key(
-            self.default_activation_quant_key, explicit=False
-        )
-        self.activation_quant_key = self.resolve_activation_quant_key(
-            activation_quant_key, explicit=activation_quant_key != default_key
-        )
         self.requantization_source: QuantizeMethodBase | None = None
         self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
 
