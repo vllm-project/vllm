@@ -115,6 +115,7 @@ def fused_moe_kernel_gptq_awq(
     use_int8_w8a16: tl.constexpr,
     # int4_w4a16 only.
     USE_TD: tl.constexpr = False,
+    use_shuffle_w4a16: tl.constexpr = False,
 ):
     """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
@@ -135,6 +136,9 @@ def fused_moe_kernel_gptq_awq(
     - expert_ids: A tensor containing the indices of the expert for each
         block. It determines which expert matrix from B should be used for
         each block in A.
+    - use_shuffle_w4a16: Changes how B is packed: int32 (E, N, K // 8) in
+        ExLlama shuffle order instead of uint8 (E, N, K // 2). has_zp must
+        be false.
     This kernel performs the multiplication of a token by its corresponding
     expert matrix as determined by `expert_ids`. The sorting of
     `sorted_token_ids` by expert index and padding ensures divisibility by
@@ -190,7 +194,31 @@ def fused_moe_kernel_gptq_awq(
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    if USE_TD:
+    tl.static_assert(not (USE_TD and use_shuffle_w4a16))
+    if use_shuffle_w4a16:
+        a_ptrs = a_ptr + (
+            offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        )
+        # Shuffle-packed INT4: B is [E, N, K//8] int32
+        # Load as [BLOCK_N, BLOCK_K//8], unpack to [BLOCK_N, BLOCK_K],
+        # transpose to [BLOCK_K, BLOCK_N].
+        offs_k8 = tl.arange(0, BLOCK_SIZE_K // 8)
+        b_packed_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + offs_bn[:, None] * stride_bn
+            + offs_k8[None, :] * stride_bk
+        )
+        # ExLlama unshuffle shifts: shift[j] = (j//2)*4 + (j%2)*16
+        _exl_shifts_row = (tl.arange(0, 8) // 2) * 4 + (tl.arange(0, 8) % 2) * 16
+        _exl_shifts_1d = tl.reshape(
+            tl.broadcast_to(_exl_shifts_row[None, :], (BLOCK_SIZE_K // 8, 8)),
+            (BLOCK_SIZE_K,),
+        )
+        exl_shifts = tl.broadcast_to(
+            _exl_shifts_1d[None, :], (BLOCK_SIZE_N, BLOCK_SIZE_K)
+        )
+    elif USE_TD:
         m_td = num_valid_tokens // top_k
         a_desc = tl.make_tensor_descriptor(
             base=a_ptr,
@@ -229,11 +257,11 @@ def fused_moe_kernel_gptq_awq(
                 + offs_bn[None, :] * stride_bn
             )
 
-    if not has_zp and use_int4_w4a16:
+    if use_shuffle_w4a16 or not has_zp and use_int4_w4a16:
         b_zp_num = 8
     if not has_zp and use_int8_w8a16:
         b_zp_num = 128
-    elif has_zp and use_int4_w4a16:
+    elif has_zp and use_int4_w4a16 and not use_shuffle_w4a16:
         b_zp_shifter = (offs_bn[None, :] % 2) * 4
 
     # -----------------------------------------------------------
@@ -253,65 +281,91 @@ def fused_moe_kernel_gptq_awq(
             k_mask = None
             k_other = None
 
-        if USE_TD:
-            a = a_desc.gather(gather_idx, k * BLOCK_SIZE_K)
-            # Interleave along the K // 2 axis before transposing.
-            b_packed = b_desc.load([pid_n * BLOCK_SIZE_N, (k * BLOCK_SIZE_K) // 2])
-            b_lo = b_packed & 0xF  # even k
-            b_hi = (b_packed >> 4) & 0xF  # odd k
-            b = tl.interleave(b_lo, b_hi).T
-        else:
+        if use_shuffle_w4a16:
             a = tl.load(
                 a_ptrs,
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(b_ptrs)
-            if use_int4_w4a16:
-                b = (b >> b_shifter) & 0xF
+            b_packed = tl.load(b_packed_ptrs)
+            b_exp = tl.interleave(b_packed, b_packed)
+            b_exp = tl.interleave(b_exp, b_exp)
+            b_exp = tl.interleave(b_exp, b_exp)
+            b_nk = (b_exp >> exl_shifts) & 0xF  # [BLOCK_N, BLOCK_K]
+            b = tl.trans(b_nk)  # [BLOCK_K, BLOCK_N]
 
-        b_scale_ptrs = (
-            b_scale_ptr
-            + off_experts * stride_bse
-            + offs_bn[None, :] * stride_bsn
-            + ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bsk
-        )
-        b_scale = tl.load(b_scale_ptrs, mask=k_mask, other=k_other)
-        b_scale = b_scale.to(tl.float32)
-
-        if has_zp and use_int4_w4a16:
-            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
-            b_zp_ptrs = (
-                b_zp_ptr
-                + off_experts * stride_bze
-                + (offs_bn[None, :] // 2) * stride_bzn
-                + offs_k_true * stride_bzk
+            # Scales: [E, N, K//G] — load per-group scale for this K tile
+            g_idx = (k * BLOCK_SIZE_K) // group_size
+            b_scale_ptrs = (
+                b_scale_ptr
+                + off_experts * stride_bse
+                + offs_bn * stride_bsn
+                + g_idx * stride_bsk
             )
-            b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = (b_zp >> b_zp_shifter) & 0xF
-            b_zp = b_zp.to(tl.float32)
-        elif has_zp and use_int8_w8a16:
-            offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
-            b_zp_ptrs = (
-                b_zp_ptr
-                + off_experts * stride_bze
-                + offs_bn[None, :] * stride_bzn
-                + offs_k_true * stride_bzk
-            )
-            b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
-            b_zp = b_zp.to(tl.float32)
-
-        # We accumulate along the K dimension.
-        if has_zp:
-            b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+            b_scale = tl.load(b_scale_ptrs).to(tl.float32)
+            b = ((b.to(tl.float32) - b_zp_num) * b_scale[None, :]).to(compute_type)
         else:
-            b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
+            if USE_TD:
+                a = a_desc.gather(gather_idx, k * BLOCK_SIZE_K)
+                # Interleave along the K // 2 axis before transposing.
+                b_packed = b_desc.load([pid_n * BLOCK_SIZE_N, (k * BLOCK_SIZE_K) // 2])
+                b_lo = b_packed & 0xF  # even k
+                b_hi = (b_packed >> 4) & 0xF  # odd k
+                b = tl.interleave(b_lo, b_hi).T
+            else:
+                a = tl.load(
+                    a_ptrs,
+                    mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                    other=0.0,
+                )
+                b = tl.load(b_ptrs)
+                if use_int4_w4a16:
+                    b = (b >> b_shifter) & 0xF
+
+            b_scale_ptrs = (
+                b_scale_ptr
+                + off_experts * stride_bse
+                + offs_bn[None, :] * stride_bsn
+                + ((offs_k[:, None] + BLOCK_SIZE_K * k) // group_size) * stride_bsk
+            )
+            b_scale = tl.load(b_scale_ptrs, mask=k_mask, other=k_other)
+            b_scale = b_scale.to(tl.float32)
+
+            if has_zp and use_int4_w4a16:
+                offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
+                b_zp_ptrs = (
+                    b_zp_ptr
+                    + off_experts * stride_bze
+                    + (offs_bn[None, :] // 2) * stride_bzn
+                    + offs_k_true * stride_bzk
+                )
+                b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
+                b_zp = (b_zp >> b_zp_shifter) & 0xF
+                b_zp = b_zp.to(tl.float32)
+            elif has_zp and use_int8_w8a16:
+                offs_k_true = (offs_k[:, None] + BLOCK_SIZE_K * k) // group_size
+                b_zp_ptrs = (
+                    b_zp_ptr
+                    + off_experts * stride_bze
+                    + offs_bn[None, :] * stride_bzn
+                    + offs_k_true * stride_bzk
+                )
+                b_zp = tl.load(b_zp_ptrs, mask=k_mask, other=k_other)
+                b_zp = b_zp.to(tl.float32)
+
+            # We accumulate along the K dimension.
+            if has_zp:
+                b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+            else:
+                b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
         accumulator = tl.dot(a, b, acc=accumulator)
 
         if not USE_TD:
             # Advance the ptrs to the next K block.
             a_ptrs += BLOCK_SIZE_K * stride_ak
-            if use_int4_w4a16:
+            if use_shuffle_w4a16:
+                b_packed_ptrs += (BLOCK_SIZE_K // 8) * stride_bk
+            elif use_int4_w4a16:
                 b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
             else:
                 b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -870,6 +924,95 @@ def invoke_fused_moe_wna16_triton_kernel(
         use_int4_w4a16=use_int4_w4a16,
         use_int8_w8a16=use_int8_w8a16,
         USE_TD=use_td,
+        **config,
+    )
+
+
+def invoke_fused_moe_kernel_hybrid_triton(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    B_scale: torch.Tensor,
+    topk_weights: torch.Tensor | None,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    mul_routed_weight: bool,
+    top_k: int,
+    config: dict[str, Any],
+    compute_type: tl.dtype,
+    group_size: int,
+):
+    """Invoke fused MoE kernel for shuffle-packed INT4 weights [E, N, K//8].
+
+    Uses fused_moe_kernel_gptq_awq with use_shuffle_w4a16=True to read
+    ExLlama-shuffle packed INT4 weights.  Symmetric quantization only
+    (zero-point bias = 8).
+
+    B: [E, N, K//8] int32 — shuffle-packed weights (row stride may be padded)
+    B_scale: [E, N, K//G] fp16/bf16 — per-group scales
+    """
+    assert B.dtype == torch.int32
+    assert B_scale is not None and B_scale.ndim == 3
+
+    M = A.size(0)
+    K = A.size(1)
+    N = B.size(1)
+    num_tokens = M * top_k
+
+    EM = sorted_token_ids.size(0)
+    if config["BLOCK_SIZE_M"] > M:
+        EM = min(EM, M * top_k * config["BLOCK_SIZE_M"])
+    grid = lambda META: (
+        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+    )
+
+    config = config.copy()
+    config["SPLIT_K"] = 1
+    BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
+    # BLOCK_K must not exceed group_size (one scale per K-tile)
+    BLOCK_SIZE_K = min(BLOCK_SIZE_K, group_size)
+    assert BLOCK_SIZE_K % 8 == 0, (
+        f"group_size {group_size} must be a multiple of 8 for shuffle kernel"
+    )
+
+    fused_moe_kernel_gptq_awq[grid](
+        A,
+        B,
+        C,
+        B_scale,
+        None,  # b_zp_ptr — symmetric only
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        N,
+        K,
+        EM,
+        num_tokens,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),  # stride_be (expert stride in int32 elements)
+        B.stride(2),  # stride_bk (K//8 stride, contiguous = 1)
+        B.stride(1),  # stride_bn (N stride)
+        C.stride(0),  # stride_cm (row/slot stride)
+        C.stride(1),  # stride_cn (column stride)
+        B_scale.stride(0),  # stride_bse
+        B_scale.stride(2),  # stride_bsk
+        B_scale.stride(1),  # stride_bsn
+        0,  # stride_bze (no zero-points)
+        0,  # stride_bzk
+        0,  # stride_bzn
+        block_k_diviable=K % BLOCK_SIZE_K == 0,
+        group_size=group_size,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        top_k=top_k,
+        compute_type=compute_type,
+        has_zp=False,
+        use_int4_w4a16=True,
+        use_int8_w8a16=False,
+        use_shuffle_w4a16=True,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
         **config,
     )
 
