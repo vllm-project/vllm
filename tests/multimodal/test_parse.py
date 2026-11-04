@@ -54,6 +54,17 @@ def test_audio_metadata_checks_supplied_embedding_lengths():
         parser.parse_mm_data({"audio": data})
 
 
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_parse_audio_tensor_detaches_before_numpy(requires_grad):
+    """Audio tensors are accepted even when they require gradients."""
+    parser = MultiModalDataParser()
+    audio = torch.tensor([0.1, 0.2], requires_grad=requires_grad)
+
+    items = parser.parse_mm_data({"audio": audio})["audio"]
+
+    np.testing.assert_array_equal(items.get(0), audio.detach().numpy())
+
+
 @pytest.mark.parametrize(
     "image",
     [
