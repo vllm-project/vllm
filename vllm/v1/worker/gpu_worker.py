@@ -110,12 +110,10 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.extensible_kv_cache import (
-    ExactMemoryBaseline,
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
-    read_exact_memory_baseline,
     registers_kv_cache_memory,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
@@ -250,7 +248,6 @@ class Worker(WorkerBase):
 
         self.elastic_ep_executor = ElasticEPScalingExecutor(self)
         self.worker_sentinel: WorkerSentinel | None = None
-        self.exact_memory_baseline: ExactMemoryBaseline | None = None
         if self.parallel_config.enable_fault_tolerance:
             self.worker_sentinel = WorkerSentinel(worker=self)
         # Buffers saved before sleep
@@ -595,8 +592,7 @@ class Worker(WorkerBase):
             # take current memory snapshot after external weights are ready
             self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
             if self.cache_config.enable_extensible_kv_cache:
-                # Free memory at its final sizing is corrected from this.
-                self.exact_memory_baseline = read_exact_memory_baseline(self.device)
+                current_platform.record_memory_baseline(self.device)
             self.requested_memory = request_memory(
                 init_snapshot, self.cache_config, self.external_weight_memory
             )
@@ -999,7 +995,6 @@ class Worker(WorkerBase):
                 # peak free for the steps it runs.
                 kv_cache = self._v2_model_runner().extensible_kv_cache
                 assert kv_cache is not None
-                kv_cache.memory_baseline = self.exact_memory_baseline
                 kv_cache.reserved_headroom_bytes = getattr(
                     self, "peak_activation_memory", 0
                 )

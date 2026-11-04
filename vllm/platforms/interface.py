@@ -1209,11 +1209,26 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def get_device_memory_used(cls, device_id: int = 0) -> int | None:
-        """Exact bytes in use on the whole visible device ``device_id``, by all
-        processes, or ``None`` when the platform does not count them.
+    def record_memory_baseline(cls, device: torch.device) -> None:
+        """Record the device memory state `corrected_free_memory` measures
+        from."""
+
+    @classmethod
+    def corrected_free_memory(
+        cls, device: torch.device, untracked_bytes: int
+    ) -> tuple[int, int]:
+        """Free device memory, and the part of it that `device_memory_info`
+        leaves out since `record_memory_baseline`, already included.
+
+        Args:
+            device: The device to read.
+            untracked_bytes: Device memory this process allocated outside
+                torch's caching allocator since the baseline.
+
         """
-        return None
+        from vllm.utils.mem_utils import device_memory_info
+
+        return device_memory_info(device)[0], 0
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

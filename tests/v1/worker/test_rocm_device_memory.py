@@ -1,40 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The exact device memory count and the free memory correction on a real
-ROCm GPU. The sysfs lookup is tested in tests/utils_/test_rocm_vram_lookup.py."""
+ROCm GPU. The sysfs lookup and the correction's arithmetic are tested without
+a GPU in tests/utils_/test_rocm_vram_lookup.py."""
 
 import ctypes
 import subprocess
 import sys
 import time
-from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.worker import extensible_kv_cache
 
 if not current_platform.is_rocm():
     # vllm.platforms.rocm queries the GPU at import time.
     pytest.skip("requires ROCm", allow_module_level=True)
 
-from vllm.platforms import rocm  # noqa: E402
+from vllm.platforms import rocm_device_memory  # noqa: E402
+from vllm.utils.extensible_tensor import ExtensibleTensor  # noqa: E402
 
 MB = 1 << 20
 DEVICE = torch.device("cuda:0")
 
 
 def _used() -> int:
-    used = rocm.RocmPlatform.get_device_memory_used(0)
-    assert used is not None
-    return used
+    path = rocm_device_memory._vram_used_file(0)
+    assert path is not None
+    with open(path) as f:
+        return int(f.read())
 
 
 @pytest.fixture
 def exact_count():
     torch.zeros(1, device=DEVICE)
-    if rocm.RocmPlatform.get_device_memory_used(0) is None:
+    if rocm_device_memory._vram_used_file(0) is None:
         pytest.skip("no exact VRAM count for this GPU")
     # Wait until earlier frees are erased and the count holds.
     torch.accelerator.empty_cache()
@@ -46,29 +47,6 @@ def exact_count():
         time.sleep(0.005)
         if (used := _used()) != last:
             held_since, last = time.monotonic(), used
-
-
-def test_failed_lookups_are_cached(monkeypatch):
-    """A GPU without the count (partitioned, APU) is looked up once."""
-    monkeypatch.setattr(rocm.RocmPlatform, "_vram_used_files", {})
-    lookups: list[int] = []
-
-    def find(*args):
-        lookups.append(1)
-        return None, "test"
-
-    monkeypatch.setattr(rocm, "find_vram_used_file", find)
-    monkeypatch.setattr(
-        rocm.torch.cuda,
-        "get_device_properties",
-        lambda device_id: SimpleNamespace(
-            is_integrated=0, uuid="", pci_domain_id=0, pci_bus_id=0, pci_device_id=0
-        ),
-    )
-    monkeypatch.setattr(rocm.torch.cuda, "mem_get_info", lambda device_id: (0, 0))
-    assert rocm.RocmPlatform.get_device_memory_used(0) is None
-    assert rocm.RocmPlatform.get_device_memory_used(0) is None
-    assert lookups == [1]
 
 
 def test_exact_count_grows_with_an_allocation(exact_count):
@@ -113,25 +91,12 @@ def code_objects():
         hip.hipModuleUnload(module)
 
 
-def _correction(baseline) -> tuple[int, int]:
-    """Free memory as reported, and the correction the final sizing adds."""
-    torch.accelerator.synchronize()
-    free, total = torch.accelerator.get_memory_info(DEVICE)
-    kv_cache = SimpleNamespace(memory_baseline=baseline, physical_bytes=0)
-    return free, extensible_kv_cache._free_memory_correction(
-        kv_cache,  # type: ignore[arg-type]
-        DEVICE,
-        free,
-        total,
-    )
-
-
 def test_code_objects_are_added_back(exact_count, code_objects):
     """200 code objects of a few KB, each counted as at least 2 MB, are added
     back; another process taking 1 GB meanwhile is not."""
-    baseline = extensible_kv_cache.read_exact_memory_baseline(DEVICE)
+    rocm_device_memory.record_memory_baseline(DEVICE)
     code_objects(200)
-    free_alone, added_alone = _correction(baseline)
+    free_alone, added_alone = rocm_device_memory.corrected_free_memory(DEVICE, 0)
     assert added_alone > 200 * MB
 
     child = subprocess.Popen(
@@ -151,24 +116,32 @@ def test_code_objects_are_added_back(exact_count, code_objects):
     try:
         assert child.stdout is not None
         assert child.stdout.readline().strip() == "ready"
-        free_shared, added_shared = _correction(baseline)
+        free_shared, added_shared = rocm_device_memory.corrected_free_memory(DEVICE, 0)
     finally:
         assert child.stdin is not None
         child.stdin.close()
         child.wait(timeout=60)
     assert free_alone - free_shared >= 1 << 30
-    assert abs(added_shared - added_alone) < 32 * MB
+    # The child's own rounding (its runtime's code objects) is added back too,
+    # but not its 1 GB.
+    assert -32 * MB < added_shared - added_alone < 256 * MB
+
+
+def _corrected_target(code_objects) -> int:
+    """Corrected free memory after loading code objects, less 256 MB."""
+    rocm_device_memory.record_memory_baseline(DEVICE)
+    code_objects(200)
+    free, added = rocm_device_memory.corrected_free_memory(DEVICE, 0)
+    assert added > 200 * MB
+    return free - 256 * MB
 
 
 @pytest.mark.optional
 def test_corrected_free_memory_can_be_allocated(exact_count, code_objects):
-    """All but 256 MB of the corrected free memory can be allocated after
-    loading code objects. Fills nearly the whole GPU: runs with --optional."""
-    baseline = extensible_kv_cache.read_exact_memory_baseline(DEVICE)
-    code_objects(200)
-    free, added = _correction(baseline)
-    assert added > 200 * MB
-    target = free + added - 256 * MB
+    """All but 256 MB of the corrected free memory can be allocated through
+    torch in 64 MB and 2 MB blocks. Fills nearly the whole GPU: runs with
+    --optional."""
+    target = _corrected_target(code_objects)
     chunks, allocated = [], 0
     try:
         for step in (64 * MB, 2 * MB):
@@ -180,3 +153,19 @@ def test_corrected_free_memory_can_be_allocated(exact_count, code_objects):
         del chunks
         torch.accelerator.empty_cache()
     assert allocated > target - 2 * MB
+
+
+@pytest.mark.optional
+def test_corrected_free_memory_fits_one_allocation(exact_count, code_objects):
+    """All but 256 MB of the corrected free memory can be committed as one
+    driver allocation, as a defragmented extensible KV cache segment is.
+    Fills nearly the whole GPU: runs with --optional."""
+    target = _corrected_target(code_objects) // (2 * MB) * (2 * MB)
+    tensor = ExtensibleTensor(target, device=DEVICE)
+    try:
+        tensor.resize_per_segment_(target)
+        assert tensor.num_physical_chunks == 1
+        tensor.full_view()[-1:].zero_()
+        torch.accelerator.synchronize()
+    finally:
+        tensor.free()

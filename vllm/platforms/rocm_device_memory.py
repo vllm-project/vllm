@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Where amdgpu reports the exact VRAM used on a GPU.
+"""Free device memory corrected by amdgpu's exact VRAM count.
 
-hipMemGetInfo counts each allocation as at least 2 MB unless the GPU's
-memory is kept in system memory (kernel apu_prefer_gtt). amdgpu's sysfs
-mem_info_vram_used counts exact sizes for the whole device, plus page tables,
-queue save areas, reserved ranges and graphics buffers. Plain file parsing,
-so it is importable and testable without a GPU.
+hipMemGetInfo counts each allocation as at least 2 MB on purpose (amdgpu
+commit 1ac354beecfd), unless the GPU's memory is kept in system memory
+(kernel apu_prefer_gtt), while the driver checks allocations at their exact
+sizes. Small kernel code objects loaded during warmup thus hide free memory.
+amdgpu's sysfs mem_info_vram_used counts exact sizes for the whole device,
+plus page tables, queue save areas, reserved ranges and graphics buffers.
 """
 
 import os
+import time
+from dataclasses import dataclass
+
+import torch
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 KFD_TOPOLOGY_NODES = "/sys/class/kfd/kfd/topology/nodes"
 DRM_SYSFS = "/sys/class/drm"
@@ -87,3 +96,146 @@ def find_vram_used_file(
             f"VRAM total {vram_total} bytes does not match HIP's {total_memory}"
         )
     return os.path.join(device_dir, "mem_info_vram_used"), ""
+
+
+@dataclass(frozen=True)
+class DeviceMemoryReading:
+    """The exact VRAM count read together with free memory as HIP reports it,
+    and this process's torch reservation."""
+
+    used: int
+    free: int
+    total: int
+    torch_reserved: int
+
+    @property
+    def gap(self) -> int:
+        """Exact used bytes less the used bytes free memory implies."""
+        return self.used - (self.total - self.free)
+
+
+def free_memory_correction(
+    baseline: DeviceMemoryReading,
+    current: DeviceMemoryReading,
+    untracked_bytes: int,
+) -> int:
+    """Free memory that current.free leaves out by the exact count, since
+    baseline: the drop in free memory less the growth of the exact count.
+    Other processes' allocations change both alike.
+
+    Never negative, and never more than the total less the exact count. That
+    still includes KFD's page-table reserve ((system RAM + VRAM) / 16384) and
+    RAS pages, which the exact count leaves out: about 80 MB on an R9700. The
+    3 GiB ROCm floor in KV_CACHE_MARGIN_FLOOR_BYTES covers them.
+    """
+    # The exact count must have grown by at least what this process
+    # allocated; if not, memory left VRAM or was freed meanwhile and the
+    # difference cannot be trusted.
+    own_growth = current.torch_reserved - baseline.torch_reserved + untracked_bytes
+    if current.used - baseline.used < own_growth:
+        logger.info(
+            "Free memory not corrected: device memory in use grew less than "
+            "this process allocated."
+        )
+        return 0
+    return max(min(baseline.gap - current.gap, -current.gap), 0)
+
+
+# A reading is settled once its gap has not fallen for this long. Freed memory
+# stays in the exact count until the driver has erased it (about 10 ms per GB
+# on an R9700) while free memory shows it free at once, which raises the gap.
+SETTLE_SECONDS = 0.2
+MAX_SAMPLING_SECONDS = 2.0
+SAMPLE_INTERVAL_SECONDS = 0.002
+
+# mem_info_vram_used per device index, or None where there is none.
+_vram_used_files: dict[int, str | None] = {}
+# Per device index; a later engine in the process replaces it.
+_baselines: dict[int, DeviceMemoryReading] = {}
+
+
+def _device_index(device: torch.device) -> int:
+    return torch.cuda.current_device() if device.index is None else device.index
+
+
+def _vram_used_file(index: int) -> str | None:
+    """Only unpartitioned discrete GPUs whose VRAM total matches HIP's."""
+    if index not in _vram_used_files:
+        props = torch.cuda.get_device_properties(index)
+        if props.is_integrated:
+            path, reason = None, "integrated GPU"
+        else:
+            path, reason = find_vram_used_file(
+                str(props.uuid),
+                (props.pci_domain_id, props.pci_bus_id, props.pci_device_id),
+                torch.cuda.mem_get_info(index)[1],
+            )
+        if path is None:
+            logger.debug(
+                "Using free device memory as HIP reports it, which counts each "
+                "allocation as at least 2 MB: %s.",
+                reason,
+            )
+        _vram_used_files[index] = path
+    return _vram_used_files[index]
+
+
+def _read(index: int, path: str) -> DeviceMemoryReading | None:
+    try:
+        with open(path) as f:
+            used = int(f.read())
+    except (OSError, ValueError):
+        return None
+    free, total = torch.cuda.mem_get_info(index)
+    return DeviceMemoryReading(used, free, total, torch.cuda.memory_reserved(index))
+
+
+def _settled_reading(index: int) -> DeviceMemoryReading | None:
+    """The reading with the lowest gap, sampled until it stops falling; an
+    erase still pending afterwards only makes the correction smaller."""
+    path = _vram_used_file(index)
+    if path is None:
+        return None
+    torch.cuda.synchronize(index)
+    start = last_drop = time.monotonic()
+    lowest = None
+    while True:
+        reading = _read(index, path)
+        if reading is None:
+            return None
+        now = time.monotonic()
+        if lowest is None or reading.gap < lowest.gap:
+            lowest, last_drop = reading, now
+        if now - last_drop >= SETTLE_SECONDS or now - start >= MAX_SAMPLING_SECONDS:
+            return lowest
+        time.sleep(SAMPLE_INTERVAL_SECONDS)
+
+
+def record_memory_baseline(device: torch.device) -> None:
+    index = _device_index(device)
+    reading = _settled_reading(index)
+    if reading is None:
+        _baselines.pop(index, None)
+    else:
+        _baselines[index] = reading
+
+
+def corrected_free_memory(
+    device: torch.device, untracked_bytes: int
+) -> tuple[int, int]:
+    index = _device_index(device)
+    baseline = _baselines.get(index)
+    current = _settled_reading(index) if baseline is not None else None
+    if baseline is None or current is None:
+        from vllm.utils.mem_utils import device_memory_info
+
+        return device_memory_info(device)[0], 0
+    correction = free_memory_correction(baseline, current, untracked_bytes)
+    if correction > 0:
+        logger.info(
+            "Free device memory: %.2f GiB reported, %.2f GiB more by the exact "
+            "VRAM count.",
+            current.free / (1 << 30),
+            correction / (1 << 30),
+        )
+    return current.free + correction, correction
