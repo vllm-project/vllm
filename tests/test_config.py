@@ -4726,8 +4726,9 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
 
 def test_layer_range_with_prefill_context_parallel(monkeypatch):
     """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
-    stage gets that stage's layers."""
-    monkeypatch.delenv("VLLM_PP_LAYER_PARTITION", raising=False)
+    stage gets that stage's layers, so layer counts match under an uneven
+    partition."""
+    monkeypatch.setenv("VLLM_PP_LAYER_PARTITION", "5,7")
     model_config = ModelConfig("facebook/opt-125m")  # 12 layers
     ranges = [
         model_config.get_layers_start_end_indices(
@@ -4741,4 +4742,4 @@ def test_layer_range_with_prefill_context_parallel(monkeypatch):
         )
         for rank in range(8)
     ]
-    assert ranges == [(0, 6)] * 4 + [(6, 12)] * 4
+    assert ranges == [(0, 5)] * 4 + [(5, 12)] * 4
