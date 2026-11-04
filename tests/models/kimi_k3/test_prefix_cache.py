@@ -25,9 +25,9 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 # Official Kimi-K3 config with 8 layers and no weights.
-MODEL = "riverclouds/Kimi-K3-8L-dummy"
+MODEL = "vllm-project/Kimi-K3-8L-dummy"
 # The recipe's DSpark draft, reading target layers that exist in MODEL.
-DRAFT = "riverclouds/Kimi-K3-DSpark-for-8L-dummy"
+DRAFT = "vllm-project/Kimi-K3-DSpark-for-8L-dummy"
 
 # Conversation: the first prompt spans FIRST_PROMPT_BLOCKS blocks plus an
 # unaligned tail, and each later turn appends TURN_TOKENS random tokens.

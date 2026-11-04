@@ -2243,3 +2243,30 @@ def test_finalize_extensible_kv_cache_keeps_measured_count():
     )
     assert config.num_blocks == scheduler_config.num_blocks == 997
     assert vllm_config.cache_config.num_gpu_blocks == 997
+
+
+def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
+    """HiSparse's host pool is sized by its own block count, not the device
+    pool's, so the measured shrink leaves host-resident tensors as is."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    host_tensor = KVCacheTensor(
+        size=16 * 3000,
+        layers=["host.0"],
+        layer_stride=16 * 3000,
+        block_stride=3000,
+        host_resident=True,
+    )
+    config.kv_cache_tensors.insert(0, host_tensor)
+
+    kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 10)
+    assert config.num_blocks == 10
+    assert config.kv_cache_tensors[0] == host_tensor
+    assert config.kv_cache_tensors[1].size == 2 * spec.page_size_bytes * 10
