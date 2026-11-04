@@ -10,9 +10,7 @@ import pytest
 import torch
 from utils import skip_unsupported
 
-import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
-    enable_batch_invariant_mode,
     matmul_batch_invariant,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
@@ -148,8 +146,14 @@ def test_get_matmul_config_pinned_to_max_num_seqs():
     if arch_family not in _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS:
         pytest.skip("No tuned persistent matmul config for this architecture")
 
-    default = {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64,
-               "GROUP_SIZE_M": 8, "num_stages": 3, "num_warps": 8}
+    default = {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_stages": 3,
+        "num_warps": 8,
+    }
     dtype = torch.bfloat16
     # Use a shape guaranteed to have per-bucket variation (present in all arches).
     N, K = 2048, 2048

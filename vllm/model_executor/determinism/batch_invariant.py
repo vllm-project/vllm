@@ -12,8 +12,8 @@ import vllm.envs as envs
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _get_descriptor_matmul_config,
     _get_matmul_config,
-    set_config_max_num_seqs,
     resolve_tuned_matmul_configs,
+    set_config_max_num_seqs,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
