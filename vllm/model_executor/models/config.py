@@ -625,10 +625,7 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
 
 def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
-    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
-    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
-    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
-    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    """Whether to enable candidate-only indexer scoring by default."""
     from vllm.platforms import current_platform
 
     hf_config = vllm_config.model_config.hf_text_config
@@ -639,11 +636,16 @@ def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
         block <= 0
         or topk_blocks <= 0
         or not current_platform.is_cuda()
-        or not current_platform.is_device_capability_family(100)
         or parallel.decode_context_parallel_size > 1
         or parallel.prefill_context_parallel_size > 1
-        or vllm_config.kernel_config.sparse_indexer_topk_backend
-        not in ("auto", "deep_select")
+    ):
+        return False
+    if current_platform.is_device_capability_family(90):
+        return True
+    topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
+    if not current_platform.is_device_capability_family(100) or topk_backend not in (
+        "auto",
+        "deep_select",
     ):
         return False
     from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (

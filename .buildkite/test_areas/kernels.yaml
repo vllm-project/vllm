@@ -164,6 +164,29 @@ steps:
   commands:
     - pytest -v -s kernels/test_bf16x3_router_gemm_cutedsl.py
 
+- label: ":nvidia: (H100) DeepSeek V4.1 Candidate Indexer"
+  key: deepseek-v41-candidate-indexer-h100
+  automatic_shard: true
+  timeout_in_minutes: 20
+  device: h100
+  source_file_dependencies:
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_indexer.py
+  - vllm/models/deepseek_v41/nvidia/ops/candidate_paged_logits.py
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/model_executor/models/config.py
+  - vllm/config/attention.py
+  - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/model_executor/kernels/attention/dsa/sparse_mqa_logits.py
+  - vllm/v1/attention/backends/mla/indexer.py
+  - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+  - tests/models/deepseek_v41/nvidia/test_candidate_indexer.py
+  commands:
+    - >-
+      pytest -v -s
+      model_executor/layers/test_mla_short_prefill_indexer.py
+      models/deepseek_v41/nvidia/test_candidate_indexer.py
+      -k "candidate_logits or candidate_indexer"
+
 - label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
   automatic_shard: true

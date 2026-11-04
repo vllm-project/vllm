@@ -934,6 +934,374 @@ def _build_paged_cache(
     return kv_cache, block_table
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or not sparse_indexer.current_platform.is_device_capability_family(90),
+    reason="SM90 WGMMA required",
+)
+@pytest.mark.parametrize(
+    "page_size,block_size,next_n,pad,offset,tile",
+    [
+        (32, 8, 1, 0, 0, 64),
+        (64, 16, 2, 256, 0, 128),
+        (32, 8, 4, 4, 4, 64),
+        (16, 8, 6, 128, 16, 256),
+    ],
+)
+def test_candidate_logits_layout_and_graph(
+    page_size: int, block_size: int, next_n: int, pad: int, offset: int, tile: int
+):
+    """Direct paged reads preserve causal bounds, strided rows and graph replay.
+
+    Small integer FP8 operands make every dot product and weighted sum exact,
+    so the independent PyTorch reference needs no numerical tolerance.
+    """
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        candidate_blocks_to_sparse_indices,
+    )
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_paged_logits import (
+        candidate_paged_logits,
+        prepare_candidate_pages,
+    )
+
+    torch.manual_seed(42)
+    batch, count = 4, 128
+    rows, width = batch * next_n, count * block_size
+    req_lens = torch.tensor([0, 1, 3073, 8197], device="cuda", dtype=torch.int32)
+    lens = req_lens[:, None] - next_n + torch.arange(1, next_n + 1, device="cuda")
+    lens = lens.clamp(min=0).to(torch.int32).flatten()
+    pages_per_req = (8197 + page_size - 1) // page_size
+    pages = batch * pages_per_req
+    table = torch.randperm(pages, device="cuda", dtype=torch.int32).view(batch, -1)
+    row_indices = torch.arange(rows, device="cuda", dtype=torch.int32) // next_n
+    key = torch.randint(-4, 5, (pages, page_size, 128), device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    scales = torch.exp2(torch.randint(-4, 1, (pages, page_size), device="cuda").float())
+    page_bytes = page_size * 132
+    backing = torch.empty(
+        pages * (page_bytes + pad) + offset, dtype=torch.uint8, device="cuda"
+    )
+    cache = backing.as_strided(
+        (pages, page_size, 132), (page_bytes + pad, 132, 1), offset
+    )
+    cache.view(pages, page_bytes).copy_(
+        torch.cat((key.view(torch.uint8).flatten(1), scales.view(torch.uint8)), dim=1)
+    )
+    q = torch.randint(-4, 5, (rows, 36, 128), device="cuda").to(torch.float8_e4m3fn)[
+        :, :32
+    ]
+    weights = (torch.randint(-8, 9, (rows, 39), device="cuda").float() / 128)[:, :32]
+    candidates = _make_candidates(lens, count, block_size).cuda()
+    candidates = candidates[:, torch.randperm(count, device="cuda")]
+    starts = torch.zeros_like(lens)
+    si = torch.empty_like(candidates)
+    physical_blocks = torch.empty_like(candidates, dtype=torch.int64)
+    end = torch.empty_like(lens)
+    out = torch.empty((rows, width + 64), device="cuda")[:, :width]
+
+    def run():
+        candidate_blocks_to_sparse_indices(
+            candidates, starts, lens, block_size, block_size, out=(si, end)
+        )
+        prepare_candidate_pages(
+            table,
+            si,
+            end,
+            row_indices,
+            physical_blocks,
+            page_size=page_size,
+            sparse_block_size=block_size,
+        )
+        candidate_paged_logits(
+            q,
+            cache,
+            weights,
+            physical_blocks,
+            end,
+            out,
+            sparse_block_size=block_size,
+            tile_tokens=tile,
+        )
+
+    def reference():
+        idx, valid_end = _expand_candidates_reference(
+            candidates, starts, lens, block_size, block_size
+        )
+        positions = (
+            (idx[:, :, None] * block_size + torch.arange(block_size, device="cuda"))
+            .flatten(1)
+            .long()
+        )
+        page = table[row_indices.long()[:, None], positions // page_size].long()
+        keys = key.float()[page, positions % page_size]
+        scale = scales[page, positions % page_size]
+        dots = torch.einsum("rhd,rcd->rhc", q.float(), keys)
+        expected = (dots.relu() * weights[:, :, None]).sum(1) * scale
+        return expected.masked_fill(
+            torch.arange(width, device="cuda")[None] >= valid_end[:, None], -torch.inf
+        )
+
+    run()
+    torch.testing.assert_close(out, reference(), atol=0, rtol=0)
+    original_lens, original_candidates = lens.clone(), candidates.clone()
+    lens //= 2
+    candidates[:, ::3] = -1
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    out.fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(out, reference(), atol=0, rtol=0)
+    # A short capture must also handle more candidates and relocated pages.
+    lens.copy_(original_lens)
+    candidates.copy_(original_candidates)
+    table.copy_(table.roll(1, dims=1))
+    out.fill_(float("nan"))
+    graph.replay()
+    torch.testing.assert_close(out, reference(), atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or not sparse_indexer.current_platform.is_device_capability_family(90),
+    reason="SM90 WGMMA required",
+)
+@pytest.mark.parametrize("large_page_stride", [False, True])
+def test_candidate_logits_large_page_stride(large_page_stride: bool):
+    """Both TMA and interleaved KV pools need offsets beyond int32-word range."""
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_paged_logits import (
+        candidate_paged_logits,
+    )
+
+    page_size = 32
+    stride = (1 << 33) + 256 if large_page_stride else page_size * 132
+    page = (1 << 33) // stride + 1
+    backing = torch.empty(
+        page * stride + page_size * 132, device="cuda", dtype=torch.uint8
+    )
+    cache = backing.as_strided((page + 1, page_size, 132), (stride, 132, 1))
+    cache[page].flatten().copy_(
+        torch.cat(
+            (
+                torch.ones(page_size * 128, device="cuda")
+                .to(torch.float8_e4m3fn)
+                .view(torch.uint8),
+                torch.ones(page_size, device="cuda").view(torch.uint8),
+            )
+        )
+    )
+    q = torch.ones((1, 32, 128), device="cuda").to(torch.float8_e4m3fn)
+    weights = torch.ones((1, 32), device="cuda")
+    physical_blocks = ((page << 32) | (torch.arange(8, device="cuda") * 8))[None]
+    end = torch.tensor([page_size], device="cuda", dtype=torch.int32)
+    out = torch.empty((1, 64), device="cuda")
+    candidate_paged_logits(
+        q, cache, weights, physical_blocks, end, out, sparse_block_size=8
+    )
+    torch.testing.assert_close(
+        out[:, :page_size], torch.full_like(out[:, :page_size], 4096), atol=0, rtol=0
+    )
+    assert torch.isneginf(out[:, page_size:]).all()
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available()
+    or not sparse_indexer.current_platform.is_device_capability_family(90),
+    reason="SM90 WGMMA required",
+)
+@pytest.mark.parametrize(
+    "next_n,ratio,ragged", [(1, 1, False), (2, 2, True), (4, 1, False), (6, 1, True)]
+)
+@pytest.mark.parametrize(
+    "batch_kind",
+    [
+        "mixed",
+        "prefill",
+        "decode",
+        "chunked_prefill",
+        "dense_prefill",
+        "mixed_dense_prefill",
+        "full_prefill",
+    ],
+)
+def test_candidate_indexer_matches_dense(
+    tmp_path,
+    workspace_init,
+    monkeypatch,
+    next_n: int,
+    ratio: int,
+    ragged: bool,
+    batch_kind: str,
+):
+    """Unified candidate scoring preserves dense top-k, including fallback rows."""
+    from transformers import LlamaConfig
+
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import SpeculativeConfig, set_current_vllm_config
+    from vllm.forward_context import ForwardContext, override_forward_context
+    from vllm.models.deepseek_v41.attention import DeepseekV4IndexerCache
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_indexer import (
+        CandidateIndexer,
+    )
+
+    torch.manual_seed(43)
+    monkeypatch.setenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "1")
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=16384,
+        index_n_heads=32,
+        index_head_dim=128,
+        index_topk=512,
+        candidate_topk_blocks=128,
+        candidate_block_size=8,
+    ).save_pretrained(tmp_path)
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=16384,
+        block_size=64,
+        max_num_seqs=4,
+        max_num_batched_tokens=4096 if batch_kind == "full_prefill" else 1024,
+    )
+    config.attention_config.indexer_sparse_logits = True
+    if next_n > 1:
+        config.speculative_config = SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=next_n - 1,
+            enable_adaptive_verification=ragged,
+        )
+    batch = BatchSpec([529, 8197, 6145, 13], [1 if ragged else next_n, next_n, 13, 13])
+    if batch_kind == "prefill":
+        batch = BatchSpec(batch.seq_lens[2:], batch.query_lens[2:])
+    elif batch_kind == "decode":
+        batch = BatchSpec(batch.seq_lens[:2], batch.query_lens[:2])
+    elif batch_kind == "chunked_prefill":
+        batch = BatchSpec([6145, 13], [513, 13])
+    elif batch_kind == "dense_prefill":
+        batch = BatchSpec([529, 13], [13, 13])
+    elif batch_kind == "mixed_dense_prefill":
+        batch = BatchSpec([529, 8197, 529, 13], batch.query_lens)
+    elif batch_kind == "full_prefill":
+        batch = BatchSpec([2049, 13], [2049, 13])
+    device = torch.device("cuda:0")
+    common = create_common_attn_metadata(batch, 64, device)
+    lens = torch.tensor(batch.seq_lens, dtype=torch.int32, device=device) // ratio
+    cache, table = _build_paged_cache(lens, 64 // ratio, 128, "fp8", 256)
+    # The shared helper builds SM100's packed UE8M0 scales; SM90 stores FP32.
+    scale_words = cache.flatten(1)[:, (64 // ratio) * 128 :].view(torch.int32)
+    scale_words.view(torch.float32).copy_(torch.exp2((scale_words & 255).float() - 127))
+    common.block_table_tensor = table
+    rows = batch.compute_num_tokens()
+    row_lens = torch.cat(
+        [
+            torch.arange(
+                length - q_len + 1, length + 1, device=device, dtype=torch.int32
+            )
+            // ratio
+            for length, q_len in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
+    candidates = _make_candidates(row_lens, 128, 8).cuda()
+    out = torch.empty((rows, 512), dtype=torch.int32, device=device)
+    hidden = torch.empty((rows, 128), device=device)
+    q = (torch.randn(rows, 32, 128, device=device) * 16).to(torch.float8_e4m3fn)
+    weights = torch.randn(rows, 32, device=device) / 16
+    with set_current_vllm_config(config):
+        k_cache = DeepseekV4IndexerCache(
+            132, torch.uint8, INDEXER_LAYER, config.cache_config, ratio
+        )
+        k_cache.bind_kv_cache(cache.transpose(1, 2))
+        spec = k_cache.get_kv_cache_spec(config)
+        indexer = CandidateIndexer(k_cache, 512, 128, 16384, out, candidates, 8)
+        builder = k_cache.get_attn_backend().get_builder_cls()(
+            spec, [INDEXER_LAYER], config, device, block_table_width=table.shape[1]
+        )
+        metadata = builder.build(0, common)
+        context = ForwardContext(
+            no_compile_layers=config.compilation_config.static_forward_context,
+            attn_metadata={INDEXER_LAYER: metadata},
+            slot_mapping={},
+        )
+        with override_forward_context(context):
+            expected = sparse_indexer.SparseAttnIndexer.forward_cuda(
+                indexer, hidden, q, None, weights
+            ).clone()
+            actual = indexer(hidden, q, None, weights).clone()
+            # A later consumer reuses the prepared pages but has different Q.
+            actual_second = indexer(hidden, q.flip(0), None, weights).clone()
+            expected_second = sparse_indexer.SparseAttnIndexer.forward_cuda(
+                indexer, hidden, q.flip(0), None, weights
+            ).clone()
+
+        assert metadata.num_decode_tokens == (
+            sum(batch.query_lens[:2])
+            if batch_kind in ("mixed", "mixed_dense_prefill", "decode")
+            else 0
+        )
+        assert metadata.num_prefill_tokens == rows - metadata.num_decode_tokens
+        plan = metadata.candidate
+        if batch_kind in ("dense_prefill", "mixed_dense_prefill", "full_prefill"):
+            assert plan is None
+        else:
+            assert plan is not None and plan.prepared
+            torch.testing.assert_close(plan.row_lens, row_lens)
+            if batch_kind == "chunked_prefill":
+                assert plan.logits.shape[0] < rows
+        # The compact and dense selectors may order equal-score ties differently.
+        # Compare selected scores exactly, using the real dense scorer's values.
+        from vllm.utils.deep_gemm import (
+            fp8_fp4_paged_mqa_logits,
+            get_num_sms,
+            get_paged_mqa_logits_metadata,
+        )
+
+        row_table = table.repeat_interleave(
+            torch.tensor(batch.query_lens, device=device), dim=0
+        )
+        schedule = get_paged_mqa_logits_metadata(
+            row_lens[:, None], 64 // ratio, get_num_sms()
+        )
+        for query, actual_topk, expected_topk in (
+            (q, actual, expected),
+            (q.flip(0), actual_second, expected_second),
+        ):
+            logits = fp8_fp4_paged_mqa_logits(
+                (query[:, None], None),
+                cache,
+                weights,
+                row_lens[:, None],
+                row_table,
+                schedule,
+                int(lens.max()),
+            )
+
+            def selected(indices, scores):
+                return (
+                    scores.gather(1, indices.clamp(min=0).long())
+                    .masked_fill(indices < 0, -torch.inf)
+                    .sort(1)
+                    .values
+                )
+
+            torch.testing.assert_close(
+                selected(actual_topk, logits),
+                selected(expected_topk, logits),
+                atol=0,
+                rtol=0,
+            )
+            assert ((actual_topk < row_lens[:, None]) | (actual_topk == -1)).all()
+            assert torch.equal((actual_topk >= 0).sum(1), row_lens.clamp(max=512))
+
+
 @pytest.mark.parametrize("kv_dtype", ["mxfp4", "fp8"])
 @pytest.mark.parametrize("next_n", [1, 2])
 @pytest.mark.parametrize("capture", [False, True])

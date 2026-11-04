@@ -113,18 +113,14 @@ class AttentionConfig:
     concurrent decodes at 128K context and grows with batch and context."""
 
     indexer_sparse_logits: bool | None = None
-    """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
-    DeepGEMM's sparse MQA-logits kernels instead of computing dense logits over
-    the whole context and masking them. Requires an SM100-class GPU (FP8 or
-    MXFP4 indexer cache), DeepGEMM >= 2.8 and the DeepSelect top-k extension
-    (the top-k runs on the kernels' bf16 logits), and no decode/prefill context
-    parallelism. The sparse path costs O(candidate blocks) per query regardless
-    of context length. None (default) enables it wherever these requirements
-    hold; True forces it (and errors where they do not); False disables it.
-    On ROCm gfx950 it runs aiter's paged MXFP4 MQA-logits kernel over the
-    candidate pool instead, with fp32 logits, and keeps the masked dense walk
-    for steps whose contexts are too short for the pool to pay; it is not
-    enabled by default there."""
+    """Score only candidate blocks in the DeepSeek V4.1 two-level indexer.
+    None (default) enables it on SM90 and supported SM100 configurations;
+    True forces it; False uses dense scoring. Requires no context parallelism.
+    SM90 uses CuTe DSL with FP8 cache and dense fallback for short prefills.
+    Unsupported cache, model geometry or microbatching raises at initialization,
+    including with the default None.
+    SM100 requires DeepGEMM >= 2.8 and DeepSelect (FP8/MXFP4 cache).
+    ROCm gfx950 uses aiter with MXFP4 cache and remains opt-in."""
 
     indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
     """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
@@ -134,7 +130,8 @@ class AttentionConfig:
     top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
     in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
     logits directly, while other top-k kernels read an FP32 copy. The sparse
-    MQA-logits path (`indexer_sparse_logits`) always emits BF16."""
+    MQA-logits path (`indexer_sparse_logits`) emits BF16 on SM100 and FP32
+    on SM90 and ROCm, independently of this setting."""
 
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split

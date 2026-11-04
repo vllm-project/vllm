@@ -43,6 +43,9 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.rocm_paged_mxfp4_indexer import (
         RocmSparseMQAIndexer,
     )
+    from vllm.models.deepseek_v41.nvidia.ops.candidate_indexer import (
+        CandidateIndexer,
+    )
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -1351,6 +1354,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         vllm_config = get_current_vllm_config()
         self.sparse_logits = vllm_config.attention_config.indexer_sparse_logits
+        self.candidate_indexer = False
         # aiter's paged MXFP4 kernels write this cache and read it in place.
         self.rocm_mxfp4 = current_platform.is_rocm() and dsa_indexer_uses_fp4(
             vllm_config
@@ -1397,7 +1401,9 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
                     if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
                     else page_alignment,
                 )
-                if self.sparse_logits and not self.rocm_mxfp4
+                if self.sparse_logits
+                and not self.rocm_mxfp4
+                and not current_platform.is_device_capability_family(90)
                 else None
             ),
         )
@@ -1412,6 +1418,15 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
 
             return DeepseekV41RocmMxfp4IndexerBackend
         if self.sparse_logits:
+            if (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(90)
+            ):
+                if not self.candidate_indexer:
+                    return DeepseekV41IndexerBackend
+                from .nvidia.ops.candidate_indexer import CandidateIndexerBackend
+
+                return CandidateIndexerBackend
             return DeepseekV41SparseIndexerBackend
         return DeepseekV41IndexerBackend
 
@@ -1518,14 +1533,19 @@ class DeepseekV4Indexer(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, config.rms_norm_eps)
         self.k_cache = k_cache
 
-        # Candidate consumers can score only the candidate blocks (opt-in);
+        # Candidate consumers can score only the candidate blocks;
         # the candidate source and pre-candidate indexers stay dense.
         use_sparse_logits = (
             vllm_config.attention_config.indexer_sparse_logits
             and candidate_block_buffer is not None
             and not candidate_write
         )
-        self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
+        self.indexer_op: (
+            SparseAttnIndexer
+            | SparseMQAIndexer
+            | RocmSparseMQAIndexer
+            | CandidateIndexer
+        )
         if use_sparse_logits:
             # DeepGEMM's sparse kernels (SM100) take either indexer cache;
             # aiter's ROCm path is MXFP4-only.
@@ -1536,7 +1556,17 @@ class DeepseekV4Indexer(nn.Module):
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
-            self.indexer_op = self.mqa_cls(
+            mqa_cls: type[
+                SparseMQAIndexer | RocmSparseMQAIndexer | CandidateIndexer
+            ] = self.mqa_cls
+            if (
+                current_platform.is_cuda()
+                and current_platform.is_device_capability_family(90)
+            ):
+                from .nvidia.ops import candidate_indexer
+
+                mqa_cls = candidate_indexer.CandidateIndexer
+            self.indexer_op = mqa_cls(
                 self.k_cache,
                 self.topk_tokens,
                 self.head_dim,
