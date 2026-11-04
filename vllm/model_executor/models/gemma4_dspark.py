@@ -227,6 +227,7 @@ class Gemma4DSparkModel(DFlashQwen3Model):
         self._rope_head_size = attn0.rotary_emb.head_size
         self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
         self._rope_is_neox = attn0.rotary_emb.is_neox_style
+        self._rope_layer_runs = [(0, len(layers_attn))]
         self._num_attn_layers = len(layers_attn)
         self._kv_size = attn0.kv_size
         self._head_dim = attn0.head_dim
