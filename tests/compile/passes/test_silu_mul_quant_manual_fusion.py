@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for manual fusion via maybe_fused_act_quant.
 
-Tests all fusion paths in _FUSED_ACT_QUANT:
+Tests all fusion paths in _FUSED_ACT_QUANT and _FUSED_BIAS_ACT_QUANT:
 - kFp8StaticTensorSym: all platforms
 - kFp8Dynamic128Sym: CUDA only
-- kNvfp4Dynamic: CUDA SM100+ only
+- kNvfp4Dynamic: CUDA SM100+ only (SiLU+Mul, and bias add + GELU)
 """
 
 import pytest
@@ -13,6 +13,7 @@ import torch
 
 import vllm.envs as envs
 from tests.utils import TestFP8Layer
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.config import (
     CompilationConfig,
     VllmConfig,
@@ -25,9 +26,11 @@ from vllm.model_executor.kernels.linear import (
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import GELU, SiluAndMul
 from vllm.model_executor.layers.fusion.fused_act_quant import (
     _FUSED_ACT_QUANT,
+    _FUSED_BIAS_ACT_QUANT,
+    has_fused_bias_act_quant,
     maybe_fused_act_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -305,6 +308,69 @@ def test_manual_fusion_nvfp4_dynamic(
         torch.testing.assert_close(
             dequant_result,
             result_unfused,
+            atol=3e-1,
+            rtol=3e-1,
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("num_tokens", [1, 130])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 CUDA only")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(100), reason="NVFP4 requires SM100+"
+)
+def test_manual_fusion_bias_gelu_nvfp4_dynamic(
+    dtype: torch.dtype, num_tokens: int
+) -> None:
+    """Bias add + GELU + NVFP4 matches quantizing gelu(x + bias), and without a
+    consumer key the plain path still adds the bias."""
+    if (GELU, kNvfp4Dynamic) not in _FUSED_BIAS_ACT_QUANT:
+        pytest.skip("bias + GELU + NVFP4 fusion not available")
+
+    from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
+
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+
+    hidden_size = 4096
+    x = torch.randn(num_tokens, hidden_size)
+    bias = torch.randn(hidden_size)
+    input_global_scale_inv = torch.tensor([2.0], dtype=torch.float32)
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none"]),
+    )
+
+    with set_current_vllm_config(config):
+        gelu = GELU()
+        plain_linear = torch.nn.Linear(hidden_size, hidden_size)
+        assert not has_fused_bias_act_quant(gelu, plain_linear)
+        result_unfused = maybe_fused_act_quant(gelu, x, plain_linear, bias)
+        torch.testing.assert_close(result_unfused, gelu(x + bias))
+
+        linear = MockLinearForFusion(
+            kNvfp4Dynamic, input_global_scale_inv=input_global_scale_inv
+        )
+        assert has_fused_bias_act_quant(gelu, linear)
+        result_fused = maybe_fused_act_quant(gelu, x, linear, bias)
+        assert isinstance(result_fused, QuantizedActivation)
+        assert result_fused.quant_key == kNvfp4Dynamic
+        assert result_fused.orig_shape == (num_tokens, hidden_size)
+
+        # reference: the add and GELU in fp32 rounded once, as in the kernel
+        ref = gelu(x.float() + bias.float()).to(dtype)
+        ref_quant, ref_scale = scaled_fp4_quant(ref, input_global_scale_inv)
+        torch.testing.assert_close(
+            dequantize_nvfp4_to_dtype(
+                result_fused.data,
+                result_fused.scale,
+                input_global_scale_inv,
+                dtype,
+                "cuda",
+            ),
+            dequantize_nvfp4_to_dtype(
+                ref_quant, ref_scale, input_global_scale_inv, dtype, "cuda"
+            ),
             atol=3e-1,
             rtol=3e-1,
         )

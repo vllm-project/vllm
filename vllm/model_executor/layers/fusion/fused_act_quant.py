@@ -17,7 +17,11 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.activation import (
+    GELU,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -98,12 +102,16 @@ def _silu_and_mul_fp8_dynamic_128(
     return _silu_and_mul_fp8_dynamic_block(x, linear, 128, kFp8Dynamic128Sym)
 
 
-def _silu_and_mul_nvfp4_dynamic(
-    x: torch.Tensor, linear: LinearBase
+def _act_nvfp4_dynamic(
+    x: torch.Tensor,
+    d: int,
+    linear: LinearBase,
+    op: Callable[..., None],
+    *op_args: torch.Tensor,
 ) -> QuantizedActivation:
-    """SiluAndMul + NVFP4 dynamic quantization."""
+    """Activation + NVFP4 dynamic quantization of output width d, run by
+    op(result, block_scale, x, input_global_scale_inv, *op_args)."""
     assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
-    d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
     x = x.reshape(-1, x.shape[-1])
     num_tokens = x.shape[0]
@@ -131,9 +139,7 @@ def _silu_and_mul_nvfp4_dynamic(
         "input_global_scale_inv is required for NVFP4 quantization"
     )
 
-    torch.ops._C.silu_and_mul_nvfp4_quant(
-        result, block_scale, x, input_global_scale_inv
-    )
+    op(result, block_scale, x, input_global_scale_inv, *op_args)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
@@ -144,11 +150,31 @@ def _silu_and_mul_nvfp4_dynamic(
     )
 
 
+def _silu_and_mul_nvfp4_dynamic(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """SiluAndMul + NVFP4 dynamic quantization."""
+    return _act_nvfp4_dynamic(
+        x, x.shape[-1] // 2, linear, torch.ops._C.silu_and_mul_nvfp4_quant
+    )
+
+
+def _bias_gelu_nvfp4_dynamic(
+    x: torch.Tensor, linear: LinearBase, bias: torch.Tensor
+) -> QuantizedActivation:
+    """Bias add + GELU + NVFP4 dynamic quantization."""
+    return _act_nvfp4_dynamic(
+        x, x.shape[-1], linear, torch.ops._C.gelu_nvfp4_quant, bias
+    )
+
+
 # (activation module type, consumer input quantization key) -> fused producer.
 # Add a row for each supported manual producer.
 _FUSED_ACT_QUANT: dict[tuple[type, QuantKey], Callable] = {
     (SiluAndMul, kFp8StaticTensorSym): _silu_and_mul_fp8_static,
 }
+# The same for producers that also add the bias of the linear producing x.
+_FUSED_BIAS_ACT_QUANT: dict[tuple[type, QuantKey], Callable] = {}
 
 
 def _relu_squared_static_fp8_quant_supported(
@@ -191,23 +217,36 @@ if current_platform.is_cuda_alike():
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
+if current_platform.is_cuda() and hasattr(torch.ops._C, "gelu_nvfp4_quant"):
+    _FUSED_BIAS_ACT_QUANT[(GELU, kNvfp4Dynamic)] = _bias_gelu_nvfp4_dynamic
+
+
+def has_fused_bias_act_quant(act_fn: torch.nn.Module, linear: LinearBase) -> bool:
+    """Whether maybe_fused_act_quant can fuse a bias add for act_fn feeding linear."""
+    return (type(act_fn), get_input_quant_key(linear)) in _FUSED_BIAS_ACT_QUANT
 
 
 def maybe_fused_act_quant(
     act_fn: torch.nn.Module,
     x: torch.Tensor,
     linear: LinearBase,
+    bias: torch.Tensor | None = None,
 ) -> "torch.Tensor | QuantizedActivation":
     """Apply act_fn, fusing the downstream linear's input quant when possible.
 
     Returns a QuantizedActivation when a fused kernel matches the activation and
     the consumer's effective input quantization key, else the plain activation.
+    A bias, the one that the linear producing x skipped, is added to x first.
     """
     key = get_input_quant_key(linear)
-    if key is not None:
+    if key is not None and bias is not None:
+        producer = _FUSED_BIAS_ACT_QUANT.get((type(act_fn), key))
+        if producer is not None:
+            return producer(x, linear, bias)
+    elif key is not None:
         registry_key = (type(act_fn), key)
         producer = _FUSED_ACT_QUANT.get(registry_key)
         support = _FUSED_ACT_QUANT_SUPPORT.get(registry_key)
         if producer is not None and (support is None or support(act_fn, x, linear)):
             return producer(x, linear)
-    return act_fn(x)
+    return act_fn(x if bias is None else x + bias)
