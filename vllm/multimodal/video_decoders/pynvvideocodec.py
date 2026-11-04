@@ -5,7 +5,8 @@ import os
 import tempfile
 import threading
 from contextlib import contextmanager, suppress
-from typing import ClassVar, NamedTuple
+from functools import lru_cache
+from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -110,6 +111,24 @@ def get_pynvvideocodec_decoder_gpu_memory_bytes(
 
 def _decoder_surface_bytes(width: int, height: int) -> int:
     return width * height * 3 * PYNVVIDEOCODEC_DECODER_CACHE_SIZE
+
+
+# Distinct (device, codec, chroma format, bit depth) combinations; real deployments
+# see a handful, so this bound only guards against unbounded growth.
+PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE = 64
+
+
+@lru_cache(maxsize=PYNVVIDEOCODEC_DECODER_CAPS_CACHE_SIZE)
+def _get_decoder_caps(
+    nvc, device_index: int, codec, chroma_format, bit_depth: int
+) -> dict[str, Any]:
+    """``nvc.GetDecoderCaps``, cached per device and stream format.
+
+    Each call takes ~180 ms and holds the GIL, which stalls every other request in
+    the API process; the result only depends on these arguments. Callers must not
+    mutate the returned dict.
+    """
+    return nvc.GetDecoderCaps(device_index, codec, chroma_format, bit_depth)
 
 
 def _pynvvideocodec_exception_types(nvc) -> tuple[type[Exception], ...]:
@@ -343,7 +362,8 @@ class PyNvVideoCodecVideoBackendMixin:
         demuxer = nvc.CreateDemuxer(file_path)
         width = demuxer.Width()
         height = demuxer.Height()
-        caps = nvc.GetDecoderCaps(
+        caps = _get_decoder_caps(
+            nvc,
             cls._DEVICE_INDEX,
             demuxer.GetNvCodecId(),
             demuxer.ChromaFormat(),

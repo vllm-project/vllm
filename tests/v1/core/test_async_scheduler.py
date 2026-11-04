@@ -316,13 +316,14 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
-    scheduler.grammar_compile_error_reqs = set()
+    scheduler.grammar_compile_error_reqs = {}
     scheduler.encoder_cache_mismatch_reqs = set()
     scheduler.vllm_config = Mock()
     scheduler.aux_output_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
+    scheduler.num_spec_tokens = 0
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -508,7 +509,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 
