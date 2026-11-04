@@ -518,6 +518,16 @@ def extend_kv_cache(
             for cache in runner.kv_caches_by_layer.values()
             if cache.device == runner.device
         ]
+        if runner.vllm_config.cache_config.use_replayssm:
+            from vllm.v1.worker.replayssm_utils import (
+                get_replayssm_block_copy_tensors,
+                initialize_replayssm_ring_trackers,
+            )
+
+            initialize_replayssm_ring_trackers(runner.kv_cache_config, forward_context)
+            runner.replayssm_block_copy_tensors = get_replayssm_block_copy_tensors(
+                forward_context
+            )
     runner.kv_connector = get_kv_connector(
         runner.vllm_config, runner.kv_caches_by_layer
     )
