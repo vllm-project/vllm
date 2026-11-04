@@ -154,10 +154,8 @@ def test_missing_causal_arg_fails_closed(monkeypatch):
     from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLABackend
 
     _install_fake_aiter_modules(monkeypatch, supports_fp8=True, supports_causal=False)
-    with pytest.raises(RuntimeError, match="causal-only"):
-        rocm_aiter_ops.mla_decode_supports_non_causal()
-    with pytest.raises(RuntimeError, match="causal-only"):
-        AiterMLABackend.supports_non_causal()
+    assert rocm_aiter_ops.mla_decode_supports_non_causal() is False
+    assert AiterMLABackend.supports_non_causal() is False
 
 
 @pytest.mark.parametrize("has_kernels", [False, True])
