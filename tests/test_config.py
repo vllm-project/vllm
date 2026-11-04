@@ -4722,3 +4722,23 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+def test_layer_range_with_prefill_context_parallel(monkeypatch):
+    """Workers are laid out as PP x PCP x TP: every PCP and TP rank of a
+    stage gets that stage's layers."""
+    monkeypatch.delenv("VLLM_PP_LAYER_PARTITION", raising=False)
+    model_config = ModelConfig("facebook/opt-125m")  # 12 layers
+    ranges = [
+        model_config.get_layers_start_end_indices(
+            ParallelConfig(
+                tensor_parallel_size=2,
+                prefill_context_parallel_size=2,
+                pipeline_parallel_size=2,
+                distributed_executor_backend="mp",
+                rank=rank,
+            )
+        )
+        for rank in range(8)
+    ]
+    assert ranges == [(0, 6)] * 4 + [(6, 12)] * 4

@@ -234,6 +234,8 @@ def get_pp_indices(
             raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
         if sum(partitions) != num_hidden_layers:
             raise ValueError(f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+        if any(p < 0 for p in partitions):
+            raise ValueError(f"Negative layer count in {partition_list_str=}.")
     else:
         layers_per_partition = num_hidden_layers // pp_size
         partitions = [layers_per_partition for _ in range(pp_size)]
