@@ -153,6 +153,45 @@ def test_swa_inline_rows_are_mapped_once_per_step():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_swa_inline_rows_follow_indices_on_graph_replay():
+    # Decode captures with fresh metadata, then refills the index buffer in
+    # place before each replay. Every layer must see rows of the new indices.
+    block_size, block_span = 4, 12
+    slots = torch.zeros((2, 5), dtype=torch.int32, device="cuda")
+    lens = torch.zeros(2, dtype=torch.int32, device="cuda")
+    metadata = SimpleNamespace(block_size=block_size, flashinfer_sparse_index_cache={})
+    layer_rows = [torch.empty_like(slots) for _ in range(2)]
+
+    def forward() -> None:
+        for out in layer_rows:
+            out.copy_(
+                dsv41_flashinfer._swa_inline_rows(
+                    metadata, "decode", slots, lens, block_span
+                )
+            )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        forward()  # warmup
+    torch.cuda.current_stream().wait_stream(stream)
+    metadata.flashinfer_sparse_index_cache.clear()  # fresh capture metadata
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+
+    new_slots = torch.tensor(
+        [[0, 3, 4, 9, -1], [7, 13, -1, -1, -1]], dtype=torch.int32, device="cuda"
+    )
+    slots.copy_(new_slots)
+    graph.replay()
+    torch.accelerator.synchronize()
+    expected = dsv41_flashinfer._slots_to_inline_rows(new_slots, block_size, block_span)
+    for out in layer_rows:
+        assert torch.equal(out, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_global_topk_indices_address_packed_rows():
     # Block size 4 packed with two other layers' pages: 12 rows per block.
     block_size, block_span = 4, 12
