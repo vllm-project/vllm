@@ -481,10 +481,9 @@ class SpeculativeConfig:
     """Whether to enable EPLB for the draft model when it is enabled for the
     target model."""
     draft_num_redundant_experts: int | None = Field(default=None, ge=0)
-    """Redundant expert count for a MoE draft using EPLB. If unset, the target's
-    count is used when target and draft routed expert counts match; otherwise
-    set this explicitly. Config validation reports an error when divisibility
-    fails."""
+    """Redundant expert count for a MoE draft using EPLB. If unset, the minimum
+    valid count is computed from the draft's routed expert counts and EP size.
+    Set this to override the computed count."""
     tensor_parallel_size: int | None = None
     """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
     warn users when they mistakenly provide the wrong argument."""
@@ -1686,47 +1685,26 @@ class SpeculativeConfig:
             draft_parallel_config = target_parallel_config
             draft_num_experts = None
 
-        target_model_config = self.target_model_config
-        if self.draft_num_redundant_experts is None and target_model_config is not None:
-            target_expert_counts = target_model_config.get_eplb_expert_counts()
-            draft_expert_counts = draft_model_config.get_eplb_expert_counts(
+        if self.draft_num_redundant_experts is None:
+            draft_parallel_config = replace(
+                draft_parallel_config,
+                eplb_config=replace(
+                    draft_parallel_config.eplb_config,
+                    num_redundant_experts=None,
+                ),
+            )
+            draft_parallel_config.compute_eplb_num_redundant_experts(
                 draft_num_experts
+                if draft_num_experts is not None
+                else draft_model_config.get_num_experts()
             )
-            ep_size = (
-                target_parallel_config.tensor_parallel_size
-                * target_parallel_config.prefill_context_parallel_size
-                * target_parallel_config.data_parallel_size
+            self.draft_num_redundant_experts = (
+                draft_parallel_config.eplb_config.num_redundant_experts
             )
-            if (
-                ep_size > 1
-                and target_expert_counts
-                and draft_expert_counts
-                and target_expert_counts != draft_expert_counts
-            ):
-                lowest_valid_counts = {
-                    (-count) % ep_size for count in draft_expert_counts
-                }
-                if len(lowest_valid_counts) == 1:
-                    lowest_valid = next(iter(lowest_valid_counts))
-                    remediation = (
-                        " Set speculative_config.draft_num_redundant_experts "
-                        f"to {lowest_valid} explicitly."
-                    )
-                else:
-                    remediation = (
-                        " Set speculative_config.draft_num_redundant_experts "
-                        "to a value valid for every draft layer."
-                    )
-                raise ValueError(
-                    "Target and draft MoE models have different routed expert "
-                    f"counts ({sorted(target_expert_counts)} vs. "
-                    f"{sorted(draft_expert_counts)}), so the draft's redundant "
-                    f"expert count must be configured explicitly.{remediation} "
-                    "To disable EPLB for the draft, set "
-                    "speculative_config.draft_enable_eplb=false."
-                )
-
-        draft_parallel_config = self._apply_draft_eplb_override(draft_parallel_config)
+        else:
+            draft_parallel_config = self._apply_draft_eplb_override(
+                draft_parallel_config
+            )
 
         draft_model_config.verify_eplb_config(
             draft_parallel_config,
@@ -1773,8 +1751,8 @@ class SpeculativeConfig:
     def apply_draft_overrides(self, vllm_config: VllmConfig) -> VllmConfig:
         """Overlay this config's draft overrides onto a target VllmConfig.
 
-        Only non-None fields override, so an unset field keeps the target's
-        resolved setting, including its EPLB redundant-expert count.
+        Only non-None model overrides are applied. Draft EPLB settings are
+        applied separately, including the draft-specific redundant-expert count.
         """
         for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
             if (value := getattr(self, src)) is not None:

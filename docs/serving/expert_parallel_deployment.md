@@ -221,16 +221,17 @@ the draft while keeping it enabled for the target. In that case,
 For every registered model, `(num_routed_experts + num_redundant_experts)` must
 be divisible by the EP world size.
 
-For EPLB-backed MoE drafts, configure the draft-specific count with
-`draft_num_redundant_experts` in the speculative config. This applies to
-Eagle, Eagle3, MTP, DFlash, and supported DSpark drafts. When unset, the draft
-inherits the target model's `num_redundant_experts` only when target and draft
-have the same routed expert counts. If their routed expert counts differ, set
-`draft_num_redundant_experts` explicitly; config validation reports the lowest
-valid draft count. An explicit value must satisfy the same divisibility rule.
-For DSpark drafts, divisibility is checked against the target EP group. If EPLB
-is enabled and `draft_tensor_parallel_size` is `1`, prefill context parallelism
-or data parallelism must also be greater than `1`.
+For EPLB-backed MoE drafts, `draft_num_redundant_experts` in the speculative
+config overrides the draft's redundant-expert count. When unset, vLLM computes
+the minimum count from the draft's routed expert count and the shared EP size,
+independently of the target's count. This applies to Eagle, Eagle3, MTP,
+DFlash, and supported DSpark drafts. A single redundant-expert count must make
+every draft layer's total expert count divisible by the EP size; configuration
+fails when the draft's layers require different padding counts. Explicit values
+are checked against the same rule. For DSpark drafts, divisibility is checked
+against the target EP group. If EPLB is enabled and
+`draft_tensor_parallel_size` is `1`, prefill context parallelism or data
+parallelism must also be greater than `1`.
 
 ### EPLB Parameters
 
@@ -241,7 +242,7 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 | `window_size` | Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval` | Frequency of rebalancing (every N engine steps) | 3000 |
 | `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
-| `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
+| `num_redundant_experts` | Additional experts needed to make the total divisible by EP size; computed when unset | `auto` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `true` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |
 | `communicator` | Backend for expert weight transfers: `"torch_nccl"`, `"torch_gloo"`, `"pynccl"`, `"nixl"`, `"symm_mem"`, or `null` (auto) | `null` |

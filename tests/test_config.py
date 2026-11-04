@@ -2505,19 +2505,27 @@ def _eplb_parallel_config(num_redundant_experts: int) -> ParallelConfig:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    ("target_experts", "draft_experts", "target_redundant", "draft_redundant"),
+    (
+        "target_experts",
+        "draft_experts",
+        "target_redundant",
+        "draft_redundant",
+        "expected_draft_redundant",
+    ),
     [
-        pytest.param(6, 6, 2, None, id="inherit-target-count"),
-        pytest.param(4, 6, 0, 2, id="explicit-draft-count"),
+        pytest.param(6, 6, 6, None, 2, id="auto-count-matches-target-experts"),
+        pytest.param(4, 6, 0, None, 2, id="auto-count-differs-from-target"),
+        pytest.param(4, 6, 0, 6, 6, id="explicit-draft-count"),
     ],
 )
-def test_draft_eplb_uses_target_or_explicit_redundant_expert_count(
+def test_draft_eplb_defaults_from_draft_expert_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     target_experts: int,
     draft_experts: int,
     target_redundant: int,
     draft_redundant: int | None,
+    expected_draft_redundant: int,
 ):
     monkeypatch.setattr(current_platform, "is_cuda_alike", lambda: True)
     target_model_config = _write_deepseek_v2_config(tmp_path / "target", target_experts)
@@ -2542,20 +2550,17 @@ def test_draft_eplb_uses_target_or_explicit_redundant_expert_count(
     )
     draft_vllm_config = speculative_config.apply_draft_overrides(base_vllm_config)
 
-    expected_redundant = (
-        target_redundant if draft_redundant is None else draft_redundant
-    )
     assert isinstance(draft_vllm_config, VllmConfig)
     assert (
         draft_vllm_config.parallel_config.eplb_config.num_redundant_experts
-        == expected_redundant
+        == expected_draft_redundant
     )
     assert target_parallel_config.eplb_config.num_redundant_experts == target_redundant
 
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("draft_redundant", [None, 1])
-def test_draft_eplb_reports_lowest_valid_redundant_expert_count(
+def test_draft_eplb_defaults_to_minimum_and_rejects_invalid_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     draft_redundant: int | None,
@@ -2565,21 +2570,28 @@ def test_draft_eplb_reports_lowest_valid_redundant_expert_count(
     draft_model_config = _write_deepseek_v2_config(tmp_path / "draft", 6)
     target_parallel_config = _eplb_parallel_config(num_redundant_experts=0)
 
-    with pytest.raises(
-        ValueError,
-        match=(
-            r"Set speculative_config\.draft_num_redundant_experts to 2.*"
-            r"draft_enable_eplb"
-        ),
-    ):
-        SpeculativeConfig(
+    if draft_redundant is None:
+        speculative_config = SpeculativeConfig(
             method="eagle3",
             model=draft_model_config.model,
             num_speculative_tokens=1,
             target_model_config=target_model_config,
             target_parallel_config=target_parallel_config,
-            draft_num_redundant_experts=draft_redundant,
         )
+        assert speculative_config.draft_num_redundant_experts == 2
+    else:
+        with pytest.raises(
+            ValueError,
+            match=r"Set speculative_config\.draft_num_redundant_experts to 2",
+        ):
+            SpeculativeConfig(
+                method="eagle3",
+                model=draft_model_config.model,
+                num_speculative_tokens=1,
+                target_model_config=target_model_config,
+                target_parallel_config=target_parallel_config,
+                draft_num_redundant_experts=draft_redundant,
+            )
 
 
 @pytest.mark.skip_global_cleanup
@@ -2622,14 +2634,15 @@ def _write_deepseek_v41_config(path: Path) -> ModelConfig:
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    ("draft_redundant", "should_raise"),
-    [(None, True), (0, False)],
-    ids=["suggest-lowest-valid-count", "explicit-draft-count"],
+    ("draft_redundant", "expected_draft_redundant", "should_raise"),
+    [(None, 0, False), (0, 0, False), (1, None, True)],
+    ids=["auto-count", "explicit-draft-count", "invalid-explicit-count"],
 )
 def test_dspark_draft_eplb_uses_draft_expert_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     draft_redundant: int | None,
+    expected_draft_redundant: int | None,
     should_raise: bool,
 ):
     """Validate V4.1 DSpark EPLB against its own routed expert count."""
@@ -2648,16 +2661,14 @@ def test_dspark_draft_eplb_uses_draft_expert_count(
     if should_raise:
         with pytest.raises(
             ValueError,
-            match=(
-                r"Set speculative_config\.draft_num_redundant_experts to 0 "
-                r"explicitly.*speculative_config\.draft_enable_eplb=false"
-            ),
+            match=r"Set speculative_config\.draft_num_redundant_experts to 0",
         ):
             SpeculativeConfig(
                 method="dspark",
                 num_speculative_tokens=1,
                 target_model_config=target_model_config,
                 target_parallel_config=target_parallel_config,
+                draft_num_redundant_experts=draft_redundant,
             )
         return
 
@@ -2668,6 +2679,7 @@ def test_dspark_draft_eplb_uses_draft_expert_count(
         target_parallel_config=target_parallel_config,
         draft_num_redundant_experts=draft_redundant,
     )
+    assert speculative_config.draft_num_redundant_experts == expected_draft_redundant
     base_vllm_config = VllmConfig(
         model_config=target_model_config,
         parallel_config=target_parallel_config,
