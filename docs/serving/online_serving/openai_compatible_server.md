@@ -210,7 +210,20 @@ token IDs, so a separate `/tokenize` call is not needed.
 
 In addition to the OpenAI request fields, the Responses API forwards vLLM
 [sampling parameters](../../api/README.md#inference-parameters) such as `top_k`,
-`min_p`, `repetition_penalty`, `seed`, `stop`, and `ignore_eos` to the engine.
+`min_p`, `repetition_penalty`, `repetition_detection`, `seed`, `stop`, and
+`ignore_eos` to the engine.
+
+`repetition_detection` stops generation early when output tokens form a repeating
+pattern. It is disabled by default. Enable it with
+`extra_body={"repetition_detection": {"max_pattern_size": 32, "min_count": 16}}`
+in `client.responses.create`, or put `repetition_detection` directly in the HTTP
+request body. This detects patterns of 1–32 tokens repeated at least 16 times.
+See [RepetitionDetectionParams][vllm.sampling_params.RepetitionDetectionParams]
+for parameter definitions.
+
+A response ended by repetition detection has `status: "completed"` and
+`incomplete_details: null`; streaming ends with `response.completed`. The
+Responses API does not expose the engine's finish reason.
 
 #### Extra parameters
 

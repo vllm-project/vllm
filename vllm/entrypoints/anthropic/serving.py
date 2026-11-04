@@ -121,7 +121,7 @@ def _to_anthropic_stop_reason(
     tool_used: bool,
     tool_complete: bool,
 ) -> tuple[
-    Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None,
+    Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "repetition"] | None,
     str | None,
 ]:
     """Map an OpenAI finish reason to Anthropic ``(stop_reason, stop_sequence)``.
@@ -131,9 +131,12 @@ def _to_anthropic_stop_reason(
     ``tool_used`` records whether a ``tool_use`` block was produced.
     ``max_tokens`` always wins. A matched stop string wins unless the tool
     calls are complete (``tool_complete``): a call it cut short must not run.
+    ``repetition`` preserves vLLM's repetition-detection termination reason.
     """
     if finish_reason == "length":
         return "max_tokens", None
+    if finish_reason == "repetition":
+        return "repetition", None
     if finish_reason not in ("stop", "tool_calls"):
         return None, None
     if tool_complete:
@@ -712,6 +715,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
             vllm_xargs=anthropic_request.vllm_xargs,
+            repetition_detection=anthropic_request.repetition_detection,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
         )
 

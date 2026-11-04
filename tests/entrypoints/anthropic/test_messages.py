@@ -50,6 +50,74 @@ async def test_simple_messages(client: anthropic.AsyncAnthropic):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["messages", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+async def test_repetition_detection_stops_repeating_output(server, api, stream):
+    """A constrained repetition stops early through either HTTP API."""
+    schema = {
+        "type": "object",
+        "properties": {"text": {"type": "string", "enum": ["a " * 128]}},
+        "required": ["text"],
+        "additionalProperties": False,
+    }
+    extra_body = {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "repetition_detection": {"max_pattern_size": 4, "min_count": 4},
+        "temperature": 0,
+    }
+    if api == "messages":
+        async with server.get_async_client_anthropic() as client:
+            response = await client.messages.create(
+                model="claude-3-7-sonnet-latest",
+                messages=[{"role": "user", "content": "Fill the required JSON."}],
+                max_tokens=64,
+                output_config={"format": {"type": "json_schema", "schema": schema}},
+                extra_body=extra_body,
+                stream=stream,
+            )
+            if stream:
+                events = [event async for event in response]
+                assert events[-1].type == "message_stop"
+                deltas = [event for event in events if event.type == "message_delta"]
+                assert len(deltas) == 1
+                stop_reason = deltas[0].delta.stop_reason
+                stop_sequence = deltas[0].delta.stop_sequence
+                output_tokens = deltas[0].usage.output_tokens
+            else:
+                stop_reason = response.stop_reason
+                stop_sequence = response.stop_sequence
+                output_tokens = response.usage.output_tokens
+        assert stop_reason == "repetition"
+        assert stop_sequence is None
+    else:
+        async with server.get_async_client() as client:
+            response = await client.responses.create(
+                model="claude-3-7-sonnet-latest",
+                input="Fill the required JSON.",
+                max_output_tokens=64,
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": "repeated_text",
+                        "schema": schema,
+                        "strict": True,
+                    }
+                },
+                extra_body=extra_body,
+                stream=stream,
+            )
+            if stream:
+                events = [event async for event in response]
+                assert events[-1].type == "response.completed"
+                response = events[-1].response
+        assert response.status == "completed"
+        assert response.incomplete_details is None
+        output_tokens = response.usage.output_tokens
+
+    assert 0 < output_tokens < 64
+
+
+@pytest.mark.asyncio
 async def test_system_message(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(
         model="claude-3-7-sonnet-latest",
