@@ -178,7 +178,8 @@ class Hermes2ProToolParser(ToolParser):
         Given {"name": "f", "arguments": {"x": 1}}, returns '{"x": 1}'.
         Once the arguments value is a complete JSON value, everything after
         it (the outer object's closing brace, or keys that follow
-        "arguments") is dropped. For partial JSON, returns as-is.
+        "arguments") is dropped. Otherwise the raw tail is returned, minus
+        the trailing '}' that closes the outer object when is_complete.
         """
         match = re.search(r'"arguments"\s*:\s*', tc_json)
         if not match:
@@ -186,11 +187,19 @@ class Hermes2ProToolParser(ToolParser):
         try:
             _, end = json.JSONDecoder().raw_decode(tc_json, match.end())
         except json.JSONDecodeError:
-            # The arguments value is still being generated.
-            return tc_json[match.end() :]
-        # The arguments value is closed. Stop there so the outer object's
-        # closing brace and any keys emitted after "arguments" are not leaked.
-        return tc_json[match.end() : end]
+            # Still being generated, or not valid JSON even when complete.
+            pass
+        else:
+            # The arguments value is closed. Stop there so the outer object's
+            # closing brace and any keys emitted after "arguments" are not
+            # leaked.
+            return tc_json[match.end() : end]
+        raw = tc_json[match.end() :]
+        if is_complete:
+            raw = raw.rstrip()
+            if raw.endswith("}"):
+                raw = raw[:-1].rstrip()
+        return raw
 
     def _compute_args_diff(
         self, index: int, tc_json: str, is_complete: bool

@@ -341,6 +341,65 @@ def test_hermes_streaming_args_match_non_streaming_when_key_follows_args(
     assert json.loads(args_str) == expected
 
 
+@pytest.mark.parametrize("stream_interval", [1, 2, 4])
+def test_hermes_streaming_stray_tool_call_marker(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    stream_interval: int,
+) -> None:
+    """A stray <tool_call> marker before the real one pairs with the later
+    </tool_call>, so the region is not valid JSON. The streamed arguments
+    must still be valid JSON. Test case taken from #53638."""
+    text = (
+        "<tool_call> hmm, wait, let me reconsider the format.\n"
+        '<tool_call>{"name": "get_weather", '
+        '"arguments": {"city": "New York City", "unit": "celsius"}}'
+        "</tool_call>"
+    )
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    assert tool_calls, "Expected at least one tool call delta"
+    assert get_function_delta(tool_calls[0]).name == "get_weather"
+    args_str = "".join(get_function_delta(tc).arguments or "" for tc in tool_calls)
+    assert json.loads(args_str) == {"city": "New York City", "unit": "celsius"}
+
+
+def test_hermes_streaming_invalid_arguments_value_keeps_outer_brace_out(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+) -> None:
+    """When the arguments value is not valid JSON even after the body is
+    complete (here Thai digits for an integer), the brace that closes the
+    outer object must not be streamed. Case reported on #65247."""
+    chunks = [
+        '<tool_call>\n{"name": "book_room", "arguments": {"attendees": \u0e51\u0e52',
+        "}}\n</tool_call>",
+    ]
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    previous_text, args = "", ""
+    for delta_text in chunks:
+        current_text = previous_text + delta_text
+        delta = parser.extract_tool_calls_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=any_chat_request,
+        )
+        previous_text = current_text
+        if delta is not None and delta.tool_calls:
+            args += "".join(
+                get_function_delta(tc).arguments or "" for tc in delta.tool_calls
+            )
+
+    assert args == '{"attendees": \u0e51\u0e52}'
+
+
 @pytest.mark.parametrize("stream_interval", [2, 3, 5])
 def test_hermes_streaming_just_forward_text_with_stream_interval(
     qwen_tokenizer: TokenizerLike,
