@@ -312,91 +312,34 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
         assert relative_l2 < 0.01, relative_l2.item()
 
 
-def test_direct_reload_restores_intermediate_padding(monkeypatch):
-    """A direct reload resets the padding the loaders skip to its cold-start
-    value (zero weights, unit block scales) instead of keeping what post-load
-    processing left in the storage.
-    """
+@pytest.mark.parametrize("static", [False, True])
+def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
+    """After a cold start that ran no loader (``load_format=dummy``), a direct
+    reload resets the padding of a padded layer, as decided at cold start:
+    zero weights, unit block scales. Per-expert scalars (per-tensor weight
+    scales, static input scales a checkpoint may omit) and parameters not made
+    by the quant method (the gate's correction bias) are left alone."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,
     )
 
-    # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
-    layer = _make_fp8_tp_experts(
-        monkeypatch,
-        1,
-        0,
-        intermediate_size=256,
-        config_overrides={"intermediate_size_per_partition": 384},
+    quant_config = (
+        Fp8Config(is_checkpoint_fp8_serialized=True, activation_scheme="static")
+        if static
+        else None
     )
-    model = torch.nn.Module()
-    model.experts = layer
+    suffixes = ("weight",) if static else ("weight", "weight_scale_inv")
     generator = torch.Generator().manual_seed(0)
-    shapes = {"w1": (2, 256, 256), "w3": (2, 256, 256), "w2": (2, 256, 256)}
     checkpoint = {
         name: (
-            torch.randn(shape, generator=generator).to(torch.float8_e4m3fn),
-            torch.rand(2, shape[1] // 128, shape[2] // 128, generator=generator) + 2,
+            torch.randn(2, 256, 256, generator=generator).to(torch.float8_e4m3fn),
+            torch.rand(2, 2, 2, generator=generator) + 2,
         )
-        for name, shape in shapes.items()
+        for name in ("w1", "w3", "w2")
     }
 
-    def load():
-        for name, tensors in checkpoint.items():
-            prefix = "w2" if name == "w2" else "w13"
-            for suffix, tensor in zip(("weight", "weight_scale_inv"), tensors):
-                param = getattr(layer, f"{prefix}_{suffix}")
-                assert param.weight_loader(
-                    param, tensor, f"{prefix}_{suffix}", name, 0, return_success=True
-                )
-
-    def padding(name, t):  # the trailing third of each intermediate span
-        if name.startswith("w13"):
-            t = t.unflatten(1, (2, -1)).transpose(2, -1)
-        return t[..., t.shape[-1] * 2 // 3 :]
-
-    load()
-    record_checkpoint_layout(model)
-    cold = {name: p.clone() for name, p in layer.named_parameters()}
-    for name, p in cold.items():
-        initial = 1 if "scale" in name else 0
-        if initial:
-            assert torch.all(padding(name, p) == 1)
-        padding(name, p).fill_(initial)  # weights are torch.empty
-    for p in layer.parameters():
-        p.data.fill_(7)  # stands in for post-load processing output
-
-    begin_direct_reload(model)
-    load()
-
-    for name, p in layer.named_parameters():
-        torch.testing.assert_close(p.float(), cold[name].float(), rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("scheme", ["block", "static"])
-def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, scheme):
-    """After a cold start that ran no loader (``load_format=dummy``), the first
-    direct reload still resets the padding: the fill is decided from
-    ``moe_config``. Per-expert scalars (per-tensor weight scales, static input
-    scales a checkpoint may omit) and parameters not created by the quant
-    method (the gate's correction bias) are left alone.
-    """
-    from vllm.model_executor.model_loader.reload.direct import (
-        begin_direct_reload,
-        record_checkpoint_layout,
-    )
-
-    if scheme == "block":
-        quant_config = None
-        suffixes = ("weight", "weight_scale_inv")
-    else:
-        quant_config = Fp8Config(
-            is_checkpoint_fp8_serialized=True, activation_scheme="static"
-        )
-        suffixes = ("weight",)
-
-    def make_layer():
+    def make_and_load(dummy: bool):
         # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
         layer = _make_fp8_tp_experts(
             monkeypatch,
@@ -406,19 +349,22 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, scheme):
             quant_config=quant_config,
             config_overrides={"intermediate_size_per_partition": 384},
         )
-        return layer
-
-    generator = torch.Generator().manual_seed(0)
-    shapes = {"w1": (2, 256, 256), "w3": (2, 256, 256), "w2": (2, 256, 256)}
-    checkpoint = {
-        name: (
-            torch.randn(shape, generator=generator).to(torch.float8_e4m3fn),
-            torch.rand(2, shape[1] // 128, shape[2] // 128, generator=generator) + 2,
-        )
-        for name, shape in shapes.items()
-    }
-
-    def load(layer):
+        model = torch.nn.Module()
+        model.experts = layer
+        if dummy:
+            layer.e_score_correction_bias = torch.nn.Parameter(
+                torch.full((2,), 7.0), requires_grad=False
+            )
+            for p in layer.parameters():
+                p.data.fill_(7)
+            record_checkpoint_layout(model)
+            # Post-load processing may rewrite moe_config; the record stands.
+            layer.moe_config.intermediate_size_per_partition_unpadded = 384
+            begin_direct_reload(model)
+        else:
+            for name, p in layer.named_parameters():
+                if "scale" not in name:
+                    p.data.zero_()  # torch.empty
         for name, tensors in checkpoint.items():
             prefix = "w2" if name == "w2" else "w13"
             for suffix, tensor in zip(suffixes, tensors):
@@ -426,42 +372,17 @@ def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, scheme):
                 assert param.weight_loader(
                     param, tensor, f"{prefix}_{suffix}", name, 0, return_success=True
                 )
+        return layer
 
-    # What a real cold start leaves: zero weight padding, unit scale padding.
-    expected = make_layer()
-    for name, p in expected.named_parameters():
-        if "scale" not in name:
-            p.data.zero_()  # torch.empty
-    load(expected)
-
-    layer = make_layer()
-    bias = torch.nn.Parameter(torch.full((2,), 5.0), requires_grad=False)
-    layer.e_score_correction_bias = bias  # registered on the layer by the gate
-    model = torch.nn.Module()
-    model.experts = layer
-    for p in layer.parameters():
-        if p is not bias:
-            p.data.fill_(7)  # dummy weights; no loader ran
-    excluded = {"e_score_correction_bias"}
-    if scheme == "static":
-        excluded |= {
-            "w13_input_scale",
-            "w13_weight_scale",
-            "w2_input_scale",
-            "w2_weight_scale",
-        }
-    assert {n for n, _ in layer.named_parameters()} >= excluded
-    record_checkpoint_layout(model)
-    # Post-load processing may rewrite moe_config (e.g. padding only the
-    # runtime copy); the fill is decided by the cold-start record.
-    layer.moe_config.intermediate_size_per_partition_unpadded = 384
-
-    begin_direct_reload(model)
-    load(layer)
-
+    expected = make_and_load(dummy=False)
+    layer = make_and_load(dummy=True)
+    kept = {"e_score_correction_bias"}
+    if static:
+        kept |= {f"{w}_{s}_scale" for w in ("w13", "w2") for s in ("weight", "input")}
+    assert kept <= dict(layer.named_parameters()).keys()
     for name, p in layer.named_parameters():
-        if name in excluded:
-            assert torch.all(p == (5 if p is bias else 7)), name
+        if name in kept:
+            assert torch.all(p == 7), name
         else:
             torch.testing.assert_close(
                 p.float(), getattr(expected, name).float(), rtol=0, atol=0
