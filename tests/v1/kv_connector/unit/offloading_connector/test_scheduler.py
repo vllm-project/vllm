@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _full_attention_spec,
     _make_hybrid_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
@@ -3368,6 +3369,8 @@ def test_scheduler_makes_a_handler_per_manager_trigger(request_runner, store_tri
             "store_triggers": store_triggers,
             "self_describing_kv_events": False,
         },
+        # An ON_OVERWRITE handler needs the V1 runner.
+        use_v2_model_runner=False,
     )
     assert [
         trigger.name for trigger in runner.connector_scheduler._store_handlers
@@ -3387,6 +3390,7 @@ def _make_lazy_runner(request_runner, async_scheduling: bool, num_gpu_blocks: in
         num_gpu_blocks=num_gpu_blocks,
         async_scheduling=async_scheduling,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     offers: list[tuple[list, ReqContext | None, StoreTrigger]] = []
 
@@ -3430,27 +3434,78 @@ def test_unsupported_store_triggers_raise(request_runner, extra_config):
         )
 
 
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
-def test_lazy_with_kv_cache_zeroing_needs_the_v1_runner(use_v2_model_runner: bool):
-    """V2 zeroes a reused block before the ON_OVERWRITE store reads it."""
+@pytest.mark.parametrize("case", ["uniform", "mixed_precision", "mamba"])
+def test_lazy_v2_needs_no_zeroing(case: str):
+    """V2 runs lazy mode only when it does not zero new blocks before the store
+    flush. Zeroing also covers the CoW copies: a partial-hit CoW needs a hit
+    inside an attention block, which needs a Mamba `align` group, and a Mamba
+    group sets needs_kv_cache_zeroing (see OnOverwriteStoreHandler.check_support).
+    """
     vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
-    vllm_config.use_v2_model_runner = use_v2_model_runner
-    kv_cache_config = _make_hybrid_kv_cache_config()
-    kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
-        ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
-    )
-    # The flag is resolved in __post_init__, before the group above was
-    # replaced, so resolve it again for the config this test builds by hand.
-    kv_cache_config.needs_kv_cache_zeroing = (
-        kv_cache_config.has_mamba_layers or kv_cache_config.has_mixed_precision_kv_cache
-    )
-    assert kv_cache_config.needs_kv_cache_zeroing
-    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    if case == "uniform":
+        kv_cache_config = KVCacheConfig(
+            num_blocks=4,
+            kv_cache_tensors=[],
+            kv_cache_groups=[KVCacheGroupSpec(["full_layer"], _full_attention_spec())],
+        )
+    elif case == "mixed_precision":
+        kv_cache_config = _make_hybrid_kv_cache_config()
+        kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
+            ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
+        )
+        # The flag is resolved in __post_init__, before the group above was
+        # replaced, so resolve it again for the config this test builds by hand.
+        kv_cache_config.needs_kv_cache_zeroing = (
+            kv_cache_config.has_mamba_layers
+            or kv_cache_config.has_mixed_precision_kv_cache
+        )
+    else:
+        kv_cache_config = _make_mamba_hybrid_kv_cache_config()
 
-    if not use_v2_model_runner:
+    if case == "uniform":
+        assert not kv_cache_config.needs_kv_cache_zeroing
+    else:
+        assert kv_cache_config.needs_kv_cache_zeroing
+
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    vllm_config.use_v2_model_runner = True
+    if case == "uniform":
         scheduler = OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
         assert _on_overwrite(scheduler)
-        return
+    else:
+        with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
+            OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+def test_lazy_v2_rejects_a_partial_hash_hit():
+    """The CoW gate refuses V2 even when the cache does not ask for zeroing.
+
+    A hit that ends inside a block makes V2 copy the block before it flushes
+    the store, so the store would read the copied data.
+    """
+    vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec(block_size=16)),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=32,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    # A real Mamba config needs zeroing. Force it off so that only the CoW
+    # gate can refuse this case.
+    kv_cache_config.needs_kv_cache_zeroing = False
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+    vllm_config.use_v2_model_runner = True
     with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=0"):
         OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
@@ -3657,14 +3712,16 @@ def test_lazy_restart_records_the_chunks_again(request_runner):
     assert overwrite_handler.first_live_chunk_idx(req_status, 0) == 0
 
 
-def test_overwrite_store_jobs_isolate_partial_chunks(request_runner):
-    """Full chunks share a job deepest first. A partial chunk gets its own job."""
+def test_overwrite_store_jobs_keep_null_placeholders(request_runner):
+    """A chunk keeps 0 for each null block, like the eager path, so the blocks
+    after a null keep their offsets. One job holds every dying chunk."""
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=40,
         async_scheduling=False,
         blocks_per_chunk=4,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
@@ -3672,16 +3729,21 @@ def test_overwrite_store_jobs_isolate_partial_chunks(request_runner):
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)
     chunks = [
-        GpuChunk("k1", 0, 1, (10, 11, 12, 13), ("b10", "b11", "b12", "b13"), 0),
-        # 2 leading null blocks
-        GpuChunk("k2", 0, 2, (30, 31), ("b30", "b31"), 2),
-        GpuChunk("k3", 0, 3, (20, 21, 22, 23), ("b20", "b21", "b22", "b23"), 0),
-        # 2 trailing null blocks
-        GpuChunk("k4", 0, 3, (50, 51), ("b50", "b51"), 0),
+        GpuChunk("k1", 0, 1, (10, 11, 12, 13), ("b10", "b11", "b12", "b13")),
+        # A leading null block.
+        GpuChunk("k2", 0, 2, (0, 0, 30, 31), (None, None, "b30", "b31")),
+        GpuChunk("k3", 0, 3, (20, 21, 22, 23), ("b20", "b21", "b22", "b23")),
+        # A trailing null block.
+        GpuChunk("k4", 0, 4, (50, 51, 0, 0), ("b50", "b51", None, None)),
     ]
     overwrite_handler._overwrite_map.add(chunks)
     # One block of each chunk is enough to overwrite the chunk.
-    overwrite_handler._allocated_block_keys = {10: None, 20: None, 30: None, 50: None}
+    overwrite_handler._allocated_block_keys = {
+        10: None,
+        20: None,
+        30: None,
+        50: None,
+    }
 
     sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_OVERWRITE)
     overwrite_handler._build_overwrite_store_jobs(sink)
@@ -3696,18 +3758,17 @@ def test_overwrite_store_jobs_isolate_partial_chunks(request_runner):
         )
         for job in store_jobs.values()
     ] == [
-        ([20, 21, 22, 23, 10, 11, 12, 13], [8], [12], ["k3", "k1"]),
-        ([50, 51], [2], [12], ["k4"]),
-        ([30, 31], [2], [10], ["k2"]),
+        (
+            [50, 51, 0, 0, 20, 21, 22, 23, 0, 0, 30, 31, 10, 11, 12, 13],
+            [16],
+            [16],
+            ["k4", "k3", "k2", "k1"],
+        )
     ]
     assert scheduler._current_batch_jobs_to_flush == set(store_jobs)
     assert overwrite_handler._overwrite_map.by_block == {}
-    runner.manager.prepare_store.assert_has_calls(
-        [
-            call(["k3", "k1"], None, trigger=StoreTrigger.ON_OVERWRITE),
-            call(["k4"], None, trigger=StoreTrigger.ON_OVERWRITE),
-            call(["k2"], None, trigger=StoreTrigger.ON_OVERWRITE),
-        ]
+    runner.manager.prepare_store.assert_called_once_with(
+        ["k4", "k3", "k2", "k1"], None, trigger=StoreTrigger.ON_OVERWRITE
     )
 
 
@@ -3723,10 +3784,11 @@ def test_overwrite_keeps_chunk_of_block_with_same_data(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
-    kept = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"), 0)
-    overwritten = GpuChunk("k2", 0, 1, (20, 21), ("b20", "b21"), 0)
+    kept = GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"))
+    overwritten = GpuChunk("k2", 0, 1, (20, 21), ("b20", "b21"))
     overwrite_handler._overwrite_map.add([kept, overwritten])
 
     assert overwrite_handler._overwrite_map.take_overwritten(
@@ -3743,11 +3805,12 @@ def test_overwrite_takes_all_chunks_of_a_shared_block(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
     chunks = [
-        GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11"), 0),
-        GpuChunk("k2", 0, 0, (10, 12), ("b10", "b12"), 0),
+        GpuChunk("k1", 0, 0, (10, 11), ("b10", "b11")),
+        GpuChunk("k2", 0, 0, (10, 12), ("b10", "b12")),
     ]
     overwrite_handler._overwrite_map.add(chunks)
 
@@ -3762,9 +3825,10 @@ def test_overwrite_map_skips_a_chunk_with_no_block(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     overwrite_handler = _on_overwrite(runner.connector_scheduler)
-    overwrite_handler._overwrite_map.add([GpuChunk("k1", 0, 0, (), (), 0)])
+    overwrite_handler._overwrite_map.add([GpuChunk("k1", 0, 0, (), ())])
 
     assert overwrite_handler._overwrite_map.by_block == {}
 
@@ -3777,6 +3841,7 @@ def test_overwrite_stores_one_copy_of_a_key(request_runner):
         async_scheduling=False,
         blocks_per_chunk=2,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
         generate_store_output(keys)
@@ -3785,8 +3850,8 @@ def test_overwrite_stores_one_copy_of_a_key(request_runner):
     overwrite_handler = _on_overwrite(scheduler)
     overwrite_handler._overwrite_map.add(
         [
-            GpuChunk("k1", 0, 1, (10, 11), ("b10", "b11"), 0),
-            GpuChunk("k1", 0, 1, (20, 21), ("b20", "b21"), 0),
+            GpuChunk("k1", 0, 1, (10, 11), ("b10", "b11")),
+            GpuChunk("k1", 0, 1, (20, 21), ("b20", "b21")),
         ]
     )
     overwrite_handler._allocated_block_keys = {10: None, 20: None}
@@ -3806,6 +3871,7 @@ def test_allocated_blocks_of_other_groups_get_new_data(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)
@@ -3827,6 +3893,7 @@ def test_copy_destination_keeps_the_block_key_of_its_owner(request_runner):
         num_gpu_blocks=10,
         async_scheduling=False,
         extra_config_overrides=_LAZY_EXTRA_CONFIG,
+        use_v2_model_runner=False,
     )
     scheduler = runner.connector_scheduler
     overwrite_handler = _on_overwrite(scheduler)

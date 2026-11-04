@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -297,6 +298,7 @@ class RequestRunner:
         worker_count: int = 1,
         retention_interval: int | None = None,
         speculative_config: Any | None = None,
+        use_v2_model_runner: bool = True,
     ):
         assert blocks_per_chunk == 1 or all(
             group.block_size == block_size for group in kv_cache_groups or ()
@@ -387,36 +389,48 @@ class RequestRunner:
             kv_cache_config, vllm_config
         )
 
-        scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
-        self.scheduler = scheduler_cls(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            structured_output_manager=StructuredOutputManager(vllm_config),
-            block_size=scheduler_block_size,
-            hash_block_size=hash_block_size,
-        )
+        # The V2 model runner property reads the environment, so select the
+        # runner for the lifetime of the connector construction.
+        with patch.dict(
+            os.environ,
+            {} if use_v2_model_runner else {"VLLM_USE_V2_MODEL_RUNNER": "0"},
+        ):
+            scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
+            self.scheduler = scheduler_cls(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                log_stats=True,
+                structured_output_manager=StructuredOutputManager(vllm_config),
+                block_size=scheduler_block_size,
+                hash_block_size=hash_block_size,
+            )
 
-        self.worker_connector = OffloadingConnector(
-            vllm_config, KVConnectorRole.WORKER, kv_cache_config
-        )
+            self.worker_connector = OffloadingConnector(
+                vllm_config, KVConnectorRole.WORKER, kv_cache_config
+            )
 
         # register worker kv_caches to enable OffloadingWorker creations
         kv_caches: dict[str, torch.Tensor] = {}
         for group in kv_cache_groups:
             spec = uniform_spec(group)
-            assert isinstance(spec, AttentionSpec)
             for layer_name in group.layer_names:
-                # Shape follows FlashAttention layout:
-                # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
-                kv_caches[layer_name] = torch.empty(
-                    num_gpu_blocks,
-                    2,
-                    spec.block_size,
-                    spec.num_kv_heads,
-                    spec.head_size,
-                    dtype=spec.dtype,
-                )
+                if isinstance(spec, AttentionSpec):
+                    # Shape follows FlashAttention layout:
+                    # Shape: (num_blocks, 2, block_size, num_kv_heads, head_size)
+                    kv_caches[layer_name] = torch.empty(
+                        num_gpu_blocks,
+                        2,
+                        spec.block_size,
+                        spec.num_kv_heads,
+                        spec.head_size,
+                        dtype=spec.dtype,
+                    )
+                elif isinstance(spec, MambaSpec):
+                    kv_caches[layer_name] = torch.empty(
+                        num_gpu_blocks, spec.page_size_bytes, dtype=torch.int8
+                    )
+                else:
+                    raise NotImplementedError(type(spec).__name__)
 
         with set_current_vllm_config(vllm_config):
             self.worker_connector.register_kv_caches(kv_caches)
@@ -812,6 +826,7 @@ def request_runner():
         worker_count=1,
         retention_interval=None,
         speculative_config=None,
+        use_v2_model_runner=True,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -823,6 +838,7 @@ def request_runner():
             worker_count=worker_count,
             retention_interval=retention_interval,
             speculative_config=speculative_config,
+            use_v2_model_runner=use_v2_model_runner,
         )
         runners.append(runner)
         return runner

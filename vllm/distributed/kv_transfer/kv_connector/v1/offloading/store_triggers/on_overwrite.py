@@ -51,12 +51,12 @@ class GpuChunk:
     key: OffloadKey
     config_idx: int
     chunk_idx: int
-    # The GPU block ids of the chunk, without the null blocks.
+    # The GPU block ids of the chunk, with 0 for each null block. Like the
+    # eager path, the null blocks stay as placeholders so later blocks keep
+    # their offsets in the CPU chunk. The null GPU block is zeroed.
     block_ids: tuple[int, ...]
-    # The key of the data in each block of block_ids.
-    block_keys: tuple[OffloadKey, ...]
-    # The position of block_ids[0] inside the chunk.
-    start_idx: int
+    # The key of the data in each block of block_ids, or None for a null block.
+    block_keys: tuple[OffloadKey | None, ...]
 
 
 class OverwriteMap:
@@ -70,12 +70,13 @@ class OverwriteMap:
         """Remember which chunks sit on each block."""
         for chunk in chunks:
             # A chunk with no non-null block has nothing to store.
-            if not chunk.block_ids:
+            block_ids = [block_id for block_id in chunk.block_ids if block_id]
+            if not block_ids:
                 continue
             # A prefix hit offers the chunk of an existing entry again.
-            if chunk in self.by_block.get(chunk.block_ids[-1], ()):
+            if chunk in self.by_block.get(block_ids[-1], ()):
                 continue
-            for block_id in chunk.block_ids:
+            for block_id in block_ids:
                 self.by_block.setdefault(block_id, []).append(chunk)
 
     def take_overwritten(
@@ -92,6 +93,8 @@ class OverwriteMap:
                 if chunk.block_keys[chunk.block_ids.index(block_id)] == expected_key:
                     continue
                 for chunk_block_id in chunk.block_ids:
+                    if not chunk_block_id:
+                        continue
                     chunks = self.by_block[chunk_block_id]
                     chunks.remove(chunk)
                     if not chunks:
@@ -114,6 +117,7 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
     @override
     def check_support(
         cls,
+        config: SchedulerOffloadConfig,
         vllm_config: "VllmConfig",
         kv_cache_config: "KVCacheConfig",
         extra_config: Mapping[str, Any],
@@ -128,14 +132,19 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
             raise ValueError(
                 "self_describing_kv_events is not supported with ON_OVERWRITE stores"
             )
-        if vllm_config.use_v2_model_runner and kv_cache_config.needs_kv_cache_zeroing:
-            # The V2 model runner zeroes new blocks and applies the CoW copies
-            # in update_requests, before handle_preemptions flushes the
-            # ON_OVERWRITE jobs. Such a store would read zeroed or copied data
-            # and save it under a valid key.
+        if vllm_config.use_v2_model_runner and (
+            kv_cache_config.needs_kv_cache_zeroing or config.partial_hash_hits_enabled
+        ):
+            # V2 writes to a reused block in update_requests, before
+            # handle_preemptions flushes the ON_OVERWRITE jobs. A store would
+            # then save the wrong data under a valid key. V2 writes in two
+            # ways: it zeroes a new block when the KV cache needs zeroing, and
+            # it applies a CoW copy when a prefix-cache hit ends inside a
+            # block. Both are refused here.
             raise ValueError(
                 "ON_OVERWRITE stores are not supported with the V2 model runner "
-                "when the KV cache needs zeroing (mixed-precision KV cache). "
+                "for a KV cache that V2 zeroes, or for a prefix-cache hit that "
+                "V2 copies, before it flushes the store. "
                 "Set VLLM_USE_V2_MODEL_RUNNER=0."
             )
 
@@ -344,23 +353,19 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         key: OffloadKey,
         group_block_ids: Sequence[int],
     ) -> GpuChunk:
-        """The chunk at a position, on its non-null GPU blocks."""
-        # A partial chunk can start and end on null blocks, and the worker
-        # needs the offset of the first one inside the chunk.
+        """The chunk at a position, with 0 for each null GPU block."""
         start = chunk_idx * self._config.blocks_per_chunk
-        block_idxs = [
-            idx
-            for idx in range(start, start + self._config.blocks_per_chunk)
-            if group_block_ids[idx]
-        ]
+        block_idxs = range(start, start + self._config.blocks_per_chunk)
         group_config = self._config.kv_group_configs[config_idx]
         return GpuChunk(
             key,
             config_idx,
             chunk_idx,
             tuple(group_block_ids[idx] for idx in block_idxs),
-            tuple(block_key(req, group_config, idx) for idx in block_idxs),
-            block_idxs[0] if block_idxs else 0,
+            tuple(
+                block_key(req, group_config, idx) if group_block_ids[idx] else None
+                for idx in block_idxs
+            ),
         )
 
     def _build_overwrite_store_jobs(self, sink: StoreJobSink) -> None:
@@ -378,32 +383,22 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
             unique_chunks.values(),
             key=lambda chunk: (chunk.config_idx, -chunk.chunk_idx),
         )
-        # The worker skips null blocks only at the start of each group. So a
-        # chunk with null blocks goes in a job of its own.
-        blocks_per_chunk = self._config.blocks_per_chunk
-        full_chunks = [
-            chunk for chunk in chunks if len(chunk.block_ids) == blocks_per_chunk
-        ]
-        batches = [full_chunks] if full_chunks else []
-        batches += [
-            [chunk] for chunk in chunks if len(chunk.block_ids) < blocks_per_chunk
-        ]
-
-        for batch in batches:
-            store_output = sink.prepare_store([chunk.key for chunk in batch], None)
-            if store_output is None:
-                logger.warning("Cannot store %d overwritten chunks", len(batch))
-                continue
-            accepted_keys = set(store_output.keys_to_store)
-            accepted = [chunk for chunk in batch if chunk.key in accepted_keys]
-            if not accepted:
-                continue
-            sink.add_job(
-                None,
-                [chunk.key for chunk in accepted],
-                self._batch_src_spec(accepted),
-                store_output.store_spec,
-            )
+        if not chunks:
+            return
+        store_output = sink.prepare_store([chunk.key for chunk in chunks], None)
+        if store_output is None:
+            logger.warning("Cannot store %d overwritten chunks", len(chunks))
+            return
+        accepted_keys = set(store_output.keys_to_store)
+        accepted = [chunk for chunk in chunks if chunk.key in accepted_keys]
+        if not accepted:
+            return
+        sink.add_job(
+            req_id=None,
+            keys=[chunk.key for chunk in accepted],
+            src_spec=self._batch_src_spec(accepted),
+            dst_spec=store_output.store_spec,
+        )
 
     def _batch_src_spec(self, chunks: list[GpuChunk]) -> GPULoadStoreSpec:
         """The GPU source spec of one job."""
@@ -414,11 +409,11 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
         for chunk in chunks:
             if not group_sizes[chunk.config_idx]:
                 # The blocks of a batch are several chunks, deepest first, so
-                # they are not contiguous in the request. Only the offset of
-                # the first block inside its chunk matters: the worker copies
-                # the group's blocks consecutively from there.
+                # they are not contiguous in the request. The null blocks are
+                # placeholders, so the group starts at a chunk boundary and the
+                # worker copies the group's blocks consecutively from there.
                 block_indices[chunk.config_idx] = (
-                    chunk.chunk_idx * self._config.blocks_per_chunk + chunk.start_idx
+                    chunk.chunk_idx * self._config.blocks_per_chunk
                 )
             group_sizes[chunk.config_idx] += len(chunk.block_ids)
             src_block_ids.extend(chunk.block_ids)

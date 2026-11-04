@@ -77,6 +77,7 @@ class StoreTriggerHandler(ABC):
     @classmethod
     def check_support(
         cls,
+        config: SchedulerOffloadConfig,
         vllm_config: "VllmConfig",
         kv_cache_config: "KVCacheConfig",
         extra_config: Mapping[str, Any],
@@ -85,6 +86,7 @@ class StoreTriggerHandler(ABC):
         """Raise if this engine cannot run the handler's stores.
 
         Args:
+            config: the resolved offloading config of this engine.
             vllm_config: the engine config.
             kv_cache_config: the KV cache layout of this engine.
             extra_config: kv_connector_extra_config of this connector.
