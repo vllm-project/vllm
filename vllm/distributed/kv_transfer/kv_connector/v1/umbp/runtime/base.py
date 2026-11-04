@@ -21,6 +21,9 @@ class UMBPSchedulerHandle(Protocol):
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         """Return authoritative existence for each key."""
 
+    def prefetch(self, keys: Sequence[str]) -> int:
+        """Stage keys in local DRAM and return the number admitted."""
+
     def clear(self) -> bool:
         """Clear all objects visible to this scheduler handle."""
 

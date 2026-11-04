@@ -264,6 +264,22 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
             return [False] * len(keys)
         return result
 
+    def prefetch(self, keys: Sequence[str]) -> int:
+        if not keys:
+            return 0
+        try:
+            count = int(self._client.batch_prefetch(list(keys)))
+        except Exception as exc:
+            self._log_failure("prefetch", exc)
+            return 0
+        if not 0 <= count <= len(keys):
+            self._log_failure(
+                "prefetch",
+                ValueError(f"invalid admission count {count} for {len(keys)} keys"),
+            )
+            return 0
+        return count
+
     def clear(self) -> bool:
         try:
             cleared = bool(self._call("clear"))
@@ -317,10 +333,15 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         now = time.monotonic()
         if now - self._last_failure_log >= _FAILURE_LOG_INTERVAL_S:
             self._last_failure_log = now
+            action = {
+                "lookup": "; treating as a miss",
+                "prefetch": "; skipping failed prefetch attempt",
+            }.get(operation, "")
             logger.warning(
-                "UMBP standalone %s against %s failed; treating as a miss: %s",
+                "UMBP standalone %s against %s failed%s: %s",
                 operation,
                 self._address,
+                action,
                 exc,
             )
 
