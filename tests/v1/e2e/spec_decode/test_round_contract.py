@@ -43,7 +43,8 @@ pytestmark = [
 
 DENSE = "Qwen/Qwen3-0.6B"
 HYBRID = "Qwen/Qwen3.5-0.8B"
-EAGLE_TARGET = "meta-llama/Llama-3.2-1B-Instruct"
+# Ungated mirror of meta-llama/Llama-3.2-1B-Instruct, the draft's verifier.
+EAGLE_TARGET = "unsloth/Llama-3.2-1B-Instruct"
 EAGLE_DRAFT = "nm-testing/Llama3_2_1B_speculator.eagle3"
 MOE = "ibm-research/PowerMoE-3b"
 NUM_LOGPROBS = 5
