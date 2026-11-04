@@ -8,8 +8,8 @@ use expect_test::expect;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogging, ParserSelection,
-    ReasoningEffort, RendererSelection,
+    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
+    ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -60,6 +60,10 @@ fn render_args_build_config_without_tls() {
         "deepseek_v32",
         "--max-logprobs",
         "-1",
+        // Set through `VLLM_SKIP_MODEL_NAME_VALIDATION`, which binds this
+        // hidden flag.
+        "--skip-model-name-validation",
+        "True",
     ])
     .unwrap();
 
@@ -82,6 +86,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.port, 8080);
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
+    assert!(config.skip_model_name_validation);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
@@ -99,6 +104,7 @@ fn render_args_allow_omitted_max_model_len() {
     let config = args.into_config();
 
     assert_eq!(config.max_model_len, None);
+    assert!(!config.skip_model_name_validation);
 }
 
 #[test]
@@ -247,6 +253,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -260,6 +267,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -275,6 +283,8 @@ fn serve_args_forward_python_flags_with_separator() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -282,6 +292,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -350,6 +361,117 @@ fn serve_args_auto_forward_enable_lora_to_python() {
         ]
     "#]]
     .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_accept_python_underscore_flag_names() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--served_model_name",
+        "qwen",
+        "--max_model_len=1024",
+        "--enforce_eager",
+        "--kv_transfer_config.kv_role",
+        "kv_both",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("1024"));
+    expect![[r#"
+        [
+            "--enforce-eager",
+            "--kv-transfer-config.kv_role",
+            "kv_both",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_merge_dotted_forms_of_frontend_flags() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.rope_scaling.rope_type",
+        "yarn",
+        "--compilation-config.mode",
+        "3",
+        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.max_position_embeddings",
+        "32k",
+        "--hf-overrides.sliding_window=4K",
+        "--hf-overrides.note",
+        "1.5K",
+        "--structured-outputs-config.backend",
+        "guidance",
+        "--default-chat-template-kwargs.enable_thinking",
+        "false",
+        "--default-chat-template-kwargs.tags+",
+        "a,b",
+        "--default-chat-template-kwargs.tags+=c",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let hf_overrides = serde_json::json!({
+        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "max_position_embeddings": 32000,
+        "sliding_window": 4096,
+        "note": "1.5K",
+    });
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        hf_overrides
+    );
+    assert_eq!(
+        serde_json::to_value(&args.runtime.default_chat_template_kwargs).unwrap(),
+        serde_json::json!({"enable_thinking": false, "tags": ["a", "b", "c"]})
+    );
+    // Shared flags still reach the engine; dotted forms of engine-only flags
+    // are left for Python to expand.
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = |flag: &str| {
+        let index = engine.python_args.iter().position(|arg| arg == flag).unwrap();
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap()
+    };
+    assert_eq!(forwarded("--hf-overrides"), hf_overrides);
+    assert_eq!(
+        forwarded("--structured-outputs-config"),
+        serde_json::json!({"backend": "guidance"})
+    );
+    expect![[r#"
+        [
+            "--compilation-config.mode",
+            "3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_reject_dotted_frontend_flag_without_value() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.max_position_embeddings",
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a value is required for '--hf-overrides.max_position_embeddings'"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -645,14 +767,16 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&[]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
+    assert!(!config.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(32 * 1024 * 1024)
     );
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
-    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`, and
-    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, which bind these hidden flags.
+    // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, and
+    // `VLLM_SKIP_MODEL_NAME_VALIDATION`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -660,13 +784,19 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1",
         "--http-max-request-body-size",
         "1048576",
+        "--skip-model-name-validation",
+        "1",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
+    assert!(config.api_server_options.skip_model_name_validation);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
     );
+    // Like Python, any value other than `1` or `true` leaves it off.
+    let config = parse(&["--skip-model-name-validation", "yes"]);
+    assert!(!config.api_server_options.skip_model_name_validation);
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
@@ -694,6 +824,7 @@ fn args_json_reads_env_only_settings_from_env() {
     let args = apply(&[]).unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
+    assert!(!args.api_server_options().skip_model_name_validation);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -703,10 +834,12 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_LOG_STATS_INTERVAL", "0.5"),
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
+        ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
+    assert!(args.api_server_options().skip_model_name_validation);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -1018,6 +1151,7 @@ fn serve_resolves_output_logging_from_log_flags() {
         args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
             .api_server_options
             .log_outputs
+            .outputs
     };
 
     assert_eq!(
@@ -1046,7 +1180,7 @@ fn frontend_args_json_passes_output_logging_into_config() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_log_requests":true,"enable_log_outputs":true,"enable_log_deltas":false}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","enable_log_requests":true,"enable_log_outputs":true,"enable_log_deltas":false,"max_log_len":5}"#,
     ])
     .unwrap();
 
@@ -1056,8 +1190,71 @@ fn frontend_args_json_passes_output_logging_into_config() {
     let config = args.into_config();
     assert_eq!(
         config.api_server_options.log_outputs,
-        OutputLogging::Complete
+        OutputLogConfig {
+            outputs: OutputLogging::Complete,
+            max_log_len: Some(5),
+        }
     );
+}
+
+#[test]
+fn frontend_args_json_passes_access_log_flags_into_config() {
+    let config_for = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().access_log
+    };
+
+    expect![[r#"
+        AccessLogConfig {
+            enabled: true,
+            excluded_paths: [],
+        }
+    "#]]
+    .assert_debug_eq(&config_for(r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#));
+    // Like Python, the endpoint list is split on commas and trimmed.
+    expect![[r#"
+        AccessLogConfig {
+            enabled: false,
+            excluded_paths: [
+                "/health",
+                "/metrics",
+            ],
+        }
+    "#]]
+    .assert_debug_eq(&config_for(
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","disable_uvicorn_access_log":true,"disable_access_log_for_endpoints":"/health, /metrics,"}"#,
+    ));
+}
+
+#[test]
+fn serve_disable_access_log_accepts_python_flag_name() {
+    let enabled_for = |flag: &str| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", flag]).unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+        config.access_log.enabled
+    };
+
+    assert!(!enabled_for("--disable-access-log"));
+    assert!(!enabled_for("--disable-uvicorn-access-log"));
+    assert!(enabled_for("--disable-access-log=false"));
 }
 
 #[test]
@@ -1451,13 +1648,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--root-path",
-        "/prefix",
+        "--uvicorn-log-level",
+        "debug",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
+        error: invalid value 'debug' for '--uvicorn-log-level <UVICORN_LOG_LEVEL>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -1614,6 +1811,7 @@ fn frontend_args_accept_json() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -1627,6 +1825,7 @@ fn frontend_args_accept_json() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -1642,6 +1841,8 @@ fn frontend_args_accept_json() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -1649,6 +1850,7 @@ fn frontend_args_accept_json() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                 },
@@ -2080,14 +2282,14 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","uvicorn_log_level":"debug"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - root_path
+        - uvicorn_log_level
 
         Remove these arguments to continue.
 
@@ -2107,16 +2309,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-listener-fd",
         "999998",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","uvicorn_log_level":"debug"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - root_path
+        - uvicorn_log_level
 
         Remove these arguments to continue.
 
@@ -2537,6 +2739,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_log_requests: false,
                         enable_log_outputs: false,
                         enable_log_deltas: true,
+                        max_log_len: None,
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
@@ -2550,6 +2753,7 @@ fn serve_args_accept_handshake_aliases() {
                         log_stats_interval: None,
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
+                        skip_model_name_validation: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2565,6 +2769,8 @@ fn serve_args_accept_handshake_aliases() {
                             ],
                         ),
                         allow_credentials: false,
+                        disable_access_log: false,
+                        disable_access_log_for_endpoints: None,
                         ssl: SslArgs {
                             ssl_keyfile: None,
                             ssl_certfile: None,
@@ -2572,6 +2778,7 @@ fn serve_args_accept_handshake_aliases() {
                             ssl_cert_reqs: 0,
                             ssl_ciphers: None,
                         },
+                        root_path: None,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -2828,13 +3035,17 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -2850,7 +3061,12 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 ],
                 allow_credentials: false,
             },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
+            },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
@@ -2947,13 +3163,17 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -2969,7 +3189,12 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 ],
                 allow_credentials: false,
             },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
+            },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
@@ -3052,6 +3277,35 @@ fn frontend_config_trusts_request_chat_template_from_args_json() {
         panic!("expected frontend args");
     };
     assert!(args.into_config().trust_request_chat_template);
+}
+
+#[test]
+fn root_path_reaches_config_from_serve_args_and_args_json() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B", "--root-path", "/llm"])
+        .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args));
+    assert_eq!(config.root_path.as_deref(), Some("/llm"));
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/llm"}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.into_config().root_path.as_deref(), Some("/llm"));
 }
 
 #[test]
@@ -3150,13 +3404,17 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             stream_interval: 1,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
-                log_outputs: Disabled,
+                log_outputs: OutputLogConfig {
+                    outputs: Disabled,
+                    max_log_len: None,
+                },
                 enable_prompt_tokens_details: false,
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
+                skip_model_name_validation: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3172,7 +3430,12 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 ],
                 allow_credentials: false,
             },
+            access_log: AccessLogConfig {
+                enabled: true,
+                excluded_paths: [],
+            },
             tls: None,
+            root_path: None,
             api_keys: [],
             disable_log_stats: false,
             custom_histogram_buckets: CustomHistogramBuckets(
