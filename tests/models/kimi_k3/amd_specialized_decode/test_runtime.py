@@ -273,18 +273,22 @@ def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
         specialized_decode_config(supported_vllm_config)
 
 
-def test_regular_decode_config_is_accepted(on_mi355x):
-    cfg = _vllm_config(speculative_config=None)
-    assert specialized_decode_config(cfg) == DecodeConfig(q=1)
-
-
-def test_regular_decode_at_dcp1_is_refused(on_mi355x):
+@pytest.mark.parametrize("dcp", [1, 8])
+@pytest.mark.parametrize(
+    "cache_dtype, m1",
+    [("fp8", True), ("auto", False)],
+    ids=["m1", "vllm-mla-ops"],
+)
+def test_regular_decode_config_is_accepted(on_mi355x, dcp, cache_dtype, m1):
+    """Ordinary decode retains DCP1 and DCP8 support, with or without M1."""
     cfg = _vllm_config(
         speculative_config=None,
-        **{"parallel_config.decode_context_parallel_size": 1},
+        **{
+            "parallel_config.decode_context_parallel_size": dcp,
+            "cache_config.cache_dtype": cache_dtype,
+        },
     )
-    reasons = runtime.unsupported(cfg)
-    assert len(reasons) == 1 and "DCP1 regular decode" in reasons[0], reasons
+    assert specialized_decode_config(cfg) == DecodeConfig(q=1, m1=m1)
 
 
 @pytest.mark.parametrize("dcp", [1, 8])
@@ -515,7 +519,7 @@ def _kda_metadata(**md):
         (8, {"num_spec_decodes": 2}, None),
         (4, {"num_prefills": 1}, "not pure decode"),
         (4, {"num_decodes": 1}, "not pure decode"),
-        (4, {"spec_sequence_masks": None}, "not pure decode"),
+        (4, {"spec_sequence_masks": None}, "not spec-verify"),
         (8, {}, "not uniform"),
         (4, {"uniform_spec_sequence_length": None}, "not uniform"),
     ],

@@ -76,8 +76,10 @@ def step_reason(
     if m.num_prefills:
         return "not pure decode"
     if m.num_spec_decodes:
-        if m.num_decodes or m.spec_sequence_masks is None:
+        if m.num_decodes:
             return "not pure decode"
+        if m.spec_sequence_masks is None:
+            return "not spec-verify"
         actual_q = m.spec_state_indices_tensor.size(-1)
         if (
             actual_q != q
@@ -151,8 +153,9 @@ class SpecializedDecode:
         if m1:
             why = mla_weight_reasons(backbone)
             m1 = tp_agree(not why, tp.cpu_group)
-            if not m1 and dcp.world_size == 1:
-                # DCP1 runs M1c only (``runtime.step_reasons``)
+            if not m1 and dcp.world_size == 1 and config.q > 1:
+                # Speculative DCP1 runs M1c only (``runtime.step_reasons``).
+                # Ordinary q=1 falls back to vLLM's MLA ops, then K2.
                 agree(why or ["another TP rank's MLA layers"], tp.cpu_group,
                       "DCP1 without M1")  # fmt: skip
             if not m1:

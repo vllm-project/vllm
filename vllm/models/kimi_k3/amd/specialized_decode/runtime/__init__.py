@@ -28,7 +28,7 @@ MAX_TOKENS = 64
 MAX_ROWS = 16
 # the served max_num_seqs: a full step of each is one of the widths (MAX_ROWS)
 MAX_SEQS = (1, 2, 4, 8)
-# M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
+# M1c's speculative qlens: speculative DCP1 runs only them
 M1C_QLENS = (4, 8)
 # the KV cache dtypes M1 serves: M1a writes E4M3, M1c / AITER's decode read it
 FP8_KV = ("fp8", "fp8_e4m3")
@@ -46,7 +46,7 @@ class DecodeConfig:
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
-    # the most requests a step has (``step_reasons``: max_num_seqs x q <= MAX_ROWS)
+    # the most requests a step has (spec verify: ``step_reasons`` caps its rows)
     max_num_seqs: int = 1
 
     @property
@@ -106,8 +106,9 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
 
 
 def m1_reasons(vllm_config) -> list[str]:
-    """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
-    those layers run vLLM's attention ops instead, then K2 (``step_reasons``)."""
+    """Why the MLA layers cannot run M1 (empty: they can). Not a refusal for
+    ordinary decode or at DCP8: those layers run vLLM's attention ops, then K2.
+    Speculative DCP1 requires M1 (``step_reasons``)."""
     import vllm.envs as envs
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -236,7 +237,7 @@ def unsupported(vllm_config) -> list[str]:
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
     platform = platform_reasons()
-    if spec is None or spec.num_speculative_tokens + 1 <= MAX_ROWS:
+    if spec is not None and spec.num_speculative_tokens + 1 <= MAX_ROWS:
         reasons += step_reasons(vllm_config, check_m1c=not platform)
     return reasons + platform
 
@@ -254,13 +255,14 @@ def m1c_serves(q: int, seqs: int) -> bool:
 
 
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
-    """The regular/speculative step configurations served: a full step fits one
-    launch, and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs
-    the kernels' modules, so only on a supported platform)."""
+    """The speculative step configurations served: a full step fits one launch,
+    and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs the
+    kernels' modules, so only on a supported platform)."""
     spec = vllm_config.speculative_config
-    q = spec.num_speculative_tokens + 1 if spec is not None else 1
+    assert spec is not None
+    q = spec.num_speculative_tokens + 1
     seqs = vllm_config.scheduler_config.max_num_seqs
-    if spec is not None and (seqs not in MAX_SEQS or seqs * q > MAX_ROWS):
+    if seqs not in MAX_SEQS or seqs * q > MAX_ROWS:
         k = q - 1
         return [
             f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
@@ -271,11 +273,6 @@ def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     m1 = m1_reasons(vllm_config)
     if m1:
         return ["DCP1 without M1 (" + "; ".join(m1) + ")"]
-    if spec is None:
-        return [
-            "DCP1 regular decode (DCP1 runs M1c only at 3 or 7 speculative "
-            "tokens; use DCP8)"
-        ]
     if check_m1c and not m1c_serves(q, seqs):
         k = q - 1
         return [
