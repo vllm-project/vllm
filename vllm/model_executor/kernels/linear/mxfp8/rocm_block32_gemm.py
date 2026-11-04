@@ -103,6 +103,62 @@ def _sum_splits(
         tl.store(count_ptr, 0)
 
 
+@triton.jit
+def _grouped_tile(
+    M,
+    N: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    N_FIRST: tl.constexpr,
+):
+    """Map the configured grid to 16-by-8 tile neighborhoods."""
+    FAST: tl.constexpr = 16
+    grid_m = tl.cdiv(M, BLOCK_M)
+    grid_n: tl.constexpr = tl.cdiv(N, BLOCK_N)
+    if N_FIRST:
+        grid_fast, grid_slow = grid_n, grid_m
+    else:
+        grid_fast, grid_slow = grid_m, grid_n
+
+    # Axis 1 is always the configured slow axis of the unchanged launch.
+    first_slow = tl.program_id(1) // 8 * 8
+    in_band = tl.program_id(1) % 8 * grid_fast + tl.program_id(0)
+    if N_FIRST:  # noqa: SIM108 - preserve the constexpr branch.
+        full_band = first_slow + 8 <= grid_slow
+    else:
+        full_band = False
+
+    if full_band:
+        # The fast-axis grid extent is compile-time N here. Every divisor in
+        # a complete slow-axis band is therefore a compile-time constant.
+        first_fast = in_band // (FAST * 8) * FAST
+        if grid_n % FAST == 0:
+            fast = first_fast + in_band % FAST
+            slow = first_slow + (in_band // FAST) % 8
+        else:
+            if first_fast + FAST <= grid_n:
+                fast = first_fast + in_band % FAST
+                slow = first_slow + (in_band // FAST) % 8
+            else:
+                tail: tl.constexpr = grid_n % FAST
+                in_tail = in_band - (grid_n - tail) * 8
+                fast = grid_n - tail + in_tail % tail
+                slow = first_slow + in_tail // tail
+    else:
+        # General path also covers partial final bands and M-first grids.
+        size_slow = tl.minimum(8, grid_slow - first_slow)
+        first_fast = in_band // (FAST * size_slow) * FAST
+        size_fast = tl.minimum(FAST, grid_fast - first_fast)
+        in_group = in_band - first_fast * size_slow
+        fast = first_fast + in_group % size_fast
+        slow = first_slow + in_group // size_fast
+
+    if N_FIRST:
+        return slow, fast
+    else:
+        return fast, slow
+
+
 @triton.jit(do_not_specialize=["M"])
 def _block32_tiled_kernel(
     x_ptr,
@@ -129,12 +185,7 @@ def _block32_tiled_kernel(
         if pid_m * BLOCK_M >= M:
             return
     else:
-        # N_FIRST launches output-column tiles fastest, so consecutive
-        # programs share an activation tile.
-        if N_FIRST:
-            pid_n, pid_m = tl.program_id(0), tl.program_id(1)
-        else:
-            pid_m, pid_n = tl.program_id(0), tl.program_id(1)
+        pid_m, pid_n = _grouped_tile(M, N, BLOCK_M, BLOCK_N, N_FIRST)
         pid_k = tl.program_id(2)
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
