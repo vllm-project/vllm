@@ -33,27 +33,27 @@ class ExternalWeightMemory:
 
     @contextmanager
     def track(self) -> Generator[None, None, None]:
-        token = _external_weight_memory.set(self)
+        token = _active_external_weights.set(self)
         try:
             yield
         finally:
-            _external_weight_memory.reset(token)
+            _active_external_weights.reset(token)
 
 
-_external_weight_memory: ContextVar[ExternalWeightMemory | None] = ContextVar(
-    "external_weight_memory", default=None
+_active_external_weights: ContextVar[ExternalWeightMemory | None] = ContextVar(
+    "active_external_weights", default=None
 )
 
 
 def record_external_weight_charge(
     socket_path: str, is_draft: bool, memory_bytes: int
 ) -> None:
-    if accounting := _external_weight_memory.get():
+    if accounting := _active_external_weights.get():
         accounting._charges[socket_path, is_draft] = memory_bytes
 
 
 def record_external_weight_fallback(socket_path: str, is_draft: bool) -> None:
-    if accounting := _external_weight_memory.get():
+    if accounting := _active_external_weights.get():
         accounting.fallback_bytes += accounting._charges.pop((socket_path, is_draft), 0)
 
 
