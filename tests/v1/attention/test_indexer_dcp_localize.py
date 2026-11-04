@@ -594,11 +594,14 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     not current_platform.is_cuda() or not has_cutedsl(),
     reason="This test requires CUDA and CuteDSL",
 )
+@pytest.mark.parametrize("logits_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("num_positions", [16384, 131072, 1 << 20])
-def test_cutedsl_gathered_select_compact_keys_match_reference(num_positions: int):
-    """BF16-valued scores (upcast SM100 MQA logits) tie at the top-k boundary.
-    Keying only their 16 high bits and the id bits below ``num_positions``
-    must select the same set as the full 64-bit key."""
+def test_cutedsl_gathered_select_compact_keys_match_reference(
+    num_positions: int, logits_dtype: torch.dtype
+):
+    """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
+    top-k boundary) keyed only by their high score bits and the id bits below
+    ``num_positions`` must select the same set as the full 64-bit key."""
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         dcp_topk_id_bits,
         dcp_topk_score_bits,
@@ -615,14 +618,19 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(num_positions: int
     # Row 2: all negative. Row 3: padding mixed in. Row 4: all tied.
     scores[2] = -scores[2].abs()
     scores[4] = 0.5
-    scores = scores.bfloat16().float()
+    scores = scores.to(logits_dtype).float()
     ids = torch.stack(
         [
             torch.randperm(num_positions, device=device)[:num_candidates]
             for _ in range(rows)
         ]
     ).to(torch.int32)
-    ids[:, 0] = num_positions - 1
+    # Largest id first, swapped into place so ids stay unique even when
+    # num_candidates == num_positions.
+    largest = num_positions - 1
+    at = (ids == largest).int().argmax(dim=1)
+    ids[torch.arange(rows, device=device), at] = ids[:, 0]
+    ids[:, 0] = largest
     ids[3, ::3] = -1
     # Rank-major [world, rows, topk, 2], as a dim-0 all-gather produces.
     gathered = (
@@ -640,7 +648,7 @@ def test_cutedsl_gathered_select_compact_keys_match_reference(num_positions: int
         gathered,
         topk,
         out=compact,
-        score_bits=dcp_topk_score_bits(torch.bfloat16),
+        score_bits=dcp_topk_score_bits(logits_dtype),
         id_bits=dcp_topk_id_bits(num_positions),
     )
     for row in range(rows):
