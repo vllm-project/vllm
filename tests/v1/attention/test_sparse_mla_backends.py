@@ -4245,6 +4245,7 @@ def test_flashattn_shared_indices_match_independent_conversion(
             2, dtype=torch.int32, device=device
         ).repeat_interleave(query_len),
         num_decode_tokens=num_decode_tokens,
+        topk_start=0,
     )
     q_nope = torch.randn(num_tokens, 8, 512, dtype=torch.bfloat16, device=device)
     q_rope = torch.randn(num_tokens, 8, 64, dtype=torch.bfloat16, device=device)
