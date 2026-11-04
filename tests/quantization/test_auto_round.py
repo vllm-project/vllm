@@ -1475,7 +1475,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
             captured["quant_config"] = quant_config
             captured["method"] = self
             self.calls: list[tuple] = []
-            self.marlin_input_dtype = None
 
         def create_weights(
             self,
@@ -1512,11 +1511,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
         "Fp8LinearMethod",
         DummyMethod,
     )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear."
-        "get_marlin_input_dtype",
-        lambda _prefix: "fp8-marlin",
-    )
 
     scheme = INCFp8LinearScheme(
         prefix="layers.0.mlp.down_proj",
@@ -1539,7 +1533,6 @@ def test_inc_fp8_linear_scheme_delegates_to_fp8_linear_method(
     assert captured["quant_config"].is_checkpoint_fp8_serialized is True
     assert captured["quant_config"].activation_scheme == "dynamic"
     assert captured["quant_config"].weight_block_size == [128, 128]
-    assert captured["method"].marlin_input_dtype == "fp8-marlin"
     assert result == "applied"
     assert [call[0] for call in captured["method"].calls] == [
         "create_weights",

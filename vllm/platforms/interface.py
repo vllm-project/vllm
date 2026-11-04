@@ -1471,6 +1471,8 @@ class Platform:
         from vllm import envs
 
         for env in os.environ:
+            if hint := envs.removed_environment_variables.get(env):
+                raise ValueError(f"{env} has been removed. {hint}")
             if env.startswith("VLLM_") and env not in envs.environment_variables:
                 if hard_fail:
                     raise ValueError(
