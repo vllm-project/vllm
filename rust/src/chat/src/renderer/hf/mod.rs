@@ -16,7 +16,7 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext, request_template_fuel};
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, tool_call_arguments_or_empty};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
@@ -555,7 +555,7 @@ fn to_template_message<'a>(
         ChatMessage::Assistant { content } => {
             let text = content.text();
             let reasoning = content.reasoning();
-            let tool_calls = to_template_tool_calls(content)?;
+            let tool_calls = to_template_tool_calls(content);
             let content =
                 to_template_content(&ChatContent::Text(text), content_format, multimodal)?;
             TemplateMessage {
@@ -592,30 +592,21 @@ fn to_template_message<'a>(
     })
 }
 
-fn to_template_tool_calls(
-    content: &[AssistantContentBlock],
-) -> Result<Option<Vec<TemplateToolCall>>> {
+fn to_template_tool_calls(content: &[AssistantContentBlock]) -> Option<Vec<TemplateToolCall>> {
     let mut tool_calls = Vec::new();
 
     for tool_call in content.tool_calls() {
-        let arguments = serde_json::from_str(&tool_call.arguments).map_err(|error| {
-            Error::ChatTemplate(format!(
-                "assistant tool call `{}` has invalid JSON arguments: {}",
-                tool_call.id,
-                error.as_report()
-            ))
-        })?;
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
             r#type: "function",
             function: TemplateToolFunction {
                 name: tool_call.name.clone(),
-                arguments,
+                arguments: JsonValue::Object(tool_call_arguments_or_empty(&tool_call.arguments)),
             },
         });
     }
 
-    Ok((!tool_calls.is_empty()).then_some(tool_calls))
+    (!tool_calls.is_empty()).then_some(tool_calls)
 }
 
 fn to_template_content(
@@ -1846,6 +1837,50 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|Paris|call_1|Sunny");
+    }
+
+    #[test]
+    fn chat_template_tool_call_arguments_that_are_not_an_object_render_as_empty() {
+        let render_arguments = |arguments: &[&str]| {
+            let tool_calls = arguments
+                .iter()
+                .map(|arguments| {
+                    AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: arguments.to_string(),
+                    })
+                })
+                .collect();
+            // `.items()` is what fails on anything but a mapping.
+            render(
+                Some(
+                    "{%- for call in messages[0].tool_calls -%}
+{{ call.function.arguments | tojson }}:
+{%- for key, value in call.function.arguments.items() -%}{{ key }}={{ value }}{%- endfor -%};
+{%- endfor -%}",
+                ),
+                &sample_request(vec![ChatMessage::assistant_blocks(tool_calls)]),
+            )
+            .unwrap()
+        };
+
+        for arguments in [
+            r#"{"cmd": "mkdir -p"#,
+            "   ",
+            "[]",
+            "42",
+            "true",
+            r#""hello""#,
+            "null",
+        ] {
+            assert_eq!(render_arguments(&[arguments]), "{}:;", "{arguments:?}");
+        }
+        // Each call is coerced on its own.
+        assert_eq!(
+            render_arguments(&[r#"{"a": 1}"#, r#"{"cmd": ""#]),
+            r#"{"a": 1}:a=1;{}:;"#
+        );
     }
 
     #[test]
