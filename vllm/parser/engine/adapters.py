@@ -133,6 +133,14 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
 
+    @property
+    def opens_reasoning_in_content(self) -> bool:
+        """Whether the grammar can open reasoning after content has started."""
+        start = self._parser_engine.parser_engine_config.transitions.get(
+            (ParserState.CONTENT, "THINK_START")
+        )
+        return start is not None and start.next_state is ParserState.REASONING
+
     def finish_streaming(self) -> DeltaMessage | None:
         with self._skip_tool_parsing():
             return self._parser_engine.finish_streaming()

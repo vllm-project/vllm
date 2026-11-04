@@ -125,6 +125,25 @@ def test_streaming_matches_parse(parser_cls, tokenizer, case, chunk_size):
     assert [json.loads(tc["arguments"])["city"] for tc in output.tool_calls] == cities
 
 
+@pytest.mark.parametrize("case", ["direct_answer", "reasoning"])
+def test_streaming_without_tool_parser(tokenizer, case):
+    # Without --enable-auto-tool-choice no tool parser is composed, so the
+    # reasoning parser alone must still split out <think> while streaming.
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="ripple")
+    assert parser_cls is not None
+    text, reasoning, content, _ = CASES[case]
+    output = collect_output(
+        replay_streaming(
+            parser_cls(tokenizer),
+            [(ord(ch), ch) for ch in text],
+            chunk_size=1,
+            finished_on_last=True,
+            prompt_token_ids=[1, ord("u"), 2, 1],
+        )
+    )
+    assert (output.reasoning, output.content) == (reasoning, content)
+
+
 def test_structured_output_applies_from_first_token(tokenizer):
     # Thinking is optional, so a constrained response must not wait for a
     # "</think>" the model may never emit.

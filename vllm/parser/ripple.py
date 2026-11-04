@@ -111,3 +111,9 @@ class RippleParser(ParserEngine):
         kwargs.pop("chat_template_kwargs", None)
         kwargs.setdefault("parser_engine_config", ripple_config())
         super().__init__(tokenizer, tools, **kwargs)
+
+    @property
+    def reasoning_end_str(self) -> str:
+        # The thinking budget matches this as token ids. The template's leading
+        # newline merges into the previous token, so leave it out.
+        return THINK_END + "\n"
