@@ -886,9 +886,6 @@ class VllmConfig:
             return False
 
         architectures = set(model_config.architectures)
-        # Multimodal wrappers (e.g. Pixtral) may host a breakable text model.
-        hf_text_config = getattr(model_config, "hf_text_config", None)
-        architectures.update(getattr(hf_text_config, "architectures", None) or ())
         return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _uses_breakable_cudagraph_for_batch_invariance(self) -> bool:
