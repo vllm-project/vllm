@@ -70,7 +70,7 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         op = AllReduceMHC(
-            hidden_size=5120, hc_mult=4, max_num_tokens=16, top_k=6, device=device
+            hidden_size=5120, hc_mult=4, max_num_tokens=256, top_k=6, device=device
         )
 
         def check_eager_and_replayed(fused, check, halved, doubled):
@@ -98,12 +98,16 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
             weight = torch.randn(5120, device=device, dtype=torch.bfloat16)
             return residual, post, comb, pre, weight
 
-        def run(n):
+        def contribution(n):
             torch.manual_seed(42 + rank)
             x = torch.randn(n, 5120, device=device, dtype=torch.bfloat16)
             # Packed +0/-0 pairs collide with the Lamport sentinel.
             x[:, :16] = 0
             x[:, 9:16:2] = -0.0
+            return x
+
+        def run(n):
+            x = contribution(n)
             residual, post, comb, pre, weight = mhc_inputs(n)
 
             def fused():
@@ -167,10 +171,26 @@ def _all_reduce_mhc(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
 
             check_eager_and_replayed(fused, check, gemm2, shared)
 
-        # Changing shapes cover shrinking and growing batches in one mailbox.
-        for n in (1, 6, 12, 8, 16, 3, 5, 2, 4, 1):
-            run(n)
-            run_finalize(n)
+        # Changing shapes cover shrinking and growing batches in one mailbox:
+        # LL only, BT only (200 rows take the wider owner reduce), then both
+        # protocols in turn, switching at 8 rows.
+        shapes = (1, 6, 12, 8, 16, 3, 5, 2, 4, 1)
+        for bt_min_rows, ns in ((257, shapes), (1, (*shapes, 200)), (8, shapes)):
+            op.bt_min_rows = op.bt_min_finalize_rows = bt_min_rows
+            for n in ns:
+                run(n)
+                run_finalize(n)
+
+        # Both protocols give the same bits.
+        for n in (6, 16, 200):
+            x = contribution(n)
+            inputs = mhc_inputs(n)
+            op.bt_min_rows = n + 1
+            ll = op(x, *inputs, 1e-6)
+            op.bt_min_rows = n
+            bt = op(x, *inputs, 1e-6)
+            assert torch.equal(ll[0], bt[0])
+            assert torch.equal(ll[1], bt[1])
 
 
 @pytest.mark.skipif(
@@ -875,3 +895,103 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+def _order_sensitive_inputs(
+    numel: int, dtype: torch.dtype, world_size: int, seed: int
+) -> torch.Tensor:
+    """Per-rank inputs, shape [numel, world_size], whose sum depends on the
+    order the ranks are accumulated in.
+
+    Each element holds +B, -B and small terms t in a random rank order, with t
+    below the float32 accumulator's resolution at B: adding t to B loses it,
+    cancelling +B and -B first keeps it, and the difference survives the
+    downcast. Ordinary random fp16/bf16 data cannot detect a changed order,
+    because its float32 partial sums are exact.
+    """
+    log2_big, log2_tiny = {
+        torch.float16: (13, -13),
+        torch.bfloat16: (20, -8),
+        torch.float32: (20, -8),
+    }[dtype]
+    gen = torch.Generator().manual_seed(seed)
+    big = (torch.rand(numel, generator=gen, dtype=torch.float64) + 1) * 2.0**log2_big
+    tiny = torch.rand(numel, world_size - 2, generator=gen, dtype=torch.float64) + 1
+    sign = torch.randint(0, 2, tiny.shape, generator=gen) * 2 - 1
+    tiny *= sign * 2.0**log2_tiny
+    terms = torch.cat([big[:, None], -big[:, None], tiny], dim=1)
+    order = torch.argsort(torch.rand(numel, world_size, generator=gen), dim=1)
+    return torch.gather(terms, 1, order).to(dtype)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def one_and_two_stage_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        fa = get_tp_group().device_communicator.ca_comm
+        assert fa is not None and not fa.disabled, "custom all-reduce is disabled"
+
+        # Sizes are counts of 16-byte packed elements. They straddle the
+        # 512 KiB 1-stage/2-stage threshold, and all but one leave a remainder
+        # when divided by the world size, giving the last rank a larger part.
+        for dtype, bits in [
+            (torch.float16, torch.int16),
+            (torch.bfloat16, torch.int16),
+            (torch.float32, torch.int32),
+        ]:
+            for packed in [1021, 32771, 65536, 262139]:
+                numel = packed * (16 // torch.empty((), dtype=dtype).element_size())
+                case = f"{dtype}, {packed * 16} bytes"
+
+                ints = torch.randint(
+                    -8, 9, (numel, tp_size), generator=torch.Generator().manual_seed(0)
+                ).to(dtype)
+                exact = ints.sum(dim=1).to(device)
+                inputs = _order_sensitive_inputs(numel, dtype, tp_size, seed=packed)
+                outs = {}
+                for algo in ["1stage", "2stage"]:
+                    m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", algo)
+                    summed = fa.all_reduce(
+                        ints[:, rank].contiguous().to(device), registered=False
+                    )
+                    torch.testing.assert_close(summed, exact, rtol=0, atol=0)
+                    outs[algo] = fa.all_reduce(
+                        inputs[:, rank].contiguous().to(device), registered=False
+                    )
+                torch.accelerator.synchronize()
+
+                differ = outs["1stage"].view(bits) != outs["2stage"].view(bits)
+                assert not differ.any(), (
+                    f"{case}: 2-stage differs from 1-stage in "
+                    f"{int(differ.sum())}/{numel} elements"
+                )
+
+
+def test_one_and_two_stage_allreduce_bitwise_identical(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Needs 4 ranks: at 2, the 2-stage owner rotation only turns a+b into b+a,
+    which is commutative, so no 2-rank run can tell the orders apart.
+    """
+    tp_size = 4
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    if not car.custom_ar:
+        pytest.skip("Custom all-reduce ops are not available.")
+    physical_ids = [
+        current_platform.visible_device_id_to_physical_device_id(i)
+        for i in range(tp_size)
+    ]
+    if not current_platform.is_fully_connected(physical_ids):
+        pytest.skip("Custom all-reduce needs fully connected GPUs above 2 ranks.")
+    multi_process_parallel(monkeypatch, tp_size, 1, one_and_two_stage_allreduce)

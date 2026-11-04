@@ -48,7 +48,7 @@ def test_watermarked_generation_with_model_parallelism(vllm_runner, parallel_kwa
             prompts,
             SamplingParams(
                 temperature=0.8,
-                seed=2,
+                seed=1,
                 max_tokens=8,
                 ignore_eos=True,
             ),
@@ -82,7 +82,7 @@ def test_watermarked_generation_with_data_parallelism():
                 "Data-parallel watermark smoke",
                 SamplingParams(
                     temperature=0.8,
-                    seed=index,
+                    seed=42,
                     max_tokens=8,
                     ignore_eos=True,
                 ),

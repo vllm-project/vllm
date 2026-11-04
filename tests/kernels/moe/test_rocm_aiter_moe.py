@@ -791,6 +791,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
         rocm_aiter_fused_experts,
     )
 
@@ -831,6 +832,7 @@ def test_aiter_moe_dispatch_policy_forwarded_to_fused_moe(
                 topk_weights=case["topk_weights"],
                 topk_ids=case["topk_ids"],
                 moe_config=moe_config,
+                quant_method=QuantMethod.NO,
                 activation=MoEActivation.SILU,
                 moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
             )
@@ -1136,6 +1138,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
     MXFP4 reference."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
+        mxfp4_w4a16_extra_kwargs,
         rocm_aiter_fused_experts,
     )
 
@@ -1165,7 +1169,9 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_accuracy():
         activation=MoEActivation.SWIGLUOAI,
         quant_config=case.quant_config,
         moe_config=case.moe_config,
+        quant_method=QuantMethod.BLOCK_1X32,
         expert_mask=None,
+        **mxfp4_w4a16_extra_kwargs(case.quant_config, case.moe_config),
     )
 
     assert out.shape == case.hidden_states.shape
@@ -1186,6 +1192,8 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
     deterministic."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        QuantMethod,
+        mxfp4_w4a16_extra_kwargs,
         rocm_aiter_fused_experts,
     )
 
@@ -1209,7 +1217,9 @@ def test_aiter_fused_moe_mi350_mxfp4_w4a16_determinism():
             activation=MoEActivation.SWIGLUOAI,
             quant_config=case.quant_config,
             moe_config=case.moe_config,
+            quant_method=QuantMethod.BLOCK_1X32,
             expert_mask=None,
+            **mxfp4_w4a16_extra_kwargs(case.quant_config, case.moe_config),
         )
 
     _assert_deterministic(run_mxfp4_moe, n_runs=4)

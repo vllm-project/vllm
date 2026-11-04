@@ -63,13 +63,18 @@ steps:
   source_file_dependencies:
   - .buildkite/test_areas/lm_eval.yaml
   - tests/evals/gsm8k/
+  - tests/watermarking/test_watermarking_e2e.py
+  - vllm/config/vllm.py
   - vllm/config/watermarking.py
   - vllm/sampling_params.py
+  - vllm/v1/engine/core.py
+  - vllm/v1/engine/input_processor.py
   - vllm/v1/watermarking/
   - vllm/v1/worker/gpu/
   autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
+  - pytest -s -v watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -93,19 +98,6 @@ steps:
         VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-watermark.txt
-
-# - label: LM Eval Large Models (4xA100)
-#   key: lm-eval-large-models-4xa100
-#   device: a100
-#   optional: true
-#   num_devices: 4
-#   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-#   source_file_dependencies:
-#   - csrc/
-#   - vllm/model_executor/layers/quantization
-#   commands:
-#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-#   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Large Models"
   key: lm-eval-large-models-4xh100
@@ -157,6 +149,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) LM Eval Small Models"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       num_devices: 1
@@ -225,6 +218,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval HiSparse"
   key: lm-eval-hisparse-nightly-4xb200
+  automatic_shard: true
   timeout_in_minutes: 60
   device: b200-k8s
   num_devices: 4
@@ -282,6 +276,7 @@ steps:
   - tests/watermarking/test_compatibility.py
   - tests/watermarking/test_engine_compatibility.py
   - tests/watermarking/test_parallel_compatibility.py
+  - tests/watermarking/test_watermarking_e2e.py
   - vllm/config/speculative.py
   - vllm/config/vllm.py
   - vllm/config/watermarking.py
@@ -299,6 +294,7 @@ steps:
     watermarking/test_compatibility.py
     watermarking/test_engine_compatibility.py
     watermarking/test_parallel_compatibility.py
+    watermarking/test_watermarking_e2e.py
   mirror:
     amd:
       automatic_shard: true
@@ -508,6 +504,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 TP"
   key: lm-eval-deepseek-r1-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -518,6 +515,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -552,6 +550,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek R1 DP"
   key: lm-eval-deepseek-r1-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -561,6 +560,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek R1 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -596,6 +596,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 TP"
   key: lm-eval-deepseek-v32-tp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -606,6 +607,7 @@ steps:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 TP"
       dind: false
+      automatic_shard: true
       device: mi355_4
       num_devices: 4
       timeout_in_minutes: 65
@@ -640,6 +642,7 @@ steps:
 
 - label: ":nvidia: (H200) [Nightly] LM Eval DeepSeek V3.2 DP"
   key: lm-eval-deepseek-v32-dp-8xh200
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h200
   optional: true
@@ -649,6 +652,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355) LM Eval DeepSeek V3-2 DP"
+      automatic_shard: true
       dind: false
       device: mi355_4
       num_devices: 4
@@ -864,38 +868,6 @@ steps:
   - vllm/model_executor/kernels/linear/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-l4.txt
-
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Default TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-default
-  optional: true
-  timeout_in_minutes: 75
-  device: a100
-  num_devices: 1
-  parallelism: 3
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
-
-- label: ":nvidia: (A100) [Nightly] LM Eval Humming Activation INT8 TEMPORARY Shard %N"
-  key: lm-eval-humming-a100-act
-  optional: true
-  timeout_in_minutes: 45
-  device: a100
-  num_devices: 1
-  parallelism: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/quantization/humming.py
-  - vllm/model_executor/layers/quantization/utils/humming/
-  - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
-  - vllm/model_executor/layers/fused_moe/oracle/
-  - vllm/model_executor/kernels/linear/
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-act-int8-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: ":nvidia: (H100) [Nightly] LM Eval Humming Default TEMPORARY"
   key: lm-eval-humming-h100-default
@@ -1175,6 +1147,7 @@ steps:
 
 - label: ":nvidia: (H100) [Nightly] GPQA Eval (GPT-OSS)"
   key: gpqa-eval-gpt-oss-2xh100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   optional: true
@@ -1188,6 +1161,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI300) GPQA Eval (GPT-OSS)"
+      automatic_shard: true
       dind: false
       device: mi300_2
       num_devices: 2

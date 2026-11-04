@@ -12,7 +12,10 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import is_deferred_attention_layer
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    finalize_model_weights,
+)
 
 from .meta import (
     SKIP_LOAD_TENSORS,
@@ -38,6 +41,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "max_layer_reload_bytes",
 ]
 
 
@@ -77,6 +81,17 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
         info.restore_device = torch.get_default_device()
+
+
+def max_layer_reload_bytes(model: torch.nn.Module) -> int:
+    """Bytes of the largest layer in checkpoint format, which a layerwise reload
+    materializes on the device, one layer at a time, before processing it."""
+    sizes = (
+        sum(t.nbytes for tensors in info.restore_metadata for t in tensors.values())
+        for layer in model.modules()
+        if (info := LAYERWISE_INFO.get(layer)) is not None
+    )
+    return max(sizes, default=0)
 
 
 @torch.no_grad()
@@ -291,8 +306,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     LOADING_LAYERS.clear()
 
 
-def finalize_layerwise_reload(*args, **kwargs):
-    finalize_layerwise_processing(*args, **kwargs)
+def finalize_layerwise_reload(model: torch.nn.Module, model_config: ModelConfig):
+    finalize_layerwise_processing(model, model_config)
+    finalize_model_weights(model)
 
 
 def _finalize_attention_layer(
@@ -307,7 +323,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    layer.process_weights_after_loading()
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:

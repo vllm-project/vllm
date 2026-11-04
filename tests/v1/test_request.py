@@ -74,3 +74,12 @@ def test_request_copies_kv_hints_from_engine_core_request():
     request = Request.from_engine_core_request(engine_request, block_hasher=None)
 
     assert request.kv_hints == kv_hints
+
+
+def test_prefill_token_ids_shares_prompt_until_outputs():
+    request = Request("r", [1, 2, 3], SamplingParams(max_tokens=4), None)
+    # Same object, so NewRequestData pickles the prompt once.
+    assert request.prefill_token_ids is request.prompt_token_ids
+    request.append_output_token_ids(4)
+    assert request.prefill_token_ids is request._all_token_ids
+    assert request.prefill_token_ids == [1, 2, 3, 4]

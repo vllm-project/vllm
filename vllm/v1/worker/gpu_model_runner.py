@@ -740,7 +740,6 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -2354,18 +2353,11 @@ class GPUModelRunner(
         if self.model_config.rswa_window is not None:
             rswa_prefix_lens = num_prompt_tokens_cpu
 
-        replayssm_decode_base_cpu = None
-        if self.cache_config.use_replayssm:
-            replayssm_decode_base_cpu = (
-                self.input_batch.replayssm_decode_base_cpu_tensor[:num_reqs_padded]
-            )
-
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
             seq_lens=self.seq_lens[:num_reqs_padded],
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            replayssm_decode_base_cpu=replayssm_decode_base_cpu,
             num_reqs=num_reqs_padded,
             num_actual_tokens=num_tokens_padded,
             max_query_len=max_query_len,
@@ -3953,18 +3945,8 @@ class GPUModelRunner(
                     return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
-                if (
-                    self.parallel_config.distributed_executor_backend
-                    == "external_launcher"
-                    and self.parallel_config.data_parallel_size > 1
-                ):
-                    # this is a corner case when both external launcher
-                    # and DP are enabled, num_scheduled_tokens could be
-                    # 0, and has_unfinished_requests in the outer loop
-                    # returns True. before returning early here we call
-                    # dummy run to ensure coordinate_batch_across_dp
-                    # is called into to avoid out of sync issues.
-                    self._dummy_run(1)
+                # With DP, LLMEngine.step() / DPEngineCoreProc run a dummy
+                # batch for this step so the DP collectives stay aligned.
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
@@ -5128,7 +5110,7 @@ class GPUModelRunner(
         cudagraph_mode = self.compilation_config.cudagraph_mode
         assert cudagraph_mode is not None
         if (
-            is_breakable_cudagraph_enabled()
+            is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
             and cudagraph_mode != CUDAGraphMode.NONE
             and not self.parallel_config.use_ubatching
         ):
@@ -6893,7 +6875,6 @@ class GPUModelRunner(
                     is_pooling_model=self.is_pooling_model,
                     cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                     reasoning_config=self.vllm_config.reasoning_config,
-                    use_replayssm=self.cache_config.use_replayssm,
                     slot_mapping_modes=slot_mapping_modes,
                 )
 

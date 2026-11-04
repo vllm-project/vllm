@@ -657,11 +657,18 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
             tool_text = "\n".join(text_parts)
 
+        tool_content: str | list[dict[str, Any]] = tool_text or ""
+        if tool_reference:
+            # One tool message per tool_result. Chat templates that expand
+            # tool references check the first content part.
+            tool_content = tool_reference
+            if tool_text:
+                tool_content.append({"type": "text", "text": tool_text})
         openai_messages.append(
             {
                 "role": "tool",
                 "tool_call_id": block.tool_use_id or "",
-                "content": tool_text or "",
+                "content": tool_content,
             }
         )
 
@@ -673,15 +680,6 @@ class AnthropicServingMessages(OpenAIServingChat):
                         {"type": "image_url", "image_url": {"url": img}}
                         for img in tool_image_urls
                     ],
-                }
-            )
-
-        if tool_reference:
-            openai_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": block.tool_use_id or "",
-                    "content": tool_reference,  # type: ignore[dict-item]
                 }
             )
 
@@ -708,6 +706,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            min_tokens=anthropic_request.min_tokens,
             watermarking=anthropic_request.watermarking,
             cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
