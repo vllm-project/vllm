@@ -635,18 +635,6 @@ def moe_awq_to_marlin_zero_points(
     return output
 
 
-def maybe_warn_marlin_atomic_add(device, dtype):
-    if torch.compiler.is_dynamo_compiling():
-        return
-    device_capability = torch.cuda.get_device_capability(device)
-    if device_capability[0] < 9 and dtype == torch.bfloat16:
-        logger.info_once(
-            "You are running Marlin kernel with bf16 on GPUs before SM90. "
-            "You can consider change to fp16 to achieve better performance "
-            "if possible."
-        )
-
-
 def moe_packed_to_marlin_zero_points(
     q_zp_packed: torch.Tensor,
     size_k: int,
@@ -669,42 +657,6 @@ def moe_packed_to_marlin_zero_points(
         q_zp = unpack_cols(q_zp_packed[e], num_bits, size_k, size_n)
         output[e] = marlin_zero_points(q_zp, size_k, size_n, num_bits, is_a_8bit)
     return output
-
-
-def maybe_warn_marlin_atomic_add_env():
-    if torch.compiler.is_dynamo_compiling():
-        return
-    if envs.VLLM_MARLIN_USE_ATOMIC_ADD:
-        return
-    logger.info_once(
-        "Marlin kernel can achieve better performance for small size_n "
-        "with experimental use_atomic_add feature. "
-        "You can consider set environment variable "
-        "VLLM_MARLIN_USE_ATOMIC_ADD to 1 if possible."
-    )
-
-
-def should_use_atomic_add_reduce(
-    m: int, n: int, k: int, device: torch.device, dtype: torch.dtype
-) -> bool:
-    # the performance of atomicAdd is better than global reduce
-    # only when m*n is small and k is large
-    if n >= 2048 or k < 2048 or device.type != "cuda":
-        return False
-
-    # disable atomicAdd reduce by default,
-    # one can enable it with VLLM_MARLIN_USE_ATOMIC_ADD=1
-    if not envs.VLLM_MARLIN_USE_ATOMIC_ADD:
-        maybe_warn_marlin_atomic_add_env()
-        return False
-
-    # sm8x doesn't support atomicAdd + bfloat16 natively
-    device_capability = torch.cuda.get_device_capability(device)
-    if device_capability[0] < 9 and dtype == torch.bfloat16:
-        maybe_warn_marlin_atomic_add(device, dtype)
-        return False
-
-    return True
 
 
 _quant_fp8_method: QuantFP8 | None = None
@@ -769,14 +721,6 @@ def apply_gptq_marlin_linear(
     padded_n, padded_k = marlin_repacked_nk(weight, wtype.size_bits)
     reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
 
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
     a_scales = None
     if input_dtype == torch.int8:
         assert wtype == scalar_types.uint4b8, (
@@ -804,7 +748,7 @@ def apply_gptq_marlin_linear(
         size_m=reshaped_x.shape[0],
         size_n=padded_n,
         size_k=padded_k,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
     )

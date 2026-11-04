@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_scales,
     marlin_repacked_nk,
     marlin_unpad_output,
-    should_use_atomic_add_reduce,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -65,14 +64,6 @@ def apply_fp8_marlin_linear(
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=8)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
     inputs = reshaped_x
     a_scales = None
     if input_dtype is not None and input_dtype.itemsize == 1:
@@ -92,7 +83,7 @@ def apply_fp8_marlin_linear(
         size_m=reshaped_x.size(0),
         size_n=padded_n,
         size_k=padded_k,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=use_fp32_reduce,
     )
 
@@ -388,14 +379,6 @@ def apply_mxfp8_marlin_linear(
     padded_n, padded_k = marlin_repacked_nk(weight, num_bits=8)
     reshaped_x = marlin_pad_dim(reshaped_x, size_k, padded_k)
 
-    use_atomic_add = should_use_atomic_add_reduce(
-        m=reshaped_x.size(0),
-        n=padded_n,
-        k=padded_k,
-        device=input.device,
-        dtype=input.dtype,
-    )
-
     output = torch.ops.vllm.marlin_gemm(
         a=reshaped_x,
         b_q_weight=weight,
@@ -409,7 +392,7 @@ def apply_mxfp8_marlin_linear(
         size_m=reshaped_x.size(0),
         size_n=padded_n,
         size_k=padded_k,
-        use_atomic_add=use_atomic_add,
+        use_atomic_add=False,
         use_fp32_reduce=use_fp32_reduce,
     )
 

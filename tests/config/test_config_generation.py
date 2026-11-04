@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
+
 import pytest
 
 from vllm.engine.arg_utils import EngineArgs
@@ -109,6 +111,15 @@ def test_unrecognized_env(monkeypatch):
         fail_on_environ_validation=True,
     )
     engine_args.create_engine_config()
+
+
+def test_deprecated_marlin_atomic_add_env_warns(monkeypatch, caplog_vllm):
+    monkeypatch.setenv("VLLM_MARLIN_USE_ATOMIC_ADD", "1")
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        EngineArgs().create_engine_config()
+    assert any(
+        "VLLM_MARLIN_USE_ATOMIC_ADD is deprecated" in m for m in caplog_vllm.messages
+    )
 
 
 def test_get_diff_sampling_param_includes_penalties():

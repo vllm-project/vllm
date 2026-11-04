@@ -2274,6 +2274,11 @@ class EngineArgs:
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
         current_platform.validate_environ(self.fail_on_environ_validation)
+        if envs.is_set("VLLM_MARLIN_USE_ATOMIC_ADD"):
+            logger.warning(
+                "VLLM_MARLIN_USE_ATOMIC_ADD is deprecated, has no effect, and "
+                "will be removed in v0.35.0."
+            )
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model

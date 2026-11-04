@@ -1596,7 +1596,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MODEL_REDIRECT_PATH": lambda: os.environ.get(
         "VLLM_MODEL_REDIRECT_PATH", None
     ),
-    # Whether to use atomicAdd reduce in gptq/awq marlin kernel.
+    # Deprecated and has no effect; will be removed in v0.35.0.
     "VLLM_MARLIN_USE_ATOMIC_ADD": lambda: (
         os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1"
     ),

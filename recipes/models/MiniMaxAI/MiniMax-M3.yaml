@@ -185,9 +185,8 @@ variants:
           - "--max-model-len"
           - "131072"
       h200:
-        # Humming runs the dense MXFP8 linear layers; the atomic-add env var
-        # enables Marlin's atomic reduction on the MXFP8 MoE path. This image
-        # also supports the FP8 MSA indexer cache on H200.
+        # Humming runs the dense MXFP8 linear layers. This image also supports
+        # the FP8 MSA indexer cache on H200.
         docker_image: "vllm/vllm-openai:nightly-1a001d584244bd21829a5e5bd4a376ea141c0ce3"
         extra_args:
           - "--attention-backend"
@@ -199,8 +198,6 @@ variants:
           - "--gpu-memory-utilization"
           - "0.95"
           - "--enable-prefix-caching"
-        extra_env:
-          VLLM_MARLIN_USE_ATOMIC_ADD: "1"
       mi300x:
         docker_image: "vllm/vllm-openai-rocm:nightly"
         extra_args:
