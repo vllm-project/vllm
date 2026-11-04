@@ -63,8 +63,8 @@ Warps: 0 loads A and its scales, 1 loads B and its scales, 2 issues the MMAs,
 4-7 run the epilogue (warp 3 is idle).
 
 Programmatic dependent launch. GEMM1 needs the record to pick its experts, so
-all its warps wait for the kernel before it first; it then triggers its
-dependents at once. GEMM2 never waits for the GEMM1 grid. It reads the record
+all its warps wait for the kernel before it first; it triggers its dependents
+later (below). GEMM2 never waits for the GEMM1 grid. It reads the record
 without waiting (the record comes from the kernel before GEMM1, and GEMM1
 triggers only after its own wait for that kernel). Its CTAs take the SMs that
 GEMM1's CTAs leave (one CTA of either fills an SM's shared memory) and stream
@@ -81,6 +81,14 @@ built. GEMM2 completes only after every GEMM1 item's epilogue, after which
 GEMM1 reads and writes no global memory (its CTAs read the record's tile
 count before triggering, and a release fence precedes the trigger); so a
 kernel that waits for GEMM2 also sees GEMM1's work done.
+
+GEMM1's A load warp triggers right after issuing the CTA's
+``GEMM1_TRIGGER_K_TILE``-th k tile, counted over its items, and a CTA with fewer
+k tiles exits without triggering. GEMM2's grid becomes ready to launch only
+once every GEMM1 CTA has got that far or exited, so kernels of other streams
+that become ready before that (the shared expert's down_proj) take the SMs
+GEMM1 leaves ahead of GEMM2's CTAs. GEMM2 launches only once every GEMM1 CTA is
+resident, and GEMM1 waits on nothing GEMM2 does, so GEMM1 always completes.
 
 The weights are those vLLM prepares for the TRT-LLM-gen backend, whose rows are
 shuffled for 128-row epilogue tiles: in each block of 32, shuffled row
@@ -129,6 +137,8 @@ TILE = 8  # token rows per tile
 TMEM_COLUMNS = 128
 # L2 eviction priority of the streamed weights: evict first.
 EVICT_FIRST = 0x12F0000000000000
+# A GEMM1 CTA lets GEMM2 launch after issuing this many k tiles of its items.
+GEMM1_TRIGGER_K_TILE = 21
 
 
 def tile_scale_bytes(k: int) -> int:
@@ -148,9 +158,9 @@ class RoutedExpertGemm:
     # loading B tiles with TMA.
     gather_b = False
     # GEMM1 counts each token tile's finished items in the record's ready
-    # words and triggers its dependents right after its wait; GEMM2 waits,
-    # item by item, for its tile's count to reach ``ready_target`` (GEMM1's
-    # m tiles) instead of for the GEMM1 grid (module docstring).
+    # words and triggers its dependents after ``GEMM1_TRIGGER_K_TILE`` k tiles;
+    # GEMM2 waits, item by item, for its tile's count to reach ``ready_target``
+    # (GEMM1's m tiles) instead of for the GEMM1 grid (module docstring).
     signal_ready = False
     ready_target = 0
     # Operand types, which a subclass's ``__call__`` sets.
@@ -465,8 +475,8 @@ class RoutedExpertGemm:
         if bid < total:
             count = (total - 1 - bid) // grid + 1
         if cutlass.const_expr(self.signal_ready):
-            # Every warp has read the tile count before warp 0 triggers
-            # GEMM2, which may finish before a CTA without items exits.
+            # Every warp reads the tile count before warp 0 triggers GEMM2
+            # (module docstring).
             cute.arch.barrier()
 
         thr_mma = tiled_mma.get_slice(mma_tile_coord_v)
@@ -497,11 +507,6 @@ class RoutedExpertGemm:
             )
             tAsSFA = cute.filter_zeros(tAsSFA)
             tAgSFA = cute.filter_zeros(tAgSFA)
-            if cutlass.const_expr(self.signal_ready):
-                # A release fence first, so that GEMM2's start synchronizes
-                # with the record (and its zeroed ready words) GEMM1 waited for.
-                cute.arch.fence_acq_rel_gpu()
-                cute.arch.griddepcontrol_launch_dependents()
             policy = Int64(EVICT_FIRST)
             state = make_pipeline_state(PipelineUserType.Producer, AB_Stage)
             for i in cutlass.range(count, unroll=1):
@@ -532,6 +537,13 @@ class RoutedExpertGemm:
                         cache_policy=policy,
                     )
                     state.advance()
+                    if cutlass.const_expr(self.signal_ready):  # noqa: SIM102
+                        if i * self.k_tiles + k_tile == GEMM1_TRIGGER_K_TILE - 1:
+                            # A release fence first, so that GEMM2's start
+                            # synchronizes with the record (and its zeroed
+                            # ready words) GEMM1 waited for.
+                            cute.arch.fence_acq_rel_gpu()
+                            cute.arch.griddepcontrol_launch_dependents()
             if cutlass.const_expr(not self.signal_ready):
                 cute.arch.griddepcontrol_launch_dependents()
             # Keep shared memory alive until the MMA warp releases every stage.

@@ -96,6 +96,9 @@ TILE = 8
 MAX_ROWS = 192
 # The row counts the route kernel and the front are built for.
 WIDTHS = tuple(w for w in (8, 16, 32, 64, 128, 192) if w <= MAX_ROWS)
+# SMs the persistent GEMMs leave free: their CTAs hold their SMs until the GEMM
+# ends, and the shared expert's stream would otherwise wait for their tail.
+RESERVED_SMS = 16
 
 
 def width(rows: int) -> int:
@@ -321,7 +324,7 @@ class RoutedExpertGemm:
             Int32(self.experts),
             Int32(cta_words(routing.ctas)),
             Int32(padded_rows),
-            Int32(_sm_count(self.device_index)),
+            Int32(_sm_count(self.device_index) - RESERVED_SMS),
             current_cu_stream(),
         )
         return h_values, h_scales
@@ -346,7 +349,7 @@ class RoutedExpertGemm:
             Int32(TILE * routing.ctas),
             Int32(self.experts),
             Int32(cta_words(routing.ctas)),
-            Int32(_sm_count(self.device_index)),
+            Int32(_sm_count(self.device_index) - RESERVED_SMS),
             current_cu_stream(),
         )
         return UnfinalizedMoEOutput(
@@ -493,7 +496,7 @@ def _finalize_kernel(device_index: int):
 
 @cache
 def _sm_count(device_index: int) -> int:
-    """Streaming multiprocessors of a device: the persistent GEMMs' CTAs."""
+    """Streaming multiprocessors of a device."""
     return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 

@@ -11,7 +11,9 @@ CTA), NaN and infinities, the forced direct path, and a sample that misses the
 row's top values. Block mode must
 select an exact top-k of the 8-token block maxima, as the stock
 ``select_candidate_blocks`` on the upcast logits does, with the newest block
-pinned and -inf blocks written as -1.
+pinned and -inf blocks written as -1. ``sparse_topk_small``
+(``sparse_topk_small.py``) writes the remapped top-k in ascending column order
+with ties broken toward the lowest column.
 """
 
 import pytest
@@ -23,6 +25,9 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.decode_topk_cu
     cluster_for,
     decode_topk,
     supports_decode_topk,
+)
+from vllm.models.deepseek_v41.nvidia.specialized_decode.attention.sparse_topk_small import (  # noqa: E501
+    sparse_topk_small,
 )
 from vllm.platforms import current_platform
 
@@ -43,16 +48,16 @@ def order_keys(values: torch.Tensor) -> torch.Tensor:
     return torch.where(bits >= 0x8000, bits ^ 0xFFFF, bits ^ 0x8000)
 
 
-def make_logits(rows: int, kind: str, seed: int) -> torch.Tensor:
-    """[rows, WIDTH] BF16 logits of one distribution."""
+def make_logits(rows: int, kind: str, seed: int, width: int = WIDTH) -> torch.Tensor:
+    """[rows, width] BF16 logits of one distribution."""
     g = torch.Generator(device=DEVICE).manual_seed(seed)
-    x = torch.randn(rows, WIDTH, device=DEVICE, generator=g)
+    x = torch.randn(rows, width, device=DEVICE, generator=g)
     if kind == "crowded":  # few distinct values: long exact ties
-        x = torch.randint(0, 6, (rows, WIDTH), device=DEVICE, generator=g).float()
+        x = torch.randint(0, 6, (rows, width), device=DEVICE, generator=g).float()
     elif kind == "constant":
-        x = torch.full((rows, WIDTH), 3.0, device=DEVICE)
+        x = torch.full((rows, width), 3.0, device=DEVICE)
     elif kind == "rising":  # the largest values at the row's end
-        x = x * 0.1 + torch.linspace(0, 8, WIDTH, device=DEVICE)
+        x = x * 0.1 + torch.linspace(0, 8, width, device=DEVICE)
     elif kind == "special":
         x[:, 7] = float("nan")
         x[:, 1000::977] = float("inf")
@@ -142,7 +147,9 @@ def test_wide_rows(rows, wide, cluster, fallback):
     """Rows of up to 524,288 logits (the ratio-2 layers' width at a 1M
     context), which only 8 CTAs a row hold, and of up to 1,048,576 (the
     candidate source's), which take 16; at 20 and 12 rows more clusters than
-    a GB300 runs at once, so they run in waves."""
+    a GB300 runs at once, so they run in waves. The blocks again as the
+    deferred candidate-block selection launches them: without PDL, a few rows
+    (here 3) a launch."""
     lengths = [
         [wide, wide * 3 // 4 + 1, wide // 2 + 1, 9000][r % 4] for r in range(rows)
     ]
@@ -154,20 +161,22 @@ def test_wide_rows(rows, wide, cluster, fallback):
     ends = torch.tensor(lengths, dtype=torch.int32, device=DEVICE)
     out = torch.full((rows, 512), 7, dtype=torch.int32, device=DEVICE)
     decode_topk(logits, ends, out, block_mode=False, fallback=fallback)
-    blocks = torch.full((rows, 2048), 7, dtype=torch.int32, device=DEVICE)
-    decode_topk(logits, ends, blocks, block_mode=True)
+    blocks = torch.full((2, rows, 2048), 7, dtype=torch.int32, device=DEVICE)
+    decode_topk(logits, ends, blocks[0], block_mode=True)
+    decode_topk(logits, ends, blocks[1], block_mode=True, pdl=False, max_rows=3)
     torch.accelerator.synchronize()
     check_tokens(logits, lengths, out, 512)
-    for r, end in enumerate(lengths):
-        nblocks = (end + 7) // 8
-        if nblocks <= 2048:  # every block, in order (no -inf blocks here)
-            want = torch.arange(2048, device=DEVICE, dtype=torch.int32)
-            want[nblocks:] = -1
-            assert torch.equal(blocks[r], want), f"row {r}"
-            continue
-        keys = block_keys(logits[r], end)
-        best = keys.topk(2048).values.sort().values
-        assert torch.equal(selected_keys(blocks[r], keys), best), f"row {r}"
+    for got in blocks:
+        for r, end in enumerate(lengths):
+            nblocks = (end + 7) // 8
+            if nblocks <= 2048:  # every block, in order (no -inf blocks here)
+                want = torch.arange(2048, device=DEVICE, dtype=torch.int32)
+                want[nblocks:] = -1
+                assert torch.equal(got[r], want), f"row {r}"
+                continue
+            keys = block_keys(logits[r], end)
+            best = keys.topk(2048).values.sort().values
+            assert torch.equal(selected_keys(got[r], keys), best), f"row {r}"
 
 
 def test_candidate_source_waves():
@@ -268,3 +277,55 @@ def test_candidate_blocks_match_stock(workspace_init, rows, fallback):
         assert torch.equal(selected_keys(got[r], keys), best), f"row {r}"
         assert torch.equal(selected_keys(want[r], keys), best), f"row {r} (stock)"
         assert int(got[r].max()) == nblocks - 1, f"row {r}: newest block not pinned"
+
+
+@pytest.mark.parametrize("kind", ["normal", "crowded", "constant", "rising", "special"])
+@pytest.mark.parametrize("k", [512, 2048])
+@pytest.mark.parametrize("block_size", [8, 16])
+def test_sparse_topk_small(kind, k, block_size):
+    """The candidate consumers' top-k on their rows (2048 candidate blocks of
+    8 tokens), eagerly and replayed from a CUDA graph on new logits: in
+    ascending column order, the columns above the k-th value and the
+    lowest-numbered ones equal to it (``torch.topk``'s set where the k-th value
+    is unique), through the block table. A positive NaN is never picked and
+    leaves its slot -1; a row of at most k columns gets them all in order, then
+    -1, into a wider output buffer past which nothing is written."""
+    width = 16384
+    lengths = [width, width - 3, 12345, 5000, k + 1, k, k - 1, 0]
+    rows = len(lengths)
+    g = torch.Generator(device=DEVICE).manual_seed(block_size)
+    blocks = torch.randint(
+        0, 1 << 20, (rows, width // block_size), device=DEVICE, generator=g
+    ).int()
+    ends = torch.tensor(lengths, dtype=torch.int32, device=DEVICE)
+    buffer = torch.full((rows, k + 64), 7, dtype=torch.int32, device=DEVICE)
+
+    def check(logits: torch.Tensor) -> None:
+        torch.accelerator.synchronize()
+        for r, n in enumerate(lengths):
+            values = logits[r, :n].float()
+            cols = torch.arange(n, device=DEVICE)
+            if n > k:
+                real = ~values.isnan()
+                picks = k - int((~real).sum())
+                values, cols = values[real], cols[real]
+                kth = values.topk(picks).values[-1]
+                above = cols[values > kth]
+                ties = cols[values == kth][: picks - above.numel()]
+                cols = torch.cat([above, ties]).sort().values
+            want = torch.full((k,), -1, dtype=torch.int32, device=DEVICE)
+            want[: cols.numel()] = blocks[r, cols // block_size] * block_size + (
+                cols % block_size
+            )
+            assert torch.equal(buffer[r, :k], want), f"row {r} (n {n})"
+        assert torch.all(buffer[:, k:] == 7)
+
+    logits = make_logits(rows, kind, k + block_size, width)
+    sparse_topk_small(logits, ends, blocks, block_size, buffer[:, :k])
+    check(logits)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        sparse_topk_small(logits, ends, blocks, block_size, buffer[:, :k])
+    logits.copy_(make_logits(rows, kind, k + block_size + 1, width))
+    graph.replay()
+    check(logits)

@@ -51,7 +51,11 @@ from .. import (
     uses_checked_flashinfer,
 )
 from ..attention.indexer import CandidateOverlap
-from ..attention.sparse_mla import SparseIndexTables, SparseMlaDecode
+from ..attention.sparse_mla import (
+    SparseIndexTables,
+    SparseMlaDecode,
+    SparseMlaPrefetch,
+)
 from ..attention.step import AttentionStep
 from ..boundary.boundary import Boundaries, BoundaryState
 from ..engram.prefetch import EngramPrefetch
@@ -244,6 +248,11 @@ class SpecializedDecode:
         )
         gemms = build_routed_expert_gemms([layer.ffn.experts for layer in layers])
         quantize = self.all_reduce.quantize_layer_input
+        # Where the attention ropes its own query, the KV insert runs on this stream
+        # beside wq_b unless the fused norm does it.
+        kv_stream = torch.cuda.Stream()
+        # The L2 prefetch of a layer's attention rows, from the layer's start.
+        self.prefetch = SparseMlaPrefetch(self.tables)
         self.plans = [
             LayerPlan(
                 layer_id=layer_id,
@@ -257,6 +266,8 @@ class SpecializedDecode:
                     source=self.candidates if attn is source else None,
                     consumer=self.candidates if attn in consumers else None,
                     all_gather=self.all_gather,
+                    kv_stream=kv_stream,
+                    prefetch=self.prefetch,
                 ),
                 moe=MoEStep(layer.ffn, gemm, FUSED_MHC_MAX_ROWS),
                 engram=layer.engram,
@@ -358,8 +369,14 @@ class SpecializedDecode:
                         aux[plan.layer_id] = layer_aux
                 state.pending = plan.attention.run(layer_input, quant, positions, step)
                 bound.join()
-                state, ffn_input, _, _ = bound.sublayer(layer, True, state)
-                state.pending = plan.moe.run(ffn_input, input_ids, step)
+                state, ffn_input, ffn_quant, _ = bound.sublayer(
+                    layer,
+                    True,
+                    state,
+                    quantize=self.all_reduce.quantize_layer_input
+                    and plan.moe.takes_mxfp8_input(state.residual.shape[0]),
+                )
+                state.pending = plan.moe.run(ffn_input, input_ids, step, ffn_quant)
                 bound.join()
             assert state is not None
             streams = bound.post_only(state)
@@ -375,6 +392,7 @@ class SpecializedDecode:
     def _join_side_work(self, error: bool = False) -> None:
         """Make the current stream wait for the side streams' pending work."""
         self.tables.join()
+        self.prefetch.join()
         if self.candidates is not None:
             self.candidates.join()
         self.engram.join()
