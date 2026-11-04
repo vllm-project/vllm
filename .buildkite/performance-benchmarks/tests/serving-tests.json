@@ -103,6 +103,19 @@
         "random-input-len": 128,
         "random-output-len": 128
       }
+    },
+    {
+      "test_name": "serving_llama8B_tp1_prefix_repetition_1024_128",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "prefix_repetition",
+        "prefix-repetition-prefix-len": 1024,
+        "prefix-repetition-suffix-len": 128,
+        "prefix-repetition-num-prefixes": 10,
+        "prefix-repetition-output-len": 128
+      }
     }
   ]
 }
