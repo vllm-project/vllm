@@ -13,6 +13,8 @@ import sys
 # `cv2` can easily mess up the environment.
 # `openai` belongs to the frontend layer; `vllm.config` is imported by
 # every process and must not pull it in.
+# `vllm.utils.deep_gemm` is imported by the API server and the engine core
+# (via `vllm.forward_context`) and must not `torch.compile` at import time.
 module_names = ["torch._inductor.async_compile", "cv2", "openai"]
 
 # set all modules in `module_names` to be None.
@@ -23,3 +25,4 @@ for module_name in module_names:
 
 import vllm  # noqa
 import vllm.config  # noqa
+import vllm.utils.deep_gemm  # noqa
