@@ -299,6 +299,30 @@ def test_online_activation_override(
     assert resolved is not None and resolved[3].activation == activation_quant_key
 
 
+def test_online_hadamard_target_wraps_resolved_method(default_vllm_config) -> None:
+    """`hadamard_size` on a `targets` spec wraps the method built with the
+    resolved activation key in `InputHadamardLinearMethod`."""
+    from vllm.model_executor.layers.quantization.input_hadamard import (
+        InputHadamardLinearMethod,
+    )
+
+    args = QuantizationConfigArgs(
+        targets={
+            "*linear*": QuantSpec(weight="mxfp4", activation=None, hadamard_size=32)
+        }
+    )
+    default_vllm_config.model_config = SimpleNamespace(
+        quantization_config=args,
+        dtype=torch.bfloat16,
+    )
+
+    method = OnlineQuantizationConfig(args).get_quant_method(_TestLinear(), "linear")
+    assert isinstance(method, InputHadamardLinearMethod)
+    assert isinstance(method.quant_method, Mxfp4OnlineLinearMethod)
+    assert method.quant_method.activation_quant_key is None
+    assert method.size == 32
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
 @pytest.mark.parametrize(
     "scheme", ["fp8_per_block", "fp8_per_channel", "mxfp8", "mxfp4"]

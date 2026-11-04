@@ -140,7 +140,12 @@ def _resolved_target(target: str | QuantSpec) -> tuple:
     """
     if isinstance(target, str):
         shorthand = _ONLINE_SHORTHANDS[target]
-        specs = (shorthand.linear, shorthand.moe)
+        # A one-sided shorthand applies its spec to either layer kind, like the
+        # equivalent `QuantSpec` does, so compare it that way.
+        specs = (
+            shorthand.linear or shorthand.moe,
+            shorthand.moe or shorthand.linear,
+        )
     else:
         specs = (target, target)
     return tuple(
