@@ -10,6 +10,7 @@ import torch
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import is_flashinfer_ssd_supported
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
@@ -209,23 +210,20 @@ def initialize_mamba_ssd_backend(
             f"Unknown Mamba SSD backend: {backend}. "
             f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
         )
+    if (
+        backend == MambaBackendEnum.FLASHINFER
+        and mamba_config.prefill_backend is None
+        and not is_flashinfer_ssd_supported()
+    ):
+        logger.warning_once(
+            "Mamba2 prefill inherited FlashInfer from --mamba-backend, but "
+            "FlashInfer SSD is unavailable on this platform. Using Triton SSD. "
+            "Set --mamba-prefill-backend to require a particular prefill backend."
+        )
+        backend = MambaBackendEnum.TRITON
     backend_cls = _BACKEND_REGISTRY[backend]
     if not isinstance(_mamba_ssd_backend, backend_cls):
-        try:
-            _mamba_ssd_backend = backend_cls()
-        except ImportError:
-            if (
-                backend != MambaBackendEnum.FLASHINFER
-                or mamba_config.prefill_backend is not None
-            ):
-                raise
-            logger.warning_once(
-                "Mamba2 prefill inherited FlashInfer from --mamba-backend, but "
-                "FlashInfer SSD is unavailable. Using Triton SSD. Set "
-                "--mamba-prefill-backend to require a particular prefill backend."
-            )
-            if not isinstance(_mamba_ssd_backend, TritonSSDBackend):
-                _mamba_ssd_backend = TritonSSDBackend()
+        _mamba_ssd_backend = backend_cls()
         logger.info("Using %s Mamba SSD backend.", _mamba_ssd_backend.name)
 
 

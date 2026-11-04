@@ -30,7 +30,10 @@ def kv_cache_config(monkeypatch):
 def test_flashinfer_requirement_errors_but_inherited_preference_falls_back(
     monkeypatch, caplog_vllm, kv_cache_config, explicit
 ):
+    """An inherited FlashInfer, e.g. --mamba-backend flashinfer on Hopper, must
+    not fail its first prefill; an explicit one fails at startup."""
     monkeypatch.setitem(sys.modules, "flashinfer.mamba", SimpleNamespace())
+    monkeypatch.setattr(ssd_dispatch, "is_flashinfer_ssd_supported", lambda: False)
     config = MambaConfig(
         backend="flashinfer",
         decode_backend="flashinfer",

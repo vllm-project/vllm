@@ -61,8 +61,8 @@ class MambaConfig:
 
     prefill_backend: MambaBackendEnum | None = None
     """Kernel backend for the SSD scan of Mamba2 prefills. "flashinfer" runs
-    FlashInfer's fused SSD scan (SM100/SM103 only). None inherits `backend`,
-    falling back to Triton if an inherited FlashInfer SSD is unavailable."""
+    FlashInfer's fused SSD scan (SM10x). None inherits `backend`,
+    falling back to Triton where FlashInfer SSD is unavailable."""
 
     @field_validator("backend", "decode_backend", "prefill_backend", mode="before")
     @classmethod
