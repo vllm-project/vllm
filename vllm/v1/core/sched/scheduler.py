@@ -1503,11 +1503,12 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    if (
+                    defer_load = (
                         load_kv_async
                         and self.defer_async_loads
                         and self.sched_step_seq > self.processed_step_seq
-                    ):
+                    )
+                    if defer_load:
                         request.last_sched_seq = self.sched_step_seq
                         self.deferred_loads[request_id] = (
                             self.sched_step_seq,
@@ -1516,11 +1517,30 @@ class Scheduler(SchedulerInterface):
                             connector_prefix_cache_hits,
                         )
                     else:
-                        self._update_connector_after_alloc(
+                        self.connector.update_state_after_alloc(
                             request,
+                            self.kv_cache_manager.get_blocks(request_id),
                             num_external_computed_tokens,
-                            connector_prefix_cache_queries,
-                            connector_prefix_cache_hits,
+                        )
+                    if (
+                        self.connector_prefix_cache_stats is not None
+                        and connector_prefix_cache_queries != 0
+                        and not defer_load
+                    ):
+                        preempted = request.num_preemptions > 0
+                        self.connector_prefix_cache_stats.record(
+                            num_tokens=connector_prefix_cache_queries,
+                            num_hits=connector_prefix_cache_hits,
+                            preempted=preempted,
+                            # The connector knows the tier only after the load
+                            # plan above exists.
+                            hits_by_source=(
+                                self.connector.get_external_cache_hit_sources(
+                                    request, connector_prefix_cache_hits
+                                )
+                                if connector_prefix_cache_hits and not preempted
+                                else None
+                            ),
                         )
 
                 # Record at admission so unscheduled lookups are not counted.
@@ -3191,39 +3211,23 @@ class Scheduler(SchedulerInterface):
             if fence > self.processed_step_seq:
                 break
             del self.deferred_loads[request_id]
-            self._update_connector_after_alloc(
-                self.requests[request_id], num_tokens, queries, hits
+            assert self.connector is not None
+            request = self.requests[request_id]
+            self.connector.update_state_after_alloc(
+                request, self.kv_cache_manager.get_blocks(request_id), num_tokens
             )
-
-    def _update_connector_after_alloc(
-        self,
-        request: Request,
-        num_external_computed_tokens: int,
-        num_queries: int,
-        num_hits: int,
-    ) -> None:
-        """Report the allocation to the connector and record its prefix-cache
-        stats."""
-        assert self.connector is not None
-        self.connector.update_state_after_alloc(
-            request,
-            self.kv_cache_manager.get_blocks(request.request_id),
-            num_external_computed_tokens,
-        )
-        if self.connector_prefix_cache_stats is None or num_queries == 0:
-            return
-        preempted = request.num_preemptions > 0
-        self.connector_prefix_cache_stats.record(
-            num_tokens=num_queries,
-            num_hits=num_hits,
-            preempted=preempted,
-            # The connector knows the tier only after the load plan above exists.
-            hits_by_source=(
-                self.connector.get_external_cache_hit_sources(request, num_hits)
-                if num_hits and not preempted
-                else None
-            ),
-        )
+            if self.connector_prefix_cache_stats is not None and queries != 0:
+                preempted = request.num_preemptions > 0
+                self.connector_prefix_cache_stats.record(
+                    num_tokens=queries,
+                    num_hits=hits,
+                    preempted=preempted,
+                    hits_by_source=(
+                        self.connector.get_external_cache_hit_sources(request, hits)
+                        if hits and not preempted
+                        else None
+                    ),
+                )
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
