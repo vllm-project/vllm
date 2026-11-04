@@ -42,7 +42,7 @@ features:
     description: "DFlash2 speculative decoding with Ricursive's drafter."
     args:
       - "--speculative-config"
-      - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":15}'
+      - '{"method":"dflash","model":"ricursiveAI/Ripple-65B-Preview-DFlash2","num_speculative_tokens":7}'
     env:
       VLLM_USE_V2_MODEL_RUNNER: "1"
 
