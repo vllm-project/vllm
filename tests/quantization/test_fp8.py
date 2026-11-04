@@ -18,6 +18,7 @@ from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.config.cache import CacheConfig
 from vllm.config.kernel import KernelConfig
+from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
@@ -40,6 +41,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
 )
+from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -894,6 +896,32 @@ def test_kv_cache_scale_sync_to_host_copies():
     assert layer._v_scale_cpu.item() == pytest.approx(layer._v_scale_float)
     assert layer._k_scale_cpu.item() == pytest.approx(layer._k_scale.item())
     assert layer._v_scale_cpu.item() == pytest.approx(layer._v_scale.item())
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype):
+    """KV-cache scales missing from the checkpoint must match a real start after
+    a dummy load: no later weight sync from that checkpoint rewrites them.
+    """
+
+    def start(load_format: str) -> torch.nn.Module:
+        layer = torch.nn.Module()
+        set_default_quant_scales(layer, register_buffer=True)
+        layer.kv_cache_dtype = kv_cache_dtype
+        method = BaseKVCacheMethod(quant_config=None)
+        method.create_weights(layer)
+        if load_format == "dummy":
+            loader = DummyModelLoader(LoadConfig(load_format=load_format))
+            loader.load_weights(layer, model_config=None)
+        method.process_weights_after_loading(layer)
+        return layer
+
+    real, dummy = start("auto"), start("dummy")
+    torch.testing.assert_close(dummy.state_dict(), real.state_dict(), rtol=0, atol=0)
+    for name in ("_q_scale_float", "_k_scale_float", "_v_scale_float"):
+        assert getattr(dummy, name) == getattr(real, name), name
+    for name in ("_k_scale_cpu", "_v_scale_cpu"):
+        assert torch.equal(getattr(dummy, name), getattr(real, name)), name
 
 
 @pytest.mark.skipif(
