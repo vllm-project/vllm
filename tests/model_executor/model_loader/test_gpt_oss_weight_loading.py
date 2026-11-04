@@ -154,30 +154,46 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
 def test_direct_reload_restores_streamed_expert_padding() -> None:
     """The last TP rank holds fewer intermediate columns than its padded
-    parameter; a direct reload resets the rest to zero, as at cold start."""
+    parameter; a direct reload resets the rest to zero even after a dummy
+    cold start (no loader ran), as the fill is decided from ``moe_config``."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,
     )
 
-    model = torch.nn.Module()
-    model.experts = _TestExperts("w2_weight", (2, 3, 3), tp_rank=1)
+    def make_experts() -> _TestExperts:
+        experts = _TestExperts("w2_weight", (2, 3, 3), tp_rank=1)
+        # MXFP4 rounds the per-rank intermediate size 2 up to 3; the checkpoint
+        # is sharded with that stride, so rank 1 holds one column.
+        experts.moe_config.__dict__.update(
+            hidden_dim=3,
+            hidden_dim_unpadded=3,
+            intermediate_size_per_partition=3,
+            intermediate_size_per_partition_unpadded=2,
+            tp_shard_with_padding=False,
+        )
+        experts._padding_fill_names = ["w2_weight"]  # set by RoutedExperts
+        return experts
+
     checkpoint = {
         3: torch.arange(12, dtype=torch.float32).reshape(4, 3) + 1,
         7: torch.arange(12, dtype=torch.float32).reshape(4, 3) + 20,
     }
 
-    def load():
+    def load(experts: _TestExperts) -> None:
         for expert_id, weight in checkpoint.items():
-            assert _load(model.experts, "w2_weight", weight, "gpt_oss_w2", expert_id)
+            assert _load(experts, "w2_weight", weight, "gpt_oss_w2", expert_id)
 
-    load()
+    expected = make_experts()
+    load(expected)
+    assert torch.count_nonzero(expected.w2_weight[:, :, 1:]) == 0
+
+    model = torch.nn.Module()
+    model.experts = make_experts()
+    model.experts.w2_weight.data.fill_(7)  # dummy weights
     record_checkpoint_layout(model)
-    cold = model.experts.w2_weight.clone()
-    assert torch.count_nonzero(cold[:, :, 1:]) == 0
-    model.experts.w2_weight.data.fill_(7)  # stands in for post-load processing
 
     begin_direct_reload(model)
-    load()
+    load(model.experts)
 
-    assert torch.equal(model.experts.w2_weight, cold)
+    assert torch.equal(model.experts.w2_weight, expected.w2_weight)

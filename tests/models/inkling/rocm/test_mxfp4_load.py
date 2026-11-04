@@ -68,24 +68,42 @@ def test_unflattens_quark_scales_and_preserves_scale_padding():
 
 
 def test_direct_reload_restores_aiter_padding():
-    """A direct reload resets the AITER padding (zero weights, 0x01 scales, as
-    Quark OCP_MX creates them) instead of keeping post-processed bytes."""
+    """After a dummy cold start (no loader ran), a direct reload resets the
+    AITER padding (zero weights, 0x01 scales, as Quark OCP_MX creates them)
+    instead of keeping the dummy or post-processed bytes."""
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,
     )
     from vllm.model_executor.utils import set_weight_attrs
 
-    moe, fake = _fake_moe()
-    # A module tree so the reload sees the parameters.
-    routed = nn.Module()
-    routed.moe_config = fake.moe_config
-    for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
-        routed.register_parameter(name, getattr(fake, name))
-    set_weight_attrs(routed.w13_weight_scale, {"padding_value": 1})
-    set_weight_attrs(routed.w2_weight_scale, {"padding_value": 1})
-    moe.experts = nn.Module()
-    moe.experts.routed_experts = routed
+    class Routed(nn.Module):
+        has_padding = RoutedExperts.has_padding
+        padding_fill_params = RoutedExperts.padding_fill_params
+
+    def make_moe():
+        moe, fake = _fake_moe()
+        # A module tree so the reload sees the parameters.
+        routed = Routed()
+        routed.moe_config = fake.moe_config
+        routed.moe_config.__dict__.update(
+            hidden_dim=5,
+            hidden_dim_unpadded=5,
+            intermediate_size_per_partition=4,
+            intermediate_size_per_partition_unpadded=3,
+            tp_shard_with_padding=False,
+        )
+        names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        for name in names:
+            routed.register_parameter(name, getattr(fake, name))
+        routed._padding_fill_names = list(names)  # set by RoutedExperts
+        set_weight_attrs(routed.w13_weight_scale, {"padding_value": 1})
+        set_weight_attrs(routed.w2_weight_scale, {"padding_value": 1})
+        moe.experts = nn.Module()
+        moe.experts.routed_experts = routed
+        return moe, routed
+
     checkpoint = {
         "experts.w13_weight": torch.arange(96, dtype=torch.uint8).view(4, 12, 2),
         "experts.w2_weight": torch.arange(80, dtype=torch.uint8).view(4, 5, 4),
@@ -93,18 +111,20 @@ def test_direct_reload_restores_aiter_padding():
         "experts.w2_weight_scale": torch.arange(80, dtype=torch.uint8).view(20, 4),
     }
 
-    def load():
+    def load(moe):
         for name, weight in checkpoint.items():
             moe.load_expert_weight(name, weight)
 
-    load()
-    record_checkpoint_layout(moe)
-    cold = {name: p.clone() for name, p in routed.named_parameters()}
+    expected_moe, expected = make_moe()
+    load(expected_moe)
+
+    moe, routed = make_moe()
     for p in routed.parameters():
-        p.data.fill_(7)  # stands in for post-load processing (shuffling)
+        p.data.fill_(7)  # dummy weights; no loader ran
+    record_checkpoint_layout(moe)
 
     begin_direct_reload(moe)
-    load()
+    load(moe)
 
     for name, p in routed.named_parameters():
-        torch.testing.assert_close(p, cold[name], rtol=0, atol=0)
+        torch.testing.assert_close(p, getattr(expected, name), rtol=0, atol=0)

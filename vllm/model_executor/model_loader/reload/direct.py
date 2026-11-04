@@ -11,8 +11,11 @@ no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
-every checkpoint tensor loaded into a padded parameter (`mark_padded`), which
-``begin`` refills whole.
+every checkpoint tensor loaded into a parameter a module lists in
+``padding_fill_params()``: ``begin`` refills those whole (weights with 0,
+ones-initialized scales with 1), erasing the checkpoint region too. Today only
+padded MoE layers list parameters (`RoutedExperts.has_padding`, decided from
+``moe_config``; other padding sources can reuse the same hook and fill).
 """
 
 from collections.abc import Iterator
@@ -211,11 +214,16 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
-        if getattr(t, "has_padding", False):
-            # Restore the cold-start padding the loaders skip (PWAL left its
-            # output there). Erases the data region too: every checkpoint
-            # tensor loaded into `t` must be resent, none may be excluded.
-            t.data.fill_(getattr(t, "padding_value", 0))
+    # Reset the padding the loaders skip (PWAL left its output there; after a
+    # dummy cold start it holds random values). Erases the data region too:
+    # every checkpoint tensor loaded into these must be resent.
+    for module in model.modules():
+        padding_fill_params = getattr(module, "padding_fill_params", None)
+        if padding_fill_params is None:
+            continue
+        for t, value in padding_fill_params():
+            if _owned(model, t):
+                t.data.fill_(value)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

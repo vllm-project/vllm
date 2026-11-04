@@ -48,7 +48,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     remap_moe_expert_weights,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.model_executor.utils import mark_padded
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -213,23 +212,21 @@ class GptOssRoutedExperts(RoutedExperts):
         return loaded_weight.narrow(dim, start, min(size, max(available, 0)))
 
     @staticmethod
-    def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> bool:
-        """Copy into the leading slice; returns whether part is left as padding."""
+    def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         if expert_data.numel() == loaded_weight.numel() == 1:
             expert_data.copy_(loaded_weight.reshape(()))
-            return False
+            return
         while loaded_weight.ndim > expert_data.ndim and loaded_weight.shape[-1] == 1:
             loaded_weight = loaded_weight.squeeze(-1)
         slices = tuple(slice(0, size) for size in loaded_weight.shape)
         expert_data[slices].copy_(loaded_weight)
-        return expert_data[slices].shape != expert_data.shape
 
     def _load_expert_bias(
         self,
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         shard_id: str,
-    ) -> bool:
+    ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
             loaded_weight = self._narrow_for_rank(
@@ -237,14 +234,14 @@ class GptOssRoutedExperts(RoutedExperts):
             )
         elif tp_rank != 0:
             loaded_weight = torch.zeros_like(loaded_weight)
-        return self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(expert_data, loaded_weight)
 
     def _load_unquantized_expert(
         self,
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         shard_id: str,
-    ) -> bool:
+    ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
             loaded_weight = self._narrow_for_rank(
@@ -256,7 +253,7 @@ class GptOssRoutedExperts(RoutedExperts):
                 loaded_weight, 0, tp_rank, expert_data.shape[1]
             )
             loaded_weight = loaded_weight.t().contiguous()
-        return self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(expert_data, loaded_weight)
 
     def _load_packed_expert(
         self,
@@ -264,7 +261,7 @@ class GptOssRoutedExperts(RoutedExperts):
         loaded_weight: torch.Tensor,
         weight_name: str,
         shard_id: str,
-    ) -> bool:
+    ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         is_w13 = shard_id == "gpt_oss_w13"
         is_weight = weight_name.endswith(("_weight", "_weight_packed"))
@@ -282,7 +279,7 @@ class GptOssRoutedExperts(RoutedExperts):
                 loaded_weight, -1, tp_rank, expert_data.shape[-1]
             )
 
-        return self._copy_to_expert(expert_data, loaded_weight)
+        self._copy_to_expert(expert_data, loaded_weight)
 
     @typing.overload
     def weight_loader(
@@ -344,7 +341,7 @@ class GptOssRoutedExperts(RoutedExperts):
         quant_method_name = self.quant_method.__class__.__name__
 
         if weight_name.endswith("_bias"):
-            padded = self._load_expert_bias(expert_data, loaded_weight, shard_id)
+            self._load_expert_bias(expert_data, loaded_weight, shard_id)
         elif weight_dtype in (
             "gpt_oss_mxfp4",
             "mxfp4",
@@ -353,13 +350,9 @@ class GptOssRoutedExperts(RoutedExperts):
             "Nvfp4OnlineMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            padded = self._load_packed_expert(
-                expert_data, loaded_weight, weight_name, shard_id
-            )
+            self._load_packed_expert(expert_data, loaded_weight, weight_name, shard_id)
         else:
-            padded = self._load_unquantized_expert(expert_data, loaded_weight, shard_id)
-        if padded:
-            mark_padded(param)
+            self._load_unquantized_expert(expert_data, loaded_weight, shard_id)
         return True if return_success else None
 
 
@@ -944,10 +937,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
                 dim2 = sliced_weight.shape[1]
-                dst = expert_data.data[:dim1, :dim2]
-                dst.copy_(sliced_weight)
-                if dst.shape != expert_data.shape:
-                    mark_padded(param)
+                expert_data.data[:dim1, :dim2].copy_(sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
@@ -1076,10 +1066,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 param = params_dict[fused_name]
                 expert_data = param.data[expert_id]
                 dim1 = sliced_weight.shape[0]
-                dst = expert_data.data[:dim1]
-                dst.copy_(sliced_weight)
-                if dst.shape != expert_data.shape:
-                    mark_padded(param)
+                expert_data.data[:dim1].copy_(sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 

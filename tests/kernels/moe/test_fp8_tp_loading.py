@@ -372,3 +372,94 @@ def test_direct_reload_restores_intermediate_padding(monkeypatch):
 
     for name, p in layer.named_parameters():
         torch.testing.assert_close(p.float(), cold[name].float(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("scheme", ["block", "static"])
+def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, scheme):
+    """After a cold start that ran no loader (``load_format=dummy``), the first
+    direct reload still resets the padding: the fill is decided from
+    ``moe_config``. Per-expert scalars (per-tensor weight scales, static input
+    scales a checkpoint may omit) and parameters not created by the quant
+    method (the gate's correction bias) are left alone.
+    """
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
+
+    if scheme == "block":
+        quant_config = None
+        suffixes = ("weight", "weight_scale_inv")
+    else:
+        quant_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True, activation_scheme="static"
+        )
+        suffixes = ("weight",)
+
+    def make_layer():
+        # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
+        layer = _make_fp8_tp_experts(
+            monkeypatch,
+            1,
+            0,
+            intermediate_size=256,
+            quant_config=quant_config,
+            config_overrides={"intermediate_size_per_partition": 384},
+        )
+        return layer
+
+    generator = torch.Generator().manual_seed(0)
+    shapes = {"w1": (2, 256, 256), "w3": (2, 256, 256), "w2": (2, 256, 256)}
+    checkpoint = {
+        name: (
+            torch.randn(shape, generator=generator).to(torch.float8_e4m3fn),
+            torch.rand(2, shape[1] // 128, shape[2] // 128, generator=generator) + 2,
+        )
+        for name, shape in shapes.items()
+    }
+
+    def load(layer):
+        for name, tensors in checkpoint.items():
+            prefix = "w2" if name == "w2" else "w13"
+            for suffix, tensor in zip(suffixes, tensors):
+                param = getattr(layer, f"{prefix}_{suffix}")
+                assert param.weight_loader(
+                    param, tensor, f"{prefix}_{suffix}", name, 0, return_success=True
+                )
+
+    # What a real cold start leaves: zero weight padding, unit scale padding.
+    expected = make_layer()
+    for name, p in expected.named_parameters():
+        if "scale" not in name:
+            p.data.zero_()  # torch.empty
+    load(expected)
+
+    layer = make_layer()
+    bias = torch.nn.Parameter(torch.full((2,), 5.0), requires_grad=False)
+    layer.e_score_correction_bias = bias  # registered on the layer by the gate
+    model = torch.nn.Module()
+    model.experts = layer
+    for p in layer.parameters():
+        if p is not bias:
+            p.data.fill_(7)  # dummy weights; no loader ran
+    excluded = {"e_score_correction_bias"}
+    if scheme == "static":
+        excluded |= {
+            "w13_input_scale",
+            "w13_weight_scale",
+            "w2_input_scale",
+            "w2_weight_scale",
+        }
+    assert {n for n, _ in layer.named_parameters()} >= excluded
+    record_checkpoint_layout(model)
+
+    begin_direct_reload(model)
+    load(layer)
+
+    for name, p in layer.named_parameters():
+        if name in excluded:
+            assert torch.all(p == (5 if p is bias else 7)), name
+        else:
+            torch.testing.assert_close(
+                p.float(), getattr(expected, name).float(), rtol=0, atol=0
+            )
