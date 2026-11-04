@@ -9,10 +9,18 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
+from vllm import envs
 from vllm.logger import init_logger
+from vllm.model_executor.determinism.batch_invariant import (
+    gptq_linear_batch_invariant,
+)
 from vllm.model_executor.kernels.linear import (
+    MPLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
+    MarlinLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -59,6 +67,7 @@ from vllm.model_executor.parameter import (
     PackedColumnParameter,
     PackedvLLMParameter,
 )
+from vllm.model_executor.utils import is_weights_pre_processed, retire_parameter
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -312,11 +321,23 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
+        # The Marlin GEMM picks its tiling and K-split from the number of
+        # tokens, so its results depend on the batch size. In batch-invariant
+        # mode, dequantize the weight and use the batch-invariant matmul.
+        self.use_batch_invariant = envs.VLLM_BATCH_INVARIANT
+        self.kernel: MPLinearKernel | None = None
 
         # Verify supported on platform.
-        verify_marlin_supported(
-            quant_type=self.quant_config.quant_type,
-            group_size=self.quant_config.group_size,
+        if not self.use_batch_invariant:
+            verify_marlin_supported(
+                quant_type=self.quant_config.quant_type,
+                group_size=self.quant_config.group_size,
+            )
+
+    @property
+    def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
+        return isinstance(self.kernel, MarlinLinearKernel) and (
+            self.kernel.config.act_type in (torch.float16, torch.bfloat16)
         )
 
     def create_weights(
@@ -346,11 +367,16 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             zero_points=False,
         )
 
-        kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+        if self.use_batch_invariant:
+            kernel_type = None
+            backend_name = "dequantize + batch-invariant matmul"
+        else:
+            kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
+            backend_name = kernel_type.__name__
 
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for AutoGPTQLinearMethod", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
+        if backend_name not in self._kernel_backends_being_used:
+            logger.info("Using %s for AutoGPTQLinearMethod", backend_name)
+            self._kernel_backends_being_used.add(backend_name)
 
         # Normalize group_size
         if self.quant_config.group_size != -1:
@@ -428,14 +454,34 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
         layer.register_parameter("qzeros", qzeros)
 
-        self.kernel = kernel_type(
-            mp_linear_kernel_config,
-            w_q_param_name="qweight",
-            w_s_param_name="scales",
-            w_zp_param_name="qzeros",
-        )
+        if kernel_type is not None:
+            self.kernel = kernel_type(
+                mp_linear_kernel_config,
+                w_q_param_name="qweight",
+                w_s_param_name="scales",
+                w_zp_param_name="qzeros",
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if is_weights_pre_processed():
+            if not self.supports_pre_processed_weights:
+                raise RuntimeError(
+                    "Pre-processed AWQ/GPTQ weights require Marlin with "
+                    "FP16 or BF16 activations"
+                )
+            # Symmetric GPTQ retains checkpoint qzeros but reads the empty w_zp.
+            retire_parameter(layer, "qzeros")
+            assert self.kernel is not None
+            self.kernel.w_zp_name = "w_zp"
+            return
+
+        if self.use_batch_invariant:
+            # No Marlin repacking: apply() unpacks the checkpoint layout.
+            for name in ("qweight", "scales", "qzeros"):
+                replace_parameter(layer, name, getattr(layer, name).data)
+            return
+
+        assert self.kernel is not None
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
@@ -444,6 +490,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.use_batch_invariant:
+            return gptq_linear_batch_invariant(
+                x,
+                layer.qweight,
+                layer.scales,
+                num_bits=self.quant_type.size_bits,
+                group_size=self.quant_config.group_size,
+                zero_bias=self.quant_type.bias,
+                bias=bias,
+            )
+
+        assert self.kernel is not None
         return self.kernel.apply_weights(layer, x, bias)
 
 
