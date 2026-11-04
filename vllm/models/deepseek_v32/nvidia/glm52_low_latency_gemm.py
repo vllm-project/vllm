@@ -444,7 +444,9 @@ class _WarpSplitKWarmup:
 
     @staticmethod
     def _compile(n: int, k: int, config: WarpSplitKConfig) -> None:
-        device = torch.device(current_platform.device_type, torch.cuda.current_device())
+        device = torch.device(
+            current_platform.device_type, torch.accelerator.current_device_index()
+        )
         x = torch.zeros((1, k), dtype=torch.bfloat16, device=device)
         weight = torch.zeros((n, k), dtype=torch.bfloat16, device=device)
         _run_warp_splitk(x, weight, config)
