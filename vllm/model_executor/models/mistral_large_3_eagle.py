@@ -14,12 +14,16 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2Model,
+    DeepseekV2MoE,
 )
 from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
@@ -61,6 +65,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         self.config = config
         self.vllm_config = vllm_config
 
+        self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
 
         assert get_pp_group().world_size == 1
@@ -83,6 +88,11 @@ class EagleMistralLarge3Model(DeepseekV2Model):
         )
         self.start_layer = 0
         self.end_layer = self.config.num_hidden_layers
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            DeepseekV2MoE,
+            "mlp",
+        )
 
         self.fc = RowParallelLinear(
             self.config.hidden_size * 2,
