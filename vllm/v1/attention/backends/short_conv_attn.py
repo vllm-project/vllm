@@ -40,6 +40,11 @@ class ShortConvAttentionBackend(AttentionBackend):
     def is_ssm(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # causal_conv1d computes each token from its own window only.
+        return True
+
 
 @dataclass
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
@@ -104,6 +109,11 @@ class PleShortConvAttentionBackend(ShortConvAttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["PleShortConvAttentionMetadataBuilder"]:
         return PleShortConvAttentionMetadataBuilder
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The dilated PLE conv path has not been validated.
+        return False
 
 
 class PleShortConvAttentionMetadataBuilder(ShortConvAttentionMetadataBuilder):

@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -165,6 +166,9 @@ def _hf_topk_router(
 
 
 class TransformersRoutedExperts(RoutedExperts):
+    _is_mixtral_format: bool | None = None
+    """Does the checkpoint use Mixtral style naming. `None` until weights are loaded."""
+
     def get_expert_mapping(
         self,
         ckpt_gate_proj_name: str | None = None,
@@ -180,10 +184,26 @@ class TransformersRoutedExperts(RoutedExperts):
         )
         mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
         if not include_fused:
+            # LoRA expects one triplet per expert, so only return the loaded naming
+            if self._is_mixtral_format is not None:
+                return mixtral_map if self._is_mixtral_format else common_map
             return common_map + mixtral_map
         common_fused, common_unfused = common_map[:3], common_map[3:]
         mixtral_fused, mixtral_unfused = mixtral_map[:3], mixtral_map[3:]
         return common_fused + mixtral_fused + common_unfused + mixtral_unfused
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return super().load_weights(self._detect_mixtral_format(weights))
+
+    def _detect_mixtral_format(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            uses_w123 = any(f".{w}." in f".{name}" for w in ("w1", "w2", "w3"))
+            self._is_mixtral_format = bool(self._is_mixtral_format) or uses_w123
+            yield name, weight
 
 
 class MoEMixin(MixtureOfExperts, Base):

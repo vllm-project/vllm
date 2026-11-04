@@ -13,10 +13,21 @@ pub use crate::lower::token_ids::TokenIdsError;
 pub enum Error {
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    /// No tokenizer is loaded (`--skip-tokenizer-init`), so the request's
+    /// text cannot be encoded or decoded.
+    #[error(
+        "this request needs a tokenizer, which is not loaded when `--skip-tokenizer-init` is set"
+    )]
+    TokenizerUnavailable,
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error("text request `{request_id}` stop strings cannot be empty")]
     EmptyStopString { request_id: String },
+    #[error(
+        "text request `{request_id}` stop strings require detokenization; enable it or use stop \
+         token IDs"
+    )]
+    StopStringsRequireDetokenize { request_id: String },
     #[error(
         "Parameter 'cache_salt' must be a non-empty string of at most 128 characters \
          and must not contain '@', '/', '\\', or NUL."
@@ -76,6 +87,8 @@ impl Error {
             | Self::PromptFillsContext { .. }
             | Self::EmptyPromptTokenIds { .. }
             | Self::EmptyStopString { .. }
+            | Self::StopStringsRequireDetokenize { .. }
+            | Self::TokenizerUnavailable
             | Self::InvalidCacheSalt
             | Self::Logprobs(_)
             | Self::TokenIds(_)
@@ -109,6 +122,9 @@ impl Error {
 
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {
-        Self::Tokenizer(error.0)
+        match error {
+            vllm_tokenizer::TokenizerError::Backend { message } => Self::Tokenizer(message),
+            vllm_tokenizer::TokenizerError::Unavailable => Self::TokenizerUnavailable,
+        }
     }
 }

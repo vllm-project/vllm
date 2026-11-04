@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -145,6 +147,7 @@ def _mxfp8_quant_triton_kernel():
 
 
 _MXFP8_QUANT_KERNEL = None
+_MXFP8_M1_BLOCK_M = {2048: 4, 3072: 4, 6144: 2}
 
 
 def _mxfp8_e4m3_quantize_triton(
@@ -163,7 +166,7 @@ def _mxfp8_e4m3_quantize_triton(
     scales = torch.empty(
         (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
     )
-    BLOCK_M = 64
+    BLOCK_M = _MXFP8_M1_BLOCK_M.get(K, 64) if M == 1 else 64
     grid = (triton.cdiv(M, BLOCK_M), K // MXFP8_BLOCK_SIZE)
     _MXFP8_QUANT_KERNEL[grid](
         x,
@@ -180,8 +183,22 @@ def _mxfp8_e4m3_quantize_triton(
         BLOCK_M=BLOCK_M,
         FP8_MAX=float(torch.finfo(MXFP8_VALUE_DTYPE).max),
         TINY=float(torch.finfo(torch.float32).tiny),
+        num_warps=4,
     )
     return xq, scales
+
+
+@functools.cache
+def _flashinfer_mxfp8_quantize():
+    """FlashInfer's MXFP8 quantize when this device uses it, else None."""
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
+
+    if current_platform.has_device_capability(100) and has_flashinfer():
+        from flashinfer import mxfp8_quantize
+
+        return mxfp8_quantize
+    return None
 
 
 def _mxfp8_e4m3_quantize_impl(
@@ -190,11 +207,9 @@ def _mxfp8_e4m3_quantize_impl(
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
-    from vllm.utils.flashinfer import has_flashinfer
 
-    if current_platform.has_device_capability(100) and has_flashinfer():
-        from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
-
+    flashinfer_mxfp8_quantize = _flashinfer_mxfp8_quantize()
+    if flashinfer_mxfp8_quantize is not None:
         x_q, x_scales = flashinfer_mxfp8_quantize(
             x,
             is_sf_swizzled_layout=is_sf_swizzled_layout,
@@ -224,6 +239,9 @@ def mxfp8_e4m3_quantize(
     is_sf_swizzled_layout: bool = False,
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # The custom op is only needed as a Dynamo boundary.
+    if not torch.compiler.is_compiling():
+        return _mxfp8_e4m3_quantize_impl(x, is_sf_swizzled_layout, alignment)
     return torch.ops.vllm.mxfp8_quantize(x, is_sf_swizzled_layout, alignment)
 
 

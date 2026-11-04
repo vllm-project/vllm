@@ -21,6 +21,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -313,6 +314,43 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
 
     assert list(metadata.retained_block_hashes) == second.block_hashes
     assert list(metadata.released_block_hashes) == first.block_hashes[:3]
+
+
+@pytest.mark.parametrize(
+    "with_config,params,expected",
+    [
+        (True, {"watermarking": True}, True),
+        (True, {"watermarking": False}, False),
+        (True, {"watermarking": True, "temperature": 0.0}, False),
+        (True, {"watermarking": True, "trace_decode_token_ids": [0]}, False),
+        (False, {"watermarking": True}, None),
+    ],
+)
+def test_first_output_reports_watermarking(with_config, params, expected):
+    """EngineCore sends the flag it applied on the first output only."""
+    scheduler = create_scheduler()
+    if with_config:
+        scheduler.vllm_config.watermark_config = WatermarkConfig(key=42)
+    (request,) = create_requests(num_requests=1, max_tokens=2, ignore_eos=True)
+    for name, value in params.items():
+        setattr(request.sampling_params, name, value)
+    scheduler.add_request(request)
+
+    reported = []
+    for _ in range(2):
+        scheduler_output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        outputs = scheduler.update_from_output(scheduler_output, model_output)
+        reported.append(outputs[0].outputs[0].watermarking)
+
+    assert reported == [expected, None]
 
 
 def test_finish_request():
@@ -1243,6 +1281,211 @@ def test_local_prefill_interval_defers_inflight_prefill_chunk(interval: int):
     assert "chk0" in output.num_scheduled_tokens
 
 
+def _setup_cache_aware(num_tokens: int = 48, **kwargs):
+    """A scheduler where `warm`'s prompt is already cached and `cold`'s is not.
+
+    Returns `(scheduler, warm, cold)`, with neither request added yet.
+
+    The threshold is pinned rather than inherited. These fixtures sit at ~0 KV
+    cache usage, so under the shipped default of 0.5 the reorder would never
+    run and every test below would pass without exercising it. Tests that are
+    about the threshold itself pass their own value.
+    """
+    kwargs.setdefault("cache_aware_admission_threshold", 0)
+    scheduler = create_scheduler(enable_prefix_caching=True, **kwargs)
+    seed, warm = create_requests(
+        num_requests=2,
+        num_tokens=num_tokens,
+        same_prompt=True,
+        req_ids=["seed", "warm"],
+    )
+    # Only index 0 of a `same_prompt` batch collides with a distinct-prompt
+    # batch, so index 1 here is a prompt no other request shares.
+    cold = create_requests(
+        num_requests=2, num_tokens=num_tokens, req_ids=["unused", "cold"]
+    )[1]
+
+    # Run `seed` far enough to leave its prompt in the prefix cache.
+    scheduler.add_request(seed)
+    output = scheduler.schedule()
+    assert "seed" in output.num_scheduled_tokens
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["seed"],
+            req_id_to_index={"seed": 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+    scheduler.finish_requests("seed", RequestStatus.FINISHED_ABORTED)
+
+    assert scheduler.kv_cache_manager.get_num_cached_tokens(warm) > 0
+    assert scheduler.kv_cache_manager.get_num_cached_tokens(cold) == 0
+    return scheduler, warm, cold
+
+
+def test_cache_aware_admission_prefers_cached_prefix():
+    """Within the window, a request whose prefix is already cached is admitted
+    ahead of one that would have to compute its own, so the cold request cannot
+    evict blocks the resident one still needs.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=4)
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["warm", "cold"]
+
+
+@pytest.mark.parametrize("window", [0, 4])
+def test_cache_aware_admission_protects_resident_prefix_from_eviction(window: int):
+    """The point of the reordering, not just its ordering.
+
+    With the cache too small to hold both prompts, whichever request is
+    admitted first keeps its blocks. Arrival order puts the cold request first,
+    so only the reordering can stop it evicting the prefix the warm request
+    still needs. `window=0` is the control: same setup, reordering off.
+    """
+    # 48-token prompts at block_size 16 are 3 blocks each; 5 blocks cannot hold
+    # both, so admitting one evicts the other's cached prefix.
+    scheduler, warm, cold = _setup_cache_aware(
+        num_tokens=48,
+        num_blocks=5,
+        block_size=16,
+        cache_aware_admission_window=window,
+    )
+    cached_before = scheduler.kv_cache_manager.get_num_cached_tokens(warm)
+    assert cached_before > 0
+
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+    output = scheduler.schedule()
+    scheduled = [r.req_id for r in output.scheduled_new_reqs]
+
+    if window:
+        # The warm request goes first and is admitted against its cached
+        # prefix, so it computes fewer tokens than its prompt.
+        assert scheduled[0] == "warm"
+        assert output.num_scheduled_tokens["warm"] < warm.num_prompt_tokens
+    else:
+        # Arrival order wins: the cold request takes the blocks it needs and
+        # the warm request's resident prefix is partly evicted, so the hit it
+        # would have had shrinks and those tokens must be recomputed.
+        assert scheduled[0] == "cold"
+        assert scheduler.kv_cache_manager.get_num_cached_tokens(warm) < cached_before
+
+
+def test_cache_aware_admission_keeps_blocked_and_started_requests_in_place():
+    """Reordering is confined to plain waiting peers.
+
+    A request in a blocked status, and one that is already partially computed,
+    each keep their exact index; nothing is moved across them, and the queue
+    beyond the window is untouched. This is the property that makes this a
+    reorder among peers rather than a priority change.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=4)
+
+    blocked, started, tail = create_requests(
+        num_requests=3, num_tokens=48, req_ids=["blocked", "started", "tail"]
+    )
+    # Enqueue everything as a plain waiting request first: a request that is
+    # already blocked on arrival is routed to `skipped_waiting` instead, and
+    # the guard under test is for one whose state changed while queued.
+    for request in (cold, blocked, started, warm, tail):
+        scheduler.add_request(request)
+    blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    started.num_computed_tokens = 16
+
+    before = [r.request_id for r in scheduler.waiting]
+    assert before == ["cold", "blocked", "started", "warm", "tail"]
+
+    scheduler._reorder_waiting_by_cached_prefix()
+    after = [r.request_id for r in scheduler.waiting]
+
+    # Only `cold` and `warm` are plain waiting peers inside the 4-slot window,
+    # so only they swap. `blocked` holds index 1, `started` holds index 2, and
+    # `tail` sits beyond the window untouched.
+    assert after == ["warm", "blocked", "started", "cold", "tail"]
+
+
+def test_cache_aware_admission_does_not_look_past_the_window():
+    """The window bounds how far a cached request can be promoted from, so a
+    request outside it keeps its place in arrival order.
+    """
+    scheduler, warm, cold = _setup_cache_aware(cache_aware_admission_window=1)
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
+
+
+def test_cache_aware_admission_skipped_below_threshold():
+    """Below the usage threshold there are no evictions worth avoiding, so
+    admission stays in arrival order.
+    """
+    scheduler, warm, cold = _setup_cache_aware(
+        cache_aware_admission_window=4, cache_aware_admission_threshold=0.9
+    )
+    assert scheduler.kv_cache_manager.usage < 0.9
+    scheduler.add_request(cold)
+    scheduler.add_request(warm)
+
+    output = scheduler.schedule()
+    assert [r.req_id for r in output.scheduled_new_reqs] == ["cold", "warm"]
+
+
+def test_cache_aware_admission_is_safe_on_a_mamba_spec():
+    """The probe must not assume full attention.
+
+    `get_num_cached_tokens` goes through the KV cache coordinator, so a group
+    whose spec is not full attention has to be handled rather than crash. A
+    Mamba group keeps recurrent state rather than a reusable token prefix, so
+    the probe finds nothing to reuse and the reordering degrades to a no-op
+    instead of shuffling the queue on meaningless scores.
+    """
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        cache_aware_admission_window=4,
+        cache_aware_admission_threshold=0.0,
+        kv_cache_spec=MambaSpec(
+            block_size=16,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
+    )
+    assert scheduler.cache_aware_window == 4
+
+    requests = create_requests(num_requests=3, num_tokens=48, req_ids=["a", "b", "c"])
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Probing is safe, reports no reusable prefix, and leaves arrival order.
+    assert all(
+        scheduler.kv_cache_manager.get_num_cached_tokens(r) == 0 for r in requests
+    )
+    scheduler._reorder_waiting_by_cached_prefix()
+    assert [r.request_id for r in scheduler.waiting] == ["a", "b", "c"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        # Reordering by queue position is meaningless in a priority heap.
+        {"scheduling_policy": "priority", "enable_prefix_caching": True},
+        # Nothing to reorder by without a prefix cache.
+        {"enable_prefix_caching": False},
+    ],
+)
+def test_cache_aware_admission_requires_fcfs_and_prefix_caching(kwargs: dict):
+    scheduler = create_scheduler(cache_aware_admission_window=4, **kwargs)
+    assert scheduler.cache_aware_window == 0
+
+
 def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
     """Drive a remote-KV request `r2` to the resume point (async load complete)
     while another request `r1` is already decoding, so the step is throttle-
@@ -1547,6 +1790,57 @@ def test_no_mm_input_chunking_at_item_boundary():
     assert ask(400, 500) == 0
     # Starts exactly at the item and covers it: schedule it.
     assert ask(400, 800) == 800
+    # Starts inside the item (a prefix cache hit ended there) and cannot finish
+    # it: schedule nothing, never a negative count.
+    assert ask(600, 500) == 0
+    # Starts inside the item and finishes it: schedule the rest.
+    assert ask(600, 600) == 600
+
+
+def test_no_mm_input_chunking_after_prefix_cache_hit_inside_item():
+    """A prefix cache hit can end inside a multimodal item (hits are block
+    aligned). The rest of the item must then be scheduled in one step too."""
+    block_size = 256
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=600,
+        disable_chunked_mm_input=True,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_model_len=2048,
+    )
+
+    def image_request(req_id: str) -> Request:
+        return create_requests(
+            num_requests=1,
+            num_tokens=590,
+            mm_hashes_list=[["image"]],
+            mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+            block_size=block_size,
+            req_ids=[req_id],
+        )[0]
+
+    def step() -> dict[str, int]:
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, make_output(scheduler))
+        return output.num_scheduled_tokens
+
+    # Caches the first two blocks, 512 of the 576 image tokens.
+    scheduler.add_request(image_request("primer"))
+    assert step() == {"primer": 590}
+
+    # The text prefill leaves 600 - 560 - 1 = 39 tokens of budget, less than the
+    # 64 image tokens left after the hit.
+    scheduler.add_request(
+        create_requests(
+            num_requests=1, num_tokens=560, block_size=block_size, req_ids=["text"]
+        )[0]
+    )
+    scheduler.add_request(image_request("hit"))
+    assert step() == {"primer": 1, "text": 560}
+
+    # The 64 image tokens and the 14 text tokens after them, in one chunk.
+    assert step() == {"primer": 1, "text": 1, "hit": 78}
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
@@ -2532,6 +2826,41 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     assert resumed.num_scheduled_tokens == {running.request_id: running.num_tokens}
 
 
+@pytest.mark.parametrize("extensible", [True, False])
+def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible):
+    """Workers learn that their extensible KV cache holds nothing to keep from
+    a pause that cleared it until the resume, and only then."""
+    from types import SimpleNamespace
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+    core.model_executor = Mock(
+        is_sleeping=False,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(enable_extensible_kv_cache=extensible)
+        ),
+    )
+    rpc = core.model_executor.collective_rpc
+
+    def reclaimable_calls() -> list[bool]:
+        return [
+            call.kwargs["args"][0]
+            for call in rpc.call_args_list
+            if call.args == ("set_kv_cache_reclaimable",)
+        ]
+
+    core.pause_scheduler(mode="keep", clear_cache=False)
+    core.resume_scheduler()
+    assert reclaimable_calls() == []
+
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.resume_scheduler()
+    assert reclaimable_calls() == ([True, False] if extensible else [])
+
+
 @pytest.mark.parametrize(
     "sleeping_tags",
     [{"weights", "kv_cache"}, {"weights"}, {"kv_cache"}],
@@ -2584,7 +2913,7 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(
         '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
     )
-    scheduler = create_scheduler(
+    base = create_scheduler(
         model=str(tmp_path),
         max_num_seqs=16,
         max_num_batched_tokens=20,
@@ -2592,8 +2921,24 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
         parallel_drafting=True,
         skip_tokenizer_init=True,
     )
-    speculative_config = scheduler.vllm_config.speculative_config
+    # P-EAGLE needs a resolvable draft model, so switch the ngram config in place
+    # and redo the config step.
+    vllm_config = base.vllm_config
+    speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    object.__setattr__(speculative_config, "method", "eagle3")
+    object.__setattr__(
+        speculative_config,
+        "draft_model_config",
+        SimpleNamespace(hf_config=SimpleNamespace(), architectures=[]),
+    )
+    vllm_config._set_max_num_scheduled_tokens()
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base.kv_cache_config,
+        structured_output_manager=base.structured_output_manager,
+        block_size=base.block_size,
+    )
     assert scheduler.max_num_scheduled_tokens == 20
     assert speculative_config.max_num_new_slots_for_drafting == 3
 
@@ -2624,7 +2969,7 @@ def test_block_drafters_cap_requests_instead_of_draft_slots(
     object.__setattr__(
         vllm_config.speculative_config,
         "draft_model_config",
-        SimpleNamespace(hf_config=SimpleNamespace()),
+        SimpleNamespace(hf_config=SimpleNamespace(), architectures=[]),
     )
     vllm_config._set_max_num_scheduled_tokens()
     scheduler = Scheduler(
@@ -3504,23 +3849,45 @@ def test_has_sync_kv_loads(
     assert output.has_sync_kv_loads is expected_has_sync_loads
 
 
-def test_kv_connector_honors_skip_reading_prefix_cache():
-    """A request that must score every prompt row takes no external hit."""
+@pytest.mark.parametrize("suffix_scoring", [False, True])
+def test_kv_connector_honors_skip_reading_prefix_cache(suffix_scoring):
+    """External hits cannot skip rows required by prompt scoring."""
     BLOCK_SIZE = 16
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 2, is_async=False),
         block_size=BLOCK_SIZE,
     )
-    plain, scoring = create_requests(num_requests=2, num_tokens=BLOCK_SIZE * 4)
-    scoring.sampling_params.prompt_logprobs = 1
-    scoring.skip_reading_prefix_cache = True
+    scoring_params = (
+        SamplingParams(
+            prompt_logprob_token_ids=[[1]] * (BLOCK_SIZE * 3 - 1),
+            prompt_logprob_start=BLOCK_SIZE,
+            skip_reading_prefix_cache=False,
+        )
+        if suffix_scoring
+        else SamplingParams(prompt_logprobs=1)
+    )
+    (plain,) = create_requests(1, num_tokens=BLOCK_SIZE * 4, req_ids=["plain"])
+    (scoring,) = create_requests(
+        1,
+        num_tokens=BLOCK_SIZE * 4,
+        req_ids=["scoring"],
+        sampling_params=scoring_params,
+    )
+    admission = []
+    scheduler.connector.on_new_request = lambda req: admission.append(
+        req.skip_reading_external_kv
+    )
     scheduler.add_request(plain)
     scheduler.add_request(scoring)
+    assert admission == [False, True]
 
     output = scheduler.schedule()
     assert output.num_scheduled_tokens[plain.request_id] == BLOCK_SIZE * 2
-    assert output.num_scheduled_tokens[scoring.request_id] == BLOCK_SIZE * 4
+    # No external hit; suffix scoring still reuses the local blocks plain just
+    # loaded, up to prompt_logprob_start.
+    expected = BLOCK_SIZE * 3 if suffix_scoring else BLOCK_SIZE * 4
+    assert output.num_scheduled_tokens[scoring.request_id] == expected
 
 
 @pytest.mark.parametrize("is_async", [False, True])
@@ -8290,93 +8657,6 @@ def test_encoder_input_skipped_when_connector_already_has_the_item(ec_role: str)
     assert not output.scheduled_encoder_inputs.get(req_id)
 
 
-class _RecordingGrammar:
-    """Records what reaches ``validate_tokens`` and raises on a negative id.
-
-    llguidance raises ``OverflowError`` on a negative token id, so this mirrors
-    the real failure: the tests below fail on the unpatched scheduler (the -1
-    padding reaches ``validate_tokens``) and pass once it is stripped first.
-    """
-
-    def __init__(self) -> None:
-        self.seen: list[list[int]] = []
-
-    def validate_tokens(self, tokens: list[int]) -> list[int]:
-        if any(t < 0 for t in tokens):
-            raise OverflowError("llguidance rejects negative token ids")
-        self.seen.append(list(tokens))
-        return tokens
-
-
-def _decode_ready_request(scheduler):
-    """Add one request and advance it out of prefill into decode."""
-    request = create_requests(num_requests=1, num_tokens=1)[0]
-    scheduler.add_request(request)
-    output = scheduler.schedule()
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=[request.request_id],
-            req_id_to_index={request.request_id: 0},
-            sampled_token_ids=[[0]],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-    return request
-
-
-def test_update_draft_token_ids_strips_ngram_padding():
-    """ngram_gpu pads unfilled draft slots with -1; manager validation must
-    strip them before grammar.validate_tokens (which otherwise raises)."""
-    scheduler = create_scheduler(num_speculative_tokens=4)
-    request = _decode_ready_request(scheduler)
-
-    grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(
-        grammar=grammar, reasoning_ended=True
-    )
-
-    scheduler.update_draft_token_ids(
-        DraftTokenIds([request.request_id], [[10, 11, -1, -1]])
-    )
-
-    assert grammar.seen == [[10, 11]]
-    assert request.spec_token_ids == [10, 11]
-
-
-def test_update_draft_token_ids_in_output_strips_padding():
-    """Same guard on the output path; the -1 pad-back for the rejected count
-    is preserved (only the input to manager validation is stripped)."""
-    scheduler = create_scheduler(num_speculative_tokens=4)
-    request = _decode_ready_request(scheduler)
-
-    grammar = _RecordingGrammar()
-    request.structured_output_request = SimpleNamespace(
-        grammar=grammar, reasoning_ended=True
-    )
-
-    scheduler_output = SimpleNamespace(
-        scheduled_spec_decode_tokens={request.request_id: [0, 0, 0, 0]}
-    )
-    scheduler.update_draft_token_ids_in_output(
-        DraftTokenIds([request.request_id], [[10, 11, -1, -1]]),
-        scheduler_output,
-    )
-
-    # The grammar only saw the stripped prefix, never a -1.
-    assert grammar.seen == [[10, 11]]
-    # Two drafts were rejected (4 scheduled - 2 valid), padded back with -1.
-    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
-        10,
-        11,
-        -1,
-        -1,
-    ]
-    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
-
-
 def test_diffusion_canvas_width_defaults_to_the_served_canvas():
     def req(extra):
         return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra))
@@ -8442,13 +8722,10 @@ def test_diffusion_scheduler_narrows_the_canvas_per_request():
     assert narrow.num_output_placeholders == 4
 
 
-@pytest.mark.parametrize("structured", [False, True])
 @pytest.mark.parametrize("async_scheduling", [False, True])
 @pytest.mark.usefixtures("diffusion_model_runner")
-def test_diffusion_scheduler_trims_full_width_worker_drafts(
-    structured, async_scheduling
-):
-    """Padded worker drafts must be narrowed before scheduling or grammar validation."""
+def test_diffusion_scheduler_trims_full_width_worker_drafts(async_scheduling):
+    """Padded worker drafts must be narrowed before scheduling."""
     scheduler = _diffusion_scheduler(async_scheduling=async_scheduling)
     wide = _diffusion_request("wide", {})
     narrow = _diffusion_request("narrow", {"diffusion_canvas_length": 4})
@@ -8457,12 +8734,7 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
     prefill = scheduler.schedule()
     _model_output(scheduler, prefill, [[], []])
 
-    if structured:
-        for request in (wide, narrow):
-            request.structured_output_request = SimpleNamespace(
-                grammar=_RecordingGrammar(), reasoning_ended=True
-            )
-    tokens = list(range(8)) if structured else [-1] * 8
+    tokens = [-1] * 8
     drafts = DraftTokenIds(["wide", "narrow"], [tokens.copy(), tokens.copy()])
     if async_scheduling:
         output = scheduler.schedule()
@@ -8476,9 +8748,6 @@ def test_diffusion_scheduler_trims_full_width_worker_drafts(
         "narrow": tokens[:4],
     }
     assert output.num_scheduled_tokens == {"wide": 8, "narrow": 4}
-    if structured:
-        assert wide.structured_output_request.grammar.seen == [tokens]
-        assert narrow.structured_output_request.grammar.seen == [tokens[:4]]
 
 
 @pytest.mark.parametrize(

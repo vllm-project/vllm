@@ -56,19 +56,25 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
             )
 
         speculative_config = vllm_config.speculative_config
-        speculative_method = (
-            speculative_config.method if speculative_config is not None else None
-        )
-        if speculative_method in {
-            "dflash",
-            "dspark",
-            "eagle3",
-            "extract_hidden_states",
-        }:
+        if speculative_config is not None and speculative_config.uses_aux_hidden_states:
             raise NotImplementedError(
                 "AliceAI does not support speculative method "
-                f"{speculative_method!r} because it requires auxiliary hidden states"
+                f"{speculative_config.method!r} because it requires auxiliary "
+                "hidden states"
             )
+
+
+def _set_deepseek_indexer_logits_dtype(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek indexer logits to BF16 where the MQA logits kernels
+    also reduce in BF16 (SM100) and to FP32 elsewhere."""
+    from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+
+    attention_config = vllm_config.attention_config
+    attention_config.indexer_logits_dtype = (
+        attention_config.resolve_indexer_logits_dtype(
+            "bfloat16" if mqa_logits_use_mx_scales() else "float32"
+        )
+    )
 
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
@@ -85,6 +91,32 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
+        _set_deepseek_indexer_logits_dtype(vllm_config)
+
+
+class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        if not get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+            return
+        # The NVFP4 KV attention kernels (MSA's CUTLASS Q8KV4 prefill) need 16
+        # query heads per KV head on each rank; fail before the workers start.
+        text_config = vllm_config.model_config.hf_text_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        num_heads = text_config.num_attention_heads // tp_size
+        num_kv_heads = max(1, text_config.num_key_value_heads // tp_size)
+        if num_heads != 16 * num_kv_heads:
+            raise ValueError(
+                "MiniMax-M3 does not support an NVFP4 KV cache with "
+                f"tensor_parallel_size={tp_size} yet: each rank holds {num_heads} "
+                f"query heads over {num_kv_heads} KV head(s), and the NVFP4 "
+                "attention kernels need 16 per KV head. Use a smaller "
+                "tensor_parallel_size (with data/expert parallelism) or another "
+                "kv_cache_dtype."
+            )
+
 
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
     @staticmethod
@@ -99,15 +131,6 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            # MTP shares the target's KV cache layout; a separate draft model
-            # must not inherit a default it was never validated with.
-            spec_config = vllm_config.speculative_config
-            if (
-                spec_config is not None
-                and spec_config.method != "mtp"
-                and spec_config.kv_cache_dtype is None
-            ):
-                spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
@@ -193,6 +216,10 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        if getattr(vllm_config.model_config.hf_text_config, "unlimited_ocr2", False):
+            UnlimitedOCRForCausalLMConfig._configure_v2(vllm_config)
+            return
+
         attn_config = vllm_config.attention_config
         fa4_available = is_fa_version_supported(4)
 
@@ -273,6 +300,12 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 "prefix cache)."
             )
 
+        UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
+
+    @staticmethod
+    def _configure_vision(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
         mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
         if mm_config is not None:
             if mm_config.mm_encoder_attn_backend is None:
@@ -289,6 +322,54 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         text_config = model_config.hf_config.text_config
         text_config.architectures = ["DeepseekV2ForCausalLM"]
+        sparse = getattr(model_config.hf_config, "sparse_attention_config", None)
+        if sparse is not None:
+            required = {
+                "training_stage": "dash",
+                "dash_stage0": "head_cls",
+                "sparse_main_rope_mode": "page2d",
+                "sparse_rope_mode": "page2d",
+                "sparse_rope_page_span": 0,
+                "use_sparse_attention": True,
+                "image_bucket_constraint": True,
+                "dash_image_only": True,
+            }
+            for key, value in required.items():
+                if sparse.get(key) != value:
+                    raise ValueError(f"Unlimited-OCR-2 requires {key}={value!r}")
+            if (
+                sparse.get("sparse_attention_freq")
+                != [1] * text_config.num_hidden_layers
+            ):
+                raise ValueError("Unlimited-OCR-2 requires DASH in every decoder layer")
+            if (
+                sparse["sparse_index_dim"]
+                != text_config.hidden_size // text_config.num_attention_heads
+            ):
+                raise ValueError("Unlimited-OCR-2 requires index_dim == head_dim")
+            if sparse["dash_sigma"] <= 0 or sparse["dash_topk_blocks"] <= 0:
+                raise ValueError("Unlimited-OCR-2 requires positive sigma and top-K")
+            # Token/page RoPE plus two DASH cache metadata channels.
+            pairs = sparse.get("sparse_rope_page_pairs", 1)
+            text_config.mrope_section = [
+                sparse["sparse_index_dim"] // 2 - pairs,
+                pairs,
+                0,
+                0,
+            ]
+            text_config.architectures = ["UnlimitedOCR2TextForCausalLM"]
+            text_config.unlimited_ocr2 = True
+            text_config.sparse_attention_config = sparse
+            window = sparse["sparse_local_block"] * sparse["sparse_block_size"]
+            requested = getattr(model_config.hf_config, "rswa_window", None)
+            if requested not in (None, 0, window):
+                raise ValueError(
+                    f"Unlimited-OCR-2 requires rswa_window={window} or 0 (full KV)"
+                )
+            model_config.hf_config.rswa_window = None if requested == 0 else window
+            text_config.rswa_window = model_config.hf_config.rswa_window
+            model_config.model_arch_config.rswa_window = text_config.rswa_window
+            return
         if getattr(model_config.hf_config, "rswa_window", None) is None:
             model_config.hf_config.rswa_window = 128
         # Propagate rswa_window to text_config so that DeepseekAttention (which
@@ -296,6 +377,85 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         # init_vllm_registered_model) can read it and create RSWAAttention.
         rswa_window = model_config.hf_config.rswa_window
         text_config.rswa_window = rswa_window
+
+    @staticmethod
+    def _configure_v2(vllm_config: "VllmConfig") -> None:
+        from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if not vllm_config.use_v2_model_runner:
+            raise ValueError(
+                "Unlimited-OCR-2 requires Model Runner V2; set "
+                "VLLM_USE_V2_MODEL_RUNNER=1"
+            )
+        # Generic JIT warmup submits text-only requests, which DASH cannot use.
+        vllm_config.kernel_config.enable_jit_warmup = False
+        compilation = vllm_config.compilation_config
+        breakable = is_breakable_cudagraph_enabled()
+        if not vllm_config.model_config.enforce_eager:
+            if compilation.mode not in (None, CompilationMode.NONE):
+                raise ValueError("Unlimited-OCR-2 currently requires compile mode NONE")
+            compilation.mode = CompilationMode.NONE
+            if compilation.cudagraph_mode is None:
+                compilation.cudagraph_mode = (
+                    CUDAGraphMode.FULL_AND_PIECEWISE
+                    if breakable
+                    else CUDAGraphMode.FULL_DECODE_ONLY
+                )
+            allowed_modes = {CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY}
+            if breakable:
+                allowed_modes.update(
+                    {CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE}
+                )
+            if compilation.cudagraph_mode not in allowed_modes:
+                raise ValueError(
+                    "Unlimited-OCR-2 prefill graphs require "
+                    "VLLM_USE_BREAKABLE_CUDAGRAPH=1 and mode "
+                    "PIECEWISE or FULL_AND_PIECEWISE; full prefill graphs "
+                    "are not supported"
+                )
+        parallel = vllm_config.parallel_config
+        unsupported = {
+            "pipeline parallelism": parallel.pipeline_parallel_size != 1,
+            "context parallelism": (
+                parallel.decode_context_parallel_size != 1
+                or parallel.prefill_context_parallel_size != 1
+            ),
+            "dual batch overlap": parallel.enable_dbo,
+            "LoRA": vllm_config.lora_config is not None,
+            "speculative decoding": vllm_config.speculative_config is not None,
+            "quantized weights": vllm_config.model_config.quantization is not None,
+            "non-default KV dtype": vllm_config.cache_config.cache_dtype != "auto",
+            "KV transfer": vllm_config.kv_transfer_config is not None,
+        }
+        for feature, enabled in unsupported.items():
+            if enabled:
+                raise ValueError(f"Unlimited-OCR-2 does not support {feature}")
+        vllm_config.cache_config.enable_prefix_caching = False
+        backend = (
+            vllm_config.attention_config.backend or AttentionBackendEnum.FLASH_ATTN
+        )
+        if backend not in (
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.FLASHINFER,
+        ):
+            raise ValueError("Unlimited-OCR-2 supports FLASH_ATTN or FLASHINFER")
+        text_config = vllm_config.model_config.hf_config.text_config
+        text_config.unlimited_ocr2_attention_backend = backend.name
+        if backend == AttentionBackendEnum.FLASHINFER:
+            compilation.cudagraph_num_of_warmups = max(
+                1, compilation.cudagraph_num_of_warmups
+            )
+        # DASH owns sparse selection and compute. Reuse Triton's paged-cache
+        # metadata, including R-SWA reclamation, for both compute backends.
+        vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+        logger.info("Unlimited-OCR-2 DASH compute backend: %s", backend.name)
+        UnlimitedOCRForCausalLMConfig._configure_vision(vllm_config)
+        logger.info(
+            "Unlimited-OCR-2: output KV window=%s; input KV is retained for DASH.",
+            vllm_config.model_config.rswa_window,
+        )
 
 
 class Gemma4Config(VerifyAndUpdateConfig):
@@ -464,7 +624,59 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
+    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
+    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
+    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
+    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    from vllm.platforms import current_platform
+
+    hf_config = vllm_config.model_config.hf_text_config
+    block = getattr(hf_config, "candidate_block_size", 0)
+    topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
+    parallel = vllm_config.parallel_config
+    if (
+        block <= 0
+        or topk_blocks <= 0
+        or not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+        or parallel.decode_context_parallel_size > 1
+        or parallel.prefill_context_parallel_size > 1
+        or vllm_config.kernel_config.sparse_indexer_topk_backend
+        not in ("auto", "deep_select")
+    ):
+        return False
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        check_deep_select_layout,
+        has_deep_select,
+        pick_sparse_block_kv,
+    )
+    from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+
+    if not (has_deep_gemm_sparse_mqa() and has_deep_select()):
+        return False
+    try:
+        pick_sparse_block_kv(block)
+        check_deep_select_layout(
+            topk_blocks * block, getattr(hf_config, "index_topk", 0)
+        )
+    except ValueError:
+        return False
+    return True
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # indexer_sparse_logits=None (default): enable the sparse-logits
+        # indexer wherever it is supported; True / False are kept as given.
+        attention_config = vllm_config.attention_config
+        if attention_config.indexer_sparse_logits is None:
+            attention_config.indexer_sparse_logits = _indexer_sparse_logits_supported(
+                vllm_config
+            )
+        _set_deepseek_indexer_logits_dtype(vllm_config)
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -549,14 +761,48 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 83.
+        from vllm.platforms import current_platform
+
         compilation_config = vllm_config.compilation_config
-        # Only override when the user has not set either of
-        # cudagraph_capture_sizes or max_cudagraph_capture_size.
-        if (
-            compilation_config.cudagraph_capture_sizes is None
-            and compilation_config.max_cudagraph_capture_size is None
+        use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Only override when the user has not set any capture size, and not on
+        # SM100 with model runner V2, whose defaults are already wider.
+        if all(
+            getattr(compilation_config, name) is None
+            for name in (
+                "cudagraph_capture_sizes",
+                "max_cudagraph_capture_size",
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            )
+        ) and not (
+            use_v2_model_runner and current_platform.is_device_capability_family(100)
         ):
-            compilation_config.max_cudagraph_capture_size = 1024
+            if use_v2_model_runner:
+                # Cover every target decode query length as the legacy 1024-token cap
+                # does. Data parallelism turns dynamic speculative decoding off later.
+                query_lens = (
+                    vllm_config.get_decode_cudagraph_query_lens(
+                        vllm_config.uniform_decode_query_len
+                    )
+                    if vllm_config.parallel_config.data_parallel_size == 1
+                    else [vllm_config.uniform_decode_query_len]
+                )
+                # The token sizes the legacy 1024-token cap captures.
+                max_tokens = min(
+                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
+                )
+                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                    {s for s in sizes if s < max_tokens} | {max_tokens}
+                )
+                compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
+                    query_lens
+                )
+            else:
+                compilation_config.max_cudagraph_capture_size = 1024
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )
@@ -787,7 +1033,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_block_size = model_config.max_model_len
 
 
-class MiniMaxM3SparseForConditionalGenerationConfig(VerifyAndUpdateConfig):
+class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
     INDEX_CACHE_KEYS = ("use_index_cache", "index_topk_freq", "index_skip_topk_offset")
 
     @classmethod
@@ -853,6 +1099,15 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
         if mm_config is not None:
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+
+class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
 
 
 class NomicBertModelConfig(VerifyAndUpdateConfig):
@@ -1235,6 +1490,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
+    "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
     "MiniMaxM3SparseForConditionalGeneration": (
@@ -1243,6 +1499,12 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronH_Nano_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Super_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        Nemotron3_5TranscribeForConditionalGenerationConfig
+    ),
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,

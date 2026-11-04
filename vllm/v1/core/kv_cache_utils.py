@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import os
+import weakref
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -15,6 +16,7 @@ from typing import (
     NewType,
     TypeAlias,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -39,6 +41,7 @@ from vllm.v1.utils import tensor_data
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -166,8 +169,8 @@ class KVCacheBlock:
     block_id: int
     # Reference count.
     ref_cnt: int = 0
-    # Deferred frees may contain blocks from multiple pools.
-    pool: "BlockPool | None" = field(
+    # Deferred frees may contain blocks from multiple pools. Weak to avoid ref cycles.
+    pool: "weakref.ref[BlockPool] | None" = field(
         default=None, repr=False, compare=False, kw_only=True
     )
     # The hash key (block hash + group id) of the block, only available
@@ -1036,6 +1039,28 @@ def get_request_block_hasher(
     return request_block_hasher
 
 
+def frontend_block_hashes(
+    request: "EngineCoreRequest", prefix_hash_config: "PrefixHashConfig | None"
+) -> list[BlockHash] | None:
+    """Return the frontend's prompt block hashes, unless their count doesn't
+    match the prompt, in which case the engine hashes the prompt itself."""
+    block_hashes = request.block_hashes
+    if block_hashes is None:
+        return None
+    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    # The engine hashes a block once its lookahead tokens exist too.
+    if prefix_hash_config is None or len(block_hashes) != (
+        max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)
+        // prefix_hash_config.hash_block_size
+    ):
+        logger.warning_once(
+            "Ignoring frontend-computed prompt block hashes that don't match the "
+            "engine's prefix hash config; hashing prompts in the engine instead."
+        )
+        return None
+    return cast(list[BlockHash], block_hashes)
+
+
 def generate_lookahead_block_hash_extra_keys(
     request: Request,
     start_token_idx: int,
@@ -1104,8 +1129,8 @@ def generate_scheduler_kv_cache_config(
         cfg.hisparse_host_num_blocks == kv_cache_configs[0].hisparse_host_num_blocks
         for cfg in kv_cache_configs
     )
-    # All workers have the same kv_cache_config except layer names, so use
-    # an arbitrary one to initialize the scheduler.
+    # Worker configs share scheduler geometry and the resolved zeroing
+    # decision, so use an arbitrary one to initialize the scheduler.
     cfg = copy.deepcopy(kv_cache_configs[0])
     for group in cfg.kv_cache_groups:
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
