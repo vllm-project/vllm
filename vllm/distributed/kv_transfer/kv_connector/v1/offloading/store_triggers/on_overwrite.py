@@ -128,6 +128,16 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
             raise ValueError(
                 "self_describing_kv_events is not supported with ON_OVERWRITE stores"
             )
+        if vllm_config.use_v2_model_runner and kv_cache_config.needs_kv_cache_zeroing:
+            # The V2 model runner zeroes new blocks and applies the CoW copies
+            # in update_requests, before handle_preemptions flushes the
+            # ON_OVERWRITE jobs. Such a store would read zeroed or copied data
+            # and save it under a valid key.
+            raise ValueError(
+                "ON_OVERWRITE stores are not supported with the V2 model runner "
+                "when the KV cache needs zeroing (mixed-precision KV cache). "
+                "Set VLLM_USE_V2_MODEL_RUNNER=0."
+            )
 
     def __init__(
         self,
