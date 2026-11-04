@@ -241,7 +241,7 @@ llm = LLM(
 
 ### Fine-Grained Per-Layer Quantization Schemes
 
-values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`) or a `{weight, activation}` spec, which allows overriding the activation quantization of a single layer.
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`) or a `{weight, activation}` spec, which allows overriding the activation quantization of a single layer.
 
 Example:
 
