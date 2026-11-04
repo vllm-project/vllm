@@ -38,7 +38,7 @@ from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 DEEPSEEK_V41_MODEL_NAME = "deepseek-ai/DeepSeek-V4.1-Flash"
 
@@ -803,6 +803,23 @@ async def test_chat_completion_render_with_sampling_params(client):
 
     # Check that internal fields are not present
     assert "_all_stop_token_ids" not in sampling_params
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "max_tokens", [{"max_tokens": 16}, {}], ids=["sixteen", "omitted"]
+)
+async def test_completion_render_keeps_default_max_tokens(client, max_tokens):
+    """``max_tokens=16`` (also the completions default) equals the
+    ``SamplingParams`` default; /render must still return it, or generate
+    treats it as unset."""
+    response = await client.post(
+        "/v1/completions/render",
+        json={"model": MODEL_NAME, "prompt": "Hello, world.", **max_tokens},
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["sampling_params"].get("max_tokens") == 16
 
 
 @pytest.mark.asyncio
