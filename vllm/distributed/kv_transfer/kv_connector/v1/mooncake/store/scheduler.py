@@ -24,7 +24,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
     LookupKeyClient,
-    LookupState,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -222,8 +221,9 @@ class MooncakeStoreScheduler:
             self._hash_block_size if self.enable_partial_hash_hits else self._block_size
         )
 
-    def start_lookup_prefetch(self, request: Request) -> LookupState | None:
-        """Input thread: start a bounded async lookup. Reads only config."""
+    def start_lookup_prefetch(self, request: Request) -> None:
+        """Start an async lookup as soon as the request is added, so it can
+        complete while the request waits to be scheduled."""
         if (
             not self.enable_lookup
             or not self.lookup_async
@@ -231,16 +231,10 @@ class MooncakeStoreScheduler:
             or request.num_tokens < self._lookup_align()
             or not request.block_hashes
         ):
-            return None
-        return self.client.prefetch(request.num_tokens, request.block_hashes)
-
-    def release_lookup(self, request: Request) -> None:
-        """Cancel a finished request's lookup, adopted or not, so a queued
-        one never occupies the lookup executor."""
-        if (prefetched := request.kv_preschedule_handle) is not None:
-            request.kv_preschedule_handle = None
-            prefetched.future.cancel()
-        self.client.discard(request.request_id)
+            return
+        self.client.prefetch(
+            request.request_id, request.num_tokens, request.block_hashes
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -254,10 +248,6 @@ class MooncakeStoreScheduler:
         """
         if not self.enable_lookup:
             return 0, False
-
-        if (prefetched := request.kv_preschedule_handle) is not None:
-            request.kv_preschedule_handle = None
-            self.client.adopt(request.request_id, prefetched)
 
         if request.num_tokens < self._lookup_align():
             return 0, False

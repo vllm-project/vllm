@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -947,19 +947,15 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
         self.num_tokens: list[int] = []
-        self.prefetched: list[int] = []
-        self.adopted: list[tuple[str, object]] = []
+        self.prefetched: list[tuple[str, int]] = []
         self.discarded: list[str] = []
 
     def discard(self, req_id):
         self.discarded.append(req_id)
 
-    def prefetch(self, num_tokens: int, block_hashes: list[bytes]):
-        self.prefetched.append(num_tokens)
-        return SimpleNamespace(future=MagicMock())
-
-    def adopt(self, req_id: str, state) -> None:
-        self.adopted.append((req_id, state))
+    def prefetch(self, req_id: str, num_tokens: int, block_hashes: list[bytes]):
+        self.prefetched.append((req_id, num_tokens))
+        return True
 
     def lookup(
         self,
@@ -978,7 +974,6 @@ def _make_admission_request(request_id="req-0"):
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
         skip_reading_external_kv=False,
-        kv_preschedule_handle=None,
     )
 
 
@@ -988,16 +983,12 @@ def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
     scheduler.client = _StubLookupClient(hit_tokens=32)
     request = _make_admission_request()
 
-    handle = scheduler.start_lookup_prefetch(request)
-    request.kv_preschedule_handle = handle
+    scheduler.start_lookup_prefetch(request)
 
-    assert scheduler.client.prefetched == [48]
-    assert scheduler.client.adopted == []
+    assert scheduler.client.prefetched == [(request.request_id, 48)]
     assert scheduler.load_specs == {}
     assert scheduler._unfinished_requests == {}
     assert scheduler.get_num_new_matched_tokens(request, 16) == (16, True)
-    assert scheduler.client.adopted == [(request.request_id, handle)]
-    assert request.kv_preschedule_handle is None
     assert scheduler.load_specs[request.request_id].vllm_cached_tokens == 16
     assert scheduler.load_specs[request.request_id].can_load is False
 
@@ -1021,24 +1012,8 @@ def test_admission_lookup_skips_ineligible_requests(option):
     else:
         request.block_hashes = []
 
-    assert scheduler.start_lookup_prefetch(request) is None
+    scheduler.start_lookup_prefetch(request)
     assert scheduler.client.prefetched == []
-
-
-def test_lookup_is_released_when_request_finishes():
-    """A request aborted while waiting never reaches the scheduler probe."""
-    scheduler = _make_bare_scheduler()
-    scheduler.lookup_async = True
-    scheduler.client = _StubLookupClient(hit_tokens=32)
-    request = _make_admission_request()
-    handle = scheduler.start_lookup_prefetch(request)
-    request.kv_preschedule_handle = handle
-
-    scheduler.release_lookup(request)
-
-    handle.future.cancel.assert_called_once()
-    assert request.kv_preschedule_handle is None
-    assert scheduler.client.discarded == [request.request_id]
 
 
 def test_admission_lookup_is_discarded_on_preemption():
@@ -1063,7 +1038,6 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1094,7 +1068,6 @@ def test_full_external_hit_with_full_local_hit_skips_load():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1117,7 +1090,6 @@ def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
     )
@@ -1143,7 +1115,6 @@ def test_partial_hash_hit_no_remote_gain_skips_load():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=32,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4", b"h5", b"h6", b"h7"],
     )
@@ -1168,7 +1139,6 @@ def test_sub_block_prompt_looks_up_with_fine_grained():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1190,7 +1160,6 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=12,
         block_hashes=[b"h0", b"h1", b"h2"],
     )
@@ -1214,7 +1183,6 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
 
     request = SimpleNamespace(
         request_id="req-0",
-        kv_preschedule_handle=None,
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
     )

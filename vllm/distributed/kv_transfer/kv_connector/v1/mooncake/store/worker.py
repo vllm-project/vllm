@@ -2722,8 +2722,6 @@ class LookupKeyClient:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
-        # Owned by the scheduler thread. prefetch() runs on the engine-core
-        # input thread and only touches the executor and the semaphore.
         self._lookups: dict[str, LookupState] = {}
         assert vllm_config.kv_transfer_config is not None
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
@@ -2790,30 +2788,22 @@ class LookupKeyClient:
         return result
 
     def prefetch(
-        self, num_tokens: int, block_hashes: list[BlockHash]
-    ) -> LookupState | None:
-        """Thread-safe: submit a lookup without registering it. The caller
-        hands the returned state to adopt() on the scheduler thread. At most
-        ``lookup_prefetch_limit`` prefetches are in flight; beyond that,
-        returns None and the scheduler looks up as usual."""
+        self, req_id: str, num_tokens: int, block_hashes: list[BlockHash]
+    ) -> bool:
+        """Start a lookup for a newly added request; a later lookup(req_id)
+        reuses it. At most ``lookup_prefetch_limit`` prefetches are in flight;
+        beyond that, returns False and the scheduler looks up as usual."""
+        assert req_id not in self._lookups
         slots = self._prefetch_slots
         if slots is None or not slots.acquire(blocking=False):
-            return None
-        try:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
-        except RuntimeError:  # executor shut down
-            slots.release()
-            return None
+            return False
+        future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
         future.add_done_callback(lambda _: slots.release())
-        return LookupState(
+        self._lookups[req_id] = LookupState(
             future=future,
             signature=_lookup_signature(num_tokens, block_hashes),
         )
-
-    def adopt(self, req_id: str, state: LookupState) -> None:
-        """Register a prefetched lookup; a later lookup(req_id) reuses it."""
-        assert req_id not in self._lookups
-        self._lookups[req_id] = state
+        return True
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""

@@ -1248,8 +1248,6 @@ class EngineCore:
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )
-        if (kv_connector := self.scheduler.get_kv_connector()) is not None:
-            req.kv_preschedule_handle = kv_connector.on_preschedule_request(req)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For

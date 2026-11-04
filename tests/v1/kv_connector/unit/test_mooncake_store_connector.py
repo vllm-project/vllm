@@ -808,7 +808,8 @@ def _gated_recv(gate: threading.Event, value: int):
 
 
 def test_admission_lookup_retains_completed_result_until_scheduled():
-    """A fast admission lookup must not be consumed or submitted twice."""
+    """A lookup started by on_new_request is reused, not consumed or
+    submitted again, by the scheduler's probes."""
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",
         kv_role="kv_both",
@@ -829,15 +830,13 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         num_tokens=48,
         block_hashes=[b"h0", b"h1", b"h2"],
         skip_reading_external_kv=False,
-        kv_preschedule_handle=None,
     )
     mock_make_socket.return_value.recv.return_value = (32).to_bytes(4, "big")
     try:
-        request.kv_preschedule_handle = connector.on_preschedule_request(request)
+        connector.on_new_request(request)
         sched = connector.connector_scheduler
         assert sched is not None
-        assert sched.client._lookups == {}
-        future = request.kv_preschedule_handle.future
+        future = sched.client._lookups[request.request_id].future
         assert future.result(timeout=5).hit_length == 32
         assert sched.load_specs == {}
         assert connector.get_num_new_matched_tokens(request, 16) == (16, True)
@@ -872,7 +871,7 @@ def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
     gate, started = threading.Event(), threading.Event()
     sock.send_multipart.side_effect = lambda *args, **kwargs: started.set()
     sock.recv.side_effect = _gated_recv(gate, 32)
-    request = SimpleNamespace(request_id="dead", kv_preschedule_handle=None)
+    request = SimpleNamespace(request_id="dead")
     try:
         assert client.lookup("busy", 48, [], non_block=True) is None
         assert started.wait(5)
@@ -916,38 +915,22 @@ def test_lookup_prefetch_cap_bounds_in_flight_prefetches(limit):
     gate = threading.Event()
     sock.recv.side_effect = _gated_recv(gate, 32)
     try:
-        first = client.prefetch(48, [])
-        assert (first is not None) == bool(limit)
-        assert client.prefetch(48, []) is None
+        assert client.prefetch("first", 48, []) == bool(limit)
+        assert client.prefetch("second", 48, []) is False
+        assert "second" not in client._lookups
         # Scheduler probes bypass the cap.
         assert client.lookup("next", 48, [], non_block=True) is None
         assert "next" in client._lookups
         if limit:
             gate.set()
-            first.future.result(timeout=5)
+            client._lookups["first"].future.result(timeout=5)
             deadline = time.monotonic() + 5.0
-            while (later := client.prefetch(48, [])) is None:
+            while not client.prefetch("later", 48, []):
                 assert time.monotonic() < deadline
                 time.sleep(0.005)
-            later.future.result(timeout=5)
+            client._lookups["later"].future.result(timeout=5)
     finally:
         gate.set()
-        client.close()
-
-
-def test_prefetch_from_another_thread_is_adopted_by_lookup():
-    client, sock = _make_lookup_client({"lookup_prefetch_limit": 1})
-    sock.recv.return_value = (32).to_bytes(4, "big")
-    states = []
-    try:
-        t = threading.Thread(target=lambda: states.append(client.prefetch(48, [])))
-        t.start()
-        t.join()
-        client.adopt("req", states[0])
-        assert states[0].future.result(timeout=5).hit_length == 32
-        assert client.lookup("req", 48, [], non_block=True).hit_length == 32
-        assert sock.send_multipart.call_count == 1
-    finally:
         client.close()
 
 
@@ -969,8 +952,8 @@ def test_lookup_client_refreshes_changed_or_expired_query(monkeypatch, change):
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     num_tokens, hashes = 48, [b"h0", b"h1", b"h2"]
     try:
-        state = client.prefetch(num_tokens, hashes)
-        client.adopt("req", state)
+        assert client.prefetch("req", num_tokens, hashes)
+        state = client._lookups["req"]
         first = state.future
         _wait_completed(state)
         assert first.result().hit_length == 32
@@ -1007,7 +990,7 @@ def test_pending_lookup_is_not_restarted_by_ttl(monkeypatch, prefetched):
     monkeypatch.setattr(worker.time, "monotonic", lambda: clock[0])
     try:
         if prefetched:
-            client.adopt("req", client.prefetch(48, []))
+            assert client.prefetch("req", 48, [])
         else:
             assert client.lookup("req", 48, [], non_block=True) is None
         first = client._lookups["req"].future
