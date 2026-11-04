@@ -1396,6 +1396,7 @@ def test_blocks_per_chunk_must_be_positive():
         build_offloading_config(config, _make_kv_cache_config())
 
 
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     "backend, placement_known",
     [("mp", True), ("uni", True), ("ray", False), ("external_launcher", False)],
