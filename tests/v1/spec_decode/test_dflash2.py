@@ -832,7 +832,9 @@ def _stub_prepare_inputs_speculator(monkeypatch, speculative_config):
     speculator.num_speculative_steps = 5
     speculator.max_num_reqs = 4
     speculator.max_num_tokens = 4096
-    speculator.max_model_len = 8192
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=8192)
+    )
     speculator.parallel_drafting_token_id = 3
     speculator.sample_from_anchor = False
     speculator.input_buffers = SimpleNamespace(
@@ -841,7 +843,7 @@ def _stub_prepare_inputs_speculator(monkeypatch, speculative_config):
     speculator.block_tables = SimpleNamespace(
         slot_mappings={0: torch.zeros(4096, dtype=torch.int64)},
         input_block_tables={0: torch.zeros(4, 32, dtype=torch.int32)},
-        kernel_block_sizes={0: 256},
+        block_sizes={0: 256},
         cp_rank=0,
         cp_size=1,
         cp_interleave=1,

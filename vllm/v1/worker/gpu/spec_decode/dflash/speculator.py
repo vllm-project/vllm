@@ -315,7 +315,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                     torch.zeros(self.max_num_reqs, dtype=torch.float32, device=device),
                     torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device),
                     self.block_tables.input_block_tables[gid],
-                    self.block_tables.kernel_block_sizes[gid],
+                    self.block_tables.block_sizes[gid],
                     self.block_tables.cp_rank,
                     self.block_tables.cp_size,
                     self.block_tables.cp_interleave,
