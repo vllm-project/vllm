@@ -2,9 +2,9 @@
 
 This page is for authors of [custom speculators](README.md#custom-speculators-experimental).
 It describes how a speculator controls a whole speculative round with the V2 model
-runner. The round has five parts: the plan of rows the target verifies, which of
-them it accepts, how many candidates the next round may take, how many requests the
-scheduler admits, and the kernels that verify and commit trees.
+runner. The round has four parts: the plan of rows the target verifies, which of
+them it accepts, how many candidates the next round may take, and the kernels that
+verify and commit trees.
 
 Every hook has a default that keeps the standard behaviour. A speculator overrides
 only the hooks it needs.
@@ -19,9 +19,9 @@ only the hooks it needs.
 | The rows the target verifies each step: chain, tree or mask (`BaseSpeculator.plan`) | The target forward, its CUDA graphs and its parallelism |
 | Which rows are accepted (`BaseSpeculator.accept`) | KV cache and recurrent-state memory, sized at startup |
 | The candidate budget for the next round (`SpeculatorConfig.candidate_budget`) | Scheduling, preemption and the order of the waiting queue |
-| A cap on running requests (`SpeculatorConfig.admit_limit`) | Committing the accepted path to the KV cache and recurrent state |
-| Its own drafting (`BaseSpeculator.propose`) | Deciding what each layer of the target can verify |
-| Optional verify and commit kernels (`SpeculatorConfig.spec_kernel_providers`) | The in-tree kernels, used for every key a speculator does not provide |
+| Its own drafting (`BaseSpeculator.propose`) | Committing the accepted path to the KV cache and recurrent state |
+| Optional verify and commit kernels (`SpeculatorConfig.spec_kernel_providers`) | Deciding what each layer of the target can verify |
+| | The in-tree kernels, used for every key a speculator does not provide |
 
 ## Startup
 
@@ -112,28 +112,10 @@ kind `"none"`).
 
 ## Every step, in call order
 
-Steps 1 and 2 run in the scheduler process. State a config keeps there stays
-there. Steps 3 to 7 run on every worker.
+Step 1 runs in the scheduler process. State a config keeps there stays there.
+Steps 2 to 6 run on every worker.
 
-### 1. Admission: `SpeculatorConfig.admit_limit`
-
-```python
-def admit_limit(self, view: BudgetView) -> int
-```
-
-This returns the most requests that may be running once this step admits waiting
-ones. The value must be at least 1. The scheduler calls it once per `schedule()`
-that admits requests. The call comes after the running requests are scheduled
-(`view.num_scheduled_reqs` counts them) and before any waiting request is admitted.
-The scheduler takes the smaller of the answer and `max_num_active_seqs`, so this
-hook can lower admission but never raise it. Running requests are never preempted
-for it. Waiting requests, preempted ones included, are still admitted in queue
-order. Under async scheduling, `view.num_running` includes the requests of the step
-still executing.
-
-The default sets no limit, and the scheduler calls only an override.
-
-### 2. Candidate budget: `SpeculatorConfig.candidate_budget`
+### 1. Candidate budget: `SpeculatorConfig.candidate_budget`
 
 ```python
 def candidate_budget(self, view: BudgetView) -> int
@@ -160,7 +142,7 @@ On a model with recurrent (Mamba, GDN) layers, a request holds one recurrent-sta
 block per draft it verifies, so a budget that drops drafts under load frees blocks
 for more running requests (`view.num_free_blocks` shows the pool).
 
-### 3. Plan: `BaseSpeculator.plan`
+### 2. Plan: `BaseSpeculator.plan`
 
 ```python
 def plan(self, inputs: PlanInputs) -> tuple[VerifyPlan, PlanBound] | None
@@ -207,14 +189,14 @@ batch that is not `chain_only`. The runner checks each plan against the effectiv
 resources and rejects a plan with more than `max_candidates` rows, or with a mask
 the resources do not allow.
 
-### 4. Verify
+### 3. Verify
 
 The runner builds the inputs from the plan and runs the target forward. Each row's
 position is `num_computed_tokens` plus its depth, or plus `positions`. With M-RoPE,
 the shift is the same on every section. Attention sees each row's ancestors, or its
 mask. The forward replays the captured graph for the batch's shape.
 
-### 5. Accept: `BaseSpeculator.accept`
+### 4. Accept: `BaseSpeculator.accept`
 
 ```python
 def accept(
@@ -245,18 +227,18 @@ argmax, which only greedy requests accept.
 
 The runner takes each committed token's logprobs from its row on the path.
 
-### 6. Commit
+### 5. Commit
 
 The runner commits the KV and the recurrent state along `path`. Every other row is
 rejected. Whether the commit moves anything depends on the plan's `is_chain`, not on
 the result: a chain commits nothing. A plan that is not a chain runs the bound
 `commit` kernels in the registry.
 
-### 7. Propose: `BaseSpeculator.propose`
+### 6. Propose: `BaseSpeculator.propose`
 
 The runner calls `propose(..., num_speculative_tokens=)` with the number of drafts
-this step's budget allows. It does not call it when the drafter is skipped (step 2).
-`propose` returns the draft tokens. The scheduler schedules them, and step 3 of the
+this step's budget allows. It does not call it when the drafter is skipped (step 1).
+`propose` returns the draft tokens. The scheduler schedules them, and step 2 of the
 next step plans over them.
 
 ## Kernel registry
@@ -331,7 +313,7 @@ class MySpeculatorConfig(SpeculatorConfig):
 ## Example: a chain speculator
 
 A chain speculator needs only the config and `propose`. The optional hooks shown
-here are a budget that stops drafting under load, and an admission cap.
+here is a budget that stops drafting under load.
 
 ```python
 # my_package/config.py
@@ -343,9 +325,6 @@ class MyChainConfig(Eagle3SpeculatorConfig):
         # No drafts when many requests are running: K + 1 rows, else 1.
         k_plus_1 = self.num_speculative_tokens + 1
         return 1 if view.num_running > 128 else k_plus_1
-
-    def admit_limit(self, view):
-        return max(1, view.max_num_seqs // 2)
 ```
 
 Register the config with `register_speculative_method` as shown in

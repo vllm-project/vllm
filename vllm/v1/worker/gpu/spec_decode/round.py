@@ -112,12 +112,9 @@ class SpecResources:
 
 @dataclass(frozen=True)
 class BudgetView:
-    """What the scheduler knows when it asks for the step's admission limit
-    (:meth:`SpeculatorConfig.admit_limit`) and candidate budget
-    (:meth:`SpeculatorConfig.candidate_budget`). Host integers. For the limit
-    they are read once the running requests are scheduled, before any waiting
-    one is admitted; for the budget, once all of this step's requests are
-    scheduled and their blocks allocated."""
+    """What the scheduler knows when it asks for the step's candidate budget
+    (:meth:`SpeculatorConfig.candidate_budget`). Host integers, read once all
+    of this step's requests are scheduled and their blocks allocated."""
 
     num_scheduled_reqs: int
     num_running: int

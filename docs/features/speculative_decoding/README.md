@@ -115,7 +115,7 @@ The speculator reads its options from
 
 By default, vLLM verifies a custom speculator's drafts as a chain and accepts them
 with its rejection sampler. A speculator can also own the verify plan (a tree or a
-mask), the accepted rows, the candidate budget, admission and kernels; see
+mask), the accepted rows, the candidate budget and kernels; see
 [The Speculative Round Contract](round_contract.md).
 
 ### V1 Custom Proposer Backend
