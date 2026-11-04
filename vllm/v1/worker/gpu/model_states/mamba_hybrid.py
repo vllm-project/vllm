@@ -346,6 +346,7 @@ class MambaHybridModelState(DefaultModelState):
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
         attn_metadata = build_attn_metadata(
+            pcp_context=input_batch.pcp_context,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

@@ -150,6 +150,40 @@ def test_input_buffers_are_exposed_for_cudagraph_capture():
     assert manager.input_buffers.is_padding.shape == (8,)
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_capture_layout_does_not_leak_into_replicated_draft(rank):
+    manager = PCPManager(
+        pcp_world_size=2,
+        pcp_rank=rank,
+        device=torch.device("cpu"),
+        shard_decode_requests=False,
+        max_num_reqs=4,
+        max_num_tokens=8,
+    )
+    draft_batch = InputBatch.make_dummy(
+        num_reqs=2,
+        num_tokens=4,
+        input_buffers=InputBuffers(4, 8, torch.device("cpu")),
+        max_query_len=2,
+    )
+    draft_batch.input_ids.copy_(torch.tensor([11, 12, 21, 22]))
+    target_batch = manager.prepare_inputs_for_capture_or_profile(draft_batch)
+    assert target_batch.pcp_context is not None
+    assert target_batch.pcp_context.world_size == 2
+    assert target_batch.pcp_context.rank == rank
+    assert draft_batch.pcp_context is None
+    torch.testing.assert_close(target_batch.input_ids, draft_batch.input_ids)
+
+    # Replicated draft inputs retain every query row, including prefills.
+    kv = torch.tensor([[11.0], [12.0], [21.0], [22.0]])
+    slots = torch.tensor([10, 11, 20, 21])
+    cache_kv, cache_slots = attention_pcp.maybe_gather_indexer_k(
+        kv, slots, num_decode_tokens=0, use_pcp=draft_batch.pcp_context is not None
+    )
+    torch.testing.assert_close(cache_kv, kv)
+    torch.testing.assert_close(cache_slots, slots)
+
+
 def test_sync_drafts_writes_logits_to_request_slots(monkeypatch):
     """Rank 0's draft logits land in each batch request's persistent slot."""
     manager = PCPManager(
@@ -295,6 +329,10 @@ def test_capture_uses_pcp_persistent_inputs():
     input_batch = manager.prepare_inputs_for_capture_or_profile(dummy_batch)
 
     assert input_batch is not dummy_batch
+    assert input_batch.pcp_context is not None
+    assert input_batch.pcp_context.world_size == 2
+    assert input_batch.pcp_context.rank == 0
+    assert dummy_batch.pcp_context is None
     assert input_batch.req_ids == dummy_batch.req_ids
     for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens"):
         actual = getattr(input_batch, name)
@@ -508,16 +546,16 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
     assert torch.equal(cache_slot_mapping, torch.tensor([123, 789, 456, PAD_SLOT_ID]))
 
 
-def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping(monkeypatch):
-    def unexpected_gather():
-        pytest.fail("replicated draft decode must not gather PCP cache inputs")
-
-    monkeypatch.setattr(attention_pcp, "get_pcp_group", unexpected_gather)
+def test_replicated_draft_cache_inputs_keep_unexpanded_slot_mapping():
     kv = torch.tensor([[11.0], [22.0], [0.0]])
     slot_mapping = torch.tensor([123, 456])
 
-    (cache_kv,), cache_slot_mapping = attention_pcp._gather_prefill_cache_inputs(
-        (kv,), slot_mapping, num_decode_tokens=2, shard_decode_requests=True
+    cache_kv, cache_slot_mapping = attention_pcp.maybe_gather_indexer_k(
+        kv,
+        slot_mapping,
+        num_decode_tokens=2,
+        use_pcp=False,
+        pcp_shard_decode_requests=True,
     )
 
     assert torch.equal(cache_kv, kv[:2])
@@ -841,3 +879,100 @@ def test_parallel_config_manages_decode_sharding(
     )
 
     assert parallel_config.pcp_shard_decode_requests is expected
+
+
+@pytest.mark.parametrize(
+    "tp,pcp,dcp,head_factor",
+    [(1, 4, 4, 1), (2, 4, 4, 1), (2, 4, 8, 2), (8, 1, 8, 8), (1, 4, 1, 1)],
+)
+def test_dcp_query_heads_count_distinct_tp_shards(tp, pcp, dcp, head_factor):
+    target = ParallelConfig(
+        tensor_parallel_size=tp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+        distributed_executor_backend="mp",
+    )
+    assert target.dcp_query_head_multiplier == head_factor
+    with pytest.raises(ValueError):
+        replace(
+            target,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+        )
+
+
+def test_dspark_mla_constructor_keeps_pcp_topology(tmp_path):
+    from transformers import DeepseekV3Config
+
+    from vllm.config import ModelConfig, SchedulerConfig, SpeculativeConfig
+    from vllm.transformers_utils.configs.k3_dspark import K3DSparkConfig
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    dims = dict(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=128,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        max_position_embeddings=128,
+        n_routed_experts=0,
+        n_shared_experts=0,
+        num_experts_per_tok=0,
+    )
+    target_path, draft_path = tmp_path / "target", tmp_path / "draft"
+    DeepseekV3Config(architectures=["DeepseekV3ForCausalLM"], **dims).save_pretrained(
+        target_path
+    )
+    K3DSparkConfig(
+        architectures=["K3DSparkModel"],
+        target_layer_ids=[0],
+        num_target_layers=1,
+        block_size=2,
+        mask_token_id=127,
+        **dims,
+    ).save_pretrained(draft_path)
+    model = ModelConfig(
+        model=str(target_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        max_model_len=128,
+        enforce_eager=True,
+    )
+    parallel = ParallelConfig(
+        prefill_context_parallel_size=4,
+        decode_context_parallel_size=4,
+        distributed_executor_backend="mp",
+    )
+    spec = SpeculativeConfig(
+        model=str(draft_path),
+        method="dspark",
+        num_speculative_tokens=2,
+        target_model_config=model,
+        target_parallel_config=parallel,
+    )
+    config = VllmConfig(
+        model_config=model,
+        parallel_config=parallel,
+        speculative_config=spec,
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=128,
+            max_num_batched_tokens=128,
+            max_num_seqs=2,
+        ),
+    )
+    drafter = DSparkSpeculator(config, torch.device("cuda"))
+    draft_parallel = drafter.vllm_config.parallel_config
+    assert draft_parallel.world_size == parallel.world_size == 4
+    assert draft_parallel.prefill_context_parallel_size == 4
+    assert draft_parallel.decode_context_parallel_size == 4
+    assert draft_parallel.compute_hash() == parallel.compute_hash()
+    assert drafter.hidden_states.shape == (128, 256)
+    assert drafter.num_query_per_req == 2

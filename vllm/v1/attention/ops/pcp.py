@@ -25,15 +25,11 @@ def _gather_prefill_cache_inputs(
     assert all(tensor.shape[0] == local_num_tokens for tensor in tensors)
     assert 0 <= num_decode_tokens <= local_num_tokens
 
-    # Replicated draft decodes use unexpanded slot mappings, even with DP padding.
-    if slot_mapping.shape[0] <= local_num_tokens:
-        return (
-            tuple(tensor[:num_decode_tokens] for tensor in tensors),
-            slot_mapping[:num_decode_tokens],
-        )
-
     pcp_group = get_pcp_group()
     pcp_size = pcp_group.world_size
+    assert slot_mapping.shape[0] == pcp_size * local_num_tokens, (
+        "PCP cache inputs require a rank-major expanded slot mapping."
+    )
     gathered_slot_mapping = slot_mapping[: pcp_size * local_num_tokens]
     if shard_decode_requests:
         gathered_inputs = tuple(
@@ -96,7 +92,7 @@ def maybe_gather_indexer_k(
     pcp_shard_decode_requests: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not use_pcp:
-        return k, slot_mapping
+        return k[: slot_mapping.shape[0]], slot_mapping
     (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
         (k,), slot_mapping, num_decode_tokens, pcp_shard_decode_requests
     )

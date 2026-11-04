@@ -703,6 +703,16 @@ class ParallelConfig:
         return self.world_size * self.data_parallel_size
 
     @property
+    def dcp_query_head_multiplier(self) -> int:
+        """Distinct TP head shards in one DCP group (PCP replicates heads)."""
+        if self.prefill_context_parallel_size == 1:
+            return self.decode_context_parallel_size
+        return max(
+            1,
+            self.decode_context_parallel_size // self.prefill_context_parallel_size,
+        )
+
+    @property
     def pcp_shard_decode_requests(self) -> bool:
         """Whether PCP can shard decode requests across its ranks.
 

@@ -1098,21 +1098,30 @@ def test_v41_rope_insert_plain_row(compress_ratio: int, store_fp8: bool):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Triton kernel")
-def test_v41_compressor_metadata_maps_tokens_to_their_ring():
+@pytest.mark.parametrize("pcp_size", [1, 2, 4])
+def test_v41_compressor_metadata_maps_tokens_to_their_ring(pcp_size):
     """The ring group's generic slot mapping is disabled (all PAD), so the
     builder must map every real token to ``ring_block * capacity + pos %
     capacity``. Padding tokens and requests on the null block (block 0, as in
     dummy batches) must stay at PAD."""
-    from unittest.mock import MagicMock
-
+    from vllm.config import ParallelConfig, SchedulerConfig, VllmConfig
     from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import CircularBufferSpec
 
     capacity = 8
-    vllm_config = MagicMock()
-    vllm_config.scheduler_config.max_num_batched_tokens = 16
-    vllm_config.parallel_config.prefill_context_parallel_size = 1
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(
+            prefill_context_parallel_size=pcp_size,
+            distributed_executor_backend="mp",
+        ),
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=16,
+            max_num_batched_tokens=16,
+            max_num_seqs=3,
+        ),
+    )
     spec = CircularBufferSpec(
         block_size=capacity,
         num_kv_heads=1,
@@ -1222,7 +1231,10 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
         DeepseekV4Attention,
         DeepseekV4Indexer,
     )
-    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v41.compressor import (
+        CompressorMetadata,
+        DeepseekCompressor,
+    )
 
     torch.manual_seed(43)
     raw = torch.randn(19, 1024, device="cuda")
@@ -1238,7 +1250,7 @@ def test_v41_attention_joins_cache_writes_before_consumption(use_aux, use_graph)
     observed = tuple(torch.empty_like(cache) for cache in caches)
     rotary = SimpleNamespace(cos_sin_cache=torch.randn(32, 64, device="cuda"))
     metadata = {
-        "state": SimpleNamespace(
+        "state": CompressorMetadata(
             slot_mapping=state_slots,
             query_start_loc=torch.tensor([0, 19], dtype=torch.int32, device="cuda"),
             token_to_req_indices=torch.zeros(19, dtype=torch.int32, device="cuda"),
@@ -1493,7 +1505,9 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
     from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
         fused_save_compress_norm,
     )
-    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v41.compressor import (
+        DeepseekCompressor,
+    )
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.kv_cache_interface import CircularBufferSpec
     from vllm.v1.worker.gpu.pcp_manager import PCPManager
@@ -1589,6 +1603,7 @@ def test_v41_pcp_compressor_preserves_pairs_and_decode_state(
                 ).unsqueeze(1),
                 slot_mapping=torch.full((width * pcp_size,), -1, device=device),
                 positions=positions[local_indices],
+                pcp_context=manager.attention_context,
             )
             ranks.append(
                 SimpleNamespace(
@@ -2955,7 +2970,9 @@ def test_v41_rocm_csa2_full_pipeline(monkeypatch):
     """
     from vllm.forward_context import ForwardContext, override_forward_context
     from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
-    from vllm.models.deepseek_v41.compressor import DeepseekCompressor
+    from vllm.models.deepseek_v41.compressor import (
+        DeepseekCompressor,
+    )
 
     torch.manual_seed(43)
     num_tokens = 19

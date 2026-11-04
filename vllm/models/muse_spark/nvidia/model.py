@@ -1238,6 +1238,7 @@ class MuseSpark1xAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scaling,
+            use_pcp=False if is_draft else None,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,

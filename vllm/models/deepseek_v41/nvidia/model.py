@@ -199,7 +199,9 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
         return MoEOutput(routed=routed, shared_output=shared_output)
 
 
-def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
+def _select_dsv4_attn_cls(
+    vllm_config: VllmConfig, use_pcp: bool | None = None
+) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
@@ -209,7 +211,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+    if use_pcp is None:
+        use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+    if use_pcp:
         if backend not in (
             None,
             AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -337,6 +341,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         run_gemm_rs: bool = False,
         mhc_stream: torch.cuda.Stream | None = None,
         fuse_mhc_all_reduce: bool = False,
+        use_pcp: bool | None = None,
     ):
         super().__init__()
 
@@ -361,7 +366,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = _select_dsv4_attn_cls(vllm_config)(
+        self.attn = _select_dsv4_attn_cls(vllm_config, use_pcp=use_pcp)(
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,

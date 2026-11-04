@@ -525,7 +525,7 @@ class DeepseekV32Attention(MLAAttention):
                     k_pe.unsqueeze(1),
                     layer_slot_mapping,
                     attn_metadata.num_decode_tokens,
-                    True,
+                    attn_metadata.uses_pcp_sharded_layout,
                     pcp_shard_decode_requests=self.pcp_shard_decode_requests,
                 )
             )

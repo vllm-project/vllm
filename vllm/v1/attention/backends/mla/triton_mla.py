@@ -88,7 +88,7 @@ class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         _reserve_attn_logits_workspace(
             vllm_config,
             vllm_config.scheduler_config.max_num_seqs * self.reorder_batch_threshold,
-            self.num_heads * self.dcp_world_size,
+            self.num_heads * self.dcp_query_head_multiplier,
             self.mla_dims.kv_lora_rank,
         )
 
@@ -239,7 +239,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             vllm_config,
             vllm_config.scheduler_config.max_num_seqs
             * max_decode_query_len(vllm_config),
-            self.num_heads * self.dcp_world_size,
+            self.num_heads * self.dcp_query_head_multiplier,
             self.kv_lora_rank,
         )
 

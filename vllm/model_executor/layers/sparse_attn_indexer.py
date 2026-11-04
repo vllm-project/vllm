@@ -724,6 +724,7 @@ def sparse_attn_indexer(
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata_narrowed.slot_mapping
+    uses_pcp_sharded_layout = attn_metadata_narrowed.uses_pcp_sharded_layout
     has_decode = attn_metadata_narrowed.num_decodes > 0
     prefill_metadata = attn_metadata_narrowed.prefill
     # If all prefills are shorter than the compression ratio, chunks are empty:
@@ -746,8 +747,8 @@ def sparse_attn_indexer(
     # Keep PCP padding so every rank contributes the same all-gather shape.
     num_tokens = slot_mapping.shape[0]
     if k is not None:
-        # MTP draft decodes are replicated and use an unexpanded slot mapping.
-        if use_pcp and num_tokens > k.shape[0]:
+        if uses_pcp_sharded_layout:
+            assert num_tokens % get_pcp_group().world_size == 0
             num_tokens //= get_pcp_group().world_size
         k = k[:num_tokens]
 
@@ -757,7 +758,7 @@ def sparse_attn_indexer(
             k,
             slot_mapping,
             num_decode_tokens,
-            use_pcp,
+            uses_pcp_sharded_layout,
             pcp_shard_decode_requests=pcp_shard_decode_requests,
         )
         # scale_fmt can be None, but the function expects str

@@ -220,6 +220,7 @@ class DefaultModelState(ModelState):
                 input_batch.pcp.dcp_local_seq_lens_cpu_upper_bound
             )
         attn_metadata = build_attn_metadata(
+            pcp_context=input_batch.pcp_context,
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,

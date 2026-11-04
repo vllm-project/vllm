@@ -132,6 +132,7 @@ class DSparkDeepseekV4Model(nn.Module):
                     prefix=maybe_prefix(prefix, f"layers.{self.num_hidden_layers + i}"),
                     topk_indices_buffer=self.topk_indices_buffer,
                     run_gemm_rs=run_gemm_rs,
+                    use_pcp=False,
                 )
                 for i in range(self.num_dspark_layers)
             ]

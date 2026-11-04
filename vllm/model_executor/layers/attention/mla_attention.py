@@ -462,6 +462,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         topk_indices_buffer: torch.Tensor | None = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
+        use_pcp: bool | None = None,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
@@ -519,6 +520,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 use_mla=True,
                 use_sparse=use_sparse,
                 num_heads=self.num_heads,
+                use_pcp=use_pcp,
             )
 
         normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
@@ -689,7 +691,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
-        if self.use_pcp and self.impl.dcp_world_size > 1 and not self.supports_pcp_dcp:
+        if (
+            self.use_pcp
+            and use_pcp is not False
+            and self.impl.dcp_world_size > 1
+            and not self.supports_pcp_dcp
+        ):
             raise NotImplementedError(
                 f"{type(self).__name__} does not support PCP+DCP."
             )
@@ -800,7 +807,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_pe,
             slot_mapping,
             attn_metadata.num_decode_tokens if attn_metadata is not None else None,
-            self.use_pcp,
+            attn_metadata is not None and attn_metadata.uses_pcp_sharded_layout,
             pcp_shard_decode_requests=self.pcp_shard_decode_requests,
         )
         assert slot_mapping is not None
@@ -1210,7 +1217,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
-        if self.use_pcp and output_padded.shape[0] > num_actual_toks:
+        if (
+            attn_metadata.uses_pcp_sharded_layout
+            and output_padded.shape[0] > num_actual_toks
+        ):
             output_padded[num_actual_toks:].zero_()
         return output_padded
 
@@ -1729,6 +1739,7 @@ class MLACommonMetadata(AttentionMetadata, Generic[D]):
     num_prefills: int
 
     causal: bool = True
+    uses_pcp_sharded_layout: bool = False
 
     # The dimension of the attention heads
     head_dim: int | None = None
@@ -2418,6 +2429,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.dcp_query_head_multiplier = parallel_config.dcp_query_head_multiplier
         # merge() unions this flag across the KV group, so a shared target/draft
         # group would mark the target builder as non-causal.
         ctx = self.compilation_config.static_forward_context
@@ -2613,7 +2625,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     common_attn_metadata,
                     decode_threshold=self.reorder_batch_threshold,
                     require_uniform=(self.query_len_support != QueryLenSupport.VARLEN),
-                    treat_short_extends_as_decodes=not self.use_pcp,
+                    treat_short_extends_as_decodes=common_attn_metadata.pcp_context
+                    is None,
                 )
             )
 
@@ -2724,6 +2737,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
+            uses_pcp_sharded_layout=common_attn_metadata.pcp_context is not None,
             causal=not non_causal_decode,
             prefill=prefill_metadata,
             decode=decode_metadata,
@@ -3394,6 +3408,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.dcp_query_head_multiplier = parallel_config.dcp_query_head_multiplier
 
     @abstractmethod
     def forward_mqa(

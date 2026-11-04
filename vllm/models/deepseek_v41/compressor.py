@@ -114,7 +114,6 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(*args, **kwargs)
         assert isinstance(self.kv_cache_spec, CircularBufferSpec)
         self.capacity = self.kv_cache_spec.block_size
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
         max_num_batched_tokens = (
             self.vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -135,7 +134,9 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CompressorMetadata:
-        num_tokens = common_attn_metadata.slot_mapping.numel() // self.pcp_size
+        pcp_context = common_attn_metadata.pcp_context
+        pcp_size = pcp_context.world_size if pcp_context is not None else 1
+        num_tokens = common_attn_metadata.slot_mapping.numel() // pcp_size
         positions = common_attn_metadata.positions
         assert positions is not None
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
@@ -159,7 +160,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             query_start_loc=common_attn_metadata.query_start_loc,
             token_to_req_indices=token_to_req_indices,
         )
-        if self.pcp_size > 1:
+        if pcp_context is not None:
             self._link_pcp_chunks(metadata, common_attn_metadata.num_reqs, positions)
         return metadata
 
@@ -312,8 +313,6 @@ class DeepseekCompressor(nn.Module):
         self.rotate = rotate
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Ratio 1 pools single tokens, so the checkpoint carries no gate.
         self.has_gate = compress_ratio > 1
 
@@ -376,9 +375,13 @@ class DeepseekCompressor(nn.Module):
         prev_rows = prev_row_indices = ring_write_slots = None
         if self.state_cache is None:
             state_cache = query_start_loc = token_to_req_indices = None
-            slot_mapping = cast(Any, attn_metadata[self.k_cache_prefix]).slot_mapping
-            if self.pcp_size > 1:
-                slot_mapping = slot_mapping.chunk(self.pcp_size)[self.pcp_rank]
+            cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
+            slot_mapping = cache_metadata.slot_mapping
+            pcp_context = cache_metadata.pcp_context
+            if pcp_context is not None:
+                slot_mapping = slot_mapping.chunk(pcp_context.world_size)[
+                    pcp_context.rank
+                ]
         else:
             state_metadata = cast(
                 CompressorMetadata, attn_metadata[self.state_cache.prefix]
@@ -387,8 +390,7 @@ class DeepseekCompressor(nn.Module):
             slot_mapping = state_metadata.slot_mapping
             query_start_loc = state_metadata.query_start_loc
             token_to_req_indices = state_metadata.token_to_req_indices
-            if self.pcp_size > 1:
-                assert state_metadata.gather_tokens is not None
+            if state_metadata.gather_tokens is not None:
                 prev_rows = get_pcp_group().all_gather(
                     kv_score[state_metadata.gather_tokens], dim=0
                 )

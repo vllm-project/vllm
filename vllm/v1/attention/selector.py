@@ -118,8 +118,13 @@ def get_attn_backend(
     attn_type: str | None = None,
     num_heads: int | None = None,
     has_sliding_window: bool = False,
+    use_pcp: bool | None = None,
 ) -> type[AttentionBackend]:
-    """Selects which attention backend to use and lazily imports it."""
+    """Select a backend for this layer and lazily import it.
+
+    ``use_pcp`` declares whether the layer requires partitioned PCP inputs.
+    When omitted, the requirement follows the physical PCP topology.
+    """
     if kv_cache_dtype is not None:
         assert is_known_kv_cache_dtype(kv_cache_dtype), (
             f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
@@ -170,7 +175,11 @@ def get_attn_backend(
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
-        use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
+        use_pcp=(
+            vllm_config.parallel_config.prefill_context_parallel_size > 1
+            if use_pcp is None
+            else use_pcp
+        ),
         use_adaptive_verification=use_adaptive_verification,
         use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
         use_rswa=(

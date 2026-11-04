@@ -168,6 +168,7 @@ class Gemma4MTPAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         attn_logits_soft_cap: float | None = None,
         prefix: str = "",
+        use_pcp: bool | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -230,6 +231,7 @@ class Gemma4MTPAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             logits_soft_cap=attn_logits_soft_cap,
+            use_pcp=use_pcp,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
