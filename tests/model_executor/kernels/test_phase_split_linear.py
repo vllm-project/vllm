@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicTensor,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _encode_layer_name
 
 MAX_DECODE_TOKENS = 8
 
@@ -144,13 +145,13 @@ def test_phase_split_dispatches_every_cell(vllm_config, decode, prefill, cutoff)
     layer = _layer(prefix=f"cell.{decode}.{prefill}.{cutoff}")
     kernel.process_weights_after_loading(layer)
     decode_mode, prefill_mode = phase.activation_modes()
-    key = layer.phase_split_key
+    name = _encode_layer_name(layer.phase_split_layer_name)
     for m in (1, MAX_DECODE_TOKENS, MAX_DECODE_TOKENS + 1, 40):
         x = torch.randn(m, 4)
         mode = decode_mode if cutoff is None or m <= cutoff else prefill_mode
         expected = x @ layer.weight.T + _OFFSET[mode]
         torch.testing.assert_close(kernel.apply_weights(layer, x), expected)
-        out = torch.ops.vllm.phase_split_linear(x, None, key, 6)
+        out = torch.ops.vllm.phase_split_linear(x, None, name, 6)
         torch.testing.assert_close(out, expected)
         assert inner.calls[-2:] == [(m, mode), (m, mode)]
 
@@ -183,7 +184,12 @@ def test_phase_split_dispatches_at_runtime_under_torch_compile(vllm_config) -> N
     ]
     torch.library.opcheck(
         torch.ops.vllm.phase_split_linear.default,
-        (torch.randn(20, 4), None, layer.phase_split_key, 6),
+        (
+            torch.randn(20, 4),
+            None,
+            _encode_layer_name(layer.phase_split_layer_name),
+            6,
+        ),
     )
 
 
@@ -204,9 +210,9 @@ def test_phase_split_serves_mla_style_eye_dequant(vllm_config) -> None:
 
 
 @torch.inference_mode()
-def test_phase_split_resolves_each_layer_by_its_key(vllm_config) -> None:
-    """Each layer runs its own weight through the op, whatever its prefix, and
-    keeps its key across weight reloads."""
+def test_phase_split_names_layers_without_unique_prefix(vllm_config) -> None:
+    """Models that build linears without a prefix, or reuse one, still load and
+    each layer runs its own weight through the op."""
 
     class _PrefixlessLinear(torch.nn.Module):
         pass
@@ -216,38 +222,51 @@ def test_phase_split_resolves_each_layer_by_its_key(vllm_config) -> None:
     layers += [_layer(prefix="", cls=_PrefixlessLinear) for _ in range(2)]
     for layer in layers:
         kernel.process_weights_after_loading(layer)
-    key = layers[1].phase_split_key
+    names = [layer.phase_split_layer_name for layer in layers]
+    assert names == [
+        "dup.proj",
+        "dup.proj#1",
+        "_PrefixlessLinear",
+        "_PrefixlessLinear#1",
+    ]
+    # Reprocessing a layer, e.g. on weight reload, keeps its name.
+    registered = len(phase_split_mod._LAYERS)
     kernel.process_weights_after_loading(layers[1])
-    assert layers[1].phase_split_key is key
-    assert key.device.type == "cpu"
-    assert "phase_split_key" not in layers[1].state_dict()
+    assert layers[1].phase_split_layer_name == "dup.proj#1"
+    assert len(phase_split_mod._LAYERS) == registered
     x = torch.randn(MAX_DECODE_TOKENS + 1, 4)
     for layer in layers:
-        out = torch.ops.vllm.phase_split_linear(x, None, layer.phase_split_key, 6)
+        out = torch.ops.vllm.phase_split_linear(
+            x, None, _encode_layer_name(layer.phase_split_layer_name), 6
+        )
         torch.testing.assert_close(out, x @ layer.weight.T + 1)
 
 
 @torch.inference_mode()
 def test_phase_split_compiled_region_serves_several_layers(vllm_config) -> None:
-    """vLLM reuses one compiled region for repeated blocks, such as encoder
-    layers. The layer reaches the op as a graph input, so the reused graph
-    runs each block's own weight without recompiling."""
+    """A compiled region that vLLM reuses for repeated blocks, such as encoder
+    layers, runs each block's own weight: the layer reaches the op as a graph
+    input, not a constant baked into the graph."""
     from torch._dynamo.testing import CompileCounterWithBackend
 
     kernel = maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
-    layers = [_layer(prefix=f"block.{i}.proj") for i in range(3)]
-    for scale, layer in zip((1.0, 10.0, 100.0), layers):
-        layer.weight.data = torch.eye(6, 4) * scale
-        kernel.process_weights_after_loading(layer)
+    blocks = []
+    for i, scale in enumerate((1.0, 10.0, 100.0)):
+        block = torch.nn.Module()
+        block.proj = _layer(prefix=f"block.{i}.proj")
+        block.proj.weight.data = torch.eye(6, 4) * scale
+        kernel.process_weights_after_loading(block.proj)
+        blocks.append(block)
     counter = CompileCounterWithBackend("aot_eager")
     run = torch.compile(
-        lambda x, key: torch.ops.vllm.phase_split_linear(x, None, key, 6),
+        lambda block, x: kernel.apply_weights(block.proj, x),
         backend=counter,
         fullgraph=True,
+        # vLLM drops every guard, so a reused region never recompiles.
+        options={"guard_filter_fn": torch.compiler.skip_all_guards_unsafe},
     )
     x = torch.ones(2, 4)
-    outputs = [run(x, layer.phase_split_key)[0, 0].item() for layer in layers]
-    assert outputs == [1.0, 10.0, 100.0]
+    assert [run(block, x)[0, 0].item() for block in blocks] == [1.0, 10.0, 100.0]
     assert counter.frame_count == 1
 
 

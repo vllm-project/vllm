@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4DynamicTensor,
 )
 from vllm.platforms import PlatformEnum
+from vllm.utils.torch_utils import _encode_layer_name
 
 
 @pytest.mark.parametrize(
@@ -1647,7 +1648,7 @@ def test_b12x_nvfp4_w4a16_quantizes_activations_above_cutoff(
         (
             torch.randn(40, k, device="cuda", dtype=torch.bfloat16),
             None,
-            layer.phase_split_key,
+            _encode_layer_name(layer.phase_split_layer_name),
             256,
         ),
         test_utils="test_faketensor",

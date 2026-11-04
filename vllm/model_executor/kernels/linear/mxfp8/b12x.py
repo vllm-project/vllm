@@ -183,6 +183,9 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
         mode = kMxfp8Dynamic if any(plans.quantized) else None
         planned = {m for plan in plans.plans for m in plan.token_counts}
         prefill_counts = set(plans.plan.token_counts)
+        covered = plans.decode_plan is not None and (
+            plans.cutoff is not None and plans.cutoff >= plans.query.num_tokens
+        )
         packed_weight = layer.b12x_mxfp8_packed_weight
 
         def compile() -> None:
@@ -193,7 +196,7 @@ class B12xMxfp8LinearKernel(Mxfp8LinearKernel, DualActivationKernel):
                     device=packed_weight.weight.values.device,
                 )
                 self.apply_weights(layer, source, mode=mode)
-                if plans.decode_plan is not None and tokens in prefill_counts:
+                if covered and tokens in prefill_counts:
                     # A cutoff at or above every planned row count leaves
                     # the A16 prefill plan to calls above it only.
                     self.apply_weights(layer, source, mode=None)
