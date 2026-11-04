@@ -128,6 +128,14 @@ class OnOverwriteStoreHandler(StoreTriggerHandler):
             raise ValueError(
                 "self_describing_kv_events is not supported with ON_OVERWRITE stores"
             )
+        if kv_cache_config.needs_kv_cache_zeroing:
+            # New blocks are zeroed, and the CoW copies applied, before the
+            # ON_OVERWRITE jobs flush. Such a store would read zeroed or
+            # copied data and save it under a valid key.
+            raise ValueError(
+                "ON_OVERWRITE stores are not supported when the KV cache needs "
+                "zeroing (a Mamba layout or a mixed-precision KV cache)."
+            )
 
     def __init__(
         self,

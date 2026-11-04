@@ -12,9 +12,11 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.test_config import (
+    _make_hybrid_kv_cache_config,
     _make_kv_cache_config,
     _make_mamba_hybrid_kv_cache_config,
     _make_vllm_config,
+    _mla_spec,
 )
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     MockOffloadingSpec,
@@ -3609,6 +3611,25 @@ def test_unsupported_store_triggers_raise(request_runner, extra_config):
             async_scheduling=False,
             extra_config_overrides=extra_config,
         )
+
+
+def test_lazy_with_kv_cache_zeroing_raises():
+    """Zeroing writes a reused block before the ON_OVERWRITE store reads it."""
+    vllm_config = _make_vllm_config(extra_config=_LAZY_EXTRA_CONFIG)
+    kv_cache_config = _make_hybrid_kv_cache_config()
+    kv_cache_config.kv_cache_groups[1] = KVCacheGroupSpec(
+        ["mla_layer"], _mla_spec(dtype=torch.bfloat16)
+    )
+    # The flag is resolved in __post_init__, before the group above was
+    # replaced, so resolve it again for the config this test builds by hand.
+    kv_cache_config.needs_kv_cache_zeroing = (
+        kv_cache_config.has_mamba_layers or kv_cache_config.has_mixed_precision_kv_cache
+    )
+    assert kv_cache_config.needs_kv_cache_zeroing
+    spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+
+    with pytest.raises(ValueError, match="needs zeroing"):
+        OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
 def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
@@ -7823,63 +7844,12 @@ class TestMambaHybridOffloadServing:
 
     def test_stored_mamba_checkpoint_is_reusable(self):
         assert self._roundtrip_served_tokens(self._make_scheduler()) == 16
-    def test_lazy_mode_leaves_the_mamba_boundary_to_the_handoff_handler(self):
-        """The lazy mode needs no Mamba refusal: the layout adds the handoff
-        handler for a mamba-align group, and that handler stores the group."""
-        scheduler = self._make_scheduler(store_mode="lazy", self_describing_kv_events=False)
-        assert list(scheduler._store_handlers) == [
-            StoreTrigger.ON_HANDOFF,
-            StoreTrigger.ON_OVERWRITE,
-        ]
-        _as_mock(scheduler.manager.prepare_store).side_effect = (
-            lambda keys, ctx, trigger: (generate_store_output(list(keys)))
-        )
-
-        request = MagicMock()
-        request.request_id = "A"
-        request.kv_transfer_params = None
-        request.num_prompt_tokens = self.PROMPT_TOKENS
-        request.num_tokens = self.PROMPT_TOKENS
-        request.num_computed_tokens = 0
-        request.block_hashes = [
-            BlockHash(f"h{i}".encode()) for i in range(self.PROMPT_TOKENS // self.BLOCK)
-        ]
-        request.all_token_ids = list(range(self.PROMPT_TOKENS))
-        request.lora_request = None
-        request.is_finished.return_value = False
-        request.status = None
-        scheduler.on_new_request(request)
-        req_status = scheduler._req_status["A"]
-        req_status.num_locally_computed_tokens = 0
-        req_status.update_offload_keys()
-        req_status.group_states[0].block_ids[:] = list(
-            range(1, self.PROMPT_TOKENS // self.BLOCK + 1)
-        )
-        req_status.group_states[1].block_ids[:] = [101]
-
-        out = SimpleNamespace(
-            num_scheduled_tokens={"A": self.PROMPT_TOKENS},
-            finished_req_ids=set(),
-            kv_connector_block_state=KVConnectorBlockState(
-                req_ids=set(),
-                resolve_block_ids={}.__getitem__,
-                boundary_state_offloads={"A": [(1, 101, self.MAMBA_BLOCK)]},
-            ),
-        )
-        for handler in scheduler._store_handlers.values():
-            sink = scheduler_module._StoreJobSink(scheduler, handler.trigger)
-            handler.build_store_jobs(out, scheduler._req_status, sink)
-
-        offers = [
-            (call.args[0], call.kwargs["trigger"])
-            for call in _as_mock(scheduler.manager.prepare_store).call_args_list
-        ]
-        # The mamba group is stored, and only the handoff handler asks for it.
-        assert offers
-        assert {trigger for _, trigger in offers} == {StoreTrigger.ON_HANDOFF}
-        assert all(
-            get_offload_group_idx(key) == 1 for keys, _ in offers for key in keys
-        )
+    def test_lazy_mode_is_refused_for_a_mamba_layout(self):
+        """A mamba layout needs zeroing, which runs before the store reads."""
+        with pytest.raises(ValueError, match="needs zeroing"):
+            self._make_scheduler(
+                store_mode="lazy", self_describing_kv_events=False
+            )
 
 
 
