@@ -247,9 +247,9 @@ def _compute_local_logits_stats_kernel(
     temp_ptr,
     vocab_size,
     num_logits,
+    all_greedy: tl.int1,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    all_greedy=False,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
 
@@ -576,12 +576,12 @@ def _rejection_kernel(
     fly_entropy_ptr,
     fly_entropy_threshold,
     vocab_num_blocks,
+    all_greedy: tl.int1,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
-    all_greedy=False,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -871,6 +871,7 @@ def _resample_kernel(
     watermark_key_0,
     watermark_key_1,
     vocab_size,
+    all_greedy: tl.int1,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
@@ -879,7 +880,6 @@ def _resample_kernel(
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
     SKIP_MASKED_BLOCKS: tl.constexpr,
-    all_greedy=False,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -1087,8 +1087,8 @@ def _insert_resampled_kernel(
     expanded_idx_mapping_ptr,
     # [max_num_reqs]
     temp_ptr,
+    all_greedy: tl.int1,
     PADDED_RESAMPLE_NUM_BLOCKS: tl.constexpr,
-    all_greedy=False,
 ):
     req_idx = tl.program_id(0)
     num_sampled = tl.load(num_sampled_ptr + req_idx)
@@ -1158,6 +1158,7 @@ def rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
+    all_greedy: bool,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
@@ -1170,7 +1171,6 @@ def rejection_sample(
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
     skip_masked_vocab_blocks: bool = False,
-    all_greedy: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     draft_logits = None

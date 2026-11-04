@@ -3,7 +3,6 @@
 
 import math
 
-import numpy as np
 import pytest
 import torch
 
@@ -51,10 +50,12 @@ def _rejection_sample(
     *,
     draft_logits: torch.Tensor | None,
     draft_logits_row_mapping: torch.Tensor | None = None,
+    all_greedy: bool = False,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return rejection_sample(
         draft_logits_cache=_draft_logits(draft_logits, draft_logits_row_mapping),
+        all_greedy=all_greedy,
         **kwargs,
     )
 

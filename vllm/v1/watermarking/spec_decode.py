@@ -328,6 +328,7 @@ def watermarked_rejection_sample(
         temperature,
         seed,
         num_speculative_steps,
+        all_greedy=False,
         use_fp64=use_fp64,
         contexts=contexts,
         watermarking=watermarking,
