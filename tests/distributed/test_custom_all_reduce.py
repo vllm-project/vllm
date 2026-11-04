@@ -252,6 +252,14 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
             device=device,
             one_shot_max_tokens=one_shot,
         )
+        # The two-shot all-reduce must reproduce the one-shot one exactly.
+        one_shot_only = FinalizeAllReduceGemmaRMSNormMxfp8(
+            hidden_size=hidden,
+            max_num_tokens=cap,
+            top_k=top_k,
+            fp32_weights=False,
+            device=device,
+        )
 
         def run(n):
             torch.manual_seed(7 + rank)
@@ -326,6 +334,16 @@ def _finalize_all_reduce_gemma_norm_mxfp8(
                 assert torch.all((dequantized - expected).abs() <= tolerance)
 
             check(fused())
+            quantized, residual_out = fused()
+            expected, expected_residual = one_shot_only(
+                moe_output, residual, weight, eps
+            )
+            assert torch.equal(
+                quantized.data.view(torch.uint8), expected.data.view(torch.uint8)
+            )
+            assert torch.equal(quantized.scale, expected.scale)
+            # Compares values: the Lamport sentinel turns a -0.0 sum into +0.0.
+            assert torch.equal(residual_out, expected_residual)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 for _ in range(5):
