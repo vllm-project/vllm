@@ -108,6 +108,17 @@ inline bool on_gfx1151() {
   return result;
 }
 
+// gfx1150, gfx1152 and gfx1153: 1024 VGPRs a lane and a 128-bit memory bus.
+inline bool on_gfx1150_class() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx1150") != std::string::npos ||
+           device_arch.find("gfx1152") != std::string::npos ||
+           device_arch.find("gfx1153") != std::string::npos;
+  }();
+  return result;
+}
 template <typename T>
 struct scalar {};
 
@@ -294,14 +305,13 @@ __global__ void LLGemm1_kernel(const scalar_t* in_a, const scalar_t* in_b,
       V0 += (s.x + s.y);                                             \
     }
 #elif defined(__HIP__GFX1X__)
-  // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
-  #define DOT2C(V0, V2, V3)                                               \
-    if constexpr (std::is_same_v<scalar_t, half>) {                       \
-      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
-    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {      \
-      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *       \
-                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));        \
-      V0 += (s.x + s.y);                                                  \
+  // gfx1x: v_dot2_f32_f16 and v_dot2_f32_bf16 (VOP3-P, gfx11 and gfx12). The
+  // bf16 dot keeps the weights packed instead of widening them to f32.
+  #define DOT2C(V0, V2, V3)                                                \
+    if constexpr (std::is_same_v<scalar_t, half>) {                        \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3));  \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {       \
+      asm("v_dot2_f32_bf16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
     }
 #endif
 
@@ -328,8 +338,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -395,7 +405,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // are being worked on by each wave.
     //----------------------------------------------------
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
@@ -565,8 +575,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -613,7 +623,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   while (m < M) {
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
@@ -799,8 +809,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
+  using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
@@ -911,7 +921,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // are being worked on by each wave.
     //----------------------------------------------------
     float sum[N][YTILE] = {};
-    scalar8 sum4[N][YTILE] = {};
+    floatx4 sum4[N][YTILE] = {};
 
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
@@ -1170,8 +1180,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
   using scalar8 =
       __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
-  using half4 =
-      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  using half4 = __attribute__((__vector_size__(4 * sizeof(__bf16)))) __bf16;
   union bigType {
     scalar_t h[A_CHUNK];
     float f[A_CHUNK / 2];
