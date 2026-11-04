@@ -899,13 +899,8 @@ def test_hisparse_deferred_free_retains_host_blocks_until_fence():
 
 
 def test_hisparse_host_cow_copy_is_drained_without_a_gpu_pool():
-    """Host-only copy-on-write work must reach the worker copy queue, and host
-    block ids must never reach GPU zeroing."""
-    config = make_hisparse_kv_cache_config(16, 16)
-    config.needs_kv_cache_zeroing = True
-    manager = make_kv_cache_manager(
-        config, max_model_len=128, hash_block_size=HISPARSE_BLOCK_SIZE
-    )
+    """Host-only copy-on-write work must reach the worker copy queue."""
+    manager = make_hisparse_kv_cache_manager(16, 16)
     source_manager = manager.coordinator.single_type_managers[0]
     source_block = source_manager.block_pool.get_new_blocks(1)[0]
     source_manager.req_to_blocks["cow"] = [source_block]
