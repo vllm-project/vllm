@@ -5,7 +5,10 @@ import time
 from concurrent.futures import Future
 
 import pytest
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer
+from tokenizers.decoders import ByteLevel
+from tokenizers.models import BPE
+from transformers import AutoTokenizer, TokenizersBackend
 
 from vllm.config import StructuredOutputsConfig, VllmConfig
 from vllm.config.model import ModelConfig
@@ -30,6 +33,204 @@ def mistral_tokenizer():
         tokenizer_name="mistralai/Mistral-Small-3.2-24B-Instruct-2506",
         tokenizer_mode="mistral",
     )
+
+
+@pytest.fixture(scope="module")
+def small_guidance_backend():
+    tokens = ["[UNK]", "[EOS]", '"', "X", "Y", "Z", *"abcdefghijklmnopqrstuvwxyz", "!"]
+    tokenizer = Tokenizer(
+        BPE(
+            vocab={token: index for index, token in enumerate(tokens)},
+            merges=[],
+            unk_token="[UNK]",
+        )
+    )
+    tokenizer.decoder = ByteLevel()
+    hf_tokenizer = TokenizersBackend(
+        tokenizer_object=tokenizer,
+        unk_token="[UNK]",
+        eos_token="[EOS]",
+    )
+    return GuidanceBackend(
+        VllmConfig(
+            structured_outputs_config=StructuredOutputsConfig(backend="guidance")
+        ),
+        tokenizer=hf_tokenizer,
+        vocab_size=len(hf_tokenizer),
+    )
+
+
+def _token_allowed(bitmask, token_id: int) -> bool:
+    word = int(bitmask[0, token_id // 32]) & 0xFFFFFFFF
+    return bool(word & (1 << (token_id % 32)))
+
+
+@pytest.mark.parametrize(
+    ("request_stops", "model_stops"),
+    [
+        pytest.param([], [1], id="default-eos"),
+        pytest.param([3], [1], id="request-stop"),
+        pytest.param([], [1, 4], id="model-eos-list"),
+        pytest.param([3], [1, 4], id="request-and-model-stops"),
+        pytest.param([31, 32], [1], id="bitmask-word-boundary"),
+    ],
+)
+def test_guidance_stop_tokens_wait_for_complete_grammar(
+    small_guidance_backend, request_stops, model_stops
+):
+    """A request stop must not truncate an unfinished JSON string."""
+    backend = small_guidance_backend
+    params = SamplingParams(stop_token_ids=request_stops)
+    params.update_from_generation_config({"eos_token_id": model_stops}, 1)
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON,
+        '{"type": "string"}',
+        stop_token_ids=params.all_stop_token_ids,
+    )
+    bitmask = backend.allocate_token_bitmask(1)
+
+    assert grammar.accept_tokens("req", [2])  # Open the string.
+    grammar.fill_bitmask(bitmask, 0)
+    for token_id in params.all_stop_token_ids:
+        assert not _token_allowed(bitmask, token_id)
+    assert _token_allowed(bitmask, 5)  # Ordinary string content is still valid.
+
+    assert grammar.accept_tokens("req", [2])  # Close the string.
+    assert not grammar.is_terminated()
+    grammar.fill_bitmask(bitmask, 0)
+    for token_id in params.all_stop_token_ids:
+        assert _token_allowed(bitmask, token_id)
+    assert not _token_allowed(bitmask, 5)
+
+
+@pytest.mark.parametrize("stop_token", [1, 3, 4, 31, 32])
+def test_guidance_stop_token_acceptance_can_be_rolled_back(
+    small_guidance_backend, stop_token
+):
+    """Rejected speculative stop tokens must restore the previous grammar."""
+    backend = small_guidance_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON,
+        '{"type": "string"}',
+        stop_token_ids={1, 3, 4, 31, 32},
+    )
+    assert grammar.accept_tokens("req", [2, 2])
+    assert grammar.accept_tokens("req", [stop_token])
+    assert grammar.is_terminated()
+
+    grammar.rollback(1)
+    assert not grammar.is_terminated()
+    grammar.rollback(1)  # Undo the closing quote, reopening the string.
+    bitmask = backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    for token_id in (1, 3, 4, 31, 32):
+        assert not _token_allowed(bitmask, token_id)
+    assert _token_allowed(bitmask, 5)
+
+
+def test_guidance_stop_tokens_are_request_local(small_guidance_backend):
+    """One request's stop set must not change another request's grammar."""
+    backend = small_guidance_backend
+    grammars = [
+        backend.compile_grammar(
+            StructuredOutputOptions.JSON,
+            '{"type": "string"}',
+            stop_token_ids=stop_ids,
+        )
+        for stop_ids in ({1, 3}, {1, 4}, None)
+    ]
+    bitmask = backend.allocate_token_bitmask(1)
+    for grammar, expected in zip(
+        grammars, ((False, True), (True, False), (True, True))
+    ):
+        assert grammar.accept_tokens("req", [2])
+        grammar.fill_bitmask(bitmask, 0)
+        assert tuple(_token_allowed(bitmask, token) for token in (3, 4)) == expected
+
+
+@pytest.mark.parametrize("pattern", ["ab", "ab(c)?"])
+def test_guidance_stop_token_rollback_preserves_accepting_state(
+    small_guidance_backend, pattern
+):
+    """Undo EOS whether the matcher stopped before or after consuming it."""
+    backend = small_guidance_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.REGEX, pattern, stop_token_ids={1, 3}
+    )
+    assert grammar.accept_tokens("req", [6, 7])  # ab
+    assert grammar.accept_tokens("req", [3])
+    assert grammar.is_terminated()
+
+    grammar.rollback(1)
+    assert not grammar.is_terminated()
+    bitmask = backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask, 3)
+    assert _token_allowed(bitmask, 8) == (pattern == "ab(c)?")  # c
+
+    grammar.rollback(1)  # Undo b; neither grammar can stop after a.
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask, 7)
+    assert not _token_allowed(bitmask, 3)
+    assert grammar.accept_tokens("req", [7, 3])
+    assert grammar.is_terminated()
+
+
+def test_guidance_stop_token_validation_preserves_draft_ids(small_guidance_backend):
+    """Speculative validation returns the original request-specific stop ID."""
+    backend = small_guidance_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.REGEX, "ab(c)?", stop_token_ids={1, 3}
+    )
+    draft = [6, 7, 3]  # ab, then the request's stop token.
+    assert grammar.validate_tokens(draft) == [6, 7, 3]
+    assert draft == [6, 7, 3]
+    assert grammar.validate_tokens([6, 3, 7]) == [6]
+    assert grammar.accept_tokens("req", [6, 7])
+    assert grammar.validate_tokens([3]) == [3]
+    assert not grammar.is_terminated()
+
+
+@pytest.mark.parametrize("tokens", [[2, 5, 3], [2, 2, 3, 5]])
+def test_guidance_stop_token_invalid_batch_does_not_advance(
+    small_guidance_backend, tokens
+):
+    """Reject both premature stops and tokens following a stop atomically."""
+    backend = small_guidance_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.JSON, '{"type": "string"}', stop_token_ids={1, 3}
+    )
+    original_tokens = tokens.copy()
+    assert not grammar.accept_tokens("req", tokens)
+    assert tokens == original_tokens
+    assert not grammar.is_terminated()
+    bitmask = backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask, 2)
+    assert not _token_allowed(bitmask, 5)
+    assert grammar.accept_tokens("req", [2, 5, 2, 3])
+    assert grammar.is_terminated()
+
+
+def test_guidance_stop_token_reset_restores_initial_state(small_guidance_backend):
+    backend = small_guidance_backend
+    grammar = backend.compile_grammar(
+        StructuredOutputOptions.REGEX, "ab", stop_token_ids={1, 3}
+    )
+    assert grammar.accept_tokens("req", [6, 7, 3])
+    assert grammar.is_terminated()
+    grammar.reset()
+    assert not grammar.is_terminated()
+    bitmask = backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask, 6)
+    assert not _token_allowed(bitmask, 3)
+
+    assert grammar.accept_tokens("req", [6, 7])
+    grammar.rollback(1)
+    grammar.fill_bitmask(bitmask, 0)
+    assert _token_allowed(bitmask, 7)
+    assert not _token_allowed(bitmask, 3)
 
 
 def test_backend_guidance_rejects_grammar_matcher_cannot_build():
