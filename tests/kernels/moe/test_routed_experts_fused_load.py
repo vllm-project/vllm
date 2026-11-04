@@ -177,6 +177,10 @@ def test_layerwise_reload_of_fused_names_completes_the_layer(
         _make(tp, ep, "linear", redundant, block_scales=False) for _ in range(2)
     )
     list(reference.load_weights(_checkpoint(fused=False, block_scales=False)))
+    # Layerwise reload runs process_weights_after_loading on the layer, which
+    # converts to the selected backend's layout (e.g. FlashInfer CUTLASS swaps
+    # w13 to [up, gate]); process the reference the same way.
+    reference.quant_method.process_weights_after_loading(reference)
     processed = []
     process = layerwise._layerwise_process
 
