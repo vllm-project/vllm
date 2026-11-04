@@ -239,7 +239,6 @@ class MambaHybridModelState(DefaultModelState):
         ubatch_idx: int = 0,
         model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     ) -> dict[str, Any]:
-        assert ubatch_idx == 0, "DBO is not supported"
         assert model_specific_attn_metadata is None
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
@@ -340,6 +339,7 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            ubatch_idx=ubatch_idx,
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
