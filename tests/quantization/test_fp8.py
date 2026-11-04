@@ -27,6 +27,10 @@ from vllm.model_executor.layers.attention.attention import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+    CompressedTensorsKVCacheMethod,
+)
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8LinearMethod,
@@ -898,8 +902,9 @@ def test_kv_cache_scale_sync_to_host_copies():
     assert layer._v_scale_cpu.item() == pytest.approx(layer._v_scale.item())
 
 
+@pytest.mark.parametrize("method_cls", ["base", "compressed_tensors"])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype):
+def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype, method_cls):
     """KV-cache scales missing from the checkpoint must match a real start after
     a dummy load: no later weight sync from that checkpoint rewrites them.
     """
@@ -908,7 +913,13 @@ def test_dummy_load_keeps_kv_cache_scales_of_real_start(kv_cache_dtype):
         layer = torch.nn.Module()
         set_default_quant_scales(layer, register_buffer=True)
         layer.kv_cache_dtype = kv_cache_dtype
-        method = BaseKVCacheMethod(quant_config=None)
+        if method_cls == "base":
+            method = BaseKVCacheMethod(quant_config=None)
+        else:
+            config = CompressedTensorsConfig(
+                target_scheme_map={}, ignore=[], quant_format="float-quantized"
+            )
+            method = CompressedTensorsKVCacheMethod(config)
         method.create_weights(layer)
         if load_format == "dummy":
             loader = DummyModelLoader(LoadConfig(load_format=load_format))

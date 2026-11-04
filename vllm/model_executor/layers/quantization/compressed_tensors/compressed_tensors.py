@@ -73,6 +73,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -1179,6 +1180,14 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer.q_zero_point = torch.nn.Parameter(
             torch.zeros(n_scales, requires_grad=False)
         )
+        # Checkpoints may omit these; dummy loading must keep the defaults.
+        for kind in ("k", "v", "q"):
+            set_weight_attrs(
+                getattr(layer, f"{kind}_scale"), {"dummy_weight_value": 1.0}
+            )
+            set_weight_attrs(
+                getattr(layer, f"{kind}_zero_point"), {"dummy_weight_value": 0.0}
+            )
 
         # TP-aware loading for attn_head strategy follows attention head partitioning:
         # - q_scale is partitioned over query heads.
