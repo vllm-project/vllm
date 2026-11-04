@@ -41,6 +41,7 @@ from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
+    gdn_replayssm_warmup,
     replayssm_autotune_warmup,
     replayssm_lifecycle_warmup,
 )
@@ -338,6 +339,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
+    # GDN ReplaySSM compiles CuTeDSL artifacts without FlashInfer autotuning.
+    gdn_replayssm_warmup(worker.model_runner)
     _warmup_flashinfer_attention(worker)
 
 

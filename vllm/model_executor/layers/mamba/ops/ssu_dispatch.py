@@ -451,6 +451,20 @@ def selective_state_update_replayssm_flashinfer(
     )
 
 
+@cache
+def _load_gdn_replayssm_materialize() -> Callable[..., None]:
+    try:
+        from flashinfer.gdn_kernels.gdn_prefix_materialize import (
+            gdn_prefix_materialize,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "FlashInfer GDN ReplaySSM prefix caching requires "
+            "flashinfer.gdn_kernels.gdn_prefix_materialize"
+        ) from e
+    return gdn_prefix_materialize
+
+
 def initialize_mamba_ssu_backend(
     mamba_config: MambaConfig,
     kv_cache_config: KVCacheConfig,

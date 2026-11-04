@@ -47,6 +47,7 @@ def _autotune_runner(
                 use_replayssm and backend == MambaBackendEnum.FLASHINFER
             ),
             use_v2_model_runner=use_v2_model_runner,
+            is_gdn_replayssm_enabled=lambda: False,
         ),
         uniform_decode_query_len=query_len,
         decode_query_len=query_len,

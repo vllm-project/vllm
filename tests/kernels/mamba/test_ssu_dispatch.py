@@ -373,10 +373,13 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
         HAS_IDX_MAPPING=True,
         MATERIALIZE_PREFIXES=True,
         LIVE_COL_IS_ZERO=False,
+        EXECUTED_QUERY_WIDTH=0,
+        GDN_STP=False,
     )
     _compact_replayssm_requests_kernel[(1,)](
         context.plan_flush_count,
         context.active_request_indices,
+        context.num_active,
         4,
         MAX_NUM_REQS=4,
         BLOCK_SIZE=4,

@@ -48,13 +48,18 @@ def _make_common_attn_metadata(query_lens: list[int]) -> CommonAttentionMetadata
 
 
 def _make_runner(
-    req_states: dict[str, tuple[int, int]], decode_query_len: int = 8
+    req_states: dict[str, tuple[int, int]],
+    decode_query_len: int = 8,
+    use_gdn_replayssm: bool = False,
 ) -> Any:
     """Build a runner stub from {req_id: (num_computed_tokens, prefill_len)}."""
     prefill_lens = np.array([s[1] for s in req_states.values()], dtype=np.int32)
     num_computed = np.array([s[0] for s in req_states.values()], dtype=np.int32)
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = decode_query_len
+    runner.vllm_config = SimpleNamespace(
+        is_gdn_replayssm_enabled=lambda: use_gdn_replayssm
+    )
     runner.adaptive_verification = None
     runner.pcp_manager = None
     runner.use_pp = False
@@ -154,6 +159,22 @@ def test_one_new_prompt_token_over_context_runs_as_decode():
     }
 
 
+def test_gdn_intermediate_single_token_then_multi_token_prompt_chunk():
+    # Token 65 must update canonical state before the final three-token prefill.
+    runner = _make_runner({"prompt": (0, 68)}, 1, use_gdn_replayssm=True)
+    for computed, scheduled in [(0, 64), (64, 1), (65, 3)]:
+        runner.req_states.num_computed_prefill_tokens[0] = computed
+        scheduler_output = SimpleNamespace(
+            num_scheduled_tokens={"prompt": scheduled},
+            total_num_scheduled_tokens=scheduled,
+            scheduled_spec_decode_tokens={},
+        )
+        state, uniform = runner.gather_batch_req_state(scheduler_output, False)
+        assert state.prefill_runs_as_decode_np.tolist() == [False]
+        assert not state.decode_graph_eligible
+        assert uniform is None
+
+
 def test_one_token_prompt_tail_with_prior_context_is_uniform_decode():
     # Replaying the last prompt token over existing context (full prefix-cache
     # hit or P/D KV import) computes exactly like a decode.
@@ -245,6 +266,7 @@ def test_uniform_decode_uses_state_index_not_batch_position():
     """
     runner: Any = GPUModelRunner.__new__(GPUModelRunner)
     runner.decode_query_len = 8
+    runner.vllm_config = SimpleNamespace(is_gdn_replayssm_enabled=lambda: False)
     runner.adaptive_verification = None
     runner.pcp_manager = None
     runner.use_pp = False

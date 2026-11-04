@@ -128,7 +128,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionMetadata,
+    GDNAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
@@ -2427,9 +2430,13 @@ class GPUModelRunner(
         # Used by mamba backends to distinguish actual decodes from
         # short extends.
         is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        is_last_prefill = is_prefilling & (
+            seq_lens_cpu_upper_bound >= num_prompt_tokens_cpu
+        )
         # Zero out padded rows so stale data from condense() doesn't
         # misclassify padding as prefill in CUDA graph mode.
         is_prefilling[num_reqs:] = False
+        is_last_prefill[num_reqs:] = False
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
@@ -2469,6 +2476,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            is_last_prefill=is_last_prefill,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
@@ -4198,6 +4206,7 @@ class GPUModelRunner(
             if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
                 mamba_ctx = mamba_bufs.postprocess_align
                 num_mamba_decodes = None
+                gdn_prefilling = None
                 if self._use_flashinfer_replayssm:
                     assert isinstance(attn_metadata, dict)
                     mamba_group = self.kv_cache_config.kv_cache_groups[
@@ -4205,8 +4214,15 @@ class GPUModelRunner(
                     ]
                     # Cache groups share the request split, but own distinct slots.
                     mamba_metadata = attn_metadata[mamba_group.layer_names[0]]
-                    assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
-                    num_mamba_decodes = mamba_metadata.num_decodes
+                    if isinstance(mamba_metadata, GDNAttentionMetadata):
+                        replay_rows = mamba_metadata.spec_sequence_masks_cpu
+                        if replay_rows is not None:
+                            gdn_prefilling = ~replay_rows[:num_reqs]
+                        else:
+                            num_mamba_decodes = mamba_metadata.num_decodes
+                    else:
+                        assert isinstance(mamba_metadata, Mamba2AttentionMetadata)
+                        num_mamba_decodes = mamba_metadata.num_decodes
                 mamba_utils.stage_postprocess_inputs_to_gpu(
                     mamba_ctx,
                     scheduler_output,
@@ -4214,6 +4230,7 @@ class GPUModelRunner(
                     num_reqs,
                     self.requests,
                     num_decodes=num_mamba_decodes,
+                    is_prefilling=gdn_prefilling,
                 )
 
             (
