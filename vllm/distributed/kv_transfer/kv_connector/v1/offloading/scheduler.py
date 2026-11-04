@@ -1351,6 +1351,9 @@ class OffloadingConnectorScheduler:
         except Exception:
             del self._req_status[request.request_id]
             raise
+        self._events_tracker.on_new_request(
+            req_context, request, self.config.kv_group_configs
+        )
 
     def get_num_new_matched_tokens(
         self,
@@ -2193,14 +2196,18 @@ class OffloadingConnectorScheduler:
                     )
 
                     gpu_block_idx = chunk_idx * blocks_per_chunk
+                    if start_gpu_block_idx is None:
+                        start_gpu_block_idx = gpu_block_idx
                     for i in range(blocks_per_chunk):
                         block_id = block_ids[gpu_block_idx + i]
-                        if block_id == 0:
-                            continue
-                        if start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
+                        # Keep null pages inside the chunk as placeholders so
+                        # later blocks retain their logical offsets in the CPU
+                        # chunk. The null GPU block is zeroed and can be copied
+                        # safely; it must not be fenced as a live allocation.
                         src_block_ids.append(block_id)
                         num_group_blocks += 1
+                        if block_id == 0:
+                            continue
                         if is_sliding_window:
                             fenced_block_ids.append(block_id)
                         else:
