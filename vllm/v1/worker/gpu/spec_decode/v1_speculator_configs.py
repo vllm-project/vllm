@@ -21,14 +21,6 @@ class UnsupportedSpeculatorConfig(SpeculatorConfig):
     """A speculative method that the V2 model runner doesn't implement."""
 
 
-class SuffixSpeculatorConfig(UnsupportedSpeculatorConfig):
-    base_method = "suffix"
-
-    @classmethod
-    def configure(cls, spec: "SpeculativeConfig") -> None:
-        spec._validate_suffix_decoding()
-
-
 class V1CustomProposerConfig(UnsupportedSpeculatorConfig):
     """A V1 custom proposer, loaded from the module path in `model`."""
 
