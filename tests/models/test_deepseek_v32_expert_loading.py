@@ -21,6 +21,7 @@ from tests.kernels.moe.utils import (
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.models.deepseek_v32.amd import model as amd_model
 from vllm.models.deepseek_v32.amd import mtp as amd_mtp
 from vllm.models.deepseek_v32.nvidia import model as nvidia_model
@@ -172,7 +173,10 @@ def test_eplb_replicas_are_loaded(model_cls, fused):
 
 @pytest.mark.parametrize("model_cls", [_AmdModel, _AmdMTP])
 @pytest.mark.parametrize("n_shared", [1, 2])
-def test_fused_shared_experts_are_split_into_slots(model_cls, n_shared, monkeypatch):
+@pytest.mark.parametrize("fused", [False, True])
+def test_fused_shared_experts_are_split_into_slots(
+    model_cls, n_shared, fused, monkeypatch
+):
     """ROCm AITER fused shared experts: the widened `mlp.shared_experts.*`
     tensor is split into `n_shared_experts` experts after the routed ones."""
     monkeypatch.setattr(
@@ -204,7 +208,7 @@ def test_fused_shared_experts_are_split_into_slots(model_cls, n_shared, monkeypa
     }
     prefix = model.prefixes[0]
     model.load_weights(
-        _checkpoint(model, fused=False)
+        _checkpoint(model, fused=fused)
         + [
             (f"{prefix}.mlp.shared_experts.{proj}_proj.weight", tensor)
             for proj, tensor in widened.items()
@@ -218,6 +222,12 @@ def test_fused_shared_experts_are_split_into_slots(model_cls, n_shared, monkeypa
     shared_reference = _reference(n_shared, seed=1)
     assert torch.equal(experts.w13_weight[E:], shared_reference.w13_weight[:n_shared])
     assert torch.equal(experts.w2_weight[E:], shared_reference.w2_weight[:n_shared])
+
+
+@pytest.mark.parametrize("model_cls", [_NvidiaModel, _AmdModel])
+def test_pp_missing_moe_layer_is_skipped(model_cls):
+    model = model_cls(PPMissingLayer())
+    assert model.load_weights(_checkpoint(model, fused=False)) == set()
 
 
 @pytest.mark.parametrize("model_cls", [_NvidiaModel, _AmdModel])
