@@ -1365,6 +1365,20 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         )
         return reshape_attn_output_for_spec_decode(output)
 
+    def _should_use_bf16_small_head_kernel(
+        self, num_tokens: int, actual_num_heads: int
+    ) -> bool:
+        if not current_platform.is_device_capability_family(90):
+            return False
+        if actual_num_heads not in (8, 16, 32):
+            return False
+
+        # Each query launches one CTA. These empirical token-per-SM cutoffs
+        # favor padding for small batches; 32 heads use a higher cutoff.
+        # They are performance heuristics, not correctness requirements.
+        min_tokens_per_sm = 2 if actual_num_heads == 32 else 1
+        return num_tokens > self._sm_count * min_tokens_per_sm
+
     def _bf16_flash_mla_kernel(
         self,
         q: torch.Tensor,
@@ -1387,12 +1401,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             // self.prefill_padding
             * self.prefill_padding
         )
-        # The padded kernel is faster before the small-head CTAs fill the GPU.
-        if (
-            current_platform.is_device_capability_family(90)
-            and actual_num_heads in (8, 16, 32)
-            and num_tokens > self._sm_count * (2 if actual_num_heads == 32 else 1)
-        ):
+        if self._should_use_bf16_small_head_kernel(num_tokens, actual_num_heads):
             q = q[:, :actual_num_heads]
             if out is not None:
                 out = out[:, :actual_num_heads]
