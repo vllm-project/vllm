@@ -6,7 +6,9 @@ Subcommands:
     align: check that requirements/test/kv_connectors_cuda.txt satisfies the
         release requirements in requirements/kv_connectors.txt (pre-commit).
     plan LOCK OUT: write the lock entries that are not installed yet to OUT.
-        Fails if an installed package has a different version than the lock.
+        Preinstalled packages at other versions are reported, not replaced:
+        later image layers can still change them, so `verify` judges the
+        finished image.
     verify LOCK: check that every lock entry is installed at its locked
         version and that the installed environment satisfies the requirements
         of every locked package.
@@ -34,7 +36,7 @@ CI_ONLY = {"nixl-cu13"}
 # Preinstalled at a version other than the lock's; their compatibility with
 # the locked packages is still checked by `verify`.
 IMAGE_OWNED = {
-    # Upgraded by the EP kernel libraries (cuda-core, nccl4py).
+    # The vLLM wheel install upgrades it for cuda-core and nccl4py (>= 1.5.4).
     "cuda-pathfinder",
 }
 # (package, dependency) requirements that are intentionally not met.
@@ -107,8 +109,8 @@ def align() -> list[str]:
 
 def plan(lock_path: Path, out: Path) -> list[str]:
     lock = read_lock(lock_path)
-    if errors := version_mismatches(lock):
-        return errors
+    for mismatch in version_mismatches(lock):
+        print(f"not installing {mismatch}; checked by verify", file=sys.stderr)
     missing = [text for name, (_, text) in lock.items() if not installed_version(name)]
     out.write_text("".join(missing))
     return []

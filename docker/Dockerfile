@@ -1102,10 +1102,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 # KV connectors for the P/D and connector suites, so CI jobs never install them
-# at runtime. Lock entries the image lacks are installed hash-verified; a
-# preinstalled package must already match the lock (tools/kv_connector_lock.py
-# lists the exceptions), and the install must not change it. Targets the stable
-# x86_64 CUDA 13 image.
+# at runtime. Lock entries the image lacks are installed hash-verified, and the
+# install must not change any preinstalled package. The test stage checks the
+# finished environment against the lock. Targets the stable x86_64 CUDA 13 image.
 COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
 COPY tools/kv_connector_lock.py tools/kv_connector_lock.py
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -1122,7 +1121,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
             exit 1; \
         fi \
-        && python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt \
         && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-new.txt; \
     fi
 
@@ -1131,6 +1129,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 FROM test-deps AS test
 
 ARG PYTHON_VERSION
+ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -1180,6 +1179,12 @@ ADD . /vllm-workspace/
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
+
+# The installs above may move packages the KV connector layer relied on.
+RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        python3 tools/kv_connector_lock.py verify requirements/test/kv_connectors_cuda.txt; \
+    fi
 
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
