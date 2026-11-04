@@ -20,7 +20,11 @@ from vllm.model_executor.layers.attention.mla_attention import (
     init_mla_context_partial,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import Fp8PtpcOnlineLinearMethod
-from vllm.v1.attention.ops.rocm_aiter_mla_fp8_quant import fused_qkv_per_tensor_quant
+from vllm.v1.attention.ops.rocm_aiter_mla_fp8_quant import (
+    cached_kv_scales,
+    prepare_fp8_context,
+    quantize_query,
+)
 from vllm.v1.attention.ops.rocm_aiter_mla_prefill import gather_compressed_context
 
 if TYPE_CHECKING:
@@ -81,6 +85,19 @@ def projection_weight(layer: torch.nn.Module, heads: int) -> ProjectionWeight:
     if not weight.is_cuda or getattr(layer, "bias", None) is not None:
         raise ValueError("FP8 projection requires GPU weights without bias")
     return ProjectionWeight(weight, scale.view(-1), preshuffled)
+
+
+def projection_weight_norms(params: ProjectionWeight, heads: int) -> torch.Tensor:
+    """Compute K/V row-norm maxima once from the native FP8 weight storage."""
+    weight = params.weight.float()
+    if params.preshuffled:
+        row_squares = (
+            weight.view(heads * 16, 16, 2, 16, 16).square().sum((1, 2, 4)).reshape(-1)
+        )
+    else:
+        row_squares = weight.square().sum(-1)
+    norms = (row_squares.sqrt() * params.scale).view(heads, 256)
+    return torch.stack((norms[:, :128].amax(), norms[:, 128:].amax()))
 
 
 def project(gathered, cache_scale, indices, params, heads, output_scales=None):
@@ -154,21 +171,33 @@ def use_fp8_context(max_query_len: int, max_seq_len: int) -> bool:
 
 
 class FP8PrefillContext:
-    """Q and projection descales owned by one layer's prefill forward."""
+    """FP8 queries owned by one layer's prefill forward."""
 
     def __init__(self) -> None:
         from aiter.ops.flydsl import flydsl_flash_attn_fp8_func
 
         self.attention = flydsl_flash_attn_fp8_func
         self.queries: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
-        self.gather_scales: torch.Tensor | None = None
 
-    def prepare(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> None:
+    def prepare(self, q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         with torch.accelerator.device_index(q.device.index):
-            quant = fused_qkv_per_tensor_quant(q, k, v)
+            quant = quantize_query(q)
             key = (q.data_ptr(), tuple(q.shape), tuple(q.stride()))
-            self.queries[key] = (quant[0], quant[3])
-            self.gather_scales = torch.cat((quant[6], quant[7]))
+            self.queries[key] = quant
+            return quant
+
+    def project(self, q, cache, cache_scale, indices, params, heads, weight_norms):
+        with torch.accelerator.device_index(q.device.index):
+            key = (q.data_ptr(), tuple(q.shape), tuple(q.stride()))
+            if key not in self.queries:
+                q8, qs, scales = prepare_fp8_context(
+                    q, cache, cache_scale, indices, weight_norms
+                )
+                self.queries[key] = (q8, qs)
+            else:
+                # A reused query can attend to a different cached chunk.
+                scales = cached_kv_scales(cache, cache_scale, indices, weight_norms)
+            return project(cache, cache_scale, indices, params, heads, scales)
 
     def run(
         self,
@@ -182,9 +211,7 @@ class FP8PrefillContext:
             cached = self.queries.get(key)
             if cached is None:
                 # Quantize each distinct slice independently.
-                quant = fused_qkv_per_tensor_quant(q, q[:0], q[:0, :, :128])
-                cached = quant[0], quant[3]
-                self.queries[key] = cached
+                cached = self.prepare(q)
             q8, qs = cached
             k8, v8, ks, vs = kv8
             return self.attention(
@@ -224,7 +251,8 @@ def compute_context(
     assert backend is not None and chunked is not None
     assert chunked.dcp_manager is not None
     assert params is not None and row_groups is not None
-    assert state.gather_scales is not None
+    weight_norms = impl._flydsl_fp8_weight_norms
+    assert weight_norms is not None
     assert len(chunked.chunks) == len(row_groups)
     output = output_lse = None
     for chunk, row_indices in zip(chunked.chunks, row_groups):
@@ -238,13 +266,14 @@ def compute_context(
         )
         query = q[chunk.token_slice]
         if use_fp8_context(chunk.max_query_len, chunk.max_seq_len):
-            kv8 = project(
+            kv8 = state.project(
+                query,
                 gathered,
                 k_scale,
                 row_indices,
                 params,
                 impl.num_heads,
-                state.gather_scales,
+                weight_norms,
             )
             attn_output, attn_lse = state.run(chunk, query, kv8, impl.scale)
         else:

@@ -2417,6 +2417,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         AiterMLAHelper.check_num_heads_validity(self._decode_num_heads)
         self._sm_count = current_platform.num_compute_units()
         self._flydsl_fp8_projection: ProjectionWeight | None = None
+        self._flydsl_fp8_weight_norms: torch.Tensor | None = None
         self._use_flydsl_fp8_prefill = (
             envs.VLLM_ROCM_USE_AITER_FLYDSL_FP8_PREFILL_ATTN
             and get_current_vllm_config().model_config.runner_type != "draft"
@@ -2465,12 +2466,14 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         super().process_weights_after_loading(act_dtype)
         self._flydsl_fp8_projection = None
+        self._flydsl_fp8_weight_norms = None
         if not self._use_flydsl_fp8_prefill:
             return
 
         from vllm.platforms.rocm import on_gfx950
         from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
             projection_weight,
+            projection_weight_norms,
         )
 
         if (
@@ -2503,6 +2506,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             128,
         ):
             raise ValueError("AITER FlyDSL FP8 FMHA does not support this layer.")
+        self._flydsl_fp8_weight_norms = projection_weight_norms(params, self.num_heads)
         self._flydsl_fp8_projection = params
 
     def _concat_k_nope_k_pe(

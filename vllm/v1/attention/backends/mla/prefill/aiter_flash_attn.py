@@ -112,8 +112,6 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         assert output_scale is None, (
             "AiterFlashAttnPrefillBackend does not support fused quantized output."
         )
-        if self.fp8_context is not None:
-            self.fp8_context.prepare(q, k, v)
         result = self.flash_attn_varlen_func(
             q=q,
             k=k,

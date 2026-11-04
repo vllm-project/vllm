@@ -51,14 +51,20 @@ models retain their existing attention routing.
 
 The context projection consumes compressed FP8 cache and FP8 weights directly,
 with FP32 accumulation, and writes FP8 K/V without a BF16 intermediate.
-Q uses dynamic per-tensor quantization. K/V output descales are computed from
-the current new-token K/V maxima with a factor of two headroom and a positive
-scale floor. Reuse is limited to the current layer's forward; distinct Q slices
-are quantized independently. FMHA returns BF16 output and natural-log LSE for
-the existing context/new-token merge.
+Q uses dynamic per-tensor quantization. Each cached chunk derives its K/V output
+descales from the selected FP8 latent row norms and the native FP8 projection
+weight row norms. K also includes the cached RoPE maximum. The weight norms
+are computed once when loading weights; cache bounds are recomputed on the GPU
+for each chunk. The first use of a Q slice combines this scan with Q quantization
+in two kernel launches, without quantizing the new-token K/V.
 
-This is an experimental numerical path: cached values can exceed the
-new-token-derived range and saturate. Validate model accuracy and performance
+These conservative bounds cover the cached projection range without expanding
+BF16 K/V to measure its maximum. They can reduce precision for small values.
+Q reuse is limited to the current layer's forward; distinct slices are quantized
+independently. FMHA returns BF16 output and natural-log LSE for the existing
+context/new-token merge.
+
+This is an experimental numerical path. Validate model accuracy and performance
 on the intended workload before enabling it in production.
 
 ```python

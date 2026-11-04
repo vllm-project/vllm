@@ -315,31 +315,32 @@ def test_k_concat_matches_torch_cat(dtype):
 @requires_gfx950
 @pytest.mark.parametrize("tokens", [0, 1, 37, 2048])
 def test_flydsl_fp8_quantization_strides_and_zero(tokens):
-    """Strided inputs obey E4M3 rounding bounds, including zero/empty tensors."""
+    """Strided queries obey E4M3 rounding bounds, including zero/empty tensors."""
     from vllm.v1.attention.ops.rocm_aiter_mla_fp8_quant import (
-        fused_qkv_per_tensor_quant,
+        prepare_fp8_context,
+        quantize_query,
     )
 
     torch.manual_seed(11)
     q = torch.randn(tokens, 12, 384, device="cuda", dtype=DTYPE)[..., ::2]
-    kv = torch.randn(tokens, 12, 320, device="cuda", dtype=DTYPE)
-    k, v = kv[..., :192], kv[..., 192:]
+    cache = torch.zeros(4, 576, device="cuda").to(torch.float8_e4m3fn)
+    cache_scale = torch.tensor([0.137], device="cuda")
+    indices = torch.tensor([1, 3], device="cuda", dtype=torch.int32)
+    norms = torch.ones(2, device="cuda")
     for zero in (False, True):
         if zero:
             q.zero_()
-            kv.zero_()
-        result = fused_qkv_per_tensor_quant(q, k, v)
-        for x, x8, descale in zip((q, k, v), result[:3], result[3:6]):
-            amax = x.float().abs().amax() if tokens else x.new_zeros(()).float()
+        fused = prepare_fp8_context(q, cache, cache_scale, indices, norms)
+        torch.testing.assert_close(fused[2], torch.full_like(fused[2], 1e-6))
+        for q8, descale in (quantize_query(q), fused[:2]):
+            amax = q.float().abs().amax() if tokens else q.new_zeros(()).float()
             expected_scale = torch.where(amax > 0, amax / 448, 1e-6)
             torch.testing.assert_close(descale[0], expected_scale)
-            assert x8.dtype == torch.float8_e4m3fn and x8.is_contiguous()
-            error = (x8.float() * descale - x.float()).abs()
+            assert q8.dtype == torch.float8_e4m3fn and q8.is_contiguous()
+            error = (q8.float() * descale - q.float()).abs()
             # Half an E4M3 ULP, plus FP32 reciprocal/multiply rounding.
-            bound = x.float().abs() * (1 / 16 + 2e-7) + descale / 1024
+            bound = q.float().abs() * (1 / 16 + 2e-7) + descale / 1024
             assert torch.all(error <= bound)
-        for descale, gather_scale in zip(result[4:6], result[6:]):
-            torch.testing.assert_close(gather_scale, descale.clamp_min(1e-6) * 2)
 
 
 @requires_gfx950
@@ -354,7 +355,7 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
     from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
         FP8PrefillContext,
         ProjectionWeight,
-        project,
+        projection_weight_norms,
     )
 
     torch.manual_seed(7)
@@ -371,8 +372,7 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
         preshuffled,
     )
     q = torch.randn(20, heads, 192, device=device, dtype=DTYPE) * 2
-    new_k = torch.randn_like(q) * 2
-    new_v = torch.randn(20, heads, 128, device=device, dtype=DTYPE) * 3
+    weight_norms = projection_weight_norms(params, heads)
     chunk = MLACommonPrefillMetadata.ContextChunk(
         index=0,
         request_slice=slice(0, 2),
@@ -395,8 +395,7 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
 
     def run():
         state = FP8PrefillContext()
-        state.prepare(q, new_k, new_v)
-        kv8 = project(cache, cache_scale, indices, params, heads, state.gather_scales)
+        kv8 = state.project(q, cache, cache_scale, indices, params, heads, weight_norms)
         output, lse = state.run(chunk, q, kv8, SCALE)
         key = (q.data_ptr(), tuple(q.shape), tuple(q.stride()))
         q8, qs = state.queries[key]
@@ -445,10 +444,10 @@ def test_flydsl_fp8_projection_and_fmha_graph_replay(preshuffled):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = run()
-    # Reuse every allocation while changing Q and the scale-producing K/V.
+    # Reuse every allocation while changing Q and the cached projection scales.
     q.mul_(0.5)
-    new_k.mul_(1.5)
-    new_v.mul_(0.75)
+    cache_scale.mul_(0.75)
+    indices.copy_(indices.flip(0))
     graph.replay()
     check(captured)
 
@@ -529,19 +528,74 @@ def test_flydsl_fp8_forward_scope_clears_after_error(default_vllm_config):
         default_vllm_config,
     )
     q = torch.ones(1, 12, 192, device="cuda", dtype=DTYPE)
-    v = torch.ones(1, 12, 128, device="cuda", dtype=DTYPE)
     with (
         pytest.raises(RuntimeError, match="sentinel"),
         backend.fp8_context_forward() as state,
     ):
-        state.prepare(q, q, v)
-        assert state.gather_scales is not None
-        old_scale = state.gather_scales.clone()
+        _, scale = state.prepare(q)
+        old_scale = scale.clone()
         raise RuntimeError("sentinel")
     assert backend.fp8_context is None
     q.mul_(2)
     with backend.fp8_context_forward() as state:
-        state.prepare(q, q, v)
-        assert state.gather_scales is not None
-        assert state.gather_scales[0] == 2 * old_scale[0]
+        _, scale = state.prepare(q)
+        assert scale[0] == 2 * old_scale[0]
     assert backend.fp8_context is None
+
+
+@requires_gfx950
+@pytest.mark.parametrize("preshuffled", [False, True])
+@pytest.mark.parametrize("multiplier", [8, 32])
+def test_flydsl_fp8_cached_outliers(preshuffled, multiplier):
+    """Each cached chunk gets a fresh scale even when its query is reused."""
+    from aiter.ops.shuffle import shuffle_weight
+
+    from vllm.v1.attention.ops.rocm_aiter_mla_fp8_prefill import (
+        FP8PrefillContext,
+        ProjectionWeight,
+        projection_weight_norms,
+    )
+
+    torch.manual_seed(71)
+    heads = 12
+    weight = (torch.randn(heads * 256, 512, device="cuda") * 32).to(torch.float8_e4m3fn)
+    weight_scale = torch.linspace(0.0002, 0.0008, heads * 256, device="cuda")
+    params = ProjectionWeight(
+        shuffle_weight(weight, (16, 16)) if preshuffled else weight,
+        weight_scale,
+        preshuffled,
+    )
+    norms = projection_weight_norms(params, heads)
+    reference_weight = weight.cpu().double() * weight_scale.cpu().double()[:, None]
+    reference_norms = reference_weight.norm(dim=-1).view(heads, 256)
+    torch.testing.assert_close(
+        norms.cpu().double(),
+        torch.stack((reference_norms[:, :128].max(), reference_norms[:, 128:].max())),
+        rtol=1e-6,
+        atol=1e-8,
+    )
+    raw = torch.randn(512, 576, device="cuda")
+    raw[256:264] *= multiplier
+    cache = raw.to(torch.float8_e4m3fn)
+    cache_scale = torch.tensor([0.125], device="cuda")
+    q = torch.randn(20, heads, 192, device="cuda", dtype=DTYPE)
+    state = FP8PrefillContext()
+    for start, end in ((0, 128), (128, 512)):
+        indices = torch.arange(start, end, device="cuda", dtype=torch.int32)
+        k8, v8, ks, vs = state.project(
+            q, cache, cache_scale, indices, params, heads, norms
+        )
+        latent = cache.cpu().double()[start:end] * cache_scale.cpu().double()
+        expanded = (latent[:, :512] @ reference_weight.t()).view(-1, heads, 256)
+        expected_k = torch.cat(
+            (expanded[..., :128], latent[:, None, 512:].expand(-1, heads, -1)),
+            dim=-1,
+        )
+        for value, expected, scale in (
+            (k8, expected_k, ks),
+            (v8, expanded[..., 128:], vs),
+        ):
+            error = value.cpu().double() * scale.cpu().double() - expected
+            assert torch.all(expected.abs() <= 448 * scale.cpu().double())
+            assert error.square().mean().sqrt() / expected.square().mean().sqrt() < 0.04
+            assert error.abs().max() / expected.abs().max() < 0.07
