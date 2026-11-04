@@ -77,11 +77,17 @@ contains a token's K and V for every local K/V head. The host pool uses compact
 token rows within each layer. HiSparse preserves the indexer's sparse selection;
 compressed indexer keys, raw-key rings, and recurrent state remain GPU-resident.
 
-The NVIDIA CUDA single-engine implementation has been checked in the following
-configurations. The rows describe complementary checks; they do not imply that
-every combination of dtype, execution mode, and topology has been tested.
+With prefix caching enabled, HiSparse reuses prefixes at whole scheduler-page
+boundaries. Any matching tokens beyond that boundary are recomputed into a new
+writable resident page. KV and recurrent-state cache hits use the same boundary;
+sub-page prefix reuse is not supported.
 
-| Path | Validated configuration and behavior |
+The NVIDIA CUDA single-engine regression suites cover the following paths.
+These are complementary test configurations, not a complete matrix of dtype,
+execution mode, and topology. Test coverage does not establish that every
+configuration has been run on the current revision.
+
+| Path | Test configuration and expected behavior |
 | --- | --- |
 | Eager decode | Synchronous TP2 execution with MTP disabled; full K/V offload, physical page reuse, and host refill with private per-rank K/V shards |
 | Cache dtypes | BF16 model/query dtype with independently selected BF16 or FP8 main K/V and indexer formats; all four combinations cover original scales, complete K/V rows, nonresident prefill, and selected-K/V replay, with matching eager on/off model evaluations |
@@ -271,6 +277,36 @@ The worker transfer contains only its transfer ID and physical copy
 coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
+
+### Speculative decode group prefetch
+
+HiSparse prefetches historical KV for layers sharing an indexer during pure
+decode batches, including multi-token verification with speculative decoding
+such as MTP. It uses the existing speculative-decoding configuration and swap
+capacity; no additional switch or backend capability flag is required.
+
+The index-producing layer resolves the current top-k once and queues each
+layer's missing rows on the group's copy stream. Each layer waits on its own
+completion event before consuming those rows, allowing later layers' copies to
+overlap earlier layers' computation. Prefill and mixed prefill/decode batches
+retain per-layer staging.
+
+This prefetch eligibility is separate from single-token resident-write and host
+mirror policy. Current verification tokens remain in resident KV, are excluded
+from the historical host-row swap plan, and are written by each layer before
+its attention runs. Prefetching does not publish rejected draft tokens as
+durable host KV. The benefit depends on host misses, shared-index group size,
+and how much copy work can overlap computation.
+
+The CUDA compact gather uses at most 64 thread blocks per launch. Workers loop
+over additional rows when verification expands the batch beyond that limit;
+the existing column parallelism is retained for smaller batches. This bounds
+copy-kernel occupancy while later layers are prefetched, without reading miss
+counts back to the CPU or launching a separate compaction kernel. Actual copy
+bandwidth and end-to-end latency must be measured together, since bounding the
+grid can trade peak copy throughput for compute overlap.
+
+### Row resolution
 
 The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 

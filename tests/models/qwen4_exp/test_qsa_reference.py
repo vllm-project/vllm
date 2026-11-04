@@ -1957,7 +1957,7 @@ def _run_qsa_hisparse_prefill_case(
         if capture_warmup or connector_warmup:
             connector.set_disabled(False)
         selection_hook.remove()
-        release_pinned_state([], [registered])
+        release_pinned_state([registered])
 
 
 @requires_qsa_kernels
@@ -2236,7 +2236,6 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         worker.initialize(
             [cache],
             [owner.layer_name],
-            backing.view(torch.uint8),
             2,
             slab_blocks,
             device,
@@ -2312,12 +2311,21 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         )
 
         # The real worker copies the sealed page before BlockPool can reuse it.
-        transfer = SparseKVPageTransfer(91, 1, (1,), after_forward=False)
+        transfer = SparseKVPageTransfer(91, 1, (1,))
         worker.start_step(
             HiSparseConnectorMetadata(
                 SparseKVOffloadCommand([transfer]), (), (), {}, True, {}
             ),
             torch.tensor([1, 0], dtype=torch.int32, device=device),
+            num_tokens=0,
+        )
+        worker.finish_forward()
+        worker.host_write_event.synchronize()
+        assert worker.take_transfer_updates() == ([], [])
+        # Sealed-page transfers wait until the next step, after draft layers.
+        worker.start_step(
+            HiSparseConnectorMetadata(None, (), (), {}, True, {}),
+            request_state_indices=None,
             num_tokens=0,
         )
         worker.finish_forward()
@@ -2458,7 +2466,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
         if worker is not None:
             worker.shutdown()
         else:
-            release_pinned_state([], [registered])
+            release_pinned_state([registered])
         pool.free_blocks([block for block in allocated if block.ref_cnt])
 
 
@@ -2755,7 +2763,6 @@ def _run_qsa_hisparse_worker_case(
         worker.initialize(
             handles,
             [owner.layer_name for owner in owners],
-            backing,
             2,
             5,
             device,
@@ -3370,7 +3377,7 @@ def _run_qsa_hisparse_worker_case(
         if worker is not None and worker._initialized:
             worker.shutdown()
         else:
-            release_pinned_state([], registered_pools)
+            release_pinned_state(registered_pools)
 
 
 @requires_qsa_kernels
