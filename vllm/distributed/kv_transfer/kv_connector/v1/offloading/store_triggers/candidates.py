@@ -11,7 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 from vllm.v1.core.kv_cache_coordinator import replay_boundaries
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
-from vllm.v1.kv_offload.base import OffloadKey
+from vllm.v1.kv_offload.base import OffloadKey, make_offload_key
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -206,6 +206,14 @@ def select_store_candidates(
         new_offload_key_chunks,
         group_store_ranges,
     )
+
+
+def block_key(
+    req: Request, group_config: GroupOffloadConfig, block_idx: int
+) -> OffloadKey:
+    """The key of the data in one GPU block of a request."""
+    hash_idx = (block_idx + 1) * group_config.hashes_per_block - 1
+    return make_offload_key(req.block_hashes[hash_idx], group_config.group_idx)
 
 
 def _reachable_store_block_mask(

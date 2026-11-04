@@ -934,7 +934,7 @@ class TieringOffloadingManager(OffloadingManager):
     def prepare_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
         *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
@@ -957,6 +957,9 @@ class TieringOffloadingManager(OffloadingManager):
             evicted, or None if store cannot proceed.
 
         """
+        # The multi-tier spec refuses the lazy trigger, so a store belongs to
+        # a request here.
+        assert req_context is not None
         # Step 1: Poll for completed async jobs FIRST
         # _process_finished_jobs() handles two kinds of completions here:
         #  - Cascade completions (store to a secondary tier, either a local
@@ -1065,7 +1068,7 @@ class TieringOffloadingManager(OffloadingManager):
     def complete_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
         *,
         trigger: StoreTrigger,
         success: bool = True,
@@ -1089,6 +1092,9 @@ class TieringOffloadingManager(OffloadingManager):
             success: Whether the GPU→primary transfer succeeded.
 
         """
+        # The multi-tier spec refuses the lazy trigger, so a store belongs to
+        # a request here.
+        assert req_context is not None
         # Step 1: Complete store in primary tier (makes chunks loadable)
         self.primary_tier.complete_store(
             keys, req_context, trigger=trigger, success=success

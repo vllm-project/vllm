@@ -24,7 +24,7 @@ class _DummyCachePolicy(CachePolicy):
         return None
 
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         pass
 
