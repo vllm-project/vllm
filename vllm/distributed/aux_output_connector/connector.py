@@ -208,6 +208,8 @@ class AuxOutputSchedulerConnector:
             logprob_block_hashes,
             logprob_boundary_token_ids,
         )
+        for request_id in finished_requests:
+            self._logprob_fingerprints.pop(request_id, None)
         self._retained_hashes, self._released_hashes = [], []
         self._finished_logprob_blocks = {}
         return metadata

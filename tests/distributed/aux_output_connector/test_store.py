@@ -2181,6 +2181,33 @@ def test_scheduler_connector_sends_unscheduled_hash_update():
     assert list(metadata.block_hashes[request.request_id]) == [b"b" * 32]
 
 
+def test_scheduler_connector_releases_finished_logprob_fingerprint():
+    connector = AuxOutputSchedulerConnector(
+        _kv_cache_manager({}), enable_routed_experts=False, enable_logprobs=True
+    )
+    request = _scheduler_request("request", [], num_tokens=9)
+    request.sampling_params = SimpleNamespace(
+        routed_experts_prompt_start=0,
+        extra_args={"aux_output_enabled": True},
+        num_logprobs=2,
+        logprob_token_ids=None,
+    )
+    request.all_token_ids = list(range(request.num_tokens))
+    fingerprint = connector._fingerprint(request)
+    connector.build_connector_meta(
+        _step_output([request.request_id], [0], [1]),
+        {request.request_id: request},
+    )
+
+    request.block_hashes.append(b"a" * 32)
+    request.num_computed_tokens = _BLOCK_SIZE
+    connector.request_finished(request)
+    metadata = connector.build_connector_meta(_step_output([], [], []), {})
+
+    assert metadata.logprobs == {request.request_id: fingerprint}
+    assert request.request_id not in connector._logprob_fingerprints
+
+
 def test_scheduler_connector_reset_derives_emit_start_from_request():
     connector = _make_connector()
     request = _scheduler_request("request", [b"a" * 32], num_tokens=5)
