@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import json
 import os
 import shutil
 import stat
@@ -643,7 +642,7 @@ async def run_request(
         and response.media_type == "application/json"
     ):
         with contextlib.suppress(pydantic.ValidationError):
-            response = _ALL_RESPONSE_ADAPTER.validate_python(json.loads(response.body))
+            response = _ALL_RESPONSE_ADAPTER.validate_json(response.body)
 
     if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
