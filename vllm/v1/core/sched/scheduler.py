@@ -451,7 +451,7 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.aux_output_connector = (
-            AuxOutputSchedulerConnector()
+            AuxOutputSchedulerConnector(self.hash_block_size)
             if vllm_config.aux_output_config.enabled
             else None
         )
@@ -1270,8 +1270,10 @@ class Scheduler(SchedulerInterface):
                     )
 
                     if num_new_tokens == 0:
-                        # The request cannot be scheduled.
-                        break
+                        # The request cannot be scheduled. Requeue it so it does
+                        # not stall the requests behind it.
+                        skip_request(request_queue)
+                        continue
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1732,14 +1734,14 @@ class Scheduler(SchedulerInterface):
 
         Discards the last sampled output token from the prior input chunk.
         """
-        # Current streaming input behaviour: Keep only computed output tokens
-        # (discard final sampled output token).
-        num_computed_tokens = session.num_computed_tokens
+        # Keep all output tokens but the final sampled one.
+        keep_end = session.num_tokens - 1
+        assert keep_end >= session.num_computed_tokens
         kept_output_tokens = session._all_token_ids[
-            session.num_prompt_tokens : num_computed_tokens
+            session.num_prompt_tokens : keep_end
         ]
-        del session._all_token_ids[num_computed_tokens:]
-        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
+        del session._all_token_ids[keep_end:]
+        del session.block_hashes[keep_end // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
@@ -2007,11 +2009,12 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
                 # bidirectional attention.
-                if num_computed_tokens + shift_computed_tokens < start_pos:
+                if num_computed_tokens < start_pos:
                     # We only schedule the decoder tokens just before the
-                    # encoder input.
-                    num_new_tokens = start_pos - (
-                        num_computed_tokens + shift_computed_tokens
+                    # encoder input. No drafter shift here: its read-ahead into
+                    # this unencoded input falls back to token embeddings.
+                    num_new_tokens = min(
+                        num_new_tokens, start_pos - num_computed_tokens
                     )
                 else:
                     # Because of prefix caching, num_computed_tokens is greater
@@ -2155,6 +2158,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        # Stopped resumable requests to re-enqueue, in output order.
+        continuing_reqs: list[Request] = []
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -2320,6 +2325,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params["remote_prefill_cached_tokens"] = (
                             prefill_stats.num_cached_tokens
                         )
+                else:
+                    continuing_reqs.append(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -2371,14 +2378,16 @@ class Scheduler(SchedulerInterface):
                 assert not prompt_logprobs_tensors
                 assert prompt_token_id_logprobs is None
 
-        # Remove the stopped requests from the running and waiting queues.
+        # Remove stopped requests from their queues, then enqueue the ones
+        # that continue, so each ends up in exactly one queue.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
         if stopped_preempted_reqs:
-            # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
             self.kv_holding_waiting.remove_requests(stopped_preempted_reqs)
             self.deferred_waiting.difference_update(stopped_preempted_reqs)
+        for request in continuing_reqs:
+            self._enqueue_waiting_request(request)
 
         error_req_ids = set(self.grammar_compile_error_reqs)
         self.grammar_compile_error_reqs.clear()
@@ -2568,7 +2577,6 @@ class Scheduler(SchedulerInterface):
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
 
-        self._enqueue_waiting_request(request)
         return False
 
     def _update_request_with_output(
@@ -2601,11 +2609,6 @@ class Scheduler(SchedulerInterface):
         if not cached_encoder_input_ids:
             return
 
-        # Defer the free by the drafter's look-ahead so an entry stays
-        # referenced until the drafter's read-ahead has also passed it,
-        # mirroring the shift the encoder scheduling path applies.
-        spec_lookahead = self.num_prefill_lookahead
-
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
@@ -2618,12 +2621,13 @@ class Scheduler(SchedulerInterface):
                 # KVs have been calculated and cached already.
                 self._free_encoder_input(request, input_id)
             elif (
-                start_pos + num_tokens + spec_lookahead
+                start_pos + num_tokens
                 <= request.num_computed_tokens - request.num_output_placeholders
             ):
-                # Processed, stored in the decoder KV cache, and far enough past
-                # the placeholder range (plus the drafter's look-ahead) that no
-                # rejection or drafter gather can reference it.
+                # Processed, stored in the decoder KV cache, and past the
+                # placeholder range with no pending rejection that could roll
+                # back into it. The drafter only reads ahead of
+                # num_computed_tokens, so it cannot reference this input either.
                 self._free_encoder_input(request, input_id)
 
     def _free_encoder_input(self, request: Request, input_id: int) -> None:
@@ -2696,6 +2700,9 @@ class Scheduler(SchedulerInterface):
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
+
+    def has_request(self, request_id: str) -> bool:
+        return request_id in self.requests
 
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)

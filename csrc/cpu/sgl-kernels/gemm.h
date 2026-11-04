@@ -64,6 +64,12 @@ inline bool can_use_brgemm(int M, int N) {
   return brgemm_supported() && (can_use_brgemm<T>(M) || N != block_size_n());
 }
 
+// Routed INT8 MoE uses a lower threshold than the M-only GEMM selector.
+template <>
+inline bool can_use_brgemm<int8_t>(int M, int N) {
+  return brgemm_supported() && (M > 3 || N != block_size_n());
+}
+
 // work around compiler internal error
 #define BLOCK_K 128  // 4 * TILE_K
 

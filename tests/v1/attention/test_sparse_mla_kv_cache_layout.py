@@ -82,6 +82,7 @@ def test_allocation_and_warmup_follow_addressing_mode(
         attn_backend=backend,
         kv_cache_dtype=cache_dtype,
         head_size=576,
+        topk_buffer_width=None,
         sliding_window=None,
         indexer=None,
         non_causal_multi_token_decode=False,

@@ -38,6 +38,7 @@ from vllm.multimodal.cache import (
     MultiModalCacheMissError,
     engine_receiver_cache_from_config,
 )
+from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -192,26 +193,8 @@ class EngineCore:
 
         self.mm_receiver_cache = engine_receiver_cache_from_config(vllm_config)
 
-        # If a KV connector is initialized for scheduler, we want to collect
-        # handshake metadata from all workers so the connector in the scheduler
-        # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
-        if kv_connector is not None:
-            # Collect and store KV connector xfer metadata from workers
-            # (after KV cache registration)
-            xfer_handshake_metadata = (
-                self.model_executor.get_kv_connector_handshake_metadata()
-            )
-
-            if xfer_handshake_metadata:
-                # xfer_handshake_metadata is list of dicts from workers
-                # Each dict already has structure {(pp_rank, tp_rank): metadata}
-                # Merge all worker dicts into a single dict
-                content: dict[tuple[int, int], Any] = {}
-                for worker_dict in xfer_handshake_metadata:
-                    if worker_dict is not None:
-                        content.update(worker_dict)
-                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+        self._set_kv_connector_handshake_metadata()
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -895,6 +878,28 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def _set_kv_connector_handshake_metadata(self) -> None:
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
+
+            if xfer_handshake_metadata:
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {(pp_rank, tp_rank): metadata}
+                # Merge all worker dicts into a single dict
+                content: dict[tuple[int, int], Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                kv_connector.set_xfer_handshake_metadata_pp_aware(content)
+
     def _reset_caches(
         self,
         reset_running_requests: bool = True,
@@ -1010,6 +1015,9 @@ class EngineCore:
 
         if tags is None or tags:
             self.model_executor.wake_up(tags)
+            if tags is None or "kv_cache" in tags:
+                # Peers must load the re-registered KV cache.
+                self._set_kv_connector_handshake_metadata()
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
@@ -1154,6 +1162,7 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
         self.shutdown_state = EngineShutdownState.RUNNING
+        self.reject_new_requests = False
 
         # Receiver for tensor IPC
         self.tensor_ipc_receiver: TensorIpcReceiver | None = None
@@ -1712,7 +1721,7 @@ class EngineCoreProc(EngineCore):
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
-            if self._reject_add_in_shutdown(req):
+            if self._reject_add_in_shutdown(req) or self._reject_add_while_paused(req):
                 return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
@@ -1747,6 +1756,28 @@ class EngineCoreProc(EngineCore):
             request.request_id,
         )
         self._send_abort_outputs_to_client([request.request_id], request.client_index)
+        return True
+
+    def _reject_add_while_paused(self, request: Request) -> bool:
+        # KV cleanup markers and inputs to open streaming sessions are not new work.
+        if (
+            not self.reject_new_requests
+            or request.abort_immediately
+            or self.scheduler.has_request(request.request_id)
+        ):
+            return False
+        error = RequestError(
+            code="engine_paused",
+            message="Generation is paused. Please retry after it resumes.",
+            retryable=True,
+        )
+        self._send_finish_outputs_to_client(
+            [request.request_id], request.client_index, FinishReason.ERROR, error
+        )
+        if request.kv_transfer_params:
+            # Let the KV connector free any remote blocks held for it.
+            request.abort_immediately = True
+            self.add_request(request)
         return True
 
     def _reject_utility_in_shutdown(
@@ -2138,6 +2169,20 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
+    def pause_generation(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
+        new requests with a retryable error until resume, rather than queue
+        them. Other pauses (e.g. sleep) leave this policy unchanged."""
+        future = self.pause_scheduler(mode, clear_cache)
+        self.reject_new_requests = mode != "keep"
+        return future
+
+    def resume_scheduler(self) -> None:
+        self.reject_new_requests = False
+        super().resume_scheduler()
+
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
         return ``None`` synchronously; False if the pause is still pending
@@ -2146,10 +2191,14 @@ class EngineCoreProc(EngineCore):
         return not self.has_work()
 
     def _send_finish_outputs_to_client(
-        self, req_ids: list[str], client_index: int, finish_reason: FinishReason
+        self,
+        req_ids: list[str],
+        client_index: int,
+        finish_reason: FinishReason,
+        error: RequestError | None = None,
     ) -> None:
         outputs = [
-            EngineCoreOutput(req_id, [], finish_reason=finish_reason)
+            EngineCoreOutput(req_id, [], finish_reason=finish_reason, error=error)
             for req_id in req_ids
         ]
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
@@ -2269,15 +2318,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
+            if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
+                # Engines alone start waves: have the coordinator wake the others.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))

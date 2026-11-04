@@ -526,6 +526,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 trace_headers=trace_headers,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=True if request._grammar_from_parser else None,
             )
             generators.append(generator)
 
@@ -647,6 +648,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         trace_headers: Mapping[str, str] | None = None,
         session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
     ):
         max_model_len = self.model_config.max_model_len
         cache_salt = cast(str | None, engine_input.get("cache_salt"))
@@ -673,6 +675,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 priority=priority,
                 session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                reasoning_ended=reasoning_ended,
             )
 
             async for res in generator:

@@ -361,12 +361,10 @@ class LoRAModelManager:
         if first_free_slot is None:
             raise ValueError("No free lora slots")
         index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
         lora_model = self._registered_adapters[lora_id]
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
-        self.lora_index_to_id[index] = lora_model.id
         num_lora_weights_applied = 0
         for module_name, module in self.modules.items():
             if isinstance(module, ClassificationHeadWithLoRA):
@@ -400,6 +398,8 @@ class LoRAModelManager:
                 "This may be expected with pipeline or expert parallelism.",
                 lora_model.id,
             )
+        self._active_adapters[lora_id] = None
+        self.lora_index_to_id[index] = lora_model.id
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -871,8 +871,7 @@ class LoRAModelManager:
                             module_name,
                         )
                     )
-                    for module in packed_module_names:
-                        lora_model.loras.pop(module, None)
+                    self._pop_lora_weights(lora_model, packed_module_names)
                     continue
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
                     replacement_loras = self._pad_lora_pairs_to_triplets(
@@ -891,8 +890,7 @@ class LoRAModelManager:
             # entries that were loaded but did not contribute to the
             # packed result. Without this they would keep extra CPU
             # memory alive after pack_moe.
-            for module in packed_module_names:
-                lora_model.loras.pop(module, None)
+            self._pop_lora_weights(lora_model, packed_module_names)
 
         for lora in lora_model.loras.values():
             lora.optimize()
@@ -1128,7 +1126,7 @@ class LoRAModelManager:
         down_proj_lora.lora_b = [w1_b, down_b, w3_b]
         # Drop the redundant base_layer entry to avoid double pin_memory
         # and to keep the activation path looking up only the wrapper key.
-        lora_model.loras.pop(module_name + ".base_layer", None)
+        self._pop_lora_weights(lora_model, [module_name + ".base_layer"])
 
     def _slice_moe_lora_ep(
         self,
@@ -1224,14 +1222,56 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.removeprefix("model.")
-            if lora_model.check_lora_name(module_name):
-                org_module_name = module_name
+            stripped_name = module_name.removeprefix("model.")
+            if lora_model.check_lora_name(stripped_name):
+                org_module_name = stripped_name
                 logger.info_once(
                     "For the pool model, successfully loaded the LoRA weights "
                     "after removing the prefix 'model.'."
                 )
+        if not lora_model.check_lora_name(org_module_name):
+            text_name = self._get_text_lora_name(lora_model, module_name)
+            if text_name is not None:
+                org_module_name = text_name
         return lora_model.get_lora(org_module_name)
+
+    def _pop_lora_weights(self, lora_model: LoRAModel, module_names: list[str]) -> None:
+        for module in module_names:
+            lora_model.loras.pop(module, None)
+            if text_name := self._get_text_lora_name(lora_model, module):
+                lora_model.loras.pop(text_name)
+
+    def _get_text_lora_name(
+        self, lora_model: LoRAModel, module_name: str
+    ) -> str | None:
+        for name in self._get_text_lora_names(module_name):
+            if lora_model.check_lora_name(name):
+                logger.info_once(
+                    "Loaded text-only LoRA weights for the language model of a "
+                    "multimodal model."
+                )
+                return name
+        return None
+
+    def _get_text_lora_names(self, module_name: str) -> list[str]:
+        """Names a text-only adapter uses for a language-model module.
+
+        Adapters trained on the text-only `*ForCausalLM` (e.g. PEFT on
+        `Qwen3_5ForCausalLM`) name modules `model.layers.*` / `lm_head`, while
+        multimodal wrappers mount the language model under a prefix such as
+        `language_model.` or `llm.`. If the prefix holds a `*ForCausalLM`, the
+        text name is the remainder; if it holds a bare decoder, it is the
+        remainder under `model.`.
+        """
+        if not getattr(self, "supports_mm", False):
+            return []
+        lm_prefix = self.mm_mapping.language_model[0].rstrip(".") + "."
+        if not module_name.startswith(lm_prefix):
+            return []
+        name = module_name.removeprefix(lm_prefix)
+        if name.startswith(("model.", "lm_head")):
+            return [name]
+        return [f"model.{name}", name]
 
     def _get_module_to_save_weights(
         self, lora_model: LoRAModel, module_name: str

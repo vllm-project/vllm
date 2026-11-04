@@ -1,0 +1,333 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+meta:
+  title: "NVIDIA Nemotron 3.5 Super VL"
+  slug: "nemotron-3-5-super-vl"
+  provider: "NVIDIA"
+  description: "120B total / 12B active vision-language model with NVFP4, FP8, and BF16 recipes for H100, H200, GB200, DGX Spark, and RTX Pro 6000"
+  date_added: 2026-10-15
+  date_updated: 2026-10-15
+  tasks:
+    - multimodal
+  related_recipes:
+    - "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16"
+  default_hardware: h200
+  hardware:
+    h100: verified
+    h200: verified
+    gb200: verified
+    dgx_spark_gb10: verified
+    rtx_pro_6000: verified
+
+model:
+  model_id: "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
+  min_vllm_version: "0.31.0"
+  docker_image: "vllm/vllm-openai:v0.31.0"
+  architecture: moe
+  parameter_count: "120B"
+  active_parameters: "12B"
+  context_length: 1048576
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  spec_decoding:
+    description: "Use MTP, LiLiCorr on DGX Spark or DSpark"
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Draft three tokens on Hopper or five on Blackwell"
+        args: ["--speculative-config.method", "mtp", "--speculative-config.num_speculative_tokens", "3"]
+        hardware_overrides:
+          blackwell:
+            args: ["--speculative-config.method", "mtp", "--speculative-config.num_speculative_tokens", "5"]
+          dgx_spark_gb10:
+            args: ["--speculative-config.method", "mtp", "--speculative-config.num_speculative_tokens", "5", "--mamba-cache-mode", "align", "--chat-template-content-format", "string"]
+      dspark:
+        label: "DSpark"
+        description: "External draft with up to eight speculative tokens"
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B.dspark","num_speculative_tokens":8,"draft_tensor_parallel_size":1,"draft_sample_method":"greedy"}'
+        hardware_overrides:
+          h100:
+            args:
+              - "--speculative-config"
+              - '{"method":"dspark","model":"RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B.dspark","num_speculative_tokens":8,"draft_tensor_parallel_size":1,"draft_sample_method":"greedy"}'
+              - "--gpu-memory-utilization"
+              - "0.89"
+              - "--prefix-match-unit"
+              - "64"
+              - "--block-size"
+              - "64"
+              - "--compilation-config"
+              - '{"max_cudagraph_capture_size":192}'
+              - "--enable-expert-parallel"
+              - "--max-num-seqs"
+              - "128"
+              - "--max-model-len"
+              - "114688"
+              - "--max-num-batched-tokens"
+              - "16384"
+              - "--enable-prefix-caching"
+              - "--async-scheduling"
+              - "--mamba-backend"
+              - "flashinfer"
+              - "--mamba-ssm-cache-dtype"
+              - "float16"
+              - "--enable-mamba-cache-stochastic-rounding"
+              - "--mamba-cache-philox-rounds"
+              - "5"
+              - "--chat-template-content-format"
+              - "string"
+              - "--mamba-cache-mode"
+              - "align"
+      lillicorr:
+        label: "LiLiCorr"
+        description: "Separate DFlash draft checkpoint, seven tokens on DGX Spark"
+        hardware:
+          h100: unsupported
+          h200: unsupported
+          gb200: unsupported
+          rtx_pro_6000: unsupported
+        variants: [default]
+        args: ["--speculative-config.model", "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr", "--speculative-config.num_speculative_tokens", "7", "--speculative-config.method", "dflash", "--max-num-seqs", "1", "--gpu-memory-utilization", "0.75", "--max-num-batched-tokens", "8192"]
+  tool_calling:
+    description: "Parse tool calls with qwen3_coder and automatic tool choice"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+  reasoning:
+    description: "Separate Nemotron v3 reasoning from the final answer"
+    args:
+      - "--reasoning-parser"
+      - "nemotron_v3"
+  local_media:
+    label: "Local Media"
+    description: "Allow access to host paths as in the BF16 cookbook examples; use only for trusted inputs"
+    args: ["--allowed-local-media-path", "/"]
+
+opt_in_features:
+  - local_media
+
+variants:
+  default:
+    precision: nvfp4
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 91
+    description: "NVFP4 W4A16 checkpoint; select a hardware profile for its cookbook configuration"
+    supported_hardware: [h100, h200, gb200, dgx_spark_gb10, rtx_pro_6000]
+    tp: { h100: 2, h200: 1, gb200: 1, dgx_spark_gb10: 1, rtx_pro_6000: 1 }
+    hardware_overrides:
+      hopper:
+        extra_args:
+          - "--max-model-len"
+          - "114688"
+          - "--max-num-seqs"
+          - "128"
+          - "--gpu-memory-utilization"
+          - "0.89"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--block-size"
+          - "64"
+          - "--prefix-match-unit"
+          - "64"
+          - "--compilation_config.max_cudagraph_capture_size"
+          - "256"
+          - "--mamba-backend"
+          - "flashinfer"
+          - "--mamba-ssm-cache-dtype"
+          - "float16"
+          - "--enable-mamba-cache-stochastic-rounding"
+          - "--mamba-cache-philox-rounds"
+          - "5"
+          - "--enable-mamba-shared-prefix-checkpoint"
+          - "--mamba-cache-mode"
+          - "align"
+          - "--video-pruning-rate"
+          - "0.5"
+          - "--media-io-kwargs"
+          - '{"video":{"fps":2,"num_frames":256}}'
+      gb200:
+        extra_args:
+          - "--max-num-seqs"
+          - "512"
+          - "--max-model-len"
+          - "114688"
+          - "--enable-prefix-caching"
+          - "--max-num-batched-tokens"
+          - "32768"
+          - "--prefix-match-unit"
+          - "16"
+          - "--enable-mamba-shared-prefix-checkpoint"
+          - "--async-scheduling"
+          - "--kernel-config"
+          - '{"linear_backend_per_quant":{"fp8_w8a8":"torch"}}'
+          - "--compilation-config"
+          - '{"pass_config":{"fuse_attn_quant":true},"use_inductor_graph_partition":true,"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+          - "--mamba-backend"
+          - "flashinfer"
+          - "--mamba-ssm-cache-dtype"
+          - "float16"
+          - "--enable-mamba-cache-stochastic-rounding"
+          - "--mamba-cache-philox-rounds"
+          - "5"
+          - "--chat-template-content-format"
+          - "string"
+          - "--mamba-cache-mode"
+          - "align"
+          - "--video-pruning-rate"
+          - "0.5"
+          - "--media-io-kwargs"
+          - '{"video":{"fps":2,"num_frames":256}}'
+      dgx_spark_gb10:
+        extra_args:
+          - "--max-num-seqs"
+          - "2"
+          - "--max-model-len"
+          - "114688"
+          - "--gpu-memory-utilization"
+          - "0.7"
+          - "--mamba-backend"
+          - "flashinfer"
+          - "--mamba-ssm-cache-dtype"
+          - "float16"
+          - "--enable-mamba-cache-stochastic-rounding"
+          - "--mamba-cache-philox-rounds"
+          - "5"
+          - "--prefix-match-unit"
+          - "16"
+          - "--enable-mamba-shared-prefix-checkpoint"
+      rtx_pro_6000:
+        extra_args: ["--max-model-len", "16384", "--max-num-seqs", "128"]
+  fp8:
+    model_id: "RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-FP8"
+    precision: fp8
+    vram_minimum_gb: 155
+    description: "FP8 Dynamic W8A8; model-card baseline uses 2x H100 with MTP or DSpark"
+    tp: { hopper: 2, blackwell: 1 }
+    extra_args: ["--gpu-memory-utilization", "0.89", "--prefix-match-unit", "64", "--block-size", "64", "--compilation-config", "{\"max_cudagraph_capture_size\":192}", "--enable-expert-parallel", "--max-num-seqs", "128", "--max-model-len", "114688", "--max-num-batched-tokens", "16384", "--enable-prefix-caching", "--async-scheduling", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding", "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align", "--enable-mamba-fine-grained-prefix-cache"]
+  bf16:
+    model_id: "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+    precision: bf16
+    vram_minimum_gb: 299
+    description: "BF16 multimodal checkpoint on 4x H100 or 2x GB200"
+    supported_hardware: [h100, gb200]
+    tp: { h100: 4, gb200: 2 }
+    hardware_overrides:
+      h100:
+        extra_args: ["--max-model-len", "114688", "--gpu-memory-utilization", "0.85", "--max-num-seqs", "32", "--limit-mm-per-prompt", '{"video":1,"image":1}', "--video-pruning-rate", "0.5", "--media-io-kwargs", '{"video":{"fps":2,"num_frames":256}}']
+      gb200:
+        extra_args: ["--max-model-len", "114688", "--async-scheduling", "--max-num-seqs", "32", "--limit-mm-per-prompt", '{"video":1,"image":1}', "--video-pruning-rate", "0.5", "--media-io-kwargs", '{"video":{"fps":2,"num_frames":256}}']
+  nvfp4_gb200_4x:
+    model_id: "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4"
+    precision: nvfp4
+    precision_hardware:
+      brand: NVIDIA
+    vram_minimum_gb: 91
+    label: "NVFP4 · 4x GB200"
+    description: "Four-GPU text-only expert-parallel configuration"
+    supported_hardware: [gb200]
+    tp: 4
+    extra_args: ["--enable-expert-parallel", "--max-num-seqs", "512", "--max-model-len", "28672", "--no-enable-prefix-caching", "--async-scheduling", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float16", "--enable-mamba-cache-stochastic-rounding", "--mamba-cache-philox-rounds", "5", "--chat-template-content-format", "string", "--mamba-cache-mode", "align"]
+  bf16_gb200_4x:
+    model_id: "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+    precision: bf16
+    vram_minimum_gb: 299
+    label: "BF16 · 4x GB200"
+    description: "Four-GPU text-only expert-parallel configuration with float32 Mamba cache"
+    supported_hardware: [gb200]
+    tp: 4
+    extra_args: ["--enable-expert-parallel", "--max-num-seqs", "512", "--max-model-len", "28672", "--no-enable-prefix-caching", "--async-scheduling", "--mamba-backend", "flashinfer", "--mamba-ssm-cache-dtype", "float32", "--chat-template-content-format", "string", "--mamba-cache-mode", "align"]
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Nemotron 3.5 Super VL is a hybrid Mamba-MoE vision-language model with image and
+  video input. The profiles below follow the NVIDIA cookbook's configurations on
+  `vllm/vllm-openai:v0.31.0`. The page opens on the one-H200 NVFP4 configuration.
+  Every generated command uses the full Hugging Face model ID as its served name.
+
+  ## Prerequisites
+
+  - Pull the pinned vLLM image and make the selected checkpoint available from
+    Hugging Face. LiLiCorr on DGX Spark also needs its separate draft checkpoint.
+  - The NVFP4 checkpoint's safetensors index reports 75.01 GB; the recipe's 91 GB
+    minimum includes the schema's 20% allowance. The BF16 index reports 248.91 GB,
+    giving a 299 GB minimum by the same method.
+  - These are weight allowances, not a guarantee that every context and batch
+    setting fits. Use the cookbook's per-hardware memory settings.
+
+  ## Hardware configurations
+
+  | Hardware | Variant | TP | Context | Cookbook workload |
+  | --- | --- | ---: | ---: | --- |
+  | 1x H200 | NVFP4 | 1 | 114,688 | Multimodal, MTP 3 |
+  | 2x H100 | NVFP4 | 2 | 114,688 | Multimodal, MTP 3 |
+  | 4x H100 | BF16 | 4 | 114,688 | Multimodal, MTP 3 |
+  | 1x GB200 | NVFP4 | 1 | 114,688 | Text only, MTP 5 |
+  | 2x GB200 | BF16 | 2 | 114,688 | Multimodal, MTP 5 |
+  | 4x GB200 | NVFP4 or BF16 4x | 4 | 28,672 | Text only, MTP 5 |
+  | 1x DGX Spark | NVFP4 | 1 | 114,688 | Text-only MTP 5 or LiLiCorr 7 |
+  | 1x RTX Pro 6000 | NVFP4 | 1 | 16,384 | MTP 5 |
+
+  Select the matching Hardware and Variant pills to generate these commands.
+  On GB200, choose BF16 with TP 2 for image or video input: the 1x NVFP4 and
+  4x variants use `--chat-template-content-format string` for text workloads.
+  DGX Spark defaults to its text-only MTP command; the LiLiCorr mode uses the
+  separate DFlash draft checkpoint and changes its concurrency and memory budget.
+  The BF16 notebook examples allow local media paths under `/`; turn on the
+  optional Local Media feature only when serving trusted clients that need it.
+
+  The cookbook also validates NVFP4 on 2x A100 with an 8,192-token allocation.
+  A100 is not in the site's hardware taxonomy, so use its command directly:
+
+  ```bash
+  vllm serve nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 \
+    --served-model-name nemotron-3.5-super \
+    --trust-remote-code \
+    --tensor-parallel-size 2 \
+    --pipeline-parallel-size 1 \
+    --data-parallel-size 1 \
+    --max-model-len 8192 \
+    --max-num-seqs 512 \
+    --speculative_config.method mtp \
+    --speculative_config.num_speculative_tokens 5 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_coder \
+    --reasoning-parser nemotron_v3
+  ```
+
+  Use `nemotron-3.5-super` as the client model name for this A100 command.
+
+  The cookbook also provides 1M-token text-only commands. They use
+  `--language-model-only` and `VLLM_ALLOW_LONG_MAX_MODEL_LEN=1`; apply those
+  complete commands from the notebook when the full window is needed. The
+  selectable configurations here retain shorter hardware-specific allocations.
+
+  ## Client usage
+
+  Send requests to `http://127.0.0.1:8000/v1` with model
+  `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` or the BF16 model ID,
+  depending on the selected variant. The cookbook includes image and video
+  requests, tool calls, and reasoning output examples.
+
+  ## References
+
+  - [NVIDIA vLLM cookbook](https://github.com/NVIDIA-NeMo/Nemotron/blob/main/usage-cookbook/Nemotron-3.5-Super-VL/vllm_cookbook.ipynb)
+  - [NVFP4 checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4)
+  - [BF16 checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16)
+  - [LiLiCorr draft checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4-LiLiCorr)
+  - [RedHatAI FP8 model card](https://huggingface.co/RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-FP8)
+  - [RedHatAI DSpark model card](https://huggingface.co/RedHatAI/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B.dspark)

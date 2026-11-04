@@ -122,8 +122,22 @@ async def _align_prompts_to_server_tokenizer(
 
         try:
             first_tokens = await _tokenize(input_requests[0].prompt)
-        except Exception:
-            print("WARNING: /tokenize unavailable, skipping alignment.")
+        except aiohttp.ClientConnectionError as e:
+            print(f"WARNING: {base_url} unreachable ({e!r}), skipping alignment.")
+            return input_requests
+        except aiohttp.ClientResponseError as e:
+            if e.status == 404:
+                hint = (
+                    "404 Not Found: either this server has no /tokenize route,"
+                    f" or it does not serve a model named `{model_id}`"
+                    " (its served names are listed by GET /v1/models)"
+                )
+            else:
+                hint = f"HTTP {e.status}"
+            print(f"WARNING: /tokenize unavailable ({hint}), skipping alignment.")
+            return input_requests
+        except Exception as e:
+            print(f"WARNING: /tokenize probe failed ({e!r}), skipping alignment.")
             return input_requests
 
         expected = input_requests[0].prompt_len

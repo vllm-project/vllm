@@ -19,6 +19,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeXferMetadata,
+    MooncakeXferResponse,
+    MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
     TransferRegion,
@@ -553,3 +555,36 @@ def test_worker_failed_recv_reports_block_ids_without_hma():
     results = worker.get_transfer_results()
     assert results.failed_recving == set()
     assert results.finished_recving == {"d-req-1"}
+
+
+@pytest.mark.parametrize("swa_enabled", [False, True])
+@pytest.mark.parametrize("outcomes", [(False, True), (True, False), (False, False)])
+def test_failed_receive_waits_for_every_peer(swa_enabled, outcomes):
+    """A failed request keeps its destinations until the last peer completes."""
+    worker = _make_kv_consumer_worker(swa_enabled=swa_enabled)
+    meta = _make_pull_meta("d-req-1", [[1, 2], [3, 4]])
+    meta.pull_tasks_count = 2
+    error_reports = 0
+    try:
+        for index, successful in enumerate(outcomes):
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.FINISH,
+                ok_reqs=["d-req-1"] if successful else None,
+                err_reqs=None if successful else ["d-req-1"],
+                err_msg=None if successful else "peer failed",
+            )
+            worker.process_pulling_result(response, {"d-req-1": meta})
+            result = worker.get_transfer_results()
+            invalid = worker.get_block_ids_with_load_errors()
+            error_reports += bool(result.failed_recving or invalid)
+            assert meta.pull_tasks_count == 1 - index
+            assert result.finished_recving == ({"d-req-1"} if index else set())
+            assert meta.failed == (not all(outcomes[: index + 1]))
+            if result.failed_recving:
+                assert result.failed_recving == {"d-req-1"}
+            if invalid:
+                assert invalid == {1, 2, 3, 4}
+        assert error_reports == 1
+        assert worker.get_transfer_results().finished_recving == set()
+    finally:
+        worker.shutdown()

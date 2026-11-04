@@ -1085,6 +1085,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         """MQA-style decode forward pass."""
         raise NotImplementedError
 
+    def reserve_workspace(self) -> None:
+        """Called in the memory profiling run to claim persistent workspace
+        that is otherwise reserved after profiling."""
+        return
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """Does this attention implementation support fused output quantization.
         Since MLA quantization is done manually in forward_impl (common code),

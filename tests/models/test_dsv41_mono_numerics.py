@@ -9,7 +9,12 @@ formats, the step's KV caches as vLLM's insert writes them.
 - The FFN launch against the same FFN half, from wo_b's unreduced output.
 
 Each stage is compared on its own input, so a failure names the stage; the MoE
-is checked on the kernels' own FFN input, where routing cannot differ."""
+is checked on the kernels' own FFN input, where routing cannot differ.
+
+On gfx942 at TP4, ``test_mono_decode_942_replays`` runs the composed runner on
+the copies of the weights that the model makes at load, at steps of 6, 8 and 42
+rows, and replays the steps in one CUDA graph. The real model's numerics on
+gfx942 are checked by ``test_dsv41_mono_layers.py``."""
 
 import pytest
 import ray
@@ -38,6 +43,14 @@ def _on_cdna4() -> bool:
     from vllm.platforms.rocm import get_cdna_version
 
     return get_cdna_version() == 4
+
+
+def _on_gfx942() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942()
 
 
 def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -74,15 +87,21 @@ def _rope(kv: torch.Tensor, positions: torch.Tensor, cos_sin: torch.Tensor):
     return x.to(torch.bfloat16)
 
 
-def _write_records(cache, block: int, slots, kv):
+def _write_records(cache, block: int, slots, kv, fnuz: bool = False):
     """fp8_ds_mla records of roped bf16 kv rows at ``slots``: the 448 nope dims
-    in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert."""
+    in e4m3 with a UE8M0 per 64, the rope dims in bf16, as vLLM's insert.
+    ``fnuz``: the e4m3 bytes in FNUZ with a maximum of 224, as vLLM's gfx942
+    window cache holds them. In FNUZ the OCP -0 byte would be NaN."""
+    fp8, fp8_max = torch.float8_e4m3fn, 448.0
+    if fnuz:
+        fp8, fp8_max = torch.float8_e4m3fnuz, 224.0
     nope = kv.float()[:, :NOPE].view(-1, 7, 64)
-    exp = torch.ceil(torch.log2(nope.abs().amax(-1).clamp_min(1e-4) / 448.0))
-    q = (nope * torch.exp2(-exp)[..., None]).clamp(-448, 448).reshape(-1, NOPE)
+    exp = torch.ceil(torch.log2(nope.abs().amax(-1).clamp_min(1e-4) / fp8_max))
+    q = nope * torch.exp2(-exp)[..., None]
+    q = q.clamp(-fp8_max, fp8_max).reshape(-1, NOPE)
     data = torch.cat(
         [
-            q.to(torch.float8_e4m3fn).view(torch.uint8),
+            q.to(fp8).view(torch.uint8),
             kv[:, NOPE:].contiguous().view(torch.uint8),
         ],
         1,
@@ -107,10 +126,14 @@ def _normed_kv(n: int, kv_norm, g, device):
     return x.to(torch.bfloat16)
 
 
-def _decode_step(ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int):
+def _decode_step(
+    ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int, fnuz: bool = False
+):
     """R requests x T tokens past random contexts: the step's metadata as
     vLLM's builders lay it out, its window rows and (ratio > 0) the compressed
-    cache filled, a random top-512 a token."""
+    cache filled, a random top-512 a token. ``fnuz``: the window records in
+    FNUZ, as on gfx942. The compressed records stay OCP, as vLLM's Triton
+    compressor writes them on gfx942 too."""
     g = torch.Generator().manual_seed(seed)
     dev = kv_norm.device
     ctx = [int(c) for c in torch.randint(2000, 40000, (R,), generator=g)]
@@ -142,7 +165,9 @@ def _decode_step(ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int):
     ]
     hp = torch.tensor([p for _, p in hist], device=dev)
     kv = _rope(_normed_kv(len(hist), kv_norm, g, dev), hp, cos_sin)
-    _write_records(swa, SWA_BLOCK, torch.tensor([slot(r, p) for r, p in hist]), kv)
+    _write_records(
+        swa, SWA_BLOCK, torch.tensor([slot(r, p) for r, p in hist]), kv, fnuz
+    )
 
     step = dict(
         M=M,
@@ -188,6 +213,18 @@ def _decode_step(ratio: int, R: int, T: int, kv_norm, cos_sin, seed: int):
             comp_entries=entries,
         )
     return step
+
+
+def _rows(s: dict, a: int, b: int) -> dict:
+    """The decode step ``s`` cut to its rows a .. b - 1, as a step of its own
+    on the same caches. The rows keep their request numbers, so the block
+    tables of ``s`` stay valid."""
+    cut = dict(s, M=b - a)
+    for k in ("positions", "slot_mapping", "token_to_req", "swa_indices", "swa_lens"):
+        cut[k] = s[k][a:b]
+    if s["topk"] is not None:
+        cut["topk"] = s["topk"][a:b]
+    return cut
 
 
 # ---------------------------------------------------------------- weights
@@ -531,3 +568,233 @@ def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+# ---------------------------------------------------------------- gfx942
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _mono_replay_942(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_USE_AITER", "1")
+        m.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
+        rocm_aiter_ops.refresh_env_variables()
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        init_workspace_manager(device)
+        _replay_942(rank, tp_size, device)
+
+
+def _replay_942(rank: int, tp: int, device) -> None:
+    """The composed gfx942 runner at TP4 on the copies of the weights that the
+    model makes at load. The steps have 6 rows (one GEMV pass), 8 rows (two
+    passes, the second one padded) and 42 rows (seven passes, the most that
+    the gfx942 kernels take). The padded pass must leave the real rows alone,
+    and the steps alternating in one CUDA graph must give the first run's
+    outputs bit for bit at every replay."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.distributed import get_tp_group
+    from vllm.engine.arg_utils import EngineArgs
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.models.deepseek_v41.amd import mono_decode
+    from vllm.models.deepseek_v41.amd.model import DeepseekV4MoE
+    from vllm.models.deepseek_v41.amd.mono.attention.plan import Dims
+    from vllm.models.deepseek_v41.amd.mono.runner import (
+        AttnWeights,
+        DSV41MonoLayer,
+        MonoLayerWeights,
+    )
+    from vllm.models.deepseek_v41.amd.mono.weights942 import linear_copy
+    from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    vc = EngineArgs(
+        model=MODEL,
+        tensor_parallel_size=tp,
+        moe_backend="aiter",
+        load_format="dummy",
+        max_model_len=65536,
+        language_model_only=True,
+    ).create_engine_config()
+    cfg = vc.model_config.hf_config
+    cfg = getattr(cfg, "text_config", cfg)
+    # replicated tensors alike on every rank; each rank's own TP shards
+    g = torch.Generator().manual_seed(1000)
+    gs = torch.Generator().manual_seed(1001 + rank)
+    H, G = N_HEADS // tp, O_GROUPS // tp
+    bf = torch.bfloat16
+
+    with set_current_vllm_config(vc), set_default_torch_dtype(bf), device:
+        moe = DeepseekV4MoE(vc, prefix="model.layers.21.ffn")
+    e, sh = moe.experts.routed_experts, moe.shared_experts
+    # The hooks that the model sets at load (mono_decode._copy_942_at_load).
+    # The routed experts are copied from the plain tensors before vLLM's MoE
+    # backend converts them, and the shared expert from the bf16 weights that
+    # vLLM dequantizes at load.
+    mono_decode._capture_plain_experts(e)
+    for lin in (sh.gate_up_proj, sh.down_proj):
+        mono_decode._copy_linear_at_load(lin)
+    _random_moe(
+        moe,
+        torch.Generator(device=device).manual_seed(2001 + rank),
+        torch.Generator(device=device).manual_seed(2000),
+        inter=mono_decode.INTER_TP4,
+    )
+    process_weights_after_loading(moe, vc.model_config, device)
+
+    def f32(*shape, s=1.0, gen=g):
+        return (torch.randn(*shape, generator=gen) * s).to(device)
+
+    def attn_copy(n: int, k: int, gen):
+        """A random MXFP8 attention linear as vLLM keeps it on gfx942, bf16
+        values with each 32 x 32 block's code repeated over the block's 32
+        rows, and its copy for the kernels, as the load hook makes it."""
+        w8, s = _mxfp8(n, k, gen, device)
+        mul = torch.exp2(s.float() - 127.0)
+        mul = mul.repeat_interleave(32, 0).repeat_interleave(32, 1)
+        return linear_copy((w8.float() * mul).to(bf), s.repeat_interleave(32, 0))
+
+    mix = (2 + HC) * HC
+    seams = {
+        sub: dict(
+            fn=f32(mix, HC * HIDDEN, s=0.01),
+            scale=f32(3, s=0.5).abs() + 0.5,
+            base=f32(mix, s=0.1),
+            norm=(1 + f32(HIDDEN, s=0.1)).to(bf),
+        )
+        for sub in ("attn", "ffn")
+    }
+    wqkv = attn_copy(1792, HIDDEN, g)
+    wq_b = attn_copy(H * HEAD_DIM, Q_RANK, gs)
+    wo_a = attn_copy(G * O_RANK, H // G * HEAD_DIM, gs)
+    wo_b = attn_copy(HIDDEN, G * O_RANK, gs)
+    q_norm, kv_norm = (1 + f32(Q_RANK, s=0.1)).to(bf), (1 + f32(HEAD_DIM, s=0.1)).to(bf)
+    sink = f32(H, gen=gs)
+    w13, w13_s, w2, w2_s = e.mono942
+    (sgu, sgu_s), (sw2, sw2_s) = sh.gate_up_proj.mono942, sh.down_proj.mono942
+    runner = DSV41MonoLayer(tp, rank, get_tp_group().cpu_group, device)
+
+    def inputs(M: int):
+        """The layer's inputs at the attention seam, the same on every rank:
+        x, residual, post mix, res mix, pre mix."""
+        gi = torch.Generator().manual_seed(11)
+        res = torch.randn(M, HC, HIDDEN, generator=gi)
+        res = (res * torch.rsqrt(res.pow(2).mean(-1, keepdim=True))).to(bf).to(device)
+        x = (torch.randn(M, HIDDEN, generator=gi) * 0.5).to(bf).to(device)
+        comb = torch.rand(M, HC, HC, generator=gi) + 0.1
+        for _ in range(20):
+            comb = comb / comb.sum(-1, keepdim=True)
+            comb = comb / comb.sum(-2, keepdim=True)
+        post = (torch.sigmoid(torch.randn(M, HC, 1, generator=gi)) * 2).to(device)
+        pre = (torch.sigmoid(torch.randn(M, HC, generator=gi)) + 1e-6).to(device)
+        return x, res, post, comb.to(device), pre
+
+    def launch(mw, s, ins, part, whole=None, ffn=None):
+        """The whole layer (K1 + K2) and the FFN launch of one step. The FFN
+        launch takes the step's inputs as its attention seam's outputs."""
+        x, res, post, comb, pre = ins
+        whole = runner.forward(
+            mw, x, res, post, comb, pre, s["positions"], s["slot_mapping"],
+            s["swa_cache"], s["swa_indices"], s["swa_lens"], s["token_to_req"],
+            topk_indices=s["topk"], comp_cache=s["comp_cache"],
+            comp_block_table=s["comp_block_table"], outs=whole,
+        )  # fmt: skip
+        ffn = runner.ffn(mw, part, res, post, comb, pre, outs=ffn)
+        return [*whole, *ffn]
+
+    steps = []  # each case's launches, on fixed buffers, for the replay stress
+    for ratio, R, T in ((1, 1, 6), (0, 8, 1), (2, 7, 6)):
+        with set_current_vllm_config(VllmConfig()):
+            rope = build_deepseek_v4_rope(
+                cfg, head_dim=HEAD_DIM, rope_head_dim=ROPE,
+                max_position_embeddings=cfg.max_position_embeddings,
+                compress_ratio=ratio,
+            )  # fmt: skip
+        cos_sin = rope.cos_sin_cache.to(device=device, dtype=torch.float32)
+        s = _decode_step(ratio, R, T, kv_norm, cos_sin, seed=7 + ratio, fnuz=True)
+        M = s["M"]
+        attn = AttnWeights(
+            layer_id=21, wqkv=wqkv[0], wqkv_scale=wqkv[1], q_norm=q_norm,
+            kv_norm=kv_norm, wq_b=wq_b[0], wq_b_scale=wq_b[1], wo_a=wo_a[0],
+            wo_a_scale=wo_a[1], wo_b=wo_b[0], wo_b_scale=wo_b[1], attn_sink=sink,
+            cos_sin=cos_sin, ratio=ratio,
+        )  # fmt: skip
+        attn.check(Dims(tp))
+        mw = MonoLayerWeights(
+            attn=attn,
+            hc_attn_fn=seams["attn"]["fn"], hc_attn_scale=seams["attn"]["scale"],
+            hc_attn_base=seams["attn"]["base"], attn_norm=seams["attn"]["norm"],
+            hc_ffn_fn=seams["ffn"]["fn"], hc_ffn_scale=seams["ffn"]["scale"],
+            hc_ffn_base=seams["ffn"]["base"], ffn_norm=seams["ffn"]["norm"],
+            gate_w=moe.gate.weight, bias=moe.gate.e_score_correction_bias,
+            w13=w13, w13_s=w13_s, w2=w2, w2_s=w2_s, sgu=sgu, sgu_s=sgu_s,
+            sw2=sw2, sw2_s=sw2_s,
+        )  # fmt: skip
+        mw.check_942(moe.n_routed_experts)
+        ins = inputs(M)
+        # this rank's unreduced wo_b output, for the FFN launch
+        part = (torch.randn(M, HIDDEN, generator=gs) * 0.1).to(bf).to(device)
+        whole, ffn = runner._outs(M, ins[1]), runner._outs(M, ins[1])
+        outs = launch(mw, s, ins, part, whole, ffn)
+        tag = f"ratio {ratio}, {R} x {T}"
+        # (output, rows) of every output with a value that is not finite
+        nonfinite = [
+            (j, (~t.isfinite()).reshape(M, -1).any(1).nonzero().flatten().tolist())
+            for j, t in enumerate(outs)
+            if not bool(t.isfinite().all())
+        ]
+        assert not nonfinite, f"{tag}: rows that are not finite, by output: {nonfinite}"
+
+        if M == 8:
+            # The second GEMV pass holds rows 6 and 7 and four padding rows.
+            # Each row must come out as it does in a step without the other
+            # rows: rows 0 .. 5 as a step of 6 rows, rows 6 and 7 as a step of
+            # 2 rows.
+            for a, b in ((0, 6), (6, 8)):
+                cut = [t[a:b].contiguous() for t in (*ins, part)]
+                alone = launch(mw, _rows(s, a, b), cut[:5], cut[5])
+                for i, (t, want) in enumerate(zip(outs, alone)):
+                    assert torch.equal(t[a:b], want), (
+                        f"{tag}: output {i} of rows {a} .. {b - 1} differs from "
+                        f"a step of those rows alone, by up to "
+                        f"{(t[a:b].float() - want.float()).abs().max().item()}"
+                    )
+
+        steps.append(
+            lambda mw=mw, s=s, ins=ins, part=part, whole=whole, ffn=ffn: launch(
+                mw, s, ins, part, whole, ffn
+            )
+        )
+
+    # the hand-off protocol under back-to-back launches: the three step widths
+    # alternating in one graph, every replay bit for bit the first's
+    outs = [t for step in steps for t in step()]
+    torch.accelerator.synchronize()
+    ref = [t.clone() for t in outs]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        for step in steps:
+            step()
+    for i in range(REPLAYS):
+        graph.replay()
+        if i % 50 == 49 or i == REPLAYS - 1:
+            torch.accelerator.synchronize()
+            bad = [
+                j for j, (t, r) in enumerate(zip(outs, ref)) if not torch.equal(t, r)
+            ]
+            assert not bad, f"replay {i}: outputs {bad} differ from the first run"
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="the gfx942 mono kernels")
+def test_mono_decode_942_replays(monkeypatch: pytest.MonkeyPatch):
+    # The gfx942 kernels build for TP4 only.
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("needs 4 GPUs")
+    pytest.importorskip("flydsl")
+    multi_process_parallel(monkeypatch, 4, 1, _mono_replay_942)

@@ -140,10 +140,10 @@ def _use_v41_mxfp8_kv_record() -> bool:
 
 def _resolve_dsv4_kv_cache_dtype(
     use_fp8_ds_mla_layout: bool,
-    kv_cache_dtype: CacheDType,
+    kv_cache_dtype: CacheDType | str,
     cache_config: CacheConfig | None,
-    packed_kv_cache_dtype: CacheDType = "fp8_ds_mla",
-) -> tuple[CacheDType, torch.dtype]:
+    packed_kv_cache_dtype: CacheDType | str = "fp8_ds_mla",
+) -> tuple[CacheDType | str, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The
@@ -546,12 +546,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if (
             swa_bounded_replay
             and vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and not cache_config.enable_prefix_caching
         ):
             logger.warning_once(
-                "SWA bounded replay is off under prefill context parallelism "
-                "(the replayed tokens' slot padding knows the rank-local batch "
-                "only); the sliding-window cache takes part in prefix caching "
-                "instead."
+                "SWA bounded replay with PCP requires prefix caching; "
+                "decoder-side replay is not supported with PCP."
             )
             swa_bounded_replay = False
         if swa_bounded_replay and current_platform.is_rocm():

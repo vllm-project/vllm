@@ -12,6 +12,8 @@ pub enum BackendKind {
     Openai,
     #[value(name = "openai-chat")]
     OpenaiChat,
+    #[value(name = "openai-responses")]
+    OpenaiResponses,
     #[value(name = "openai-embeddings")]
     OpenaiEmbeddings,
     #[value(name = "openai-embeddings-chat")]
@@ -28,6 +30,7 @@ impl BackendKind {
             Self::Vllm => "vllm",
             Self::Openai => "openai",
             Self::OpenaiChat => "openai-chat",
+            Self::OpenaiResponses => "openai-responses",
             Self::OpenaiEmbeddings => "openai-embeddings",
             Self::OpenaiEmbeddingsChat => "openai-embeddings-chat",
             Self::VllmPooling => "vllm-pooling",
@@ -38,7 +41,7 @@ impl BackendKind {
     /// Return true if the backend is compatible with OpenAI-style API and sampling parameters.
     pub fn is_openai_compatible(self) -> bool {
         match self {
-            Self::Vllm | Self::Openai | Self::OpenaiChat => true,
+            Self::Vllm | Self::Openai | Self::OpenaiChat | Self::OpenaiResponses => true,
             Self::OpenaiEmbeddings
             | Self::OpenaiEmbeddingsChat
             | Self::VllmPooling
@@ -702,6 +705,7 @@ impl BenchServeArgs {
         }
         match self.backend {
             BackendKind::OpenaiChat => "/v1/chat/completions".to_string(),
+            BackendKind::OpenaiResponses => "/v1/responses".to_string(),
             BackendKind::Vllm | BackendKind::Openai => "/v1/completions".to_string(),
             BackendKind::OpenaiEmbeddings | BackendKind::OpenaiEmbeddingsChat => {
                 "/v1/embeddings".to_string()

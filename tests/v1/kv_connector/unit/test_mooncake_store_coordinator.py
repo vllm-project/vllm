@@ -466,6 +466,42 @@ def test_store_mask_retention_interval_zero_eagle_round_trip(num_prompt_tokens):
     assert hit == 64
 
 
+@pytest.mark.parametrize("extra_retained_tokens", [0, 3])
+def test_load_mask_restores_mtp_replay_tail(extra_retained_tokens):
+    """An external SWA hit allocates the MTP re-prefill tail below the window,
+    so the store must keep it and the load must restore it; otherwise those
+    blocks hold stale KV under valid prefix hashes."""
+    swa = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=8,
+        extra_retained_tokens=extra_retained_tokens,
+    )
+    groups = [KVCacheGroupSpec(["L0"], _full(32)), KVCacheGroupSpec(["L1"], swa)]
+    coord = _make_coord(groups, hash_block_size=8, retention_interval=0)
+    hashes = _hashes(96 // coord.hash_block_size)
+    exists: set[tuple[int, bytes]] = set()
+    store_masks = coord.store_mask(96, num_prompt_tokens=96)
+    for gid, (group, mask) in enumerate(zip(groups, store_masks, strict=True)):
+        group_hashes = coord.block_hashes_for_spec(hashes, group.kv_cache_spec)
+        for chunk_id, block_hash in enumerate(group_hashes):
+            if mask is None or mask[chunk_id]:
+                exists.add((gid, bytes(block_hash)))
+
+    _masks, hit = coord.find_longest_cache_hit(
+        hashes,
+        max_length=96,
+        cached_block_pool=ExternalCachedBlockPool(coord.hash_block_size, exists),
+    )
+    assert hit == 64
+    loaded = [i for i, v in enumerate(coord.load_mask(hashes, hit)[1]) if v]
+    # add_local_computed_blocks pads only the blocks below the retained window.
+    first_allocated = (hit - swa.sliding_window - extra_retained_tokens + 1) // 8
+    assert loaded == list(range(first_allocated, hit // 8))
+
+
 def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     """Sparse segment tails (interval=64 -> chunks 7,15) plus the replay
     boundary tail (num_prompt=100 -> chunk 11) coexist."""

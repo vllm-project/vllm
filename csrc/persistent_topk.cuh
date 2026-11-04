@@ -265,8 +265,10 @@ __device__ __noinline__ void histogram_2048_topk(
         const int elem_idx = base_idx + sub;
         uint32_t bin = 0;
         if (vec_valid) bin = reg_bins[item++];
-        const bool is_above = vec_valid && (bin > uthr);
-        const bool is_equal = vec_valid && (bin == uthr);
+        // Lanes past seq_len are -inf padding from the row's last float4.
+        const bool in_range = vec_valid && (elem_idx < seq_len);
+        const bool is_above = in_range && (bin > uthr);
+        const bool is_equal = in_range && (bin == uthr);
 
         const uint32_t above_mask = __ballot_sync(0xffffffff, is_above);
         if (above_mask) {

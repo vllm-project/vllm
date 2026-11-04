@@ -85,6 +85,12 @@ DECODE_BLOCK_SIZE=${DECODE_BLOCK_SIZE:-128}
 ENFORCE_EAGER=${ENFORCE_EAGER:-1}
 # Comma-separated extra args for vllm serve (e.g. --max-model-len,2048)
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
+# Set to 1 to put every instance to sleep and wake it up before the eval.
+SLEEP_WAKE=${SLEEP_WAKE:-0}
+if [[ "$SLEEP_WAKE" == "1" ]]; then
+  export VLLM_SERVER_DEV_MODE=1
+  VLLM_SERVE_EXTRA_ARGS="${VLLM_SERVE_EXTRA_ARGS:+${VLLM_SERVE_EXTRA_ARGS},}--enable-sleep-mode"
+fi
 # Pin concurrent prefiller and non-DP decoder engines to separate internal
 # port windows. DP decoder ranks retain their existing internal port selection.
 PREFILLER_INTERNAL_PORT_BASE=${PREFILLER_INTERNAL_PORT_BASE:-20000}
@@ -313,9 +319,17 @@ run_tests_for_model() {
   # Wait for the proxy to start
   sleep 5
 
+  SLEEP_WAKE_URLS=""
+  if [[ "$SLEEP_WAKE" == "1" ]]; then
+    for PORT in "${PREFILL_PORTS[@]}" "${DECODE_PORTS[@]}"; do
+      SLEEP_WAKE_URLS="${SLEEP_WAKE_URLS:+${SLEEP_WAKE_URLS},}http://localhost:${PORT}"
+    done
+  fi
+
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name SLEEP_WAKE_URLS=$SLEEP_WAKE_URLS \
+    python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

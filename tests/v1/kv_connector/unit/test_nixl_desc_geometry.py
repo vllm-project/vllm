@@ -11,6 +11,7 @@ incoming transfer can overwrite a co-resident request's KV or mamba state
 mid-decode (silent corruption of an unrelated request).
 """
 
+import math
 from collections import defaultdict
 from threading import Event, Lock
 from types import SimpleNamespace
@@ -455,6 +456,7 @@ def _register_overlaid_mla_worker(
     worker._transfer_layer_region_indices = ()
     worker._transfer_layer_group_ids = ()
     worker._region_is_mla = []
+    worker._head_sharded_draft_kv_heads = None
     worker.block_len_per_layer = []
     worker.block_stride_per_layer = []
     worker.device_id = 0
@@ -573,8 +575,11 @@ def test_registration_ignores_a_sub_block_padding_tail(page_covers_view):
     assert _descriptor_geometry(padded) == _descriptor_geometry(unpadded)
 
 
-def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
-    """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
+def _make_mla_hybrid_worker(
+    local_block_size, kernel_block_size, num_logical_blocks, worker_cls=None
+):
+    """Build a real worker (pull by default) with a hybrid MLA + 2xKDA HMA
+    layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
         base_worker as bw,
     )
@@ -655,7 +660,9 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
         ),
         set_current_vllm_config(vllm_config),
     ):
-        worker = NixlConnectorWorker(vllm_config, "local-engine", kv_cache_config)
+        worker = (worker_cls or NixlConnectorWorker)(
+            vllm_config, "local-engine", kv_cache_config
+        )
         worker.use_mla = True
 
         # Attention caches are kernel-block granular on dim 0, as the
@@ -667,13 +674,15 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
             )
             for _ in range(2)
         ]
+        # MLA caches are [B, 1, N, C] on device, tokens on dim 2.
+        mla_views = [t.view(t.shape[0], 1, kernel_block_size, -1) for t in tensors]
         worker.register_kv_caches(
             {
                 "kda_a.0": tensors[0],
-                "mla.0": tensors[0],
+                "mla.0": mla_views[0],
                 "kda_b.0": tensors[0],
                 "kda_a.1": tensors[1],
-                "mla.1": tensors[1],
+                "mla.1": mla_views[1],
                 "kda_b.1": tensors[1],
             }
         )
@@ -736,11 +745,11 @@ def _make_remote_meta(
     )
 
     remote_ppl = remote_block_size // remote_kernel_block_size
-    # Kernel-granularity pages are TP-independent for MLA hybrids and must
-    # match the local ones for the handshake to pass, scaled down by the
-    # block-size ratio when the remote's kernel block is smaller.
-    block_size_ratio = worker.block_size // remote_kernel_block_size
-    kernel_page = worker.block_len_per_layer[0] // block_size_ratio
+    # Per-token page bytes are TP-independent for MLA hybrids and must match
+    # the local ones for the handshake to pass.
+    kernel_page = (
+        worker.block_len_per_layer[0] * remote_kernel_block_size // worker.block_size
+    )
     return NixlAgentMetadata(
         engine_id="remote-engine",
         agent_metadata=b"remote-agent-meta",
@@ -904,7 +913,8 @@ def _run_hetero_case(
     )
 
     remote_kernel = remote_kernel or kernel
-    block_size_ratio = kernel // remote_kernel
+    # Transfer unit: the remote kernel block when it divides the local one.
+    unit = math.gcd(kernel, remote_kernel)
     remote_ppl = remote_block // remote_kernel
     matched = num_tokens - 1  # mamba N-1 rule
     n_local = -(-num_tokens // local_block)
@@ -967,9 +977,8 @@ def _run_hetero_case(
     remote_bases = [0x10_000_000, 0x20_000_000]
     local_unified = worker._test_unified_page
     remote_unified = (local_unified // local_block) * remote_block
-    # With block_size_ratio > 1 the local page is split into ratio sub-descs,
-    # each the size of a whole remote kernel page.
-    desc_page = worker.block_len_per_layer[0] // block_size_ratio
+    # The local page is split into sub-descs of one transfer unit each.
+    desc_page = worker.block_len_per_layer[0] * unit // kernel
     meta_r_num_blocks_bytes = (meta_r.num_blocks // remote_ppl) * remote_unified
     covered_tokens = set()
     for op, lh, lids, rh, rids in nixl.xfers:
@@ -1013,8 +1022,8 @@ def _run_hetero_case(
                 covered_tokens.add(ltok)
 
     # Invariant 3: full coverage of the matched tokens, at the finest
-    # transfer granularity (the remote kernel block).
-    needed = {t for t in range(0, matched - matched % remote_kernel, remote_kernel)}
+    # transfer granularity.
+    needed = {t for t in range(0, matched - matched % unit, unit)}
     missing = needed - covered_tokens
     assert not missing, (
         f"tokens never transferred: {sorted(missing)[:8]} "
@@ -1073,6 +1082,50 @@ def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens)
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("local_block,remote_block", [(36, 20), (20, 36)])
+@pytest.mark.parametrize(
+    "num_tokens", [2, 4, 5, 19, 20, 21, 36, 37, 40, 41, 72, 73, 80, 81]
+)
+def test_hetero_non_divisible_block_sizes(local_block, remote_block, num_tokens):
+    """Hybrid MLA blocks follow the TP-sharded SSM page, so on backends that
+    take any kernel block size P and D may have blocks neither of which
+    divides the other; they pair in gcd-sized units."""
+    _run_hetero_case(
+        local_block,
+        kernel=local_block,
+        remote_block=remote_block,
+        remote_kernel=remote_block,
+        num_tokens=num_tokens,
+    )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "worker_cls,local_block,remote_block",
+    [(NixlPullConnectorWorker, 257, 256), (NixlPushConnectorWorker, 36, 20)],
+)
+def test_hetero_block_split_is_declined(worker_cls, local_block, remote_block):
+    """Pull pairs whose gcd would split each block into very many transfers,
+    and every push pair, fail the handshake instead of being split."""
+    worker = _make_mla_hybrid_worker(
+        local_block_size=local_block,
+        kernel_block_size=local_block,
+        num_logical_blocks=8,
+        worker_cls=worker_cls,
+    )
+    meta_r = _make_remote_meta(
+        worker,
+        remote_block_size=remote_block,
+        remote_kernel_block_size=remote_block,
+        remote_num_logical=8,
+        remote_ssm_sizes=(24, 32),
+    )
+    with pytest.raises(AssertionError, match="not divisible"):
+        _register_remote_agents(worker, meta_r, tp_size=2)
+    assert meta_r.block_size == remote_block
 
 
 @pytest.mark.cpu_test

@@ -1663,6 +1663,13 @@ class Gemma4ForConditionalGeneration(
             batch_size, num_patches = src.shape[0], src.shape[1]
             dst[:batch_size, :num_patches].copy_(src)
 
+        configured_max_tokens = self.config.vision_config.default_output_length
+        # One graph per row width (soft tokens of one image or video frame),
+        # so a budget's rows are not all padded to the widest image.
+        row_widths = tuple(
+            t for t in _SUPPORTED_SOFT_TOKENS if t <= configured_max_tokens
+        )
+
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
             buffer_keys=[
@@ -1676,6 +1683,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values": pad_pixel_values,
                 "pixel_position_ids": pad_pixel_position_ids,
             },
+            capture_axes=(row_widths,),
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -1712,10 +1720,15 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             if isinstance(pixel_values, list):
+                # A batch pads its images to the widest one, so pack by that.
+                row_tokens = (
+                    max((pv.shape[0] for pv in pixel_values), default=0) // pool_ratio
+                )
                 return [
                     EncoderItemSpec(
                         input_size=pv.shape[0],
                         output_tokens=pv.shape[0] // pool_ratio,
+                        path_output_tokens={"default": row_tokens},
                     )
                     for pv in pixel_values
                 ]
@@ -1750,10 +1763,25 @@ class Gemma4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+        )
+
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             pixel_position_ids = mm_kwargs["pixel_position_ids"]
+            if isinstance(pixel_values, list):
+                row_patches = max(
+                    (pixel_values[i].shape[0] for i in indices), default=0
+                )
+            else:
+                row_patches = pixel_values.shape[1]
+            axis_keys = (row_patches // pool_ratio,)
+
             if len(indices) == 0:
                 is_pv_list = isinstance(pixel_values, list)
                 is_pp_list = isinstance(pixel_position_ids, list)
@@ -1762,20 +1790,24 @@ class Gemma4ForConditionalGeneration(
                     "pixel_position_ids": (
                         [] if is_pp_list else pixel_position_ids[:0]
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             if isinstance(pixel_values, list):
                 return {
                     "pixel_values": [pixel_values[i] for i in indices],
                     "pixel_position_ids": [pixel_position_ids[i] for i in indices],
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             return {
                 "pixel_values": pixel_values[indices],
                 "pixel_position_ids": pixel_position_ids[indices],
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         elif modality == "video":
             pixel_values_videos = mm_kwargs["pixel_values_videos"]
             pixel_position_ids_videos = mm_kwargs["pixel_position_ids_videos"]
             video_frame_counts = mm_kwargs["video_frame_counts"]
+            axis_keys = (pixel_values_videos.shape[1] // pool_ratio,)
 
             if len(indices) == 0:
                 is_fc_tensor = isinstance(video_frame_counts, torch.Tensor)
@@ -1785,6 +1817,7 @@ class Gemma4ForConditionalGeneration(
                     "video_frame_counts": (
                         video_frame_counts[:0] if is_fc_tensor else []
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
 
             fc_list = (
@@ -1819,6 +1852,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values_videos": selected_pv,
                 "pixel_position_ids_videos": selected_pp,
                 "video_frame_counts": selected_fc,
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         raise ValueError(f"Unknown modality: {modality}")
 
@@ -1839,20 +1873,21 @@ class Gemma4ForConditionalGeneration(
 
         dtype = dtype or torch.float32
 
-        max_size = max(max_batch_size, max_frames_per_batch)
+        assert axis_keys is not None
+        (per_item_output,) = axis_keys
+        assert isinstance(per_item_output, int)
+
+        # Every row of a batch replayed on this graph is an image or video
+        # frame of per_item_output tokens, so a batch that fits token_budget
+        # never needs more rows than this. Capture needs at least one row.
+        max_size = min(
+            max(max_batch_size, max_frames_per_batch),
+            max(1, token_budget // per_item_output),
+        )
 
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
-        # Retrieve the model's actual configured maximum tokens:
-        configured_max_tokens = getattr(
-            self.config.vision_config,
-            "num_soft_tokens",
-            _SUPPORTED_SOFT_TOKENS[2],
-        )
-        # Dynamically compute the slot capacity per item bounded by both the
-        # current graph budget and the user's maximum config:
-        per_item_output = min(token_budget, configured_max_tokens)
         # Satisfy k^2 * per_item_output = per_item_patches
         per_item_patches = per_item_output * pool_ratio
 

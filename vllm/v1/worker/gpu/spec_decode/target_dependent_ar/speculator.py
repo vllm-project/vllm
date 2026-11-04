@@ -303,6 +303,10 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 input_batch.idx_mapping, num_reqs_padded=num_reqs
             )
 
+        # Prefill must keep the target batch shape; only decode can shrink it.
+        if dummy_run and dp_sync_state is not None:
+            num_reqs = min(num_reqs, dp_sync_state.num_reqs)
+
         # Prepare the inputs for the decode steps.
         prepare_decode_inputs(
             self.draft_tokens[:num_reqs, 0],
@@ -317,7 +321,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         decode_batch_sync, num_batch_tokens = (
             self._build_uniform_batch_dp_sync(
-                dp_sync_state, num_reqs, num_query_per_req=1
+                dp_sync_state,
+                num_reqs,
+                num_query_per_req=1,
             )
             if dp_sync_state is not None
             else (None, num_reqs)

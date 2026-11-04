@@ -57,7 +57,6 @@ from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     get_dtype_size,
-    is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
     nvfp4_split_data_scale,
@@ -91,6 +90,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
+    is_quantized_kv_cache,
     iter_layer_specs,
 )
 from vllm.v1.utils import CpuGpuBuffer

@@ -1,0 +1,177 @@
+meta:
+  title: "DeepSeek-V3.2"
+  slug: "deepseek-v3.2"
+  provider: "DeepSeek"
+  description: "DeepSeek V3.2 MoE model with MLA attention, sparse attention, and scalable RL for strong reasoning and agent capabilities."
+  date_added: 2025-12-04
+  date_updated: 2026-09-14
+  tasks:
+    - text
+  performance_headline: "GPT-5-level reasoning with efficient MoE inference"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+
+model:
+  model_id: "deepseek-ai/DeepSeek-V3.2"
+  min_vllm_version: "0.18.0"
+  default_frontend: rust
+  architecture: moe
+  parameter_count: "671B"
+  active_parameters: "37B"
+  context_length: 163840
+  supports_dcp: true
+  base_args:
+    - "--trust-remote-code"
+    - "--kernel-config.enable_flashinfer_autotune=False"
+  base_env: {}
+
+dependencies:
+  - note: "DeepGEMM pinned build for MQA logits (FP8 MoE kernels)"
+    command: "uv pip install git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3 --no-build-isolation"
+  - note: "Set VLLM_USE_DEEP_GEMM=0 to skip DeepGEMM for the MoE path (recommended on H20)"
+    command: "export VLLM_USE_DEEP_GEMM=0"
+    optional: true
+
+features:
+  tool_calling:
+    description: "Enable tool calling with DeepSeek V3.2 chat template support."
+    args:
+      - "--tokenizer-mode"
+      - "deepseek_v32"
+      - "--tool-call-parser"
+      - "deepseek_v32"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Enable reasoning/thinking mode with the DeepSeek V3 reasoning parser."
+    args:
+      - "--reasoning-parser"
+      - "deepseek_v3"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding with 3 speculative tokens."
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":3}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 805
+    description: "Native FP8 checkpoint (F8_E4M3)"
+  nvfp4:
+    model_id: "nvidia/DeepSeek-V3.2-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 403
+    description: "NVIDIA FP4 quantized variant with FP8 KV cache for reduced VRAM usage."
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/DeepSeek-V3.2-NVFP4-FP8-BLOCK"
+    precision: nvfp4
+    label: "NVFP4+FP8 Block (RedHat)"
+    vram_minimum_gb: 430
+    description: "RedHatAI NVFP4+FP8 block mixed-precision checkpoint"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  DeepSeek-V3.2 is a Mixture-of-Experts model that balances computational efficiency with
+  strong reasoning and agent capabilities through three technical innovations: DeepSeek Sparse
+  Attention (DSA) for efficient long-context processing, a scalable reinforcement learning
+  framework achieving GPT-5-level performance, and a large-scale agentic task synthesis pipeline
+  for robust tool-use generalization.
+
+  ## Prerequisites
+
+  - **Hardware**: Minimum 8x H100/H200 80GB GPUs (BF16) or 3x H200 (NVFP4 variant).
+  - **vLLM**: Version 0.18.0 or later (nightly recommended).
+  - **Python**: 3.10+
+  - **CUDA**: 12.x or later (CUDA 13.x may require extra env vars; see Troubleshooting).
+  - **Disk**: ~1.3 TB for BF16 weights; ~350 GB for NVFP4 variant.
+  - **DeepGEMM** (recommended):
+    ```bash
+    uv pip install git+https://github.com/deepseek-ai/DeepGEMM.git@v2.1.1.post3 --no-build-isolation
+    ```
+    Note: Set `VLLM_USE_DEEP_GEMM=0` to disable MoE DeepGEMM if you experience issues
+    (e.g., on H20 GPUs) or want to skip the long warmup.
+
+  ## Client Usage
+
+  Launch the server:
+  ```bash
+  vllm serve deepseek-ai/DeepSeek-V3.2 \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --kernel-config.enable_flashinfer_autotune=False \
+    --tokenizer-mode deepseek_v32 \
+    --tool-call-parser deepseek_v32 \
+    --enable-auto-tool-choice \
+    --reasoning-parser deepseek_v3
+  ```
+
+  Use the OpenAI Python SDK to interact with the server:
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(
+      api_key="your-api-key",
+      base_url="http://localhost:8000/v1",
+  )
+
+  # Standard chat
+  response = client.chat.completions.create(
+      model="deepseek-ai/DeepSeek-V3.2",
+      messages=[{"role": "user", "content": "Hello!"}],
+  )
+
+  # Thinking / reasoning mode
+  response = client.chat.completions.create(
+      model="deepseek-ai/DeepSeek-V3.2",
+      messages=[{"role": "user", "content": "Solve this step by step..."}],
+      extra_body={"chat_template_kwargs": {"thinking": True}},
+  )
+  ```
+
+  ## Troubleshooting
+
+  **`ptxas fatal: Value 'sm_110a' is not defined for option 'gpu-name'`**
+  This can occur on CUDA 13.x. Fix by exporting:
+  ```bash
+  export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+  export PATH=/usr/local/cuda/bin:$PATH
+  export LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH:-}
+  ```
+
+  **TP=8 performance on Hopper/Blackwell**
+  Avoid `-tp 8` with FlashMLA-Sparse. Due to kernel restrictions, TP=8 yields only 16 heads
+  per rank but is padded to 64, causing overhead. Prefer TP=2 (Hopper) or TP=1 (Blackwell)
+  with DP/EP mode: `vllm serve deepseek-ai/DeepSeek-V3.2 -dp 8 --enable-expert-parallel`.
+
+  **DeepGEMM warmup too slow**
+  Set `VLLM_USE_DEEP_GEMM=0` to disable MoE DeepGEMM and skip the long warmup.
+
+  ## References
+
+  - [DeepSeek-V3.2 on Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2)
+  - [DeepSeek API Documentation](https://api-docs.deepseek.com/)
+  - [vLLM Data Parallel Deployment Guide](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment.html)

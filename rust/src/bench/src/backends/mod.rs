@@ -3,6 +3,7 @@
 
 pub mod openai_chat;
 pub mod openai_completions;
+pub mod openai_responses;
 pub mod pooling;
 pub mod streaming;
 
@@ -150,6 +151,7 @@ impl Default for RequestFuncInput {
 pub enum Backend {
     OpenAICompletions(openai_completions::OpenAICompletionsBackend),
     OpenAIChat(openai_chat::OpenAIChatBackend),
+    OpenAIResponses(openai_responses::OpenAIResponsesBackend),
     Pooling(pooling::PoolingBackend),
 }
 
@@ -163,6 +165,7 @@ impl Backend {
         match self {
             Backend::OpenAICompletions(b) => b.send_request(input, client).await,
             Backend::OpenAIChat(b) => b.send_request(input, client).await,
+            Backend::OpenAIResponses(b) => b.send_request(input, client).await,
             Backend::Pooling(b) => b.send_request(input, client).await,
         }
     }
@@ -175,6 +178,9 @@ pub fn get_backend(kind: BackendKind) -> Result<Backend> {
             openai_completions::OpenAICompletionsBackend,
         )),
         BackendKind::OpenaiChat => Ok(Backend::OpenAIChat(openai_chat::OpenAIChatBackend)),
+        BackendKind::OpenaiResponses => Ok(Backend::OpenAIResponses(
+            openai_responses::OpenAIResponsesBackend,
+        )),
         kind if kind.is_pooling() => Ok(Backend::Pooling(pooling::PoolingBackend { kind })),
         _ => unreachable!(),
     }
