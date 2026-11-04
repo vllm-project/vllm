@@ -218,6 +218,12 @@ class EngineClient(ABC):
         """Check whether the engine is sleeping."""
         ...
 
+    async def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> dict[str, str]:
+        """Set a logger level in this process and every EngineCore / worker."""
+        raise NotImplementedError
+
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""

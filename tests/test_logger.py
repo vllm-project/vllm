@@ -513,3 +513,44 @@ def test_caplog_mp_spawn(caplog_mp_spawn):
 
     assert "AAAA" in log_holder.text
     assert "BBBBB" in log_holder.text
+
+
+def test_set_logger_level_updates_vllm_root_and_handlers(monkeypatch):
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    configure_logging(LoggingConfig(log_level="INFO"))
+    from vllm.logger import set_logger_level
+
+    applied = set_logger_level("DEBUG")
+    assert applied == {"level": "DEBUG", "logger": "vllm"}
+
+    root = logging.getLogger("vllm")
+    assert root.level == logging.DEBUG
+    assert root.handlers
+    assert all(handler.level == logging.DEBUG for handler in root.handlers)
+
+    set_logger_level("INFO", "root")
+    assert root.level == logging.INFO
+    assert all(handler.level == logging.INFO for handler in root.handlers)
+
+
+def test_set_logger_level_module_relaxes_handlers(monkeypatch):
+    monkeypatch.setenv("VLLM_LOGGING_COLOR", "0")
+    configure_logging(LoggingConfig(log_level="INFO"))
+    from vllm.logger import set_logger_level
+
+    module_name = f"vllm.test_set_level.{uuid4()}"
+    applied = set_logger_level("debug", module_name)
+    assert applied == {"level": "DEBUG", "logger": module_name}
+
+    module_logger = logging.getLogger(module_name)
+    assert module_logger.level == logging.DEBUG
+    root = logging.getLogger("vllm")
+    assert root.level == logging.INFO
+    assert all(handler.level == logging.DEBUG for handler in root.handlers)
+
+
+def test_set_logger_level_rejects_unknown_value():
+    from vllm.logger import set_logger_level
+
+    with pytest.raises(ValueError, match="invalid log level"):
+        set_logger_level("nope")

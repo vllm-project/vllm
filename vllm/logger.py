@@ -335,6 +335,75 @@ def init_logger(name: str) -> _VllmLogger:
     return cast(_VllmLogger, logger)
 
 
+_VLLM_ROOT_LOGGER_NAME = "vllm"
+_GLOBAL_LOGGER_ALIASES = frozenset({"", "root", "vllm"})
+
+
+def parse_log_level(level: Any) -> int:
+    """Return a ``logging`` level value for a name or integer."""
+    if isinstance(level, bool) or level is None:
+        raise ValueError(f"invalid log level: {level!r}")
+    if isinstance(level, float):
+        if not level.is_integer():
+            raise ValueError(f"invalid log level: {level!r}")
+        level = int(level)
+    if isinstance(level, int):
+        name = logging.getLevelName(level)
+        if isinstance(name, str) and not name.startswith("Level "):
+            return level
+        raise ValueError(f"invalid log level: {level!r}")
+    if isinstance(level, str):
+        stripped = level.strip().upper()
+        if not stripped:
+            raise ValueError(f"invalid log level: {level!r}")
+        mapping = logging.getLevelNamesMapping()
+        if stripped in mapping:
+            return mapping[stripped]
+    raise ValueError(f"invalid log level: {level!r}")
+
+
+def _normalize_logger_name(logger_name: str | None) -> str:
+    if logger_name is None:
+        return _VLLM_ROOT_LOGGER_NAME
+    stripped = logger_name.strip()
+    if stripped.lower() in _GLOBAL_LOGGER_ALIASES:
+        return _VLLM_ROOT_LOGGER_NAME
+    return stripped
+
+
+def _set_vllm_handler_levels(level: int, *, exact: bool) -> None:
+    """Update handlers on the ``vllm`` logger.
+
+    ``exact=True`` sets every handler to ``level``. ``exact=False`` only lowers
+    a handler when it would otherwise filter out records at ``level``.
+    """
+    root = logging.getLogger(_VLLM_ROOT_LOGGER_NAME)
+    for handler in root.handlers:
+        if exact or handler.level == logging.NOTSET or handler.level > level:
+            handler.setLevel(level)
+
+
+def set_logger_level(level: Any, logger_name: str | None = None) -> dict[str, str]:
+    """Set a logger level in this process.
+
+    Omitting ``logger_name``, or passing ``root`` / ``vllm`` / ``""``, updates
+    the ``vllm`` logger and its handlers. Any other name updates that logger
+    and, if needed, relaxes ``vllm`` handlers so the new level can reach the
+    stream (child loggers propagate into the ``vllm`` handler).
+
+    Returns the canonical ``level`` name and ``logger`` name that were applied.
+    """
+    level_value = parse_log_level(level)
+    target_name = _normalize_logger_name(logger_name)
+    target = logging.getLogger(target_name)
+    target.setLevel(level_value)
+    _set_vllm_handler_levels(level_value, exact=(target_name == _VLLM_ROOT_LOGGER_NAME))
+    return {
+        "level": logging.getLevelName(level_value),
+        "logger": target_name,
+    }
+
+
 @contextmanager
 def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     current_level = logging.root.manager.disable

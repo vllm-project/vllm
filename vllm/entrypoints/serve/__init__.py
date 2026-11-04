@@ -63,3 +63,7 @@ def register_vllm_dev_api_routers(app: FastAPI):
     from .dev.sleep.api_router import attach_router as attach_sleep_router
 
     attach_sleep_router(app)
+
+    from .dev.logging.api_router import attach_router as attach_logging_router
+
+    attach_logging_router(app)

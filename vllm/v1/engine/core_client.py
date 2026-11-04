@@ -207,6 +207,11 @@ class EngineCoreClient(ABC):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
+    def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
+        raise NotImplementedError
+
     def release_kv_cache_memory(self) -> None:
         raise NotImplementedError
 
@@ -312,6 +317,11 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        raise NotImplementedError
+
+    async def set_log_level_async(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
         raise NotImplementedError
 
     async def release_kv_cache_memory_async(self) -> None:
@@ -445,6 +455,16 @@ class InprocClient(EngineCoreClient):
             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
         result = self.engine_core.sleep(level, mode)
         assert result is None
+
+    def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
+        return [self.engine_core.set_log_level(level, logger_name)]
+
+    async def set_log_level_async(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
+        return self.set_log_level(level, logger_name)
 
     def release_kv_cache_memory(self) -> None:
         self.engine_core.release_kv_cache_memory()
@@ -1107,6 +1127,12 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         self.call_utility("sleep", level, mode)
 
+    def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
+        # Sync client manages a single EngineCore.
+        return [self.call_utility("set_log_level", level, logger_name)]
+
     def release_kv_cache_memory(self) -> None:
         self.call_utility("release_kv_cache_memory")
 
@@ -1387,6 +1413,12 @@ class AsyncMPClient(MPClient):
 
     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         await self.call_utility_async("sleep", level, mode)
+
+    async def set_log_level_async(
+        self, level: str | int, logger_name: str | None = None
+    ) -> list[dict[str, str]]:
+        # Every EngineCore must apply: use all-engines utility like wake_up.
+        return await self.call_utility_all_async("set_log_level", level, logger_name)
 
     async def release_kv_cache_memory_async(self) -> None:
         await self.call_utility_async("release_kv_cache_memory")

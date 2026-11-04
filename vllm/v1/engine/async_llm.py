@@ -1225,6 +1225,16 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
+    async def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> dict[str, str]:
+        """Set log level in the API process, every EngineCore, and every worker."""
+        from vllm.logger import set_logger_level
+
+        applied = set_logger_level(level, logger_name)
+        await self.engine_core.set_log_level_async(applied["level"], applied["logger"])
+        return applied
+
     async def compute_weight_checksums(self) -> list[dict[str, str]]:
         return await self.engine_core.compute_weight_checksums_async()
 

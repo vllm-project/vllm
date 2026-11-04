@@ -214,6 +214,7 @@ For further details on sleep mode, please refer to [this page](../../features/sl
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
+- `/set_log_level` - Change the `vllm` logger level, or a module logger, in the API process, every EngineCore, and every worker (e.g. `curl -X POST 'http://localhost:8000/set_log_level?level=DEBUG'` or `...?level=DEBUG&logger=vllm.v1.worker`)
 
 ## Chat Template
 

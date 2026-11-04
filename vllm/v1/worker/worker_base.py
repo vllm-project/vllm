@@ -126,6 +126,14 @@ class WorkerBase:
         """Basic health check (override for device-specific checks)."""
         return
 
+    def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> dict[str, str]:
+        """Set a logger level in this worker process (collective RPC target)."""
+        from vllm.logger import set_logger_level
+
+        return set_logger_level(level, logger_name)
+
     def synchronize_device(self) -> None:
         """Block until in-flight device work completes; backends outside
         ``torch.accelerator`` must override with their own wait."""

@@ -1067,6 +1067,19 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def set_log_level(
+        self, level: str | int, logger_name: str | None = None
+    ) -> dict[str, str]:
+        """Set a logger level in this EngineCore process and all its workers."""
+        from vllm.logger import set_logger_level
+
+        applied = set_logger_level(level, logger_name)
+        self.model_executor.collective_rpc(
+            "set_log_level",
+            kwargs=dict(level=applied["level"], logger_name=applied["logger"]),
+        )
+        return applied
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
