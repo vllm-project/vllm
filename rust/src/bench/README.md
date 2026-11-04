@@ -516,7 +516,7 @@ Run `vllm-bench --help` for the authoritative list. Grouped reference below.
 | Flag | Default | Description |
 | ------ | --------- | ------------- |
 | `--dataset-name` | `random` | Dataset type (`random`, `random-mm`, `sharegpt`, `speed-bench`, `hf`) |
-| `--dataset-path` | — | Path to dataset file (`sharegpt` auto-downloads when omitted) |
+| `--dataset-path` | — | Path to dataset file, or HF dataset ID for `hf` (`sharegpt` auto-downloads when omitted; rejected with synthetic datasets such as `random`) |
 | `--num-prompts` | `1000` | Number of prompts to generate (conversations in multi-turn mode) |
 | `--max-model-len` | — | Filter out requests where `prompt_len + output_len` exceeds this context length |
 | `--input-len` | — | Override input length (general) |

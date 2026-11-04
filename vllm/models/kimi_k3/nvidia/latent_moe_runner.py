@@ -92,15 +92,22 @@ class LatentMoERunner(MoERunner):
             )
             self.enable_k3_latent_moe_tail_fusion = False
 
+        if (
+            self.enable_k3_latent_moe_tail_fusion
+            and use_fused_path
+            and get_current_vllm_config().model_config.enable_sleep_mode
+        ):
+            logger.warning_once(
+                "K3 latent-MoE tail fusion does not support sleep mode. "
+                "Falling back to the default path."
+            )
+            self.enable_k3_latent_moe_tail_fusion = False
+
         if self.enable_k3_latent_moe_tail_fusion and use_fused_path:
             vllm_config = get_current_vllm_config()
             if vllm_config.parallel_config.use_ubatching:
                 raise ValueError(
                     "K3 latent-MoE tail fusion does not support DBO or ubatching."
-                )
-            if vllm_config.model_config.enable_sleep_mode:
-                raise ValueError(
-                    "K3 latent-MoE tail fusion does not support sleep mode."
                 )
             transform = self.routed_output_transform
             assert transform is not None
