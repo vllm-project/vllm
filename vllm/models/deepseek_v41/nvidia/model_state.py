@@ -166,6 +166,44 @@ class ReplayAttnMetadata(ModelSpecificAttnMetadata):
         return {}
 
 
+def _skip_tail_min_remaining(vllm_config: VllmConfig, window: int) -> int | None:
+    """How many prompt tokens must remain after a prefill chunk for it to skip
+    its replay tail (replay one row instead of its last window); None turns this
+    off. A chunk that may read the skipped rows (only the replay batch's metadata
+    hides them) must miss every CUDA graph: the last chunk holds at least this
+    many tokens, and a chunk cut short shares its step with the smallest prefill
+    cap (encoder inputs can cut one anywhere). The second window covers the few
+    tokens MTP lookahead or max_model_len shave off a chunk."""
+    if vllm_config.model_config.supports_multimodal_inputs:
+        return None
+    compilation = vllm_config.compilation_config
+    max_graph_tokens = 0
+    if compilation.cudagraph_mode != CUDAGraphMode.NONE:
+        max_graph_tokens = compilation.max_cudagraph_capture_size or 0
+    scheduler = vllm_config.scheduler_config
+    spec = vllm_config.speculative_config
+    draft_slots = dropped_drafts = 0
+    if spec is not None:
+        draft_slots = spec.max_num_new_slots_for_drafting
+        if spec.enable_adaptive_verification:
+            dropped_drafts = spec.num_speculative_tokens
+    # Each scheduled request takes draft_slots off the input budget, and
+    # adaptive verification may drop every draft before graph dispatch.
+    max_reqs = scheduler.max_num_seqs
+    min_cut_step = (
+        min(
+            scheduler.max_num_scheduled_tokens or scheduler.max_num_batched_tokens,
+            scheduler.max_num_batched_tokens - max_reqs * draft_slots,
+        )
+        - max_reqs * dropped_drafts
+    )
+    if scheduler.long_prefill_token_threshold > 0:
+        min_cut_step = min(min_cut_step, scheduler.long_prefill_token_threshold)
+    if min_cut_step <= max_graph_tokens + window:
+        return None
+    return max_graph_tokens + 2 * window
+
+
 class DeepseekV41ModelState(DefaultModelState):
     """DefaultModelState plus the engram lookback window and SWA bounded replay.
 
@@ -281,36 +319,11 @@ class DeepseekV41ModelState(DefaultModelState):
             )
             layers.trim_threshold = threshold
         # PCP keeps whole windows so every trimmed request spans all ranks.
-        self._tail_reach: int | None = None
+        self._skip_tail_min_remaining: int | None = None
         if layers is not None and self.pcp_size == 1:
-            self._tail_reach = self._one_row_reach(vllm_config, layers.window)
-
-    @staticmethod
-    def _one_row_reach(vllm_config: VllmConfig, window: int) -> int | None:
-        """How far before its prompt's end a prefill chunk must end to replay one
-        row, or None. Chunks that may read the rows it skipped (only the replay
-        batch's metadata hides them) must miss every CUDA graph: the last chunk
-        holds the reach, and a chunk cut short shares its step with the smallest
-        prefill cap (encoder inputs can cut one anywhere). The second window
-        covers the few tokens MTP lookahead or max_model_len shave off a chunk."""
-        if vllm_config.model_config.supports_multimodal_inputs:
-            return None
-        compilation = vllm_config.compilation_config
-        max_graph_tokens = 0
-        if compilation.cudagraph_mode != CUDAGraphMode.NONE:
-            max_graph_tokens = compilation.max_cudagraph_capture_size or 0
-        scheduler = vllm_config.scheduler_config
-        spec = vllm_config.speculative_config
-        draft_slots = spec.max_num_new_slots_for_drafting if spec is not None else 0
-        min_cut_step = min(
-            scheduler.max_num_scheduled_tokens or scheduler.max_num_batched_tokens,
-            scheduler.max_num_batched_tokens - draft_slots,
-        )
-        if scheduler.long_prefill_token_threshold > 0:
-            min_cut_step = min(min_cut_step, scheduler.long_prefill_token_threshold)
-        if min_cut_step <= max_graph_tokens + window:
-            return None
-        return max_graph_tokens + 2 * window
+            self._skip_tail_min_remaining = _skip_tail_min_remaining(
+                vllm_config, layers.window
+            )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
@@ -576,8 +589,8 @@ class DeepseekV41ModelState(DefaultModelState):
             )
             kv_floor = kv_start
         else:
-            # A chunk ending at least the reach before its prompt's end replays
-            # its last row; the chunks after it within a window follow it.
+            # A chunk far enough from its prompt's end skips its replay tail and
+            # replays its last row; the chunks after it within a window follow it.
             computed = input_batch.num_computed_prefill_tokens_np[:num_reqs]
             prefill = prefilling & ~keeps_rows
             skipped_end = self._skipped_tail_np[idx_mapping]
@@ -587,11 +600,11 @@ class DeepseekV41ModelState(DefaultModelState):
                 & (computed - skipped_end < layers.window - 1)
             )
             one_row = np.zeros_like(prefill)
-            if self._tail_reach is not None:
+            if self._skip_tail_min_remaining is not None:
                 remaining = (
                     input_batch.prefill_len_np[:num_reqs] - computed - query_lens
                 )
-                one_row = prefill & (remaining >= self._tail_reach)
+                one_row = prefill & (remaining >= self._skip_tail_min_remaining)
             kept_lens = np.where(
                 self._keeps_rows_np[idx_mapping],
                 query_lens,

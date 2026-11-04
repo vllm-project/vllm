@@ -561,9 +561,8 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
 
 
 def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
-    """Without CUDA graphs a chunk ending 2 * WINDOW or more before its prompt's
-    end replays its last row. Later chunks whose window reaches the rows it
-    skipped read nothing below them and take the replay batch though none trims."""
+    """A chunk ending 2 * WINDOW (the minimum without graphs) before its prompt's end
+    replays one row; later chunks reading back past it get a floor and a replay."""
 
     def chunk(start, length, prompt=500):
         batch = replace(
@@ -582,22 +581,33 @@ def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
 
 
 @pytest.mark.parametrize(
-    ("long_prefill", "multimodal", "reach"),
-    [(0, False, 512 + 2 * WINDOW), (640, False, None), (0, True, None)],
+    ("override", "min_remaining"),
+    [
+        ({}, 512 + 2 * WINDOW),
+        ({"long_prefill_token_threshold": 640}, None),
+        ({"supports_multimodal_inputs": True}, None),
+        ({"max_num_new_slots_for_drafting": 63}, None),  # taken per request
+        ({"num_speculative_tokens": 64}, None),  # adaptive verification drops all
+    ],
 )
-def test_one_row_rule_keeps_cut_chunks_out_of_graphs(long_prefill, multimodal, reach):
+def test_skipped_tails_stay_out_of_graphs(override, min_remaining):
     """Chunks that may read rows a one-row chunk skipped must miss CUDA graphs: a
-    chunk cut short shares its step with its prefill cap, encoder inputs anywhere."""
-    cfg = SimpleNamespace(
-        model_config=SimpleNamespace(supports_multimodal_inputs=multimodal),
-        compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.PIECEWISE, max_cudagraph_capture_size=512
-        ),
-        scheduler_config=SimpleNamespace(
-            max_num_batched_tokens=16384,
-            max_num_scheduled_tokens=None,
-            long_prefill_token_threshold=long_prefill,
-        ),
-        speculative_config=None,
+    chunk cut short runs with at least its prefill cap less every draft."""
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    config = SimpleNamespace(
+        supports_multimodal_inputs=False,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        max_cudagraph_capture_size=512,
+        max_num_seqs=256,
+        max_num_batched_tokens=16384,
+        max_num_scheduled_tokens=None,
+        long_prefill_token_threshold=0,
+        max_num_new_slots_for_drafting=0,
+        enable_adaptive_verification=True,
+        num_speculative_tokens=0,
     )
-    assert DeepseekV41ModelState._one_row_reach(cfg, WINDOW) == reach
+    vars(config).update(override)
+    parts = ("model", "compilation", "scheduler", "speculative")
+    cfg = SimpleNamespace(**{f"{part}_config": config for part in parts})
+    assert model_state._skip_tail_min_remaining(cfg, WINDOW) == min_remaining
