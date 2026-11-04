@@ -22,12 +22,13 @@ from tests.utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
 )
+from vllm.models.glm5next.amd.specialized_decode.runtime.spec import WIDTHS
 
 from ._ffn import POLL_TIMEOUT_US, _dequant, _rel, _vllm_seam
 
 MODEL = "amd/GLM-5.3-Flash-Quark-MXFP4"
 PREFIX = "language_model.model.layers.7.mlp"
-ROWS = (2, 4, 8)
+ROWS = WIDTHS
 
 
 def _random_moe(moe, gd, gr) -> None:

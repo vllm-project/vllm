@@ -12,6 +12,8 @@ completing and padding rows."""
 
 import torch
 
+from vllm.models.glm5next.amd.specialized_decode.runtime.spec import WIDTHS
+
 from ._ffn import (
     POLL_TIMEOUT_US,
     REPLAYS,
@@ -21,7 +23,7 @@ from ._ffn import (
     _vllm_seam,
 )
 
-ROWS = (2, 4, 8)
+ROWS = WIDTHS
 BLOCK = 64  # MLA tokens a cache block: 16 kpool entries a block (preshuffled)
 MAX_LEN = 8192
 # tokens of each row including the new one (0: padding); 4100, 1500, 7000, 64 and

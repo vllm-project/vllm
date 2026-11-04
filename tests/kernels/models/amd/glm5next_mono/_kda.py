@@ -9,6 +9,8 @@ TP sum of the o_proj partials and the MoE."""
 
 import torch
 
+from vllm.models.glm5next.amd.specialized_decode.runtime.spec import WIDTHS
+
 from ._ffn import (
     POLL_TIMEOUT_US,
     REPLAYS,
@@ -18,7 +20,7 @@ from ._ffn import (
     _vllm_seam,
 )
 
-ROWS = (2, 4, 8)
+ROWS = WIDTHS
 SLOTS = 12
 
 

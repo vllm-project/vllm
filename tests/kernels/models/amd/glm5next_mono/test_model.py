@@ -25,6 +25,7 @@ import torch
 
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
+from vllm.models.glm5next.amd.specialized_decode.runtime.spec import STEP_TOKENS
 from vllm.utils.torch_utils import set_random_seed
 
 from ._ffn import _on_cdna4
@@ -36,7 +37,7 @@ KERNEL_LAYERS = (3, 4)
 VOCAB = 4096
 STEPS = 8
 # every kernel step size at TP4 (widths 2, 4, 8)
-BATCHES = (1, 2, 4, 8)
+BATCHES = STEP_TOKENS
 SEED = 0
 ENV = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",

@@ -524,10 +524,44 @@ steps:
   source_file_dependencies:
   - docker/Dockerfile.rocm_base
   - vllm/models/glm5next/amd/
+  - vllm/models/glm5next/common/attention.py
+  - vllm/models/glm5next/common/kda.py
   - vllm/models/glm5next/common/model.py
+  - vllm/models/glm5next/common/sparse_indexer.py
+  - vllm/models/glm5next/common/specialized_decode.py
+  - tests/kernels/models/amd/glm5next_mono/
+  - tests/models/glm5next/amd_specialized_decode/
+  commands:
+  - pytest -v -s tests/models/glm5next/amd_specialized_decode/
+  - pytest -v -s tests/kernels/models/amd/glm5next_mono/
+
+- label: ':amd: (MI355) GLM-5.3-Flash Mono Decode Kernel TP8'
+  key: glm53-flash-mono-decode-kernel-tp8-amd
+  dind: false
+  device: mi355_8
+  num_devices: 8
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/glm5next/amd/
+  - vllm/models/glm5next/common/attention.py
+  - vllm/models/glm5next/common/kda.py
+  - vllm/models/glm5next/common/model.py
+  - vllm/models/glm5next/common/sparse_indexer.py
+  - vllm/models/glm5next/common/specialized_decode.py
   - tests/kernels/models/amd/glm5next_mono/
   commands:
-  - pytest -v -s tests/kernels/models/amd/glm5next_mono/
+  # only the TP8 cases; the 4-GPU step above runs TP2/TP4 (TP8 skips there)
+  - >-
+    pytest -v -s
+    "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_ffn_layer_matches_vllm_ops[8-False]"
+    "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_kda_layer_matches_vllm_ops[8-False]"
+    "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_dsa_layer_matches_vllm_ops[8-mixed-False]"
+    "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_dsa_layer_matches_vllm_ops[8-mixed-True]"
+    "tests/kernels/models/amd/glm5next_mono/test_ops.py::test_ffn_matches_glm5next_moe[8]"
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
