@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping
 
 import torch
 import torch.nn as nn
-from transformers import PaliGemmaProcessor
+from transformers import ColPaliConfig, PaliGemmaConfig, PaliGemmaProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
@@ -42,15 +42,8 @@ from .utils import AutoWeightsLoader, WeightsMapper
 
 
 class ColPaliProcessingInfo(PaliGemmaProcessingInfo):
-    """Processing info for ColPali models.
-
-    ColPali models use a custom HuggingFace config (ColPaliConfig) that is
-    not an instance of PaliGemmaConfig. We override get_hf_config() and
-    get_hf_processor() to skip the strict type check.
-    """
-
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
+    def get_hf_config(self) -> PaliGemmaConfig:
+        return self.ctx.get_hf_config(ColPaliConfig).vlm_config
 
     def get_hf_processor(self, **kwargs: object) -> PaliGemmaProcessor:
         # Force standard PaliGemmaProcessor even when trust_remote_code=True.
@@ -118,19 +111,14 @@ class ColPaliModel(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
         config = vllm_config.model_config.hf_config
+        super().__init__(
+            vllm_config=vllm_config.with_hf_config(config.vlm_config), prefix=prefix
+        )
+
         head_dtype = vllm_config.model_config.head_dtype
 
-        hidden_size = getattr(config, "hidden_size", None)
-        if hidden_size is None and hasattr(config, "text_config"):
-            hidden_size = config.text_config.hidden_size
-        if hidden_size is None:
-            raise ValueError(
-                "Unable to determine text hidden size from config. "
-                "Expected 'hidden_size' or 'text_config.hidden_size'."
-            )
+        hidden_size = config.vlm_config.text_config.hidden_size
         self._proj_hidden_size = hidden_size
 
         # ColPali uses embedding_dim=128, but also check other naming variants
