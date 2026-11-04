@@ -193,20 +193,15 @@ def test_no_warmup_off_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("algorithm", ["gumbel", "dual_key_gumbel", "synthid_text"])
-@pytest.mark.parametrize(
-    "deduplicate_contexts,skip_masks",
-    [("single_turn", {True}), ("none", {True, False})],
-)
-def test_samples_every_reachable_dtype_and_skip_mask(
+@pytest.mark.parametrize("deduplicate_contexts", ["single_turn", "none"])
+def test_samples_every_reachable_dtype(
     monkeypatch: pytest.MonkeyPatch,
     algorithm: str,
     deduplicate_contexts: str,
-    skip_masks: set[bool],
 ) -> None:
-    """Without deduplication an all-watermarked batch passes no skip mask.
+    """The sampler passes a skip mask on every watermarked step.
 
-    A later batch mixing in an opted-out request passes one, so both variants
-    are reachable and both must be warmed, for both logits dtypes.
+    Only the logits dtype varies, so each dtype is warmed once.
     """
     worker = _worker(
         WatermarkConfig(
@@ -218,13 +213,10 @@ def test_samples_every_reachable_dtype_and_skip_mask(
     calls = _capture_samples(monkeypatch, worker)
     watermark_sample_warmup(worker)
 
-    variants = [(call["logits"].dtype, call["skip_mask"] is not None) for call in calls]
-    assert set(variants) == {
-        (dtype, skip)
-        for dtype in (torch.bfloat16, torch.float32)
-        for skip in skip_masks
-    }
-    assert len(variants) == len(set(variants))
+    dtypes = [call["logits"].dtype for call in calls]
+    assert all(call["skip_mask"] is not None for call in calls)
+    assert set(dtypes) == {torch.bfloat16, torch.float32}
+    assert len(dtypes) == len(set(dtypes))
 
 
 def test_warmup_argument_dtypes_match_the_runtime_buffers(
@@ -363,61 +355,10 @@ def test_speculative_config_warms_the_target_role_only(
     }
 
 
-@requires_cuda
-def test_dedup_none_also_warms_the_mask_free_specialization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(
-        _worker(
-            WatermarkConfig(key=MASTER_KEY, deduplicate_contexts="none"),
-            device="cuda",
-        )
-    )
-
-    assert _variants(calls) == {
-        (MASTER_KEY, torch.bfloat16, True),
-        (MASTER_KEY, torch.float32, True),
-        (MASTER_KEY, torch.bfloat16, False),
-        (MASTER_KEY, torch.float32, False),
-    }
-    for call in calls:
-        if call.get("skip_mask") is None:
-            assert "temperatures" not in call
-
-
-@requires_cuda
-def test_use_fp64_follows_the_path_that_forwards_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only the mixed path forwards the sampler's ``use_fp64_gumbel``.
-
-    ``GumbelWatermarker._sample_watermarked`` launches the mask-free variant
-    with the ``use_fp64=False`` default, so warming it with fp64 would compile
-    a specialization the engine never launches and miss the one it does.
-    """
-    calls = _capture_calls(monkeypatch)
-    watermark_sample_warmup(
-        _worker(
-            WatermarkConfig(key=MASTER_KEY, deduplicate_contexts="none"),
-            use_fp64_gumbel=True,
-            device="cuda",
-        )
-    )
-
-    assert calls
-    for call in calls:
-        assert call.get("use_fp64", False) is (call.get("skip_mask") is not None)
-
-
-@pytest.mark.parametrize(
-    "deduplicate_contexts,skip_masks",
-    [("single_turn", {True}), ("none", {True, False})],
-)
+@pytest.mark.parametrize("deduplicate_contexts", ["single_turn", "none"])
 def test_synthid_warms_every_reachable_specialization(
     monkeypatch: pytest.MonkeyPatch,
     deduplicate_contexts: str,
-    skip_masks: set[bool],
 ) -> None:
     """``SynthIDWatermarker.sample`` launches its fused kernels.
 
@@ -440,14 +381,9 @@ def test_synthid_warms_every_reachable_specialization(
     )
 
     assert gumbel_calls == []
-    assert {
-        (call["logits"].dtype, call["skip_mask"] is not None) for call in calls
-    } == {
-        (dtype, skip)
-        for dtype in (torch.bfloat16, torch.float32)
-        for skip in skip_masks
-    }
-    assert len(calls) == 2 * len(skip_masks)
+    assert all(call["skip_mask"] is not None for call in calls)
+    assert {call["logits"].dtype for call in calls} == {torch.bfloat16, torch.float32}
+    assert len(calls) == 2
     for call in calls:
         assert call["key"] == MASTER_KEY
         assert call["depth"] == 24

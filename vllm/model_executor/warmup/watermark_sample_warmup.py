@@ -3,13 +3,13 @@
 """Warm up the watermarked sampler's Triton kernels.
 
 Watermark kernels are JIT-compiled once per specialization, which includes the
-logits dtype and whether a skip mask is passed. The generic sampler warmup
+logits dtype. The generic sampler warmup
 samples with ``SamplingParams.for_sampler_warmup()``, whose feature-heavy logits
 processing forces the fp32 copy in ``apply_sampling_params``, so the first
 ordinary temperature-1.0 request is the first launch with model-dtype logits and
 pays the compilation inside inference. This samples through the sampler's
-watermarker once per logits dtype and skip-mask variant the sampler path can
-pass, which launches whatever kernels the configured algorithm uses.
+watermarker once per logits dtype the sampler path can pass, which launches
+whatever kernels the configured algorithm uses.
 """
 
 from __future__ import annotations
@@ -58,14 +58,6 @@ def watermark_sample_warmup(worker: Worker) -> None:
         # processing is needed and fp32 otherwise. ``ModelConfig.dtype`` is
         # resolved to a torch dtype during validation.
         dtypes = {cast("torch.dtype", model_config.dtype), torch.float32}
-        # ``GPUWatermarkSampler._sample_random`` builds a skip mask whenever
-        # context deduplication is on; with it off only a batch that mixes in an
-        # opted-out or greedy row does, and the mask-free specialization stays
-        # reachable.
-        with_skip_mask = (
-            (True,) if sampler.deduplicate_contexts != "none" else (True, False)
-        )
-
         vocab_size = model_config.get_vocab_size()
         # Dtypes mirror the runtime buffers the sampler passes and are part of
         # the specialization key: int32 request-state token ids, int64 index and
@@ -89,23 +81,17 @@ def watermark_sample_warmup(worker: Worker) -> None:
         )
 
         logger.info(
-            "Warming up watermark sampler kernels (algorithm=%s, vocab=%d, "
-            "dtypes=%s, skip_mask=%s).",
+            "Warming up watermark sampler kernels (algorithm=%s, vocab=%d, dtypes=%s).",
             watermark_config.algorithm,
             vocab_size,
             [str(dtype) for dtype in dtypes],
-            list(with_skip_mask),
         )
         for dtype in dtypes:
             logits = torch.zeros(
                 (_NUM_WARMUP_TOKENS, vocab_size), dtype=dtype, device=device
             )
-            for use_skip_mask in with_skip_mask:
-                sampler.watermarker.sample(
-                    logits,
-                    contexts,
-                    random_sampler,
-                    skip_mask=skip_mask if use_skip_mask else None,
-                )
+            sampler.watermarker.sample(
+                logits, contexts, random_sampler, skip_mask=skip_mask
+            )
     except Exception:
         logger.warning("Skipping watermark sampler warmup.", exc_info=True)
