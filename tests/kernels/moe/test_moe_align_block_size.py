@@ -11,6 +11,7 @@ import torch
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
+    moe_align_block_size_pair,
 )
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import set_random_seed
@@ -20,6 +21,97 @@ NUM_EXPERTS = [32, 160, 256, 257]
 TOP_KS = [1, 2, 16, 32]
 BLOCK_SIZES = [32, 128]
 set_random_seed(0)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,top_k,num_experts",
+    [
+        (0, 6, 16),
+        (1, 1, 7),
+        (1, 6, 16),
+        (8, 6, 384),
+        (7, 7, 64),
+        (9, 7, 256),
+        (8, 8, 128),
+        (1, 65, 384),
+        (512, 8, 64),
+    ],
+)
+@pytest.mark.parametrize("blocks", [(8, 40), (128, 32), (8, 8), (256, 512)])
+@pytest.mark.parametrize("dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_moe_align_block_size_pair_preserves_routes(
+    num_tokens: int,
+    top_k: int,
+    num_experts: int,
+    blocks: tuple[int, int],
+    dtype: torch.dtype,
+    use_expert_map: bool,
+):
+    """Both tiles preserve valid routes, including remapped and missing experts."""
+    topk_ids = torch.randint(
+        -1, num_experts + 1, (num_tokens, top_k), device="cuda", dtype=dtype
+    )
+    if topk_ids.numel() >= 3:
+        topk_ids.flatten()[:3] = torch.tensor(
+            [0, -1, num_experts], device="cuda", dtype=dtype
+        )
+    expert_map = None
+    if use_expert_map:
+        expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
+        local_experts = torch.randperm(num_experts, device="cuda")[::2]
+        expert_map[local_experts] = torch.arange(
+            local_experts.numel(), device="cuda", dtype=torch.int32
+        )
+    actual = moe_align_block_size_pair(topk_ids, *blocks, num_experts, expert_map)
+    for block, (sorted_ids, expert_ids, num_padded) in zip(blocks, actual):
+        ref_sorted, ref_experts, ref_num = moe_align_block_size(
+            topk_ids, block, num_experts, expert_map, ignore_invalid_experts=True
+        )
+        torch.testing.assert_close(num_padded, ref_num, atol=0, rtol=0)
+        length = num_padded.item()
+        torch.testing.assert_close(
+            expert_ids[: length // block],
+            ref_experts[: length // block],
+            atol=0,
+            rtol=0,
+        )
+        _verify_expert_level_sorting(
+            sorted_ids, ref_sorted, expert_ids, block, length, topk_ids.numel()
+        )
+        assert torch.all(expert_ids[length // block :] == -1)
+        assert torch.all(sorted_ids[length:] == topk_ids.numel())
+        assert torch.all(sorted_ids[sorted_ids >= topk_ids.numel()] == topk_ids.numel())
+    if blocks[0] == blocks[1]:
+        assert all(first is second for first, second in zip(*actual))
+
+
+@pytest.mark.parametrize("strided", [False, True])
+def test_moe_align_block_size_pair_graph_replay_updates_routes(strided: bool):
+    """Replaying with changed routes/maps clears old blocks and padding."""
+    storage = torch.zeros((9, 16), device="cuda", dtype=torch.int64)
+    topk_ids = storage[1:, ::2] if strided else storage.flatten()[1:65].view(8, 8)
+    expert_map = torch.arange(16, device="cuda", dtype=torch.int32)
+    moe_align_block_size_pair(topk_ids, 8, 40, 16, expert_map)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = moe_align_block_size_pair(topk_ids, 8, 40, 16, expert_map)
+    for expert, local_expert in [(16, -1), (7, 2), (7, -1), (4, 1)]:
+        topk_ids.fill_(expert)
+        if expert < 16:
+            expert_map[expert] = local_expert
+        graph.replay()
+        for block, (sorted_ids, expert_ids, num_padded) in zip((8, 40), actual):
+            expected_count = round_up(64, block) if local_expert >= 0 else 0
+            assert num_padded.item() == expected_count
+            assert torch.all(expert_ids[: expected_count // block] == local_expert)
+            assert torch.all(expert_ids[expected_count // block :] == -1)
+            expected_rows = torch.arange(64, device="cuda", dtype=torch.int32)
+            if local_expert >= 0:
+                torch.testing.assert_close(
+                    sorted_ids[:64], expected_rows, atol=0, rtol=0
+                )
+            assert torch.all(sorted_ids[64 if local_expert >= 0 else 0 :] == 64)
 
 
 @pytest.mark.parametrize("num_experts,num_tokens", [(32, 8), (256, 8), (256, 1024)])

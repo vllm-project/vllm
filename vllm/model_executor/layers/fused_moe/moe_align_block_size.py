@@ -6,7 +6,8 @@ from typing import Literal, overload
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.triton_utils import triton
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
 
@@ -256,3 +257,166 @@ def batched_moe_align_block_size(
     )
 
     return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+@triton.jit
+def _moe_align_block_size_pair_kernel(
+    TopkIds,
+    ExpertMap,
+    SortedIds1,
+    ExpertIds1,
+    NumTokens1,
+    SortedIds2,
+    ExpertIds2,
+    NumTokens2,
+    NUM_ROUTES: tl.constexpr,
+    NUM_EXPERTS: tl.constexpr,
+    TOP_K: tl.constexpr,
+    STRIDE_TOKEN: tl.constexpr,
+    STRIDE_TOPK: tl.constexpr,
+    STRIDE_MAP: tl.constexpr,
+    BLOCK_SIZE1: tl.constexpr,
+    BLOCK_SIZE2: tl.constexpr,
+    SORTED_SIZE1: tl.constexpr,
+    SORTED_SIZE2: tl.constexpr,
+    HAS_EXPERT_MAP: tl.constexpr,
+    BLOCK_ROUTES: tl.constexpr,
+):
+    route = tl.arange(0, BLOCK_ROUTES)
+    expert = tl.load(
+        TopkIds + route // TOP_K * STRIDE_TOKEN + route % TOP_K * STRIDE_TOPK,
+        route < NUM_ROUTES,
+        -1,
+    ).to(tl.int32)
+    valid = (route < NUM_ROUTES) & (expert >= 0) & (expert < NUM_EXPERTS)
+    if HAS_EXPERT_MAP:
+        expert = tl.load(ExpertMap + expert * STRIDE_MAP, valid, -1)
+        valid &= expert >= 0
+
+    # Count routed rows rather than scan the full expert space for decode.
+    same_expert = expert[:, None] == expert[None, :]
+    earlier = (route[None, :] < route[:, None]) & valid[None, :]
+    rank = tl.sum((same_expert & earlier).to(tl.int32), 1)
+    count = tl.sum((same_expert & valid[None, :]).to(tl.int32), 1)
+    leader = valid & (rank == 0)
+    padded1 = tl.where(leader, tl.cdiv(count, BLOCK_SIZE1) * BLOCK_SIZE1, 0)
+    padded2 = tl.where(leader, tl.cdiv(count, BLOCK_SIZE2) * BLOCK_SIZE2, 0)
+    lower_expert = expert[None, :] < expert[:, None]
+    offset1 = tl.sum(tl.where(lower_expert, padded1[None, :], 0), 1)
+    offset2 = tl.sum(tl.where(lower_expert, padded2[None, :], 0), 1)
+
+    sorted1 = tl.arange(0, triton.next_power_of_2(SORTED_SIZE1))
+    sorted2 = tl.arange(0, triton.next_power_of_2(SORTED_SIZE2))
+    experts1 = tl.arange(
+        0, triton.next_power_of_2(triton.cdiv(SORTED_SIZE1, BLOCK_SIZE1))
+    )
+    experts2 = tl.arange(
+        0, triton.next_power_of_2(triton.cdiv(SORTED_SIZE2, BLOCK_SIZE2))
+    )
+    tl.store(SortedIds1 + sorted1, NUM_ROUTES, sorted1 < SORTED_SIZE1)
+    tl.store(SortedIds2 + sorted2, NUM_ROUTES, sorted2 < SORTED_SIZE2)
+    tl.store(ExpertIds1 + experts1, -1, experts1 < tl.cdiv(SORTED_SIZE1, BLOCK_SIZE1))
+    tl.store(ExpertIds2 + experts2, -1, experts2 < tl.cdiv(SORTED_SIZE2, BLOCK_SIZE2))
+    # Initializing padding and writing valid rows may involve different warps.
+    tl.debug_barrier()
+    tl.store(SortedIds1 + offset1 + rank, route, valid)
+    tl.store(SortedIds2 + offset2 + rank, route, valid)
+    block1 = tl.arange(0, triton.next_power_of_2(triton.cdiv(NUM_ROUTES, BLOCK_SIZE1)))
+    block2 = tl.arange(0, triton.next_power_of_2(triton.cdiv(NUM_ROUTES, BLOCK_SIZE2)))
+    tl.store(
+        ExpertIds1 + offset1[:, None] // BLOCK_SIZE1 + block1[None, :],
+        expert[:, None],
+        leader[:, None] & (block1[None, :] < padded1[:, None] // BLOCK_SIZE1),
+    )
+    tl.store(
+        ExpertIds2 + offset2[:, None] // BLOCK_SIZE2 + block2[None, :],
+        expert[:, None],
+        leader[:, None] & (block2[None, :] < padded2[:, None] // BLOCK_SIZE2),
+    )
+    tl.store(NumTokens1, tl.sum(padded1, 0))
+    tl.store(NumTokens2, tl.sum(padded2, 0))
+
+
+def moe_align_block_size_pair(
+    topk_ids: torch.Tensor,
+    block_size1: int,
+    block_size2: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None = None,
+) -> tuple[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+]:
+    """Align the same routes for two independently tuned MoE projections.
+
+    Each result has the semantics of ``moe_align_block_size`` with
+    ``ignore_invalid_experts=True``. Equal block sizes share one result.
+    Small Hopper batches use one launch; other batches use the existing op.
+    """
+    if block_size1 == block_size2:
+        alignment = moe_align_block_size(
+            topk_ids.contiguous(),
+            block_size1,
+            num_experts,
+            expert_map,
+            ignore_invalid_experts=True,
+        )
+        return alignment, alignment
+
+    num_routes = topk_ids.numel()
+    # Bound the quadratic route comparison and per-CTA padding initialization.
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(90)
+        and 0 < num_routes <= 64
+        and max(block_size1, block_size2) <= 256
+    ):
+        alignments = [
+            moe_align_block_size(
+                topk_ids.contiguous(),
+                block_size,
+                num_experts,
+                expert_map,
+                ignore_invalid_experts=True,
+            )
+            for block_size in (block_size1, block_size2)
+        ]
+        return alignments[0], alignments[1]
+
+    outputs = []
+    for block_size in (block_size1, block_size2):
+        max_num_tokens_padded = min(
+            num_routes * block_size, num_routes + num_experts * (block_size - 1)
+        )
+        outputs.append(
+            (
+                torch.empty(
+                    max_num_tokens_padded, device=topk_ids.device, dtype=torch.int32
+                ),
+                torch.empty(
+                    triton.cdiv(max_num_tokens_padded, block_size),
+                    device=topk_ids.device,
+                    dtype=torch.int32,
+                ),
+                torch.empty(1, device=topk_ids.device, dtype=torch.int32),
+            )
+        )
+    _moe_align_block_size_pair_kernel[(1,)](
+        topk_ids,
+        expert_map,
+        *outputs[0],
+        *outputs[1],
+        num_routes,
+        num_experts,
+        topk_ids.size(1),
+        *topk_ids.stride(),
+        expert_map.stride(0) if expert_map is not None else 1,
+        block_size1,
+        block_size2,
+        outputs[0][0].numel(),
+        outputs[1][0].numel(),
+        expert_map is not None,
+        triton.next_power_of_2(num_routes),
+        num_warps=4,
+    )
+    return outputs[0], outputs[1]

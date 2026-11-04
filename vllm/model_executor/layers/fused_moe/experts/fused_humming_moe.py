@@ -27,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.fused_globalize_align_block_size impor
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
+    moe_align_block_size_pair,
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
@@ -709,6 +710,12 @@ class HummingIndexedExperts(HummingExpertsBase):
             )
             moe_block_size = 64
 
+        w2_block_size = 64
+        for lower, upper, config in self.w2_tuning_config:
+            if lower < valid_shape_m <= upper:
+                w2_block_size = config["block_shape"][0]
+                break
+
         use_scatter = False
         if expert_map is not None:
             num_sms = num_compute_units(topk_ids.get_device())
@@ -726,6 +733,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             if expert_tokens_meta is not None
             else None
         )
+        second_alignment = None
         if (
             current_platform.is_cuda()
             and rank_expert_offset is not None
@@ -742,6 +750,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             )
             _, sorted_ids, expert_ids, num_tokens_padded = alignment[:4]
             scatter_idx = alignment[4] if use_scatter else None
+        elif not use_scatter:
+            first_alignment, second_alignment = moe_align_block_size_pair(
+                topk_ids,
+                moe_block_size,
+                w2_block_size,
+                self.global_num_experts,
+                expert_map,
+            )
+            sorted_ids, expert_ids, num_tokens_padded = first_alignment
+            scatter_idx = None
         else:
             alignment = moe_align_block_size(
                 topk_ids=topk_ids,
@@ -768,12 +786,13 @@ class HummingIndexedExperts(HummingExpertsBase):
         moe_kwargs1.update(moe_common_kwargs)
         moe_kwargs2.update(moe_common_kwargs)
 
-        w2_block_size = 64
-        for lower, upper, config in self.w2_tuning_config:
-            if lower < valid_shape_m <= upper:
-                w2_block_size = config["block_shape"][0]
-                break
-        if w2_block_size != moe_block_size:
+        if second_alignment is not None:
+            moe_kwargs2.update(
+                sorted_ids=second_alignment[0],
+                expert_ids=second_alignment[1],
+                num_tokens_padded=second_alignment[2],
+            )
+        elif w2_block_size != moe_block_size:
             sorted_ids2, expert_ids2, num_tokens_padded2 = moe_align_block_size(
                 topk_ids=topk_ids,
                 block_size=w2_block_size,
