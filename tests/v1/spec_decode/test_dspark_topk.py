@@ -22,6 +22,128 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
     _argmax_candidates,
 )
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import markov_walk_topk
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("reduced_vocab", [False, True])
+@pytest.mark.parametrize("topk,rank,vocab", [(3, 65, 17), (32, 256, 67)])
+@torch.inference_mode()
+def test_fused_markov_walk_matches_sequential_after_graph_replay(
+    dtype, reduced_vocab, topk, rank, vocab
+):
+    """Eight dependent steps preserve mapping and reread anchors on replay."""
+    torch.manual_seed(0)
+    batch, steps, scale = 3, 8, 0.5
+    target_vocab = vocab * (2 if reduced_vocab else 1)
+    d2t = torch.arange(vocab, device="cuda") if reduced_vocab else None
+    # Dyadic weights make the reference's dot products exact in FP32.
+    w1 = torch.randint(-2, 3, (target_vocab, rank + 1), device="cuda").to(dtype)
+    w2 = torch.randint(-2, 3, (vocab, rank + 1), device="cuda").to(dtype)
+    w1.div_(16)
+    w2.div_(16)
+    w1, w2 = w1[:, 1:], w2[:, 1:]
+    biases = (w1.float() @ w2.float().T * scale).to(dtype)
+    markov_biases, markov_ids = biases.topk(topk, dim=-1)
+    storage = torch.randint(-16, 17, (batch, steps, vocab + 1), device="cuda")
+    base = storage.to(dtype)[:, :, 1:]
+    original = base.clone()
+    anchors = torch.arange(batch, device="cuda") * 2 + 1
+    input_ids = torch.zeros(batch * 2 + 1, dtype=torch.int32, device="cuda")
+    output = torch.full((batch, steps + 1), -1, dtype=torch.int64, device="cuda")
+
+    def run():
+        values, ids = base.topk(topk, dim=-1)
+        markov_walk_topk(
+            base_logits=base,
+            base_values=values,
+            base_ids=ids,
+            markov_ids=markov_ids,
+            markov_biases=markov_biases,
+            w1=w1,
+            w2=w2,
+            input_ids=input_ids,
+            anchor_indices=anchors,
+            draft_tokens=output[:, 1:],
+            d2t=d2t,
+            scale=scale,
+        )
+
+    run()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for shift in (0, 3):
+        base.copy_(original.roll(shift, dims=-1))
+        input_ids[anchors] = (
+            torch.arange(batch, dtype=torch.int32, device="cuda") + shift
+        )
+        graph.replay()
+        values, ids = base.topk(topk, dim=-1)
+        prev = input_ids[anchors]
+        expected = torch.empty_like(output[:, 1:])
+        for step in range(steps):
+            corrected = values[:, step].unsqueeze(-1).clone()
+            corrected.baddbmm_(w2[ids[:, step]], w1[prev].unsqueeze(-1), alpha=scale)
+            logits = torch.full_like(base[:, step], -torch.inf)
+            logits.scatter_(1, ids[:, step], corrected.squeeze(-1))
+            cached_ids = markov_ids[prev]
+            logits.scatter_(
+                1,
+                cached_ids,
+                base[:, step].gather(1, cached_ids) + markov_biases[prev],
+            )
+            prev = logits.argmax(dim=-1)
+            if d2t is not None:
+                prev = prev + d2t[prev]
+            expected[:, step] = prev
+        torch.testing.assert_close(output[:, 1:], expected, rtol=0, atol=0)
+        assert (output[:, 0] == -1).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_fused_markov_walk_preserves_cached_overwrite_and_argmax_rules(dtype):
+    """Cached duplicates override base scores before tie and NaN selection."""
+    base_ids = torch.tensor([[[8, 2, 5]]], device="cuda").repeat(4, 1, 1)
+    values = torch.tensor(
+        [[9, 7, 6], [9, 7, 8], [-torch.inf] * 3, [9, torch.nan, 6]],
+        dtype=dtype,
+        device="cuda",
+    ).unsqueeze(1)
+    base = torch.full((4, 1, 10), -100.0, dtype=dtype, device="cuda")
+    base.scatter_(2, base_ids, values)
+    markov_ids = torch.tensor([[8, 9, 1]], device="cuda").repeat(10, 1)
+    biases = torch.zeros((10, 3), dtype=dtype, device="cuda")
+    biases[:4] = torch.tensor(
+        [
+            [-7, 107, 107],
+            [-7, 107, 107],
+            [0, -torch.inf, -torch.inf],
+            [torch.nan, 107, 107],
+        ],
+        dtype=dtype,
+        device="cuda",
+    )
+    tokens = torch.empty((4, 1), dtype=torch.int64, device="cuda")
+    markov_walk_topk(
+        base_logits=base,
+        base_values=values,
+        base_ids=base_ids,
+        markov_ids=markov_ids,
+        markov_biases=biases,
+        w1=torch.ones((10, 1), dtype=dtype, device="cuda"),
+        w2=torch.zeros((10, 1), dtype=dtype, device="cuda"),
+        input_ids=torch.arange(4, device="cuda"),
+        anchor_indices=torch.arange(4, device="cuda"),
+        draft_tokens=tokens,
+        d2t=None,
+        scale=1.0,
+    )
+    expected = torch.tensor([[1], [5], [0], [2]], device="cuda")
+    torch.testing.assert_close(tokens, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

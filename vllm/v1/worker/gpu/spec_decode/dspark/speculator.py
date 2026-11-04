@@ -30,8 +30,14 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+)
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.topk_markov import markov_walk_topk
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -280,14 +286,53 @@ class DSparkSpeculator(DFlashSpeculator):
         base_logits = self.model.compute_draft_logits(sample_hidden)
         base_logits = base_logits.view(num_reqs, n_spec, -1)
         base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
+        candidate_argmax = (
+            self.draft_logits is None and self.acceptance_estimator is None
+        )
+        if (
+            candidate_argmax
+            and not self.use_confidence_head
+            and current_platform.is_cuda()
+            and base_logits.is_cuda
+        ):
+            head = self.model.model.markov_head
+            w1 = head.markov_w1.weight
+            w2 = getattr(head.markov_w2, "weight", None)
+            if (
+                isinstance(
+                    head.markov_w2.quant_method,
+                    (UnquantizedEmbeddingMethod, UnquantizedLinearMethod),
+                )
+                and w2 is not None
+                and w1.is_cuda
+                and w1.device == w2.device == base_logits.device
+                and w1.dtype == w2.dtype == base_logits.dtype
+                and w1.dtype in (torch.float16, torch.bfloat16, torch.float32)
+                and w1.ndim == w2.ndim == 2
+                and w1.stride(1) == w2.stride(1) == 1
+                and w1.shape[1] == w2.shape[1] <= 1024
+                and head.markov_w2.tp_size == 1
+                and self._draft_topk <= 128
+            ):
+                markov_walk_topk(
+                    base_logits=base_logits,
+                    base_values=base_values,
+                    base_ids=draft_indices,
+                    markov_ids=self._markov_candidate_ids,
+                    markov_biases=self._markov_candidate_biases,
+                    w1=w1,
+                    w2=w2,
+                    input_ids=self.input_buffers.input_ids,
+                    anchor_indices=self._anchor_idx[:num_reqs],
+                    draft_tokens=self.draft_tokens,
+                    d2t=self.model.draft_id_to_target_id,
+                    scale=self.model.logits_processor.scale,
+                )
+                return
         idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_markov_embeds = []
         prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
-        candidate_argmax = (
-            self.draft_logits is None and self.acceptance_estimator is None
-        )
-
         for i in range(n_spec):
             markov_embed = self.model.markov_embed(prev)
             if self.use_confidence_head:
