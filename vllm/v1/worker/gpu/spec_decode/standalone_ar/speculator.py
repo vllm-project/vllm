@@ -65,7 +65,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 2,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 2
+            ),
             varlen_decode=self.enable_adaptive_verification,
         )
         super().init_cudagraph_manager(cudagraph_mode)
