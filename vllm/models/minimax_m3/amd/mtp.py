@@ -110,8 +110,7 @@ def _build_sparse_indexer_context(
         msa_indexer_impl_cls = impl_cls
         sparse_bt_buffer = torch.empty(
             rows,
-            config.index_topk_blocks
-            * (config.index_block_size // ASM_PAGE_SIZE),
+            config.index_topk_blocks * (config.index_block_size // ASM_PAGE_SIZE),
             dtype=torch.int32,
         )
         sparse_ctx_buffer = torch.empty(rows, dtype=torch.int32)
