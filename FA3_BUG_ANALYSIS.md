@@ -4,7 +4,7 @@
 
 FA3 combine kernel (`flash_fwd_combine_kernel.h`) chooses its tile scheduler and grid shape on the HOST at **capture time** using the **dummy batch** shape. CUDA graphs freeze this grid.
 
-### The Problem Chain:
+### The Problem Chain
 
 1. **Capture uses dummy batch:**
    - FULL graphs captured with `num_reqs = min(num_tokens, max_num_seqs)` dummy requests
@@ -27,7 +27,7 @@ FA3 combine kernel (`flash_fwd_combine_kernel.h`) chooses its tile scheduler and
 ## Prediction Table (All Cases Confirmed)
 
 | Scenario | Captured Shape | Scheduler | Result |
-|----------|---|---|---|
+| ---------- | --- | --- | --- |
 | 168-token, max_num_seqs 8–40 | 8×21...40×5 | STANDARD | ❌ Wrong |
 | 168-token, max_num_seqs 48–64 | 48×4...64×3 | LINEARIZE | ✅ Correct |
 | 2-token graph (trigger A) | 2×1 | STANDARD (1 row/req) | ❌ 2nd token never combined |
@@ -38,6 +38,7 @@ FA3 combine kernel (`flash_fwd_combine_kernel.h`) chooses its tile scheduler and
 **vLLM-side fix:** Use `max_seqlen_q = num_tokens` (upper bound) instead of `ceil(num_tokens / num_reqs)` for FULL graphs.
 
 This ensures:
+
 - Scheduler decision at capture time matches replay reality
 - Grid shape accommodates the maximum possible single-request size
 - Each CTA can process all its tokens regardless of request distribution
