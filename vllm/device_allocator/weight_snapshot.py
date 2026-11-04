@@ -155,10 +155,13 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
                 f"({len(saved)} saved vs {len(now)} tensors, first differences "
                 f"{diff}); delete it to rebuild"
             )
-        buf = _pinned()
-        view = memoryview(buf.numpy())
+        # Two pinned buffers: the disk read of one overlaps the H2D copy of the other.
+        bufs = [_pinned(), _pinned()]
+        views = [memoryview(b.numpy()) for b in bufs]
+        events = [torch.cuda.Event(), torch.cuda.Event()]
         torch.accelerator.synchronize()
         t0 = time.perf_counter()
+        i = 0
         for _, t in tensors:
             dst = t.detach()
             if dst.is_contiguous():
@@ -167,8 +170,11 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
                 target = torch.empty(t.nbytes, dtype=torch.uint8, device=t.device)
             for off in range(0, t.nbytes, _CHUNK):
                 n = min(_CHUNK, t.nbytes - off)
-                os.preadv(fd, [view[: _round_up(n)]], offset + off)
-                target[off : off + n].copy_(buf[:n])
+                events[i].synchronize()
+                os.preadv(fd, [views[i][: _round_up(n)]], offset + off)
+                target[off : off + n].copy_(bufs[i][:n], non_blocking=True)
+                events[i].record()
+                i ^= 1
             if not dst.is_contiguous():
                 dst.copy_(target.view(t.dtype).view(t.shape))
             offset += _round_up(t.nbytes)
