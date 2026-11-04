@@ -231,8 +231,9 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
+    native_conv = use_cpp_conv()
     conv_state = layer.kv_cache[0]
-    if use_cpp_conv():
+    if native_conv:
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(1, 2)
     else:
@@ -262,7 +263,7 @@ def _cpu_gdn_attention_nonspec(
         decode_b = b[:num_decode_tokens]
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
-        if use_cpp_conv:
+        if native_conv:
             decode_mixed_qkv = _causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
                 conv_states=conv_state,
@@ -320,7 +321,7 @@ def _cpu_gdn_attention_nonspec(
             num_decodes : num_decodes + num_prefills
         ]
 
-        if use_cpp_conv:
+        if native_conv:
             prefill_mixed_qkv = _causal_conv1d_fwd_cpu(
                 x=prefill_mixed_qkv.transpose(0, 1),
                 weight=layer.conv1d.weight,

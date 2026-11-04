@@ -668,6 +668,85 @@ def test_spec_aware_nonspec_materializes_state_indices(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("num_decodes", [1, 0])
+def test_nonspec_conv_follows_use_cpp_conv(
+    native: bool, num_decodes: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plain path takes the C++ conv only where use_cpp_conv() holds."""
+    num_prefills = 1 - num_decodes
+    metadata = GDNAttentionMetadata(
+        num_prefills=num_prefills,
+        num_prefill_tokens=2 * num_prefills,
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decodes,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=2 - num_decodes,
+        non_spec_state_indices_tensor=torch.tensor([0], dtype=torch.int32),
+        non_spec_query_start_loc=torch.tensor([0, 2 - num_decodes], dtype=torch.int32),
+        has_initial_state=torch.tensor([False]),
+    )
+    called = []
+
+    def conv(name):
+        def run(**kwargs):
+            called.append(name)
+            return kwargs["x"]
+
+        return run
+
+    monkeypatch.setattr(gdn_attention, "use_cpp_conv", lambda: native)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    for name in (
+        "_causal_conv1d_update_cpu",
+        "causal_conv1d_update_cpu",
+        "_causal_conv1d_fwd_cpu",
+        "causal_conv1d_torch",
+    ):
+        monkeypatch.setattr(gdn_attention, name, conv(name))
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_cpu",
+        lambda **kwargs: torch.zeros(1, num_decodes, 1, 1),
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_gdn_gating_cpu",
+        lambda **kwargs: (kwargs["a"], kwargs["b"]),
+    )
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "chunk_gated_delta_rule_cpu",
+        lambda **kwargs: (torch.zeros(1, 2, 1, 1), None),
+    )
+    num_tokens = 2 - num_decodes
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(weight=torch.empty(4, 1, 4), bias=None),
+        A_log=torch.empty(0),
+        dt_bias=torch.empty(0),
+        kv_cache=[torch.zeros(1, 3, 4), torch.zeros(1, 1, 1, 1)],
+        rearrange_mixed_qkv=lambda x: (x[:, :1],) * 3,
+    )
+    gdn_attention._cpu_gdn_attention_nonspec(
+        layer,
+        metadata,
+        torch.zeros(num_tokens, 4),
+        torch.zeros(num_tokens, 1),
+        torch.zeros(num_tokens, 1),
+        torch.zeros(num_tokens, 1, 1),
+    )
+
+    native_name, torch_name = (
+        ("_causal_conv1d_update_cpu", "causal_conv1d_update_cpu")
+        if num_decodes
+        else ("_causal_conv1d_fwd_cpu", "causal_conv1d_torch")
+    )
+    assert called == [native_name if native else torch_name]
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize(
     ("has_avx512_bf16", "has_arm_bf16"), [(True, False), (False, True)]
 )
