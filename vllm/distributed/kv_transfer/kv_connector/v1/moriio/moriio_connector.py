@@ -139,6 +139,9 @@ _MAX_LOCAL_MAMBA_TAIL_BLOCKS = 1
 # A WRITE failure is broadcast to every decode DP rank, so ranks that never
 # see the request would otherwise keep its transfer id forever.
 _MAX_UNMATCHED_WRITE_FAILURES = 4096
+# A write_done for a request that already finished (e.g. aborted while waiting
+# for its KV) never matches; it is dropped after defer_timeout or at this cap.
+_MAX_UNMATCHED_WRITE_COMPLETIONS = 4096
 
 
 try:
@@ -1861,9 +1864,13 @@ class MoRIIOConnectorWorker:
         self._handle_request_thread = None
         self._heartbeat: MoRIIOHeartbeat | None = None
         self._writer = MoRIIOWriter(self)
-        # Completions that arrived before transfer_id_to_request_id was populated.
-        # Retried each step until the mapping is established.
-        self._unmatched_write_completions: set[str] = set()
+        # Completions that arrived before transfer_id_to_request_id was populated,
+        # with the time each first arrived. Retried each step until the mapping is
+        # established, or dropped once older than defer_timeout.
+        self._unmatched_write_completions: OrderedDict[TransferId, float] = (
+            OrderedDict()
+        )
+        self._num_expired_write_completions = 0
         self._unmatched_write_failures: OrderedDict[TransferId, None] = OrderedDict()
         # Producer-side READ-mode ACK fan-in. When decode TP is larger than
         # prefill TP, multiple decode ranks can read from one prefill rank and
@@ -2910,11 +2917,12 @@ class MoRIIOConnectorWorker:
             }
         else:
             if self.mode == MoRIIOMode.WRITE:
-                fresh = self.moriio_wrapper.pop_finished_write_req_ids()
                 # Accumulate with any completions that arrived before their
                 # transfer_id was registered in transfer_id_to_request_id.
-                self._unmatched_write_completions |= fresh
-                done_recving = self._unmatched_write_completions
+                now = time.monotonic()
+                for transfer_id in self.moriio_wrapper.pop_finished_write_req_ids():
+                    self._unmatched_write_completions.setdefault(transfer_id, now)
+                done_recving = set(self._unmatched_write_completions)
             else:
                 # READ mode: the scheduler treats KV loads as synchronous
                 # (load_kv_async=False), so requests go directly to RUNNING
@@ -2933,14 +2941,38 @@ class MoRIIOConnectorWorker:
         }
         if self.mode == MoRIIOMode.WRITE and not self.is_producer:
             # Remove the ones we successfully matched; leave unmatched for retry.
-            matched_xfer_ids = {
-                id
-                for id in self._unmatched_write_completions
-                if id in self.transfer_id_to_request_id
-            }
-            self._unmatched_write_completions -= matched_xfer_ids
+            pending = self._unmatched_write_completions
+            mapping = self.transfer_id_to_request_id
+            for transfer_id in [t for t in pending if t in mapping]:
+                del pending[transfer_id]
+            self._expire_unmatched_write_completions()
 
         return done_sending, done_recving
+
+    def _expire_unmatched_write_completions(self) -> None:
+        """Drop write_done notifications that no request will ever match.
+
+        The mapping for a completion that raced ahead of start_load_kv arrives
+        within a step or two. One still unmatched after defer_timeout belongs to
+        a request that finished first, e.g. one aborted while waiting for its KV.
+        """
+        pending = self._unmatched_write_completions
+        deadline = time.monotonic() - self.moriio_config.defer_timeout
+        expired = 0
+        while pending and (
+            len(pending) > _MAX_UNMATCHED_WRITE_COMPLETIONS
+            or next(iter(pending.values())) <= deadline
+        ):
+            pending.popitem(last=False)
+            expired += 1
+        if expired:
+            self._num_expired_write_completions += expired
+            logger.warning(
+                "MoRIIO WRITE: dropped %d write_done notification(s) that no "
+                "request on this rank matched within defer_timeout (%d so far).",
+                expired,
+                self._num_expired_write_completions,
+            )
 
     def get_transfer_results(self) -> KVConnectorTransferResults:
         done_sending, done_recving = self.get_finished()

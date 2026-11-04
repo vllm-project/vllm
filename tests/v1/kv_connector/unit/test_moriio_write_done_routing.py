@@ -650,6 +650,93 @@ def test_write_failed_is_reported_as_failed_recving_on_owning_rank():
     assert list(worker._unmatched_write_failures) == ["tOtherRank"]
 
 
+def _write_consumer(wrapper: MoRIIOWrapper, defer_timeout: float = 60.0):
+    worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
+    vars(worker).update(
+        is_producer=False,
+        mode=MoRIIOMode.WRITE,
+        moriio_wrapper=wrapper,
+        moriio_config=SimpleNamespace(defer_timeout=defer_timeout),
+        transfer_id_to_request_id={},
+        _unmatched_write_completions=OrderedDict(),
+        _num_expired_write_completions=0,
+    )
+    return worker
+
+
+def _write_done(wrapper: MoRIIOWrapper, *transfer_ids: str) -> None:
+    with patch.object(moriio_engine, "get_role", return_value=ROLE.CONSUMER):
+        for tid in transfer_ids:
+            wrapper._handle_structured_message(
+                {"type": "write_done", "transfer_id": tid}
+            )
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock():
+    c = _Clock()
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.time", c
+    ):
+        yield c
+
+
+def test_write_done_before_its_mapping_is_reported_once_mapped(clock):
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper)
+    _write_done(wrapper, "tA")
+
+    assert worker.get_finished() == (set(), set())
+    clock.now += 30
+    worker.transfer_id_to_request_id = {"tA": "req-1"}
+    assert worker.get_finished() == (set(), {"req-1"})
+    assert not worker._unmatched_write_completions
+
+
+def test_write_done_no_request_matches_is_dropped_after_defer_timeout(clock):
+    """A late write_done for a request that already finished (e.g. aborted
+    while waiting for its KV, which unmaps it) used to stay forever."""
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper, defer_timeout=60.0)
+    _write_done(wrapper, "tGone")
+    assert worker.get_finished() == (set(), set())
+
+    # A repeat does not restart its clock.
+    clock.now += 59
+    _write_done(wrapper, "tGone")
+    assert worker.get_finished() == (set(), set())
+    assert list(worker._unmatched_write_completions) == ["tGone"]
+
+    clock.now += 2
+    assert worker.get_finished() == (set(), set())
+    assert not worker._unmatched_write_completions
+    assert worker._num_expired_write_completions == 1
+
+
+def test_unmatched_write_done_backlog_is_capped(clock):
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+        moriio_connector,
+    )
+
+    cap = moriio_connector._MAX_UNMATCHED_WRITE_COMPLETIONS
+    wrapper = _real_wrapper()
+    worker = _write_consumer(wrapper)
+    _write_done(wrapper, *(f"t{i}" for i in range(cap + 10)))
+
+    worker.get_finished()
+
+    assert len(worker._unmatched_write_completions) == cap
+    assert worker._num_expired_write_completions == 10
+
+
 def test_write_rejects_unmappable_tp_before_scheduling_any_layer():
     from unittest.mock import Mock
 

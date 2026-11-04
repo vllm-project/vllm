@@ -327,8 +327,9 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
-        #                     READ release notification (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation, a missing
+        #                     READ release notification, or a WRITE completion
+        #                     no request matches (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
 
