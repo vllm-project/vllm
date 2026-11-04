@@ -39,6 +39,8 @@ __all__ = [
     "get_layerwise_info",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
+    "stage_layer_for_reload",
+    "unstage_layer",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
     "max_layer_reload_bytes",
@@ -118,23 +120,42 @@ def initialize_layerwise_reload(
     model._do_torchao_reload = False
 
     for layer in model.modules():
-        info = get_layerwise_info(layer)
+        stage_layer_for_reload(layer, defer_processing=defer_processing)
 
-        # Skip if the layer has already been initialized
-        if info.can_load():
-            continue
 
-        # Save current tensors for later copying
-        info.kernel_tensors = get_layer_params_buffers(layer)
-        # snapshot now: restore_layer_on_meta drops alias buffers from the live set
-        info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+def stage_layer_for_reload(
+    layer: torch.nn.Module, *, defer_processing: bool = False
+) -> None:
+    """Keep the layer's kernel tensors aside and restore it on the meta device:
+    its wrapped loaders buffer the checkpoint tensors until the layer is
+    complete, then process it and copy the result into the kernel tensors.
+    A layer already staged is left as is."""
+    info = get_layerwise_info(layer)
 
-        # Restore layer parameters/buffers onto meta device
-        restore_layer_on_meta(layer, info)
+    # Skip if the layer has already been initialized
+    if info.can_load():
+        return
 
-        # Wrap weight loaders to buffer loading
-        initialize_online_processing(layer)
-        info.defer_processing = defer_processing
+    # Save current tensors for later copying
+    info.kernel_tensors = get_layer_params_buffers(layer)
+    # snapshot now: restore_layer_on_meta drops alias buffers from the live set
+    info.kernel_non_persistent_buffers = set(layer._non_persistent_buffers_set)
+
+    # Restore layer parameters/buffers onto meta device
+    restore_layer_on_meta(layer, info)
+
+    # Wrap weight loaders to buffer loading
+    initialize_online_processing(layer)
+    info.defer_processing = defer_processing
+
+
+def unstage_layer(layer: torch.nn.Module) -> None:
+    """Undo `stage_layer_for_reload`: put the kernel tensors back and drop
+    what the loaders buffered."""
+    info = get_layerwise_info(layer)
+    if info.kernel_tensors is not None:
+        _place_kernel_tensors(layer, info)
+    info.reset()
 
 
 def initialize_online_processing(layer: torch.nn.Module):

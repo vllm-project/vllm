@@ -11,7 +11,9 @@ post-load processing has the hazards found on real models:
     registered as a retired parameter (NVFP4 ``weight_scale_2``);
 (e) post-load processing that must never run on converted bytes (packing);
 (f) post-load processing grows a weight (padding): a reload writes it into
-    the existing storage to keep its address.
+    the existing storage to keep its address;
+(g) online quantization: the kernel tensor cannot hold the BF16 checkpoint
+    tensor, which is staged and quantized as at cold start.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -28,10 +30,18 @@ from vllm.model_executor.layers.quantization.online.base import OnlineQuantizati
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
-from vllm.model_executor.model_loader.reload import finish_reload, start_reload
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    finish_reload,
+    record_metadata_for_reloading,
+    start_reload,
+)
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -94,6 +104,12 @@ def _pad(layer):  # (f): kernel layout larger than the checkpoint's
     replace_parameter(layer, "weight", torch.nn.functional.pad(layer.weight, (0, 4)))
 
 
+def _quantize_int8(layer):  # (g): BF16 checkpoint tensor, int8 kernel tensor
+    scale = layer.weight.float().abs().amax() / 127
+    replace_parameter(layer, "weight", (layer.weight / scale).round().to(torch.int8))
+    replace_parameter(layer, "weight_scale", scale)
+
+
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -102,6 +118,7 @@ _SHAPES = {
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
+    "online.weight": ((4, 4), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -110,7 +127,22 @@ _PWAL = {
     "nvfp4": _consume_scale_2,
     "engram": _pack,
     "pad": _pad,
+    "online": _quantize_int8,
 }
+
+
+class _OnlineMethod(_Method):
+    """As the online quantization methods: the checkpoint tensor is created on
+    meta, the layerwise loaders stage it and quantize once the layer is
+    complete, and a guard keeps post-load processing from quantizing again."""
+
+    uses_meta_device = True
+
+    def process_weights_after_loading(self, layer):
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+        super().process_weights_after_loading(layer)
+        layer._already_called_process_weights_after_loading = True
 
 
 class _Layer(torch.nn.Module):
@@ -131,8 +163,15 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
-            param = torch.nn.Parameter(torch.empty(shape, dtype=dtype), False)
+            online = name.startswith("online.")
+            param = torch.nn.Parameter(
+                torch.empty(shape, dtype=dtype, device="meta" if online else None),
+                False,
+            )
             parent.register_parameter(local, param)
+            if online:  # as the online methods' create_weights
+                parent.quant_method = _OnlineMethod(_PWAL["online"])
+                initialize_online_processing(parent)
 
     def load_weights(self, weights):
         params = dict(self.named_parameters())
@@ -159,7 +198,9 @@ def _cold_start(weights: dict[str, torch.Tensor]) -> _ToyModel:
     """As ``BaseModelLoader.load_model`` does."""
     with _DEVICE:
         model = _ToyModel()
+        record_metadata_for_reloading(model)
     model.load_weights(weights.items())
+    finalize_layerwise_processing(model, _MODEL_CONFIG)
     process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
     return model
 
@@ -248,6 +289,7 @@ class TestReloadEqualsColdStart:
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
             ["pad.weight"],
+            ["online.weight", "online.weight_scale"],
         ],
         ids=[
             "a-parent-derived",
@@ -256,6 +298,7 @@ class TestReloadEqualsColdStart:
             "d-consumed-scale",
             "e-not-idempotent",
             "f-grows",
+            "g-online-quant",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
@@ -297,10 +340,10 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_quantization_refused(self, monkeypatch):
-        # finish clears the guard that keeps online quantization from
-        # quantizing its converted bytes again
+    def test_online_requantization_refused(self, monkeypatch):
+        # post-load processing releases the checkpoint parameters it dequantizes
         online = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        online.uses_meta_device = False  # as set_requantization_source
         init = _ToyModel.__init__
 
         def with_online_layer(self):
@@ -308,7 +351,7 @@ class TestRefusals:
             self.proj.quant_method = online
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online quantization"):
+        with pytest.raises(RuntimeError, match="online requantization"):
             _cold_start(_checkpoint())
 
     def test_online_shared_experts_refused(self, monkeypatch):
@@ -320,7 +363,7 @@ class TestRefusals:
             self.proj.shared_expert_online_loader = object()
 
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        with pytest.raises(RuntimeError, match="online quantization"):
+        with pytest.raises(RuntimeError, match="fused shared experts"):
             _cold_start(_checkpoint())
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
@@ -557,11 +600,11 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"model_config": SimpleNamespace(quantization="torchao")},
             "torchao",
         ),
-        ("direct", {"quant_config": _ONLINE}, "online quantization"),
+        ("direct", {"quant_config": _ONLINE}, None),
         (
             "direct",
             {"quant_config": SimpleNamespace(online_quantization_config=_ONLINE)},
-            "online quantization",
+            None,
         ),
         ("direct", {"lora_config": object()}, "LoRA"),
         (

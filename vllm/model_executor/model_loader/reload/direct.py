@@ -9,6 +9,12 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
+Online-quantized modules (``quant_method.uses_meta_device``) are the
+exception: their kernel storage cannot hold the BF16 checkpoint tensors. They
+reload the way they cold start: ``begin`` stages them (layerwise), so their
+loaders buffer the checkpoint tensors and quantize once the module is complete,
+copying the result into the kernel tensors.
+
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent.
 """
@@ -24,6 +30,12 @@ from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBa
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
     storage_view,
+)
+
+from .layerwise import (
+    finalize_layerwise_processing,
+    stage_layer_for_reload,
+    unstage_layer,
 )
 
 logger = init_logger(__name__)
@@ -90,14 +102,16 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
-        # also without an online config (experts_int8); fused shared experts
-        # quantize staging parameters that post-load processing deletes
-        if isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase)) or (
-            getattr(module, "shared_expert_online_loader", None) is not None
-        ):
+        # requantization releases the checkpoint parameters it dequantizes;
+        # fused shared experts quantize staging parameters that post-load
+        # processing deletes
+        if (
+            isinstance(method, (OnlineLinearBase, OnlineMoEMethodBase))
+            and not method.uses_meta_device
+        ) or getattr(module, "shared_expert_online_loader", None) is not None:
             raise RuntimeError(
-                f"direct reload: online quantization is not supported "
-                f"({name}: {type(method).__name__})"
+                f"direct reload: online requantization and fused shared experts "
+                f"are not supported ({name}: {type(method).__name__})"
             )
         if isinstance(method, (HummingLinearMethod, HummingMoEMethod)):
             # its post-load processing runs once per quant method (a guard on
@@ -145,6 +159,14 @@ def _check_params_kept(model: torch.nn.Module) -> None:
             f"of {len(replaced)} checkpoint tensors (e.g. {replaced[:3]}); keep "
             "it with `replace_parameter` / `retire_parameter` instead"
         )
+
+
+def _online_quant_modules(model: torch.nn.Module) -> list[torch.nn.Module]:
+    return [
+        m
+        for m in model.modules()
+        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
+    ]
 
 
 def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
@@ -196,6 +218,9 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    online = _online_quant_modules(model)
+    for module in online:  # still staged if an update was aborted
+        unstage_layer(module)
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
@@ -209,6 +234,8 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+    for module in online:
+        stage_layer_for_reload(module)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
@@ -230,11 +257,18 @@ def finish_direct_reload(
     if device.type != "cpu":
         torch.accelerator.synchronize()  # engines may write on other streams
 
+    # Staged online-quantized modules the loaders did not complete (padding)
+    # quantize now; one the update left out gets its kernel tensors back.
+    # Before the rerun: parents read them (MLA dequantizes kv_b_proj).
+    finalize_layerwise_processing(model, model_config)
+
     # One-shot "already processed" guards would make the rerun below a no-op
     # and leave the freshly written checkpoint layout in place. Only quant
-    # methods' guards: other modules set it for other reasons.
+    # methods' guards: other modules set it for other reasons. Online
+    # quantization keeps its guard: it would quantize its kernel bytes again.
     for module in model.modules():
-        if isinstance(getattr(module, "quant_method", None), QuantizeMethodBase):
+        method = getattr(module, "quant_method", None)
+        if isinstance(method, QuantizeMethodBase) and not method.uses_meta_device:
             module.__dict__.pop("_already_called_process_weights_after_loading", None)
 
     process_weights_after_loading(model, model_config, device)
