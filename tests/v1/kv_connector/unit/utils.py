@@ -76,6 +76,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.requests) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.kv_holding_waiting) == 0
+    assert len(scheduler.async_kv_waiting) == 0
     assert not scheduler.deferred_waiting
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
@@ -83,6 +84,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler._inflight_prefills) == 0
     assert not scheduler._kv_fetch_stages
     assert not any(scheduler._kv_fetch_counts.values())
+    assert not scheduler._aborted_kv_loads
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
