@@ -240,16 +240,26 @@ Configure it with `algorithm="synthid_text"` and `depth`, which defaults to 22:
 ```bash
 vllm serve MODEL \
   --watermark-config \
-  '{"algorithm":"synthid_text","key":42,"context_width":4,"depth":32}'
+  '{"algorithm":"synthid_text","key":42,"context_width":4,"depth":22}'
 ```
 
 `depth` controls the number of tournament-sampling layers, must be between 1
 and 32, and defaults to 22. Higher values strengthen the watermark but add
-sampling overhead.
+sampling overhead. The overhead grows in steps: depths 1 to 11 take one pass
+over the vocabulary for the tournament, depths 12 to 22 take two, and depths 23
+to 32 take three.
+
+On NVIDIA GPUs, SynthID-Text samples with fused kernels that need compute
+capability 8.0 or newer and Triton 3.8 or newer. vLLM refuses to start with
+`synthid_text` on a CUDA GPU that needs the kernels but cannot run them, such as
+with an older Triton or on ROCm. CPUs and GPUs below compute capability 8.0 use
+a torch implementation that is much slower and meant for testing.
 
 `SynthIDWatermarkDetector` implements the corresponding unweighted-mean detector
 using the same generation parameters. Its reported p-value assumes independent
-Bernoulli(0.5) values under the null.
+Bernoulli(0.5) values under the null. Build the detector with the same `depth`
+as the sampler: a sampler of depth `d` only biases the first `d` layers, and a
+detector that reads more layers adds unbiased bits and weakens the score.
 
 ## Pseudorandom functions
 
