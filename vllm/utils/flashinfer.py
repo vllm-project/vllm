@@ -502,6 +502,73 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
 
 
 @functools.cache
+def has_flashinfer_prims_ts_sparse_mla() -> bool:
+    """Return ``True`` if FlashInfer ships the task-scheduled (prims_ts) sparse
+    MLA decode wrapper. Its quantized formats are probed separately by
+    ``prims_ts_sparse_mla_format_error`` once a device is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.attention.prims_ts import (
+            BatchSparseMLADecodePagedTSWrapper,
+            get_prims_ts_sparse_mla_decode_workspace_size,
+        )
+    except ImportError:
+        return False
+    return callable(BatchSparseMLADecodePagedTSWrapper) and callable(
+        get_prims_ts_sparse_mla_decode_workspace_size
+    )
+
+
+@functools.cache
+def prims_ts_sparse_mla_schedules_native_heads() -> bool:
+    """Whether FlashInfer's prims_ts sparse MLA schedules a head count between
+    its qualified 8/16/32/64/128 on the next qualified count's tile (e.g. 96
+    heads on the 2-CTA 128-head schedule), flashinfer-ai/flashinfer#7984.
+    Older builds run 65..127 heads as two M64 tiles that load every KV row
+    twice, so their callers pad such queries to 128 heads instead."""
+    if not has_flashinfer_prims_ts_sparse_mla():
+        return False
+    try:
+        from flashinfer.attention.prims_ts.kernels.mla_decode.sparse_policy import (
+            sparse_policy_heads,
+        )
+    except ImportError:
+        return False
+    return "rope_dim" in inspect.signature(sparse_policy_heads).parameters
+
+
+@functools.cache
+def prims_ts_sparse_mla_format_error(kv_cache_format: str) -> str | None:
+    """Why the installed FlashInfer cannot plan prims_ts sparse MLA (D576, 128
+    E4M3 query heads, LSE) over ``kv_cache_format`` on this GPU, else None.
+
+    Asks the public workspace-size query, which resolves the plan without
+    allocating or compiling (FlashInfer >= the nightly with PR 7410 for
+    "nvfp4.fp8rope")."""
+    if not has_flashinfer_prims_ts_sparse_mla():
+        return "FlashInfer has no prims_ts sparse MLA decode"
+    from flashinfer.attention.prims_ts import (
+        get_prims_ts_sparse_mla_decode_workspace_size,
+    )
+
+    try:
+        get_prims_ts_sparse_mla_decode_workspace_size(
+            torch.device("cuda", torch.accelerator.current_device_index()),
+            1,
+            128,
+            max_topk=2048,
+            q_dtype=torch.float8_e4m3fn,
+            qk_rope_head_dim=64,
+            kv_cache_format=kv_cache_format,
+            return_lse=True,
+        )
+    except (ValueError, NotImplementedError, KeyError, TypeError) as e:
+        return f"FlashInfer prims_ts sparse MLA rejects {kv_cache_format!r}: {e}"
+    return None
+
+
+@functools.cache
 def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
     """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
 
@@ -515,6 +582,34 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
     mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
     dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
     return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
+
+
+@functools.cache
+def has_flashinfer_topk_varlen_gvr2() -> bool:
+    """Return ``True`` if FlashInfer ships the ``gvr_2`` varlen top-k backend
+    (self-sampling GVR V2, ``flashinfer.top_k_varlen(backend="gvr_2")``).
+
+    Feature-detected on the production entry ``run_varlen`` (FlashInfer >=
+    0.7.2: per-row ``kv_lens``, a capture-stable ``max_seq_len`` and the
+    hint-free ``top_k``) and the band-aware ``warmup_varlen`` (``row_stride``)
+    that the dispatcher calls.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.topk_varlen.kernels import gvr2_topk_host
+
+        run_params = inspect.signature(gvr2_topk_host.run_varlen).parameters
+        warmup_params = inspect.signature(gvr2_topk_host.warmup_varlen).parameters
+    except Exception:
+        # The module imports the CuTe DSL; anything it raises means unusable.
+        return False
+    return {"kv_lens", "max_seq_len", "top_k"} <= set(run_params) and {
+        "num_rows_list",
+        "row_stride",
+    } <= set(warmup_params)
 
 
 @functools.cache

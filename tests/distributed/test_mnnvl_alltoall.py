@@ -482,7 +482,9 @@ def _one_sided_workspace_grow_worker(rank, world_size):
         top_k = base_kwargs["top_k"]
         ids = torch.arange(top_k, dtype=torch.int32, device=device).repeat(tokens, 1)
         weights = torch.ones(tokens, top_k, device=device)
-        received = shared.dispatch(x, ids, weights, max_tokens_per_rank=world_size + 2)
+        received = shared.dispatch(
+            x, ids, weights, runtime_max_tokens_per_rank=world_size + 2
+        )
         local = (received.topk_ids >= rank * 8) & (received.topk_ids < (rank + 1) * 8)
         values = received.hidden_states.to(torch.bfloat16)
         expected = x.to(torch.bfloat16)
@@ -1093,7 +1095,7 @@ def _one_sided_data_worker(rank, world_size, *, padded_mxfp8):
                     topk_ids,
                     topk_weights,
                     hidden_states_scale=x_sf,
-                    max_tokens_per_rank=runtime_max_tokens,
+                    runtime_max_tokens_per_rank=runtime_max_tokens,
                 )
                 recv_ids = received.topk_ids
                 local = (recv_ids >= rank * experts_per_rank) & (
@@ -1306,7 +1308,7 @@ def _one_sided_low_precision_worker(rank, world_size):
         topk_ids,
         topk_weights,
         hidden_states_scale=x_sf,
-        max_tokens_per_rank=tokens_per_rank,
+        runtime_max_tokens_per_rank=tokens_per_rank,
     )
 
     expert_output = torch.ones(

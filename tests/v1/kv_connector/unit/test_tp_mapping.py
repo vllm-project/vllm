@@ -22,7 +22,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+)
 
 # ======================================================================
 # Test fixtures / helpers
@@ -322,6 +326,56 @@ class TestMambaPlanSplitHandles:
 
         with pytest.raises(AssertionError, match="Head-sharded"):
             list(worker._build_local_splits_from_plan(plan, src_blocks_data, 2, 2))
+
+    def test_hetero_block_size_head_sharded_draft_splits(self):
+        """A GQA draft under a hybrid MLA target gathers each source rank's
+        heads into its slot of every sub-block; MLA descs are read whole."""
+        plan = TPMapping(
+            source_ranks_per_group=((0,), (0, 1)),
+            all_source_ranks=(0, 1),
+            rank_to_attention_slot={0: 0, 1: 0},
+            rank_offset_factor=0,
+        )
+        draft_plan = TPMapping(
+            source_ranks_per_group=((0, 1), (0, 1)),
+            all_source_ranks=(0, 1),
+            rank_to_attention_slot={0: 0, 1: 1},
+            rank_offset_factor=0,
+        )
+        worker = _make_mock_worker_for_splits((MLAAttentionSpec, MambaSpec))
+        # Regions: MLA (replicated), then the draft; one block each.
+        worker.block_len_per_layer = [200, 400]
+        worker.num_regions = 2
+        worker.region_num_blocks = [1, 1]
+        worker._region_is_mla = [True, False]
+        worker._transfer_layer_region_indices = ()
+        # Block-size ratio 2: each block is two sub-blocks; SSM is never expanded.
+        src_blocks_data = np.array(
+            [
+                (1000, 100, 0, 100, 2),
+                (2000, 200, 0, 200, 2),
+                (3000, 400, 0, 400, 1),
+            ],
+            dtype=np.uint64,
+        )
+
+        splits = list(
+            worker._build_local_splits_from_plan(
+                plan, src_blocks_data, 4, 2, draft_plan
+            )
+        )
+
+        mla = [1000, 100, 0, 100, 2]
+        assert splits[0].tolist() == [
+            mla,
+            [2000, 100, 0, 200, 2],
+            [3000, 200, 0, 400, 1],
+        ]
+        assert splits[1].tolist() == [
+            mla,
+            [2100, 100, 0, 200, 2],
+            [3200, 200, 0, 400, 1],
+        ]
 
 
 @pytest.mark.parametrize(

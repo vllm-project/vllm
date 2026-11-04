@@ -34,6 +34,24 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     cache_reasons,
     weight_reasons,
 )
+from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+
+def test_dsa_layers_use_k2_after_sparse_attention():
+    """Sparse attention supplies gated pre-o_proj activations to K2."""
+    config = KimiLinearConfig(
+        num_hidden_layers=16,
+        num_experts=896,
+        first_k_dense_replace=1,
+        attn_res_block_size=12,
+        linear_attn_config={
+            "kda_layers": [i for i in range(1, 17) if i % 4],
+            "full_attn_layers": [4, 8, 12, 16],
+        },
+        dsa_config={"dsa_layers": [4, 8, 12, 16]},
+    )
+    kinds = layer_kinds(config)
+    assert kinds == {i: WHOLE if config.is_kda_layer(i) else FFN for i in range(1, 16)}
 
 
 def _vllm_config(**over) -> SimpleNamespace:
@@ -112,13 +130,15 @@ def _k3_text_config():
     """Kimi-K3's layer pattern: 93 layers, MLA every 4th, AttnRes blocks of 12,
     layer 0 dense."""
     mla = {i for i in range(93) if i % 4 == 3} | {92}
-    return SimpleNamespace(
+    return KimiLinearConfig(
         num_hidden_layers=93,
         attn_res_block_size=12,
         num_experts=896,
         first_k_dense_replace=1,
-        moe_layer_freq=1,
-        is_kda_layer=lambda i: i not in mla,
+        linear_attn_config={
+            "kda_layers": [i + 1 for i in range(93) if i not in mla],
+            "full_attn_layers": [i + 1 for i in sorted(mla)],
+        },
     )
 
 

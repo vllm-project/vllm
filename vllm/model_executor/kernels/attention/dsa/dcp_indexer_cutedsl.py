@@ -23,6 +23,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
 )
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import dcp_local_to_global_index
 
 
 def _dcp_merge_topk_and_interleave(vllm_config: Any) -> tuple[int, int]:
@@ -161,10 +162,8 @@ class PackDCPTopkCandidatesKernel(
             other=-float("inf"),
         )
 
-        global_id = (
-            (safe_local_idx // CP_INTERLEAVE) * (DCP_WORLD_SIZE * CP_INTERLEAVE)
-            + DCP_RANK * CP_INTERLEAVE
-            + safe_local_idx % CP_INTERLEAVE
+        global_id = dcp_local_to_global_index(
+            safe_local_idx, DCP_RANK, DCP_WORLD_SIZE, CP_INTERLEAVE
         )
         global_id = tl.where(valid, global_id, -1)
 

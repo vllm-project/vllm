@@ -12,6 +12,10 @@ layer loop. The TP all-reduces run in-kernel over peer memory.
   top-16, MXFP4 experts, shared experts, latent all-reduce + RMSNorm, up_proj,
   final all-reduce).
 
+Kimi-K3.1 DSA layers run their indexer and sparse MLA normally, then pass the
+gated attention output to K2 for o_proj and the latent MoE. Eligible KDA layers
+retain K1/K2. Prefill and unsupported decode batches use the standard layer path.
+
 The kernels read vLLM's loaded weights and KDA states in place. Nothing is copied
 or re-quantized.
 

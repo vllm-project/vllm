@@ -102,6 +102,18 @@ def test_override_does_not_mutate_the_target_config():
     assert cfg.attention_config.backend == "FLASHINFER"
 
 
+def test_cache_dtype_override_keeps_the_block_size_origin():
+    cache_config = CacheConfig()
+    cache_config.block_size = 1088  # resolved, not user-specified
+    cfg = _config("FLASHMLA_SPARSE", None)
+    cfg.cache_config = cache_config
+    cfg.speculative_config.kv_cache_dtype = "fp8"
+
+    used = _capture_draft_config(cfg).cache_config
+    assert (used.cache_dtype, used.block_size) == ("fp8", 1088)
+    assert not used.user_specified_block_size
+
+
 def test_draft_attn_builders_get_overrides_and_keep_resolved_cache_state():
     """The draft's metadata builders read the same kernel overrides as its
     layers, without losing state the engine core resolved on the target, e.g.

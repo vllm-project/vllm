@@ -25,7 +25,7 @@ use crate::parser::unified::{HfTemplateError, ResponseTemplate};
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
 use crate::renderer::{
     DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DeepSeekV41ChatRenderer, DynChatRenderer,
-    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer,
+    HarmonyChatRenderer, InklingChatRenderer, KimiK3ChatRenderer, KimiK3Variant,
 };
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -98,6 +98,7 @@ impl HfChatBackend {
             RendererSelection::KimiK3 => Arc::new(KimiK3ChatRenderer::new(
                 tokenizer.clone(),
                 options.default_chat_template_kwargs,
+                KimiK3Variant::from_model_type(model_type),
             )),
         };
 
@@ -238,7 +239,7 @@ mod tests {
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest, ResolvedToolContext};
-    use crate::{ChatTool, ParserSelection, RendererSelection};
+    use crate::{ChatTool, EffortValue, ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -329,6 +330,25 @@ mod tests {
         assert_eq!(
             prompt,
             "<｜begin▁of▁sentence｜><｜User｜>hello<｜Assistant｜></think>"
+        );
+    }
+
+    #[test]
+    fn auto_uses_kimi_k3_renderer_with_k31_efforts_for_kimi_k31_model_type() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"kimi_k31"}"#,
+            r#"{}"#,
+        );
+        let mut request = request_with_user_text("hello");
+        request.chat_options.reasoning_effort = Some(EffortValue::from("medium"));
+
+        let rendered = backend.chat_renderer().render(&request).unwrap();
+
+        assert!(matches!(rendered.prompt, Prompt::TokenIds(_)));
+        assert_eq!(
+            rendered.effective_template_kwargs["thinking_effort"],
+            "medium"
         );
     }
 

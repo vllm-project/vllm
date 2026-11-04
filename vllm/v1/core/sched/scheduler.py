@@ -145,6 +145,26 @@ class Scheduler(SchedulerInterface):
             self.scheduler_config.long_prefill_token_threshold_adaptive
         )
         self.max_model_len = vllm_config.model_config.max_model_len
+        # DCP ShardQ (sparse MLA) gathers each step's prefill rows' context
+        # into a fixed workspace: keep the rows' context pages within it so
+        # no prefill step falls back to the DCP path whole.
+        self.max_prefill_context_pages: int | None = None
+        if (
+            vllm_config.attention_config.sparse_mla_shard_q
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+        ):
+            from vllm.v1.attention.ops.dcp_shardq.context import (
+                PAGE_TOKENS,
+                scheduler_context_pages,
+            )
+
+            self.max_prefill_context_pages = scheduler_context_pages(vllm_config)
+            self.prefill_context_page_tokens = PAGE_TOKENS
+            spec_config = vllm_config.speculative_config
+            # Rows of more tokens than this are prefill rows to ShardQ.
+            self.max_decode_row_tokens = 1 + (
+                spec_config.num_speculative_tokens if spec_config else 0
+            )
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
@@ -696,6 +716,19 @@ class Scheduler(SchedulerInterface):
             num_new_tokens -= self.num_prefill_lookahead - remaining
         return max(num_new_tokens, 0)
 
+    def _prefill_context_pages(
+        self, num_computed_tokens: int, num_new_tokens: int
+    ) -> int:
+        """Workspace pages a row adds to a DCP ShardQ step (0 for decode rows
+        or without the cap)."""
+        if (
+            self.max_prefill_context_pages is None
+            or num_new_tokens <= self.max_decode_row_tokens
+        ):
+            return 0
+        page = self.prefill_context_page_tokens
+        return -(-(num_computed_tokens + num_new_tokens) // page)
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -739,6 +772,9 @@ class Scheduler(SchedulerInterface):
         prefill_admitted = False
         # Whether any scheduled request has a synchronous connector KV load.
         has_sync_kv_loads = False
+
+        # Workspace pages of this step's prefill rows (DCP ShardQ).
+        prefill_context_pages = 0
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -908,6 +944,19 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            context_pages = self._prefill_context_pages(
+                request.num_computed_tokens, num_new_tokens
+            )
+            if (
+                context_pages
+                and prefill_context_pages
+                and prefill_context_pages + context_pages
+                > self.max_prefill_context_pages
+            ):
+                # The DCP ShardQ workspace cannot hold this row's context too.
+                req_index += 1
+                continue
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -994,6 +1043,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             # Schedule the request.
+            prefill_context_pages += context_pages
             scheduled_running_reqs.append(request)
             prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
@@ -1397,6 +1447,20 @@ class Scheduler(SchedulerInterface):
                         skip_request(request_queue)
                         continue
 
+                context_pages = self._prefill_context_pages(
+                    num_computed_tokens, num_new_tokens
+                )
+                if (
+                    context_pages
+                    and prefill_context_pages
+                    and prefill_context_pages + context_pages
+                    > self.max_prefill_context_pages
+                ):
+                    # The DCP ShardQ workspace cannot hold this row's context
+                    # too; requeue it for a later step.
+                    skip_request(request_queue)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1569,6 +1633,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
+                prefill_context_pages += context_pages
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 self._set_kv_fetch_stage(request, None)

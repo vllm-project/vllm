@@ -27,7 +27,7 @@ pub use deepseek_v32::DeepSeekV32ChatRenderer;
 pub use deepseek_v41::DeepSeekV41ChatRenderer;
 pub use harmony::HarmonyChatRenderer;
 pub use inkling::InklingChatRenderer;
-pub use kimi_k3::KimiK3ChatRenderer;
+pub use kimi_k3::{KimiK3ChatRenderer, KimiK3Variant};
 pub use selection::RendererSelection;
 
 /// Location of one multimodal content part in the source chat request.

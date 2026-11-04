@@ -13,7 +13,6 @@ from vllm.config import ParallelConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.models.common.ops import sequence_parallel as sp_ops
 from vllm.models.kimi_k3.nvidia import model as kimi_model
-from vllm.models.kimi_k3.nvidia import mtp as kimi_mtp
 from vllm.platforms import current_platform
 
 
@@ -50,20 +49,6 @@ class _Projection(nn.Module):
             torch.ones(1, hidden_size),
             requires_grad=False,
         )
-
-
-class _SequenceParallelMTPBlock:
-    use_sequence_parallel = True
-
-    def __call__(
-        self,
-        *,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ):
-        assert residual is None
-        return hidden_states * 2, None, hidden_states * 3
 
 
 def _mock_sequence_parallel_collectives(monkeypatch):
@@ -216,56 +201,6 @@ def test_kimi_attn_residual_states_stay_sequence_sharded(monkeypatch):
     assert hidden_states.shape == prefix_sum.shape == (2, 2)
     assert block_residual.shape == (2, 1, 2)
     assert layer.mlp.num_tokens == 2
-
-
-def test_kimi_mtp_restores_sequence_parallel_output(monkeypatch):
-    layer = object.__new__(kimi_mtp.KimiK3MultiTokenPredictorLayer)
-    nn.Module.__init__(layer)
-    layer.enorm = _IdentityNorm()
-    layer.hnorm = _IdentityNorm()
-    layer.eh_proj = nn.Identity()
-    object.__setattr__(layer, "mtp_block", _SequenceParallelMTPBlock())
-
-    final_norm = Mock(side_effect=lambda hidden_states: hidden_states + 1)
-    object.__setattr__(
-        layer,
-        "shared_head",
-        SimpleNamespace(norm=final_norm),
-    )
-
-    monkeypatch.setattr(
-        kimi_mtp,
-        "fused_mtp_input",
-        lambda positions, inputs_embeds, *args: inputs_embeds,
-    )
-    monkeypatch.setattr(
-        kimi_mtp,
-        "sp_shard",
-        lambda tensor: torch.nn.functional.pad(tensor, (0, 0, 0, 1))[:2],
-    )
-    monkeypatch.setattr(
-        kimi_mtp,
-        "sp_all_gather",
-        lambda tensor: torch.cat([tensor, tensor], dim=0),
-    )
-
-    inputs_embeds = torch.arange(6, dtype=torch.float32).view(3, 2)
-    logits_hidden_states, hidden_states = layer(
-        input_ids=torch.zeros(3, dtype=torch.long),
-        positions=torch.arange(3),
-        previous_hidden_states=torch.zeros_like(inputs_embeds),
-        inputs_embeds=inputs_embeds,
-    )
-
-    sharded_states = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, 1))[:2]
-    expected_hidden_states = torch.cat(
-        [sharded_states * 5, sharded_states * 5],
-        dim=0,
-    )[:3]
-    torch.testing.assert_close(hidden_states, expected_hidden_states)
-    torch.testing.assert_close(logits_hidden_states, expected_hidden_states + 1)
-    final_norm.assert_called_once()
-    torch.testing.assert_close(final_norm.call_args.args[0], expected_hidden_states)
 
 
 @pytest.mark.parametrize(

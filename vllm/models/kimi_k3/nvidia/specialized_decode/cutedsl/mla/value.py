@@ -93,3 +93,59 @@ class MlaValue:
                         for e in range(2)
                     )
                 store_words(at(output, t, col), (bf16x2(lo, hi),))
+
+
+# Rows from which the value projection of many local heads (TP1 / DEP: 96) runs as
+# one batched GEMM over the heads (cuBLAS, the stock decode's W_UV bmm: FP32
+# accumulation, one BF16 rounding) and MlaGate, instead of MlaValue, whose CTAs (32
+# outputs, head, 16 rows) each stage their W_UV slice (32 KB) again for every
+# 16-row tile and run mma.sync. GB300 TP1 DSA layer, us (32K / AgentX): 40 rows
+# 152.4 / 165.1 -> 153.2 / 166.4, 80 rows 192.1 / 206.3 -> 186.2 / 200.2, 320 rows
+# 408.8 / 460.9 -> 375.0 / 426.9 (MlaValue 16.1 / 50.0 us CUPTI at 80 / 320 rows,
+# MlaGate 5.1 / 7.4 plus the bmm). At TP8 (12 heads) MlaValue is 4-9 us and the
+# layer ties (80-320 rows within 0.5 us): MlaValue stays.
+VALUE_BMM_FROM = 64
+VALUE_BMM_HEADS = 64
+
+
+def value_bmm(heads: int, batch: int) -> bool:
+    """Whether ``batch`` rows of ``heads`` local heads take the batched GEMM."""
+    return heads >= VALUE_BMM_HEADS and batch >= VALUE_BMM_FROM
+
+
+class MlaGate:
+    """The sigmoid gate of the W_UV output rows: ``values`` [H, B, 128] BF16 (the
+    batched GEMM's), ``gate`` [B, H * 128] -> ``output`` [B, H * 128], as MlaValue
+    rounds and gates them (BF16 value times the FP32 sigmoid, rounded to BF16;
+    rows of empty requests zero). One 256-thread CTA per (16 rows, head): each
+    thread 8 outputs of one row."""
+
+    def __init__(self, heads: int, batch: int, q: int = 1):
+        self.heads, self.batch, self.q = heads, batch, q
+        self.grid = ((batch + 15) // 16, heads, 1)
+
+    @cute.jit
+    def __call__(self, *args):
+        launch(self.kernel, args, self.grid, 256)
+
+    @cute.kernel
+    def kernel(self, args):
+        values, gate, lengths, output = args
+        tid, _, _ = cute.arch.thread_idx()
+        tile, head, _ = cute.arch.block_idx()
+        t, chunk = tile * 16 + tid // 16, tid % 16
+        cute.arch.griddepcontrol_wait()
+        cute.arch.griddepcontrol_launch_dependents()
+        if t < self.batch:
+            col = head * 128 + chunk * 8
+            words = load_words(at(values, head, t, chunk * 8), count=4, mutable=True)
+            gates = load_words(at(gate, t, col), count=4, mutable=True)
+            out = []
+            for e in cutlass.range_constexpr(4):
+                v, g = unpack_bf16(words[e]), unpack_bf16(gates[e])
+                # Padded rows may hold a NaN gate; keep inactive rows zero.
+                lo, hi = Float32(0), Float32(0)
+                if lengths[t // self.q] > 0:
+                    lo, hi = (v[k] * sigmoid(g[k], False) for k in range(2))
+                out.append(bf16x2(lo, hi))
+            store_words(at(output, t, col), tuple(out))

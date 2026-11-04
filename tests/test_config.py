@@ -355,11 +355,10 @@ def test_mismatched_float_kv_cache_is_rejected(cache_dtype, model_dtype, should_
 
 
 @pytest.mark.parametrize("dcp_size", [1, 2])
-def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
-    # The nvfp4_ds_mla chunked-context gather is not validated under DCP, so
-    # the combination fails at startup instead of on the first request that
-    # carries cached context.
-    kwargs = dict(
+def test_nvfp4_ds_mla_accepts_decode_context_parallelism(dcp_size):
+    # The nvfp4_ds_mla chunked-context gather reads each rank's local context
+    # from its chunk start, as fp8_ds_mla does, so DCP is supported.
+    VllmConfig(
         cache_config=CacheConfig(cache_dtype="nvfp4_ds_mla"),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
@@ -368,11 +367,6 @@ def test_nvfp4_ds_mla_rejects_decode_context_parallelism(dcp_size):
             distributed_executor_backend="mp",
         ),
     )
-    if dcp_size > 1:
-        with pytest.raises(ValueError, match="decode context parallelism"):
-            VllmConfig(**kwargs)
-    else:
-        VllmConfig(**kwargs)
 
 
 def test_per_request_spec_decode_metrics_requires_spec_decode():

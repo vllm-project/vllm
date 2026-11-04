@@ -203,9 +203,8 @@ class AiterMxfp4LinearKernel(MxFp4LinearKernel):
         # Use preshuffled ASM (P) and Triton (D) GEMM when tuned in aiter
         if self.asm_gemm_supported:
             n, k_bytes = layer.weight.shape
-            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(
-                n, k_bytes
-            ) and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(n, k_bytes)
+            # The optional small-M Triton path checks its own tuning at dispatch.
+            self.use_asm_gemm = rocm_aiter_ops.is_asm_fp4_gemm_tuned(n, k_bytes)
 
         if self.use_asm_gemm and not _asm_fp4_scale_swizzle_supported(
             layer.weight_scale.data

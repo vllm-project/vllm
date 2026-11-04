@@ -7,7 +7,7 @@ from functools import partial, wraps
 
 import cutlass
 import cutlass.cute as cute
-from cutlass import Float32, Float64, Int32, Int64, Uint8, Uint16, Uint32, Uint64
+from cutlass import Float32, Int32, Int64, Uint8, Uint16, Uint32, Uint64
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.experimental import primitives as nvvm
@@ -127,18 +127,62 @@ def inv_rms(value, eps, *, m8=False):
 
 
 @asm(Float32, pure=True)
-def query_norm_rsqrt(total: Float32, eps: Float32):
-    code = "{ .reg .f32 mean; div.rn.f32 mean,$1,0f44c00000; "
-    code += "add.f32 mean,mean,$2; rsqrt.approx.f32 $0,mean; }"
+def query_norm_rsqrt(total: Float32, eps: Float32, *, triton: bool = False):
+    """rsqrt(total / 1536 + eps) of the q_a RMSNorm as the stock layer computes it:
+    vllm_c's rms_norm (IEEE divide; K3.1 DSA), or ``triton`` K3 MLA's Triton
+    fused_q_kv_rmsnorm (Triton's fp32 divide)."""
+    divide = "div.full.f32" if triton else "div.rn.f32"
+    rsqrt = "rsqrt.approx.ftz.f32" if triton else "rsqrt.approx.f32"
+    code = f"{{ .reg .f32 mean; {divide} mean,$1,0f44c00000; "
+    code += f"add.f32 mean,mean,$2; {rsqrt} $0,mean; }}"
     return code, "=f,f,f", (total, eps)
 
 
-@asm(Float64, pure=True)
-def reciprocal64(value: Float64):
-    step = "fma.rn.f64 e,n,r,0d3ff0000000000000; fma.rn.f64 {},r,e,r; "
-    code = "{ .reg .f64 r,e,n; neg.f64 n,$1; rcp.approx.ftz.f64 r,$1; "
-    code += step.format("r") * 2 + step.format("$0") + "}"
-    return code, "=d,d", (value,)
+@asm(Float32, pure=True)
+def attn_res_rstd(total: Float32, eps: Float32, scale=None):
+    """rsqrtf(total / 7168 + eps) as attn_res_kernel.cu compiles it (--use_fast_math);
+    with ``scale`` its fused output norm's rsqrtf(total / 7168 + eps * scale * scale).
+    """
+    code = "{ .reg .f32 m,t; div.approx.ftz.f32 m,$1,0f45E00000; "
+    if scale is None:
+        code += "add.ftz.f32 m,m,$2; rsqrt.approx.ftz.f32 $0,m; }"
+        return code, "=f,f,f", (total, eps)
+    code += "mul.ftz.f32 t,$2,$3; fma.rn.ftz.f32 m,t,$3,m; rsqrt.approx.ftz.f32 $0,m; }"
+    return code, "=f,f,f,f", (total, eps, Float32(scale))
+
+
+@asm(Float32, pure=True)
+def rms_norm_rstd(total: Float32, eps: Float32):
+    """rsqrt(total / 7168 + eps) of vllm_c's rms_norm of a 7168-wide row (IEEE
+    divide)."""
+    code = "{ .reg .f32 m; div.rn.f32 m,$1,0f45E00000; add.rn.f32 m,m,$2; "
+    code += "rsqrt.approx.f32 $0,m; }"
+    return code, "=f,f,f", (total, eps)
+
+
+@asm(Float32, pure=True)
+def rcp_approx(value: Float32):
+    """1.f / value under --use_fast_math."""
+    return "rcp.approx.ftz.f32 $0,$1;", "=f,f", (value,)
+
+
+@asm(Float32, pure=True)
+def ds_tile_scale(amax: Float32):
+    """The fp8_ds_mla tile scale exp2f(ceilf(log2f(max(amax / 448, 1e-4)))) as the
+    stock writer concat_and_cache_ds_mla computes it: an IEEE divide, libdevice's
+    log2f (inlined below) and an exact ex2 of the integer."""
+    poly = ("0fBE2C7F30", "0f3E2FCF2A", "0fBE374E43", "0f3E520BF4", "0fBE763C8B")
+    poly += ("0f3E93BF99", "0fBEB8AA49", "0f3EF6384A", "0fBF38AA3B")
+    code = "{ .reg .f32 x,m,e,t,p; .reg .b32 b,k; "
+    code += "div.rn.f32 x,$1,0f43E00000; max.f32 x,x,0f38D1B717; "
+    code += "mov.b32 b,x; add.s32 k,b,-1060439283; and.b32 k,k,-8388608; "
+    code += "sub.s32 b,b,k; mov.b32 m,b; cvt.rn.f32.s32 e,k; "
+    code += "fma.rn.f32 e,e,0f34000000,0f00000000; add.f32 t,m,0fBF800000; "
+    code += f"fma.rn.f32 p,t,0f3DC6B27F,{poly[0]}; "
+    code += "".join(f"fma.rn.f32 p,p,t,{c}; " for c in poly[1:])
+    code += "mul.f32 m,t,p; mul.f32 m,t,m; fma.rn.f32 m,t,0f3FB8AA3B,m; "
+    code += "add.f32 e,e,m; cvt.rpi.f32.f32 e,e; ex2.approx.f32 $0,e; }"
+    return code, "=f,f", (amax,)
 
 
 @asm(Float32, pure=True)
@@ -187,27 +231,75 @@ def routing_weight(score: Float32, total: Float32, scale: Float32, *, renorm=Tru
 
 
 @asm(Float32, pure=True)
-def situ(g: Float32, u: Float32, beta_lb: Float32, inv_beta: Float32, inv_lb: Float32):
-    code = "{ .reg .f32 tg,tu,ex,rc,z; mul.f32 tg,$1,$4; tanh.approx.f32 tg,tg; "
-    code += "mul.f32 tu,$2,$5; tanh.approx.f32 tu,tu; mul.f32 z,$1,0fbfb8aa3b; "
-    code += "ex2.approx.ftz.f32 ex,z; add.f32 ex,ex,0f3f800000; "
-    code += "rcp.approx.ftz.f32 rc,ex; mul.f32 z,$3,tg; mul.f32 z,z,rc; "
-    code += "mul.f32 $0,z,tu; }"
-    return code, "=f,f,f,f,f,f", (g, u, beta_lb, inv_beta, inv_lb)
+def situ(g, u, beta, linear_beta, inv_beta, inv_linear_beta):
+    """Routed-expert SiTU as the stock trtllm-gen FC1 epilogue computes it from the
+    FP32 accumulators: (beta * tanh(g * inv_beta) * sigmoid(g)) * (linear_beta *
+    tanh(u * inv_linear_beta)), in that order, with tanh.approx and sigmoid as
+    rcp.approx(1 + ex2.approx(-g log2 e))."""
+    code = "{ .reg .f32 tg,tu,ex,rc,z; mul.rn.f32 tg,$1,$5; tanh.approx.f32 tg,tg; "
+    code += "mul.rn.f32 tu,$2,$6; tanh.approx.f32 tu,tu; mul.rn.f32 z,$1,0fbfb8aa3b; "
+    code += "ex2.approx.ftz.f32 ex,z; add.rn.f32 ex,ex,0f3f800000; "
+    code += "rcp.approx.ftz.f32 rc,ex; mul.rn.f32 z,$3,tg; mul.rn.f32 z,z,rc; "
+    code += "mul.rn.f32 tu,$4,tu; mul.rn.f32 $0,z,tu; }"
+    operands = (g, u, beta, linear_beta, inv_beta, inv_linear_beta)
+    return code, "=f,f,f,f,f,f,f", tuple(map(Float32, operands))
+
+
+@asm(Float32, pure=True)
+def situ_tanh(x: Float32):
+    """``tanhf`` of the ``_C`` situ_and_mul kernel (csrc/activation_kernels.cu, built
+    without fast math), from its PTX: an odd polynomial below 0.6, else copysign(1 - 2
+    / (1 + ex2.approx.ftz(2|x| log2 e)), x) with rcp.approx.ftz, 1 from 9.01; non-FTZ
+    multiplies and FMAs."""
+    code = (
+        "{ .reg .f32 a,y,e,r,t,q,p,s; .reg .pred big,sat;\n"
+        "abs.f32 a,$1; mul.rn.f32 y,a,0f4038AA3B; ex2.approx.ftz.f32 e,y;\n"
+        "add.rn.f32 e,e,0f3F800000; rcp.approx.ftz.f32 r,e;\n"
+        "fma.rn.f32 t,r,0fC0000000,0f3F800000; setp.ge.f32 sat,a,0f41102CB4;\n"
+        "selp.f32 t,0f3F800000,t,sat; copysign.f32 t,$1,t;\n"
+        "mul.rn.f32 q,$1,$1; fma.rn.f32 p,q,0f3C80F082,0fBD563CAE;\n"
+        "fma.rn.f32 p,p,q,0f3E085941; fma.rn.f32 p,p,q,0fBEAAA9ED;\n"
+        "fma.rn.f32 p,p,q,0f00000000; fma.rn.f32 s,p,$1,$1;\n"
+        "setp.ge.f32 big,a,0f3F19999A; selp.f32 $0,t,s,big; }"
+    )
+    return code, "=f,f", (Float32(x),)
+
+
+@asm(Float32, pure=True)
+def rcp_rn(x: Float32):
+    return "rcp.rn.f32 $0,$1;", "=f,f", (Float32(x),)
+
+
+@asm(Float32, pure=True)
+def mul_rn(a: Float32, b: Float32):
+    return "mul.rn.f32 $0,$1,$2;", "=f,f,f", (Float32(a), Float32(b))
 
 
 @cute.jit
-def shared_situ(gate, up, beta, inverse_beta, linear_beta, inverse_linear_beta):
-    denominator = Float32(1) + cute.math.exp(-gate, fastmath=False)
-    sigmoid = Float32(0)
-    if denominator != Float32(float("inf")):
-        sigmoid = Float32(reciprocal64(Float64(denominator)))
-    g = (beta * cute.math.tanh(gate * inverse_beta, fastmath=False)) * sigmoid
-    u = up
+def situ_gate(gate, beta):
+    """The gate factor of the ``_C`` situ_and_mul kernel: (0.5 beta) * tanh(g *
+    fl(1 / beta)) * (1 + tanh(0.5 g)), sigmoid(g) taken as (1 + tanh(g / 2)) / 2."""
+    half_beta = mul_rn(beta, Float32(0.5))
+    scaled = mul_rn(half_beta, situ_tanh(mul_rn(rcp_rn(beta), gate)))
+    return mul_rn(scaled, add_rn(situ_tanh(mul_rn(gate, Float32(0.5))), Float32(1)))
+
+
+@cute.jit
+def situ_up(up, linear_beta):
+    """The up factor of the ``_C`` kernel: linear_beta * tanh(u * fl(1 / linear_beta)),
+    or u when ``linear_beta`` <= 0 (unset)."""
+    u = Float32(up)
     if linear_beta > 0:
-        divided = Float32(Float64(up) * inverse_linear_beta)
-        u = linear_beta * cute.math.tanh(divided, fastmath=False)
-    return g * u
+        u = mul_rn(linear_beta, situ_tanh(mul_rn(rcp_rn(linear_beta), up)))
+    return u
+
+
+@cute.jit
+def situ_and_mul(gate, up, beta, linear_beta):
+    """The ``SituAndMul`` op as the deployment runs it, before the BF16 store: the
+    op enabled (custom_ops "all", e.g. compilation mode NONE under the breakable
+    CUDA graph), i.e. the ``_C`` situ_and_mul kernel, gate factor times up factor."""
+    return mul_rn(situ_gate(gate, beta), situ_up(up, linear_beta))
 
 
 def bits_float(bits):
@@ -322,19 +414,39 @@ def pack_fp8(values):
     return code, "=r,f,f,f,f", values
 
 
+@asm(Uint32, pure=True)
+def pack_e2m1(values):
+    """E2M1 (round to nearest, satfinite) of 8 values, element 0 in the low nibble
+    (cvt's first source is the high nibble)."""
+    code = "{ .reg .b8 b0,b1,b2,b3; cvt.rn.satfinite.e2m1x2.f32 b0,$2,$1; "
+    code += "cvt.rn.satfinite.e2m1x2.f32 b1,$4,$3; "
+    code += "cvt.rn.satfinite.e2m1x2.f32 b2,$6,$5; "
+    code += "cvt.rn.satfinite.e2m1x2.f32 b3,$8,$7; mov.b32 $0,{b0,b1,b2,b3}; }"
+    return code, "=r,f,f,f,f,f,f,f,f", values
+
+
+@asm((Uint32, Float32), pure=True)
+def nvfp4_scale(amax: Float32):
+    """The E4M3 scale code of a 16-value NVFP4 block, sf = e4m3(max(amax / 6, 2^-9)),
+    and 1 / float(sf), with IEEE divisions (vLLM's nvfp4_ds_mla writer)."""
+    code = "{ .reg .f32 s; .reg .b16 p; .reg .b32 h; .reg .f16 lo,hi; "
+    code += "div.rn.f32 s,$2,0f40C00000; max.f32 s,s,0f3B000000; "
+    code += "cvt.rn.satfinite.e4m3x2.f32 p,0f00000000,s; cvt.u32.u16 $0,p; "
+    code += "cvt.rn.f16x2.e4m3x2 h,p; mov.b32 {lo,hi},h; cvt.f32.f16 s,lo; "
+    code += "div.rn.f32 $1,0f3F800000,s; }"
+    return code, "=r,=f,f", (amax,)
+
+
 @cute.jit
-def mx_exponent(amax: Float32, floor: cutlass.Constexpr[bool] = False):
+def mx_exponent(amax: Float32):
+    """E8M0 scale of an MXFP8 block: amax's exponent minus 8, plus one when its
+    mantissa exceeds 448's (1.75), as the trtllm-gen MoE FC1 epilogue and FlashInfer's
+    mxfp8_quantize round it."""
     bits = Uint32(float_bits(amax))
     e = Int32(bits >> 23)
     result = Int32(0)
-    if cutlass.const_expr(floor):
-        if e == 255:
-            result = 254
-        elif e > 8:
-            result = e - 8
-    else:
-        if e != 0:
-            result = min(max(e - 8 + Int32(bits & 8388607 > 6291456), 0), 254)
+    if e != 0:
+        result = min(max(e - 8 + Int32(bits & 8388607 > 6291456), 0), 254)
     return result
 
 

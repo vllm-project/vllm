@@ -9,11 +9,14 @@ download or compile at startup. Run it after installing or upgrading vLLM:
 """
 
 import argparse
+import importlib.metadata
 import os
 import subprocess
 import sys
 import typing
 from importlib.util import find_spec
+
+from packaging.version import Version
 
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.logger import init_logger
@@ -41,6 +44,9 @@ def _download_flashinfer_kernels(dry_run: bool) -> int:
             "version; installing flashinfer-cubin only."
         )
         cmd.append("install-cubin-wheel")
+    if Version(importlib.metadata.version("flashinfer-python")).is_devrelease:
+        # Kernel wheels for a FlashInfer nightly are only on the nightly index.
+        cmd.append("--nightly")
     if dry_run:
         cmd.append("--dry-run")
     # FlashInfer refuses to import while kernels from another FlashInfer version

@@ -10,8 +10,9 @@ from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import (
     get_dcp_group,
     get_tensor_model_parallel_world_size,
@@ -41,6 +42,7 @@ from vllm.v1.attention.backends.mla.index_group import (
     HiSparseMLAIndexGroup,
     SparseMLAIndexGroup,
     SparseMLAIndexGroupBuilder,
+    get_sparse_mla_index_group_max_rows,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
@@ -50,6 +52,14 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.shardq import (
+    PUSH_ROWS_KERNEL,
+    ShardQSplit,
+    indexer_rows,
+    maybe_build_shardq_split,
+    shard_q,
+    unshard_out,
+)
 from vllm.v1.hisparse.runtime import (
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
@@ -60,6 +70,10 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.attention.ops.dcp_shardq.context import (
+        DcpShardQContext,
+        DcpShardQPlanner,
+    )
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -149,6 +163,27 @@ class SparseMLAPrefillMetadata(MLACommonPrefillMetadata):
     host_staging_plan: HiSparsePrefillStagingPlan | None = None
 
 
+@dataclass
+class SparseMLAShardQ:
+    """Token-sharded TP prefill step (see vllm.v1.attention.ops.shardq).
+
+    In a mixed step the leading decode tokens stay head-sharded; the split
+    covers the prefill tokens, relative to the first of them.
+    """
+
+    split: ShardQSplit
+    # Request of each of this rank's prefill tokens.
+    req_id_per_token: torch.Tensor
+    num_decode_tokens: int
+    # Rows the indexer scores, ascending, on the host and the device
+    # (see vllm.v1.attention.ops.shardq.indexer_rows).
+    indexer_rows_cpu: np.ndarray
+    indexer_rows: torch.Tensor
+    # Under DCP, the gathered context the step attends instead of the
+    # DCP-local cache.
+    gathered_context: "DcpShardQContext | None" = None
+
+
 @dataclass(kw_only=True)
 class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     block_table: torch.Tensor
@@ -163,6 +198,7 @@ class SparseMLACommonMetadata(MLACommonMetadata[MLACommonDecodeMetadata]):
     prefill_max_seq_len: int = 0
     prefill: SparseMLAPrefillMetadata | None = None
     cp_kv_cache_interleave_size: int = 1
+    shardq: SparseMLAShardQ | None = None
 
 
 T = TypeVar("T", bound=SparseMLACommonMetadata)
@@ -184,7 +220,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self.device = device
         self.model_config = vllm_config.model_config
         self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens: int = vllm_config.model_config.hf_text_config.index_topk
+        self.topk_tokens: int = self.model_config.hf_text_config.index_topk
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -255,6 +291,82 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self._prefill_backend = (
             layer_prefill_backend.clone() if layer_prefill_backend is not None else None
         )
+        # Build ShardQ splits only when a layer consumes them.
+        layers = vllm_config.compilation_config.static_forward_context
+        self.use_shardq = any(
+            getattr(layers.get(name), "use_shardq", False) for name in layer_names
+        )
+        self.shardq_min_tokens = (
+            vllm_config.attention_config.sparse_mla_shard_q_min_tokens
+        )
+        # Under DCP, ShardQ steps attend a gathered copy of their context.
+        self.dcp_shardq: DcpShardQPlanner | None = None
+        if self.use_shardq and self.dcp_world_size > 1:
+            self.use_shardq = self._init_dcp_shardq(
+                kv_cache_spec, vllm_config, attention_layer
+            )
+        if self.use_shardq:
+            logger.info_once(
+                "Sharding sparse MLA prefill steps of >= %d tokens across TP "
+                "ranks by token (sparse_mla_shard_q).",
+                self.shardq_min_tokens,
+            )
+
+    def _init_dcp_shardq(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        vllm_config: "VllmConfig",
+        attention_layer: Any,
+    ) -> bool:
+        """Whether DCP ShardQ steps can gather this layer's caches
+        (vllm.v1.attention.ops.dcp_shardq)."""
+        from vllm.v1.attention.ops.dcp_shardq import context as shardq_context
+        from vllm.v1.attention.ops.dcp_shardq.context import (
+            ContextLayout,
+            DcpShardQPlanner,
+            capacity_pages,
+            dcp_fallback_max_tokens,
+            register_warmup,
+        )
+
+        layout = ContextLayout.from_layer(
+            kv_cache_spec, getattr(attention_layer, "indexer", None)
+        )
+        if layout is None:
+            logger.warning_once(
+                "DCP ShardQ needs a packed MLA cache format in blocks of "
+                "whole 64-token pages and an fp8 indexer key cache; DCP "
+                "prefill steps keep the DCP path."
+            )
+            return False
+        from vllm.v1.attention.backends.mla.indexer import (
+            DeepseekV32IndexerMetadataBuilder,
+            get_max_prefill_buffer_size,
+        )
+
+        decode_query_len = DeepseekV32IndexerMetadataBuilder.get_decode_threshold(
+            vllm_config
+        )
+        # DCP spans the TP group, so DCP ranks also index the workspace peers.
+        self.dcp_shardq = DcpShardQPlanner(
+            layout,
+            capacity_pages(
+                shardq_context.workspace_max_tokens(vllm_config),
+                vllm_config.scheduler_config.max_num_seqs,
+            ),
+            get_max_prefill_buffer_size(vllm_config),
+            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+            self.shardq_min_tokens,
+            # Rows the indexer scores as decodes keep the DCP path.
+            decode_query_len,
+            self.dcp_world_size,
+            get_dcp_group().rank_in_group,
+            self.device,
+            label=f"{self.layer_names[0]}, {len(self.layer_names)} layers",
+            max_fallback_tokens=dcp_fallback_max_tokens(vllm_config, decode_query_len),
+        )
+        register_warmup(layout, self.dcp_world_size, self.topk_tokens)
+        return True
 
     def _init_reorder_batch_threshold(
         self,
@@ -417,6 +529,51 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             )
             self._prefill_backend.prepare_metadata(prefill)
 
+        shardq = None
+        if self.dcp_shardq is not None:
+            # A DCP ShardQ step shards every token after its leading decode
+            # rows, short prefill pieces that this backend classifies as
+            # decodes included.
+            plan = self.dcp_shardq.plan(
+                common_attn_metadata, prefill is not None and prefill.use_dense_mha
+            )
+            if plan is not None:
+                split, gathered_context = plan
+                num_dcp_decode_tokens = gathered_context.num_decode_tokens
+                rows_cpu, rows = indexer_rows(split, num_dcp_decode_tokens)
+                shardq = SparseMLAShardQ(
+                    split,
+                    req_id_per_token[split.local_idx + num_dcp_decode_tokens],
+                    num_dcp_decode_tokens,
+                    rows_cpu,
+                    rows,
+                    gathered_context,
+                )
+        elif (
+            self.use_shardq
+            and num_prefills > 0
+            and not (prefill is not None and prefill.use_dense_mha)
+        ):
+            # Split the prefill tokens; decode tokens stay head-sharded.
+            query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+            split = maybe_build_shardq_split(
+                query_start_loc_cpu[num_decodes : common_attn_metadata.num_reqs + 1]
+                - num_decode_tokens,
+                num_prefills,
+                common_attn_metadata.num_actual_tokens - num_decode_tokens,
+                self.shardq_min_tokens,
+                self.device,
+            )
+            if split is not None:
+                rows_cpu, rows = indexer_rows(split, num_decode_tokens)
+                shardq = SparseMLAShardQ(
+                    split,
+                    req_id_per_token[split.local_idx + num_decode_tokens],
+                    num_decode_tokens,
+                    rows_cpu,
+                    rows,
+                )
+
         return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
@@ -436,6 +593,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_seq_len=prefill_max_seq_len,
             prefill=prefill,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            shardq=shardq,
         )
 
     @staticmethod
@@ -639,6 +797,11 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     # Reuse the index group's top-k conversion only for uniform decode batches
     # of multi-layer groups; other batches convert per layer.
     group_conversion_decode_only: ClassVar[bool] = False
+    # Whether forward_mqa_shardq is implemented and validated.
+    supports_shardq: ClassVar[bool] = False
+    # Whether forward_mqa_shardq also attends a DCP step's gathered context
+    # (SparseMLAShardQ.gathered_context).
+    supports_dcp_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -682,7 +845,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
         if index_group_builder is None and self.topk_indices_buffer is not None:
-            index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
+            index_group_builder = SparseMLAIndexGroupBuilder(
+                self.topk_indices_buffer,
+                get_sparse_mla_index_group_max_rows(get_current_vllm_config()),
+            )
         if index_group_builder is not None:
             vllm_config = get_current_vllm_config()
             self.index_group, self.index_group_index = (
@@ -713,6 +879,59 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             v_head_dim=v_head_dim,
             kv_cache_dtype=kv_cache_dtype,
         )
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        cudagraph_mode = (
+            vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
+        )
+        # The attention layer decides whether to use ShardQ.
+        attention_config = vllm_config.attention_config
+        dcp_size = parallel_config.decode_context_parallel_size
+        kv_transfer_config = vllm_config.kv_transfer_config
+        # A disaggregated decode instance receives its prefills' KV, so it
+        # would hold the gathered-context workspace for nothing.
+        decode_instance = (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_consumer"
+        )
+        self.use_shardq = (
+            self.supports_shardq
+            and attention_config.sparse_mla_shard_q
+            and attention_config.hisparse_config is None
+            and parallel_config.tensor_parallel_size > 1
+            and (
+                dcp_size == 1
+                or (
+                    self.supports_dcp_shardq
+                    and not decode_instance
+                    and dcp_size == parallel_config.tensor_parallel_size
+                    # The gathered context is laid out for interleave 1, in
+                    # one workspace that micro-batches would share.
+                    and parallel_config.cp_kv_cache_interleave_size == 1
+                    and not parallel_config.use_ubatching
+                    and current_platform.is_device_capability_family(100)
+                )
+            )
+            and parallel_config.prefill_context_parallel_size == 1
+            and cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL
+        )
+        if self.use_shardq:
+            # ShardQ's exchanges of the MQA query and output (the dtypes of
+            # MLAAttention's reservation, reserve_shardq_buffers).
+            dtype = vllm_config.model_config.dtype
+            fp8_query = (
+                is_quantized_kv_cache(kv_cache_dtype)
+                and self.supports_quant_query_input
+            )
+            PUSH_ROWS_KERNEL.register_warmup(
+                rows=(
+                    (
+                        current_platform.fp8_dtype() if fp8_query else dtype,
+                        num_heads * (kv_lora_rank + qk_rope_head_dim),
+                    ),
+                    (dtype, num_heads * kv_lora_rank),
+                )
+            )
 
     def record_logical_topk_ready(self) -> None:
         if self.index_group is not None:
@@ -884,6 +1103,95 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         assert prefill_lse is not None
         return out, torch.cat((decode_lse, prefill_lse))
 
+    def forward_mqa_shardq(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> torch.Tensor:
+        """Sparse MQA of a ShardQ step (see vllm.v1.attention.ops.shardq).
+
+        ``q`` holds every token for this rank's heads. It is exchanged so this
+        rank attends its token slice with all heads, and the output is
+        exchanged back to every token for this rank's heads. Under DCP the
+        slice attends the step's gathered context (``shardq.gathered_context``)
+        instead of the DCP-local cache, and the output's leading decode rows
+        are left for the layer to fill on the DCP path.
+        """
+        shardq = attn_metadata.shardq
+        assert shardq is not None and self.topk_indices_buffer is not None
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
+        block_size = attn_metadata.block_size
+        _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
+        num_decode_tokens = shardq.num_decode_tokens
+        decode_out = None
+        if num_decode_tokens and shardq.gathered_context is None:
+            # Decode tokens stay head-sharded; their top-k rows are in place.
+            physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_decode_tokens],
+                attn_metadata.block_table,
+                self.topk_indices_buffer[:num_decode_tokens],
+                BLOCK_SIZE=block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=self.topk_indices_buffer.shape[1],
+                return_valid_counts=True,
+            )
+            decode_out, _ = self._forward_mqa_kernel(
+                q[:num_decode_tokens],
+                kv_c_and_k_pe_cache,
+                physical_topk,
+                valid_counts,
+                layer=layer,
+                block_size=block_size,
+                is_decode=True,
+            )
+        num_heads = shardq.split.world * q.shape[1]
+        q = shard_q(
+            q[num_decode_tokens:],
+            shardq.split,
+            padded_heads=self.shardq_query_heads(num_heads),
+        )
+        block_table = attn_metadata.block_table
+        if shardq.gathered_context is not None:
+            # The prefill rows of a DCP step attend its gathered context.
+            kv_c_and_k_pe_cache = shardq.gathered_context.mla_view(kv_c_and_k_pe_cache)
+            block_table = shardq.gathered_context.block_table
+            block_size = shardq.gathered_context.block_size
+            _, block_stride_rows = flat_kv_row_view(kv_c_and_k_pe_cache, block_size)
+        # The indexer wrote this rank's top-k compactly after the decode rows.
+        topk = self.topk_indices_buffer[
+            num_decode_tokens : num_decode_tokens + q.shape[0]
+        ]
+        physical_topk, valid_counts = triton_convert_req_index_to_global_index(
+            shardq.req_id_per_token,
+            block_table,
+            topk,
+            BLOCK_SIZE=block_size,
+            BLOCK_STRIDE_ROWS=block_stride_rows,
+            NUM_TOPK_TOKENS=topk.shape[1],
+            return_valid_counts=True,
+        )
+        # The token slice's output goes straight back to the head shards: the
+        # LSE (and the empty-row masking that comes with it) is never read.
+        out, _ = self._forward_mqa_kernel(
+            q,
+            kv_c_and_k_pe_cache,
+            physical_topk,
+            valid_counts,
+            layer=layer,
+            block_size=block_size,
+            is_decode=False,
+            return_lse=False,
+        )
+        out = unshard_out(
+            out[:, :num_heads], shardq.split, num_leading_rows=num_decode_tokens
+        )
+        if decode_out is not None:
+            out[:num_decode_tokens] = decode_out
+        return out
+
     def _forward_mqa_kernel(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -894,8 +1202,15 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         layer: AttentionLayer,
         block_size: int,
         is_decode: bool,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """``return_lse`` None means ``need_to_return_lse_for_decode``."""
         raise NotImplementedError
+
+    def shardq_query_heads(self, num_heads: int) -> int:
+        """Heads the MQA kernel runs a ShardQ token slice of ``num_heads``
+        query heads with; ShardQ receives the query zero-padded to them."""
+        return num_heads
 
     @staticmethod
     def masked_mha_workspace_fits(prefill: MLACommonPrefillMetadata) -> bool:

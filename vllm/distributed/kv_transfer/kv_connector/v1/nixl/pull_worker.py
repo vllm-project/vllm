@@ -371,6 +371,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
                 expected_consumers=plan.local_consumers,
                 awaiting_kvs=meta.awaiting_kvs,
+                num_tokens=meta.remote.num_tokens,
             ):
                 return
 
@@ -409,6 +410,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         expected_consumers: int,
         awaiting_kvs: bool,
+        num_tokens: int | None = None,
     ) -> bool:
         """Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
@@ -433,7 +435,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 )
             local_block_ids, remote_block_ids = (
                 self._map_block_ids_for_block_size_ratio(
-                    local_block_ids, remote_block_ids, block_size_ratio
+                    local_block_ids, remote_block_ids, block_size_ratio, num_tokens
                 )
             )
         # NOTE(rob): having the staging blocks be on the READER side is

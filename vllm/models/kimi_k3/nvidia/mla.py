@@ -35,7 +35,6 @@ import math
 from typing import TYPE_CHECKING, cast
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm import _custom_ops as ops
@@ -77,7 +76,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.utils import is_weights_pre_processed, replace_parameter
 from vllm.models.common.ops import fused_q_kv_rmsnorm
-from vllm.models.kimi_k3.nvidia.low_latency_gemm import try_low_latency_gemm
+from vllm.models.kimi_k3.nvidia.low_latency_gemm import low_latency_linear
 from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
@@ -507,12 +506,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
-    def _unquantized_gemm(
-        self, hidden_states: torch.Tensor, weight: torch.Tensor
-    ) -> torch.Tensor:
-        out = try_low_latency_gemm(hidden_states, weight)
-        return out if out is not None else F.linear(hidden_states, weight)
-
     def _apply_q_lora_attention(
         self,
         positions: torch.Tensor,
@@ -567,9 +560,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 lambda: self._apply_q_lora_attention(
                     positions,
                     hidden_states,
-                    self._unquantized_gemm(hidden_states, qkv_a_weight),
+                    low_latency_linear(hidden_states, qkv_a_weight),
                 ),
-                lambda: self._unquantized_gemm(hidden_states, gate_weight),
+                lambda: low_latency_linear(hidden_states, gate_weight),
                 start_event,
                 end_event,
                 self.aux_stream,

@@ -121,7 +121,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             topk_ids,
             topk_weights,
             hidden_states_scale=dispatch_x_sf,
-            max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
         recv_x_sf = received.hidden_states_scale
         if recv_x_sf is not None:
