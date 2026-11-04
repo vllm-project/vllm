@@ -123,6 +123,14 @@ def _compute_units() -> int:
     return current_platform.num_compute_units(torch.accelerator.current_device_index())
 
 
+def gated_norm_rows(rows: int, cus: int) -> int:
+    """Rows a program of the stock RMSNormGated (FLA ``layernorm_guard``,
+    ``calc_rows_per_block``) normalizes, for ``rows`` head rows on a GPU of
+    ``cus`` compute units. Its reduction layout, and so the sum order K1's gated
+    norm reproduces, depends on it: above 2 x cus rows a program takes two."""
+    return min(4, 1 << (_cdiv(rows, 2 * cus) - 1).bit_length())
+
+
 def device_grid() -> int:
     """``resolve_grid`` for the current device and ``GRID_ENV``."""
     return resolve_grid(_compute_units(), os.environ.get(GRID_ENV))

@@ -732,9 +732,19 @@ class DenseMono:
         )
 
     def _k1_key(self, dense_gdn, s: int, *, first: bool, eps=1e-6, norm_eps=1e-6):
+        from vllm.models.qwen3_5.amd.mono.tiling import _resident_cus
+
+        # the stock gated norm's layout (the GPU's CUs) and out_proj's AITER K
+        # splits, probed once per width (from _allocate, before any capture)
+        stock = dense_gdn.stock_fields(s, self.tp, self.k1_oproj, _resident_cus())
         if self.whole_step:
             return dense_gdn.K1Build(
-                tokens=s, first=first, eps=eps, norm_eps=norm_eps, grid=self.grid
+                tokens=s,
+                first=first,
+                eps=eps,
+                norm_eps=norm_eps,
+                grid=self.grid,
+                **stock,
             )
         return dense_gdn.K1Build(
             tokens=s,
@@ -743,6 +753,7 @@ class DenseMono:
             normed=True,
             oproj=self.k1_oproj,
             grid=self.grid,
+            **stock,
         )
 
     def _k2_key(self, dense_ffn, s: int, eps=1e-6):
@@ -862,6 +873,15 @@ class DenseMono:
                     D.stock_split_fields(s, self.tp, self.oproj)
             except ValueError as exc:
                 return f"K2: {exc}"
+        if self.k1:
+            from vllm.models.qwen3_5.amd.mono import dense_gdn
+            from vllm.models.qwen3_5.amd.mono.tiling import _resident_cus
+
+            try:
+                for s in range(1, self.k1_rows + 1):
+                    dense_gdn.stock_fields(s, self.tp, self.k1_oproj, _resident_cus())
+            except ValueError as exc:
+                return f"K1: {exc}"
         if self.whole_step and self.oproj and not self.k1:
             self.gdn_core = {
                 i: _gdn_core(layer.linear_attn)

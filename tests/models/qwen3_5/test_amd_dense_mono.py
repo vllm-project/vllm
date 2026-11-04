@@ -110,6 +110,13 @@ def tearDownModule():
         _CONFIG.__exit__(None, None, None)
 
 
+def _cus():
+    """The GPU's compute units (the stock gated norm's layout follows them)."""
+    from vllm.models.qwen3_5.amd.mono.tiling import _resident_cus
+
+    return _resident_cus()
+
+
 def _grid():
     """The grid the kernels build for on this GPU."""
     from vllm.models.qwen3_5.amd.mono.tiling import device_grid
@@ -640,6 +647,14 @@ class DenseGdnTest(unittest.TestCase):
             layer = LAYER_TAGS[s % len(LAYER_TAGS)]
             w = _rank_slice(K, _gdn_weights(g, K), tp, rank)
             w_qkvz, w_ba = D.shuffle_w(w["w_qkvz"]), D.shuffle_w(w["w_ba"])
+            try:
+                stock = K.stock_fields(s, tp, oproj, _cus())
+            except ValueError as exc:
+                # out_proj's AITER K splits K1 cannot reproduce (dense_mono
+                # declines this configuration)
+                with self.subTest(tp=tp, rank=rank, s=s, oproj=oproj):
+                    self.skipTest(str(exc))
+                continue
             key = K.K1Build(
                 tokens=s,
                 first=first,
@@ -649,6 +664,7 @@ class DenseGdnTest(unittest.TestCase):
                 normed=normed,
                 oproj=oproj,
                 grid=_grid(),
+                **stock,
             )
             fold = {}
             if oproj:

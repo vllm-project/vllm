@@ -308,3 +308,18 @@ def test_stage_plan_table(grid):
     assert rows["o_proj + norm (32 columns a task)"]["passes"] == (
         1 if grid == 256 else 2
     )
+
+
+@pytest.mark.parametrize(
+    "rows, cus, want",
+    [
+        (48 * 5, 128, 1),  # TP1, 5 rows on MI350P: one row a program
+        (48 * 6, 128, 2),  # past 2 x 128 rows: two
+        (48 * 8, 256, 1),  # MI355X at the TP1 cap
+        (24 * 11, 128, 2),  # TP2 on MI350P from 11 rows
+        (48 * 16, 64, 4),  # capped at 4
+    ],
+)
+def test_gated_norm_rows_follow_the_stock_launch(rows, cus, want):
+    # FLA layernorm_guard.calc_rows_per_block: next_power_of_2(cdiv(M, 2 cus)), <= 4
+    assert T.gated_norm_rows(rows, cus) == want

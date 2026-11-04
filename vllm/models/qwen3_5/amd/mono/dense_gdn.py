@@ -46,13 +46,18 @@ LDS. Each task's arithmetic is the same at either width.
 Bit-exact with the stock decode path (the Triton conv update,
 ``fused_recurrent_gated_delta_rule_packed_decode``, RMSNormGated): the same
 rounding, lane layouts, reduction orders, FMA contractions and transcendental
-lowerings as their gfx950 code. A row whose state slot is -1 (a pad row) writes
-no state and a zero core row, as stock.
+lowerings as their gfx950 code. Two of these depend on the stock code's
+version and launch: beta = sigmoid(b) stays fp32 (as the stock kernel since
+vLLM #53877), and the gated norm reduces as the program the stock launch gives
+S x nv rows on this GPU (``tiling.gated_norm_rows``: two rows a program past
+2 x CUs, so 6 rows and up at TP1 on 128 CUs). A row whose state slot is -1
+(a pad row) writes no state and a zero core row, as stock.
 
 Weights: in_proj_qkvz [q | k | v | z] and in_proj_ba [b | a] (the rank's) as
 MXFP4 in the (16, 16)-shuffled order (``dense_ffn.shuffle_w``), e8m0 scales [N, K / 32].
 """
 
+import functools
 import struct
 from dataclasses import dataclass
 
@@ -80,6 +85,7 @@ from vllm.models.qwen3_5.amd.mono.common.ops import (
     traced,
     uniform,
     xred,
+    xshfl,
 )
 from vllm.models.qwen3_5.amd.mono.common.plan import (
     THREADS,
@@ -102,6 +108,7 @@ from vllm.models.qwen3_5.amd.mono.tiling import (  # noqa: F401 (re-exported)
     VCH,
     Geo,
     check_resident,
+    gated_norm_rows,
     gdn_passes,
     n_tasks,
 )
@@ -132,6 +139,7 @@ LOG2E = 1.4426950408889634
 # 128-vector two elements a lane (DPP row_shr 8..1, row_bcast 15 / 31), and a
 # state row of 32 lanes x 4 columns.
 VEC_ORDER = D.WAVE_ORDER
+NORM2_ORDER = (32, 16, 8, 4, 2)
 ROW_ORDER = (16, 8, 4, 2, 1)
 
 assert VCH == WAVES and BA_STEPS * BA_E == STEPS
@@ -143,6 +151,25 @@ O_SPLITS = 4
 
 def o_splits(s: int) -> int:
     return O_SPLITS if s <= 8 else 1
+
+
+@functools.cache
+def stock_fields(s: int, tp: int, oproj: bool, cus: int) -> dict:
+    """``K1Build`` fields that follow the stock path on this GPU at S rows: the
+    gated norm's rows a program (``tiling.gated_norm_rows``, from the compute
+    units) and, with ``oproj``, the installed AITER's K splits of out_proj (0
+    where they equal ``o_splits``). Probed once per argument set."""
+    geo = Geo(tp)
+    out = {"norm_rows": gated_norm_rows(geo.nv * s, cus)}
+    if oproj:
+        n = D.stock_splits(s, HIDDEN, geo.val)
+        if n not in D.SPLIT_COUNTS:
+            raise ValueError(
+                f"the stock MXFP4 GEMM splits out_proj's K in {n} at {s} rows; "
+                f"K1 reproduces {D.SPLIT_COUNTS} splits only"
+            )
+        out["o_split"] = 0 if n == o_splits(s) else n
+    return out
 
 
 # Geo (``tiling``): a rank's GDN shapes on the build's grid; its qg_cta,
@@ -171,6 +198,10 @@ class K1Build:
     # CTAs, one a CU, all resident (``tiling.resolve_grid``): 256 MI355X, 128
     # MI350P
     grid: int = DEFAULT_GRID
+    # the stock gated norm's rows a program (``stock_fields``): 1 or 2
+    norm_rows: int = 1
+    # out_proj's K splits (``oproj``; ``stock_fields``), 0 for ``o_splits``
+    o_split: int = 0
 
 
 ABI = KernelAbi(
@@ -576,7 +607,7 @@ def gdn_loads(c):
     and weights."""
     tid, a, geo = c["tid"], c["args"], c["G"]
     k0, nt = c["P"]
-    g = {"valid": [], "live": [], "sbase": [], "st": [], "soff": []}
+    g: dict = {"valid": [], "live": [], "sbase": [], "st": [], "soff": []}
     for m in range((nt + 1) // 2):
         k, valid = recur_task(c, m)
         t, h, ch, ok = task_of(c, plus(k, k0))
@@ -720,7 +751,7 @@ def gdn_gates(c):
         sp = tl_log_fma(fx.Float32(1.0) + tl_exp_fma(x))
         sp = (x <= fx.Float32(SOFTPLUS_THRESHOLD)).select(sp, x)
         decay = tl_exp_fma(-tl_exp_fma(ld_f32(a["a_log"], h)) * sp)
-        beta = bf16_round(fx.Float32(1.0) / (fx.Float32(1.0) + tl_exp_fma(-v)))
+        beta = fx.Float32(1.0) / (fx.Float32(1.0) + tl_exp_fma(-v))
         fx.ptr_store((which == 0).select(beta, decay), c["scal"] + (k * 2 + which))
     gpu.barrier()
     for n in range_constexpr((2 * nt + WAVES - 1) // WAVES):
@@ -793,10 +824,17 @@ def gdn_norm(c, g):
             ]
         )
         x = [f32_of(got[0][j]) for j in range(2)]
-        rstd = hw_rsq(
-            butterfly(x[0] * x[0] + x[1] * x[1], VEC_ORDER) * fx.Float32(1.0 / HD)
-            + fx.Float32(c["norm_eps"])
-        )
+        if const_expr(c["norm_rows"] == 1):
+            ss = butterfly(x[0] * x[0] + x[1] * x[1], VEC_ORDER)
+        else:
+            # Two rows a program: a stock thread holds 4 columns (lanes 2 m,
+            # 2 m + 1 here) as two pairs added elementwise, then 32 threads
+            # reduce with xor 16, 8, 4, 2, 1 (here doubled).
+            n0, n1 = xshfl(x[0], 1), xshfl(x[1], 1)
+            ss = butterfly(
+                (x[0] * x[0] + n0 * n0) + (x[1] * x[1] + n1 * n1), NORM2_ORDER
+            )
+        rstd = hw_rsq(ss * fx.Float32(1.0 / HD) + fx.Float32(c["norm_eps"]))
         y = []
         for j in range_constexpr(2):
             z = f32_of(got[1][j])
@@ -860,7 +898,7 @@ def o_out(c, own=None):
     t = fx.min(tid // 4, s - 1)
     j = tid % 4
     y = [
-        bf16_round(D.row_sum_waves(c["red"], 8 * (j % 2) + e, t, j // 2, o_splits(s)))
+        bf16_round(D.row_sum_waves(c["red"], 8 * (j % 2) + e, t, j // 2, c["o_n"]))
         for e in range(8)
     ]
     if (tid < s * 4) & (bid < D.O_CTAS):
@@ -897,7 +935,9 @@ def build(key: K1Build):
     lay = scratch_layout(key)
     geo = Geo(key.tp, key.grid)
     nblk = key.grid
-    assert not key.oproj or (key.tp == 2 and geo.val // D.STEP % o_splits(s) == 0)
+    o_n = key.o_split or o_splits(s)
+    assert not key.oproj or (key.tp == 2 and geo.val // D.STEP % o_n == 0)
+    assert key.norm_rows in (1, 2), key
     # the LDS of the widest GDN pass (every pass on 256 CTAs: one)
     nt = max(n for _, n in gdn_passes(geo, s))
     # Front: below 256 CTAs every CTA runs the input norm itself from the whole
@@ -929,20 +969,18 @@ def build(key: K1Build):
         g: GLds
         o: OLds
 
-    if local_norm:
+    @fx.struct
+    class SmemNorm:
+        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
+        rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
+        nrm: fx.Array[fx.Float32, D.MAX_ROUNDS * WAVES, 16]
 
-        @fx.struct
-        class Smem:
-            red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-            rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
-            nrm: fx.Array[fx.Float32, D.MAX_ROUNDS * WAVES, 16]
+    @fx.struct
+    class SmemOwners:
+        red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
+        rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
 
-    else:
-
-        @fx.struct
-        class Smem:
-            red: fx.Array[fx.Float32, WAVES * 64 * 4, 16]
-            rst: fx.Array[fx.Float32, D.max_tokens(key.tp), 16]
+    Smem = SmemNorm if local_norm else SmemOwners
 
     keyed = key_tuple(key, digest())
     name = (
@@ -951,6 +989,10 @@ def build(key: K1Build):
     )
     if key.grid != DEFAULT_GRID:
         name += f"_g{key.grid}"
+    if key.norm_rows != 1:
+        name += f"_r{key.norm_rows}"
+    if key.o_split:
+        name += f"_q{key.o_split}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def k1(
@@ -1000,6 +1042,8 @@ def build(key: K1Build):
             "oproj": key.oproj,
             "eps": key.eps,
             "norm_eps": key.norm_eps,
+            "norm_rows": key.norm_rows,
+            "o_n": o_n,
             "stamps": scratch + fx.Int64(lay["stamps"][0]) if key.stamps else None,
             "put": mb.put,
             "put_words": mb.put_words,
@@ -1075,12 +1119,12 @@ def build(key: K1Build):
             run_gdn(c)
         if const_expr(key.stop > 4 and key.oproj):
             publish(c["put"], c["ordy"], bid, fx.Int32(1), tid == 0)
-            oops = D.o_loads(c, width=geo.val, splits=o_splits(s))
+            oops = D.o_loads(c, width=geo.val, splits=o_n)
             o_core(c)
             D.stamp(c, 7)
-            D.o_stage(c, oops, width=geo.val, splits=o_splits(s))
+            D.o_stage(c, oops, width=geo.val, splits=o_n)
             o_out(c)
-            o_more_out(c, geo.val, o_splits(s))
+            o_more_out(c, geo.val, o_n)
 
     @flyc.jit
     def launch(
