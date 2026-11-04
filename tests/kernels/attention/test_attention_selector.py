@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Literal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -612,6 +612,37 @@ def test_flash_attn_accepts_handled_fp8_variants(
 blackwell_only = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="FA4 is CUDA-only"
 )
+
+
+@pytest.mark.parametrize(
+    "capability,head_size,fa_version,expected",
+    [
+        (100, 256, 4, 128),
+        (100, 128, 4, 128),
+        (100, 64, 4, 16),
+        (100, 128, 2, 16),
+        (90, 128, 4, 16),
+    ],
+)
+def test_fa4_blackwell_prefers_128_token_blocks(
+    capability: int, head_size: int, fa_version: int, expected: int
+):
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    platform = MagicMock()
+    platform.is_xpu.return_value = False
+    platform.is_device_capability_family.side_effect = lambda cap, *_: cap == capability
+    vllm_config = MagicMock()
+    vllm_config.model_config.get_head_size.return_value = head_size
+    vllm_config.cache_config.cache_dtype = "auto"
+    module = "vllm.v1.attention.backends.flash_attn"
+    with (
+        patch(f"{module}.current_platform", platform),
+        patch(f"{module}.get_current_vllm_config_or_none", return_value=vllm_config),
+        patch(f"{module}.get_flash_attn_version", return_value=fa_version),
+    ):
+        assert FlashAttentionBackend.get_preferred_block_size(16) == expected
+        assert FlashAttentionBackend.get_preferred_block_size(256) == 256
 
 
 @pytest.fixture
