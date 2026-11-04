@@ -29,6 +29,7 @@ or just on the low or high end.
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
+| [Gate/Up Linear + SiLU+Mul](#gateup-linear--silumul-fuse_zentorch_gated_act)   | `fuse_zentorch_gated_act`    | zentorch gate/up linear → SiLU+Mul             | O1 (AMD Zen CPU only)          | TBD                | No        | Always       |
 
 ## Support Matrix
 
@@ -334,6 +335,37 @@ q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`, `MLADualRMSPerTokenQuantPattern`)
 - Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`, `fused_mla_dual_rms_norm_per_token_quant`)
 - AITER kernels: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442), `fused_qk_rmsnorm_per_token_quant`
+
+### Gate/Up Linear + SiLU+Mul (`fuse_zentorch_gated_act`)
+
+!!! info
+    AMD Zen CPU only. Requires a zentorch build that provides `zentorch_linear_gated_act`.
+
+**What it fuses.** Fuses the bias-free gate/up projection of an MLP with the SiLU+Mul that
+follows it into one zentorch call, which applies the activation in the GEMM epilogue and
+writes only the `[M, I]` output instead of the `[M, 2I]` gate/up tensor.
+
+```text
+# Unfused:
+gate_up = zentorch_linear_unary(x, w13)            # bf16
+        | zentorch_dynamic_qlinear(x, w13, s13)    # DA8W8 / DA8W4
+out = silu(gate_up[:, :I]) * gate_up[:, I:]
+
+# Fused:
+zentorch_linear_gated_act.out(x, w13, s13, activation="silu", out=out)
+```
+
+Requires: `ZenCpuPlatform` (selected when zentorch imports) and 2-D bf16 activations.
+Enabled by default in optimization level O1 and above.
+
+The CPU platform compiles in `DYNAMO_TRACE_ONCE` mode with the plain Inductor backend, where
+the post-grad pass manager does not run. `ZenCpuPlatform` therefore installs the pass as
+Inductor's `post_grad_custom_post_pass` in `inductor_compile_config`.
+
+**Code locations.**
+
+- Pass: [`vllm/compilation/passes/fusion/zentorch_gated_act_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/zentorch_gated_act_fusion.py) (`ZentorchGatedActFusionPass`, `ZenCpuPostGradPass`)
+- Installation: [`vllm/platforms/zen_cpu.py`](https://github.com/vllm-project/vllm/blob/main/vllm/platforms/zen_cpu.py) (`ZenCpuPlatform.check_and_update_config`)
 
 ## See Also
 
