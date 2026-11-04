@@ -255,6 +255,37 @@ async def test_derender_chat_usage_falls_back_to_generate_usage(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_tokens", [0, 17])
+async def test_derender_chat_usage_prompt_tokens_beats_generate_usage(
+    client, prompt_tokens
+):
+    """An explicit prompt_tokens, 0 included, wins over
+    generate_response.usage.prompt_tokens."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(
+                synthetic_ids,
+                usage={
+                    "prompt_tokens": 10,
+                    "completion_tokens": len(synthetic_ids),
+                    "total_tokens": 10 + len(synthetic_ids),
+                },
+            ),
+            "prompt_tokens": prompt_tokens,
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == prompt_tokens
+    assert usage["total_tokens"] == prompt_tokens + len(synthetic_ids)
+
+
+@pytest.mark.asyncio
 async def test_derender_chat_logprobs(client):
     """Integer token ids are decoded to real strings by derender."""
     gen_req = await _render_chat(client)
@@ -705,6 +736,52 @@ async def test_derender_completion_usage_fallback_is_per_response(client):
     assert usage["prompt_tokens"] == 5
     assert usage["completion_tokens"] == len(ids1) + len(ids2)
     assert usage["total_tokens"] == 5 + len(ids1) + len(ids2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt_tokens", [[0, 0], [3, 7]])
+async def test_derender_completion_usage_prompt_tokens_beats_generate_usage(
+    client, prompt_tokens
+):
+    """An explicit prompt_tokens list, zeros included, wins over each generate
+    response's usage.prompt_tokens."""
+    gr1 = await _render_completion(client, "Hello")
+    gr2 = await _render_completion(client, "World")
+
+    ids1 = gr1["token_ids"][:3]
+    ids2 = gr2["token_ids"][:4]
+
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                _make_completion_generate_response(
+                    ids1,
+                    gr1["request_id"],
+                    usage={
+                        "prompt_tokens": 5,
+                        "completion_tokens": len(ids1),
+                        "total_tokens": 5 + len(ids1),
+                    },
+                ),
+                _make_completion_generate_response(
+                    ids2,
+                    gr2["request_id"],
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": len(ids2),
+                        "total_tokens": 10 + len(ids2),
+                    },
+                ),
+            ],
+            "prompt_tokens": prompt_tokens,
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()["usage"]
+    assert usage["prompt_tokens"] == sum(prompt_tokens)
+    assert usage["total_tokens"] == sum(prompt_tokens) + len(ids1) + len(ids2)
 
 
 @pytest.mark.asyncio
