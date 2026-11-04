@@ -138,6 +138,50 @@ def _aiter_can_use_biased_grouped_topk(num_experts: int, topk: int) -> bool:
     return topk >= g and g in AITER_SUPPORTED_NUM_GRP
 
 
+def _maybe_dsv4_topk(
+    gating_output: torch.Tensor,
+    scoring_func: str,
+    e_score_correction_bias: torch.Tensor | None,
+    topk: int,
+    renormalize: bool,
+    indices_type: torch.dtype | None,
+    input_tokens: torch.Tensor | None,
+    hash_indices_table: torch.Tensor | None,
+    routed_scaling_factor: float,
+    bias_vl: torch.Tensor | None,
+    image_sentinel_lo: int,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The single-kernel DSv4 top-k, or None when it does not apply.
+
+    It consumes the gate logits the caller already has, so the expert ids it
+    picks come from exactly the same floats as the fallback kernel's.
+    """
+    output_indices_dtype = torch.int32 if indices_type is None else indices_type
+    if (
+        scoring_func != "sqrtsoftplus"
+        or hash_indices_table is not None
+        or not can_use_dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            output_indices_dtype,
+        )
+    ):
+        return None
+    assert e_score_correction_bias is not None
+    return dsv4_topk(
+        gating_output,
+        e_score_correction_bias,
+        output_indices_dtype,
+        routed_scaling_factor,
+        is_padding=get_moe_padding_mask(gating_output.shape[0]),
+        input_ids=input_tokens,
+        bias_vl=bias_vl,
+        image_sentinel_lo=image_sentinel_lo,
+    )
+
+
 def fused_topk_bias(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -170,30 +214,21 @@ def fused_topk_bias(
             "Number of tokens mismatch"
         )
 
-        output_indices_dtype = torch.int32 if indices_type is None else indices_type
-        padding_mask = get_moe_padding_mask(gating_output.shape[0])
-        if (
-            scoring_func == "sqrtsoftplus"
-            and hash_indices_table is None
-            and can_use_dsv4_topk(
-                gating_output,
-                e_score_correction_bias,
-                topk,
-                renormalize,
-                output_indices_dtype,
-            )
-        ):
-            assert e_score_correction_bias is not None
-            return dsv4_topk(
-                gating_output,
-                e_score_correction_bias,
-                output_indices_dtype,
-                routed_scaling_factor,
-                is_padding=padding_mask,
-                input_ids=input_tokens,
-                bias_vl=bias_vl,
-                image_sentinel_lo=image_sentinel_lo,
-            )
+        fast = _maybe_dsv4_topk(
+            gating_output,
+            scoring_func,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            indices_type,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+            bias_vl,
+            image_sentinel_lo,
+        )
+        if fast is not None:
+            return fast
 
         M, _ = hidden_states.size()
 
@@ -276,6 +311,22 @@ def fused_topk_bias(
             if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
+
+    fast = _maybe_dsv4_topk(
+        gating_output,
+        scoring_func,
+        e_score_correction_bias,
+        topk,
+        renormalize,
+        indices_type,
+        input_tokens,
+        hash_indices_table,
+        routed_scaling_factor,
+        bias_vl,
+        image_sentinel_lo,
+    )
+    if fast is not None:
+        return fast
 
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
