@@ -270,6 +270,9 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     assert built_buckets(1) == [8]
     assert built_buckets(3) == [8, 16, 32]
     assert built_buckets(16) == built_buckets(128) == [8, 16, 32, 64, 96, 128]
+    # TP 4 has the builds up to 32 rows: larger steps run stock.
+    assert built_buckets(1, 4) == [8]
+    assert built_buckets(3, 4) == built_buckets(128, 4) == [8, 16, 32]
 
 
 def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:
@@ -320,18 +323,20 @@ def _moe_parallel(use_ep: bool = True, ep_size: int = 8, ep_rank: int = 3):
     )
 
 
-def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
+def test_deployment_guard_accepts_only_tep8_or_tep4_with_dspark(checkpoints) -> None:
     tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
     tep8 = _vllm_config(tiny, dspark, tp=8)
     assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
     for cache_dtype in ("fp8", "fp8_e4m3"):
         fp8 = _vllm_config(tiny, dspark, tp=8, cache_dtype=cache_dtype)
         assert deployment_refusals(fp8, 3, 8, _moe_parallel()) == []
+    tep4 = _vllm_config(tiny, dspark, tp=4)
+    assert deployment_refusals(tep4, 3, 4, _moe_parallel(ep_size=4)) == []
 
-    tp4 = _vllm_config(tiny, dspark, tp=4, expert_placement_strategy="round_robin")
-    tp4.parallel_config.enable_expert_parallel = False
-    assert deployment_refusals(tp4, 3, 4, _moe_parallel(use_ep=False)) == [
-        "tensor_parallel_size=4 (kernel: 8)",
+    tp2 = _vllm_config(tiny, dspark, tp=2, expert_placement_strategy="round_robin")
+    tp2.parallel_config.enable_expert_parallel = False
+    assert deployment_refusals(tp2, 1, 2, _moe_parallel(use_ep=False)) == [
+        "tensor_parallel_size=2 (kernel: (4, 8))",
         "expert parallelism off (needs --enable-expert-parallel)",
         "expert placement round_robin",
         "MoE layers not expert parallel",
