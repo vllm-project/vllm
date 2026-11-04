@@ -691,6 +691,8 @@ def make_routed_experts(
     num_redundant_experts: int = 0,
     dtype: torch.dtype = torch.float32,
     layer_name: str = "model.layers.0.mlp.experts",
+    activation: MoEActivation = MoEActivation.SILU,
+    ckpt_names: tuple[str, str, str | None] = ("gate_proj", "down_proj", "up_proj"),
 ):
     """An unquantized CPU `RoutedExperts` whose parallel config fakes the
     (size, rank) of expert TP and EP; needs a current vLLM config."""
@@ -727,13 +729,15 @@ def make_routed_experts(
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=parallel_config,
-        activation=MoEActivation.SILU,
+        activation=activation,
         in_dtype=dtype,
         device="cpu",
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=16,
     )
-    return RoutedExperts(layer_name, dtype, moe_config, None, expert_map_manager)
+    return RoutedExperts(
+        layer_name, dtype, moe_config, None, expert_map_manager, *ckpt_names
+    )
 
 
 def routed_expert_checkpoint(
@@ -776,12 +780,14 @@ def fake_moe_layer(
     tp: tuple[int, int] = (1, 0),
     ep: tuple[int, int] = (1, 0),
     lora: bool = False,
+    **kwargs,
 ) -> torch.nn.Module:
     """A decoder layer stand-in for model loader tests: `mlp.experts` is a
     `MoERunner` (optionally LoRA-wrapped) around a real CPU `RoutedExperts`
-    whose params are filled with -7, and `mlp.gate.weight` is the router."""
+    whose params are filled with -7, and `mlp.gate.weight` is the router.
+    `kwargs` go to `make_routed_experts`."""
     experts = make_routed_experts(
-        num_experts, hidden_size, intermediate_size, tp=tp, ep=ep
+        num_experts, hidden_size, intermediate_size, tp=tp, ep=ep, **kwargs
     )
     for param in experts.parameters():
         param.data.fill_(-7.0)
