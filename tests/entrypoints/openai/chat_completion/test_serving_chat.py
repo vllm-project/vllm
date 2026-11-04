@@ -3229,21 +3229,59 @@ async def test_chat_kv_transfer_prompt_token_ids_rejects_invalid_ids(ids):
 
 
 @pytest.mark.asyncio
-async def test_chat_kv_transfer_prompt_token_ids_rejected_without_kv_connector():
-    """Without a KV connector the forwarded ids must not replace the prompt.
-
-    The reuse contract is disaggregated serving; on a plain server the ids
-    would silently take over from the rendered messages (#62307).
-    """
+async def test_chat_kv_transfer_prompt_token_ids_ignored_without_kv_connector():
+    """An aggregated server renders messages instead of trusting forwarded ids."""
     serving_chat = _build_serving_chat(_build_mock_engine())
+    messages = [{"role": "user", "content": "hi"}]
+    expected = await serving_chat.render_chat_request(
+        ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "prompt_features": {"sentinel": "drop-with-ids"},
+            "do_remote_prefill": True,
+        },
+    )
+    result = await serving_chat.render_chat_request(request)
+
+    expected_conversation, expected_engine_inputs = expected
+    conversation, engine_inputs = result
+    assert conversation == expected_conversation
+    assert len(engine_inputs) == len(expected_engine_inputs)
+    for actual, baseline in zip(engine_inputs, expected_engine_inputs, strict=True):
+        assert {k: v for k, v in actual.items() if k != "arrival_time"} == {
+            k: v for k, v in baseline.items() if k != "arrival_time"
+        }
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
+
+
+@pytest.mark.asyncio
+async def test_chat_kv_transfer_prompt_token_ids_opt_in_without_kv_connector():
+    """An explicit server opt-in preserves direct token-id reuse."""
+    mock_engine = _build_mock_engine()
+    mock_engine.model_config.enable_prompt_token_ids = True
+    serving_chat = _build_serving_chat(mock_engine)
 
     request = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "hi"}],
-        kv_transfer_params={"prompt_token_ids": [10, 20, 30]},
+        kv_transfer_params={
+            "prompt_token_ids": [10, 20, 30],
+            "do_remote_prefill": True,
+        },
     )
-    with pytest.raises(VLLMValidationError, match="KV transfer connector"):
-        await serving_chat.render_chat_request(request)
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    conversation, engine_inputs = result
+    assert conversation == []
+    assert engine_inputs[0]["type"] == "token"
+    assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
+    assert request.kv_transfer_params == {"do_remote_prefill": True}
 
 
 @pytest.mark.asyncio
@@ -3266,6 +3304,7 @@ async def test_chat_kv_transfer_prompt_token_ids_reused_with_kv_connector():
 
     conversation, engine_inputs = result
     assert conversation == []
+    assert engine_inputs[0]["type"] == "token"
     assert engine_inputs[0]["prompt_token_ids"] == [10, 20, 30]
     assert request.kv_transfer_params == {"do_remote_prefill": True}
 

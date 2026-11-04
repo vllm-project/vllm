@@ -119,15 +119,18 @@ def _reused_prompt_token_ids(
     ``kv_transfer_params`` so the decode stage can skip re-tokenizing. Removing
     the key keeps the id list out of the engine's sampling metadata.
 
-    Returns None without checking the ids when ``echo`` is set or ``messages``
-    has non-text content, since both need ``messages`` to be rendered.
-    Otherwise raises VLLMValidationError if the server has no KV transfer
-    connector, or if the ids are malformed or out of vocabulary.
+    Returns None without checking the ids when ``echo`` is set, ``messages``
+    has non-text content, or the server has no KV transfer connector and direct
+    token-id reuse was not explicitly enabled. Otherwise raises
+    VLLMValidationError if the ids are malformed or out of vocabulary.
     """
     kv = getattr(request, "kv_transfer_params", None)
     if not isinstance(kv, dict):
         return None
     ids = kv.pop("prompt_token_ids", None)
+    # Forwarded features only have meaning together with the ids. Consume both
+    # so a request never retains half of the pre-rendered payload.
+    kv.pop("prompt_features", None)
     if ids is None:
         return None
     if getattr(request, "echo", False):
@@ -142,17 +145,19 @@ def _reused_prompt_token_ids(
             "messages have non-text content and are rendered instead."
         )
         return None
-    # The reuse contract is disaggregated serving, where the decode side runs
-    # with a KV transfer connector. Without one the forwarded ids would
-    # replace the rendered messages outright, skipping the chat template,
+    # Without a connector, accepting forwarded ids would skip chat templating,
     # truncate_prompt_tokens, and tokenization on any client-supplied text.
-    if getattr(renderer.config, "kv_transfer_config", None) is None:
-        raise VLLMValidationError(
-            "`kv_transfer_params['prompt_token_ids']` is only honored when the "
-            "server runs a KV transfer connector (`--kv-transfer-config`); "
-            "without one the forwarded ids would replace the rendered prompt.",
-            parameter="kv_transfer_params.prompt_token_ids",
+    # Render messages by default so aggregated routers keep working; an explicit
+    # server opt-in preserves direct reuse for trusted pre-rendered requests.
+    if getattr(renderer.config, "kv_transfer_config", None) is None and not getattr(
+        renderer.config.model_config, "enable_prompt_token_ids", False
+    ):
+        logger.debug(
+            "Ignoring kv_transfer_params['prompt_token_ids']: "
+            "the server has no KV transfer connector and "
+            "--enable-prompt-token-ids is not set, so messages are rendered instead."
         )
+        return None
     # bool is an int subclass, hence the exact type check.
     if (
         not isinstance(ids, list)
