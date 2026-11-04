@@ -375,18 +375,22 @@ def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
 def pad_kv_cache_segments(
     kv_cache_config: KVCacheConfig, layout: KVCacheLayout, granule: int
 ) -> KVCacheConfig:
-    """Start every layer's region on a granule, so that a defragmenting commit
-    of any block count can back each segment with one physical chunk.
+    """Start every layer's region on a granule.
+
+    Committing the null block then backs each layer's first granule, which
+    kernels may read beyond the blocks they index (FlashMLA sparse prefill
+    reads the first 128 KiB even when every index is invalid). It also lets a
+    defragmenting commit of any block count back each segment with one
+    physical chunk, as RDMA registration requires.
 
     Only address space grows: commits already map whole granules per segment.
-    Block-outermost layouts have a single segment at offset 0 and are returned
-    as is.
+    Layouts without per-layer segments are returned as is.
     """
-    if layout.is_block_outermost:
+    if layout.is_block_outermost or not layout.is_block_compact:
         return kv_cache_config
-    assert layout.is_block_compact, f"{layout.name} has no per-layer segments."
     num_blocks = kv_cache_config.num_blocks
-    tensors = kv_cache_config.kv_cache_tensors
+    # Host-resident tensors live outside the reservation and keep their place.
+    tensors = [t for t in kv_cache_config.kv_cache_tensors if not t.host_resident]
     assert all(t.layer_stride == num_blocks * t.block_stride for t in tensors)
     # Cache groups alias each other's layer regions.
     regions = {
@@ -403,13 +407,15 @@ def pad_kv_cache_segments(
         padded_end += round_up(regions[offset], granule)
     padded = copy.copy(kv_cache_config)
     padded.kv_cache_tensors = [
-        replace(
+        tensor
+        if tensor.host_resident
+        else replace(
             tensor,
             size=padded_end,
             offset=padded_offsets[tensor.offset],
             layer_stride=round_up(tensor.layer_stride, granule),
         )
-        for tensor in tensors
+        for tensor in kv_cache_config.kv_cache_tensors
     ]
     return padded
 

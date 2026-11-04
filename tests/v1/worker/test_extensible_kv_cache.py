@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -303,6 +304,15 @@ def test_pad_kv_cache_segments():
     config, _ = _make_config(KVCacheLayout.BLNHC)
     assert pad_kv_cache_segments(config, KVCacheLayout.BLNHC, granule) is config
 
+    # Host-resident tensors (HiSparse) sit outside the reservation: kept as is.
+    config, _ = _make_config(KVCacheLayout.LBNHC, num_blocks=num_blocks)
+    (device,) = config.kv_cache_tensors
+    host = replace(device, layers=["host.0"], host_resident=True)
+    config.kv_cache_tensors = [device, host]
+    padded = pad_kv_cache_segments(config, KVCacheLayout.LBNHC, granule)
+    assert padded.kv_cache_tensors[0].layer_stride == 2 * granule
+    assert padded.kv_cache_tensors[1] is host
+
 
 @requires_cuda
 def test_mixed_block_strides_commit_per_layer(vmm):
@@ -493,6 +503,28 @@ def test_defragmenting_commit_backs_each_segment_with_one_allocation(vmm, padded
         assert all(_segments_backed_by_one_chunk(kv_cache)) == padded
         if padded:
             assert buffer.num_physical_chunks == NUM_LAYERS
+    finally:
+        kv_cache.free()
+
+
+@requires_cuda
+@pytest.mark.parametrize("padded", [False, True])
+def test_null_block_commit_backs_each_padded_layers_first_granule(vmm, padded):
+    """Kernels may read up to 128 KiB past the blocks they index (FlashMLA
+    sparse prefill). Unpadded, a layer starting one page before a granule
+    boundary has only that page backed after the null block commit; padded,
+    every layer's first granule is."""
+    layout = KVCacheLayout.LBNHC
+    granule = _granule(layout)
+    page = _make_config(layout)[1].page_size_bytes
+    config, _ = _make_config(layout, num_blocks=granule // page - 1)
+    if padded:
+        config = pad_kv_cache_segments(config, layout, granule)
+    kv_cache = ExtensibleKVCache(config, torch.device("cuda"), layout)
+    try:
+        kv_cache.allocate(kv_cache.size)
+        backed = kv_cache.buffer.segments_backed_by_one_chunk([granule] * NUM_LAYERS)
+        assert all(backed) == padded
     finally:
         kv_cache.free()
 

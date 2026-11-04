@@ -509,6 +509,8 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("connector created at init")
 
     monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
+    monkeypatch.setattr(gpu_worker, "pad_kv_cache_segments", lambda config, *_: config)
+    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
     log: list[str] = []
     runner = SimpleNamespace(
         initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
@@ -524,7 +526,10 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
         cache_hit_alignment_tokens=16,
     )
     worker = SimpleNamespace(
-        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=True,
+            get_resolved_kv_cache_layout=lambda: None,
+        ),
         model_config=SimpleNamespace(enable_return_routed_experts=False),
         vllm_config=SimpleNamespace(kv_transfer_config=None),
         model_runner=runner,
@@ -537,6 +542,56 @@ def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
     assert runner.extensible_kv_cache.warmup_committable_blocks == 40
     assert log == ["initialize_kv_cache"]
     assert worker._kv_cache_config is kv_cache_config
+
+
+def test_extensible_init_pads_segments_without_a_connector(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Without any KV connector the extensible cache still gets a padded
+    config: committing the null block must back each layer's first granule,
+    which attention kernels can read beyond the blocks they index."""
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+    from vllm.v1.worker.gpu_worker import Worker
+
+    kv_cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_layout=None,
+        needs_kv_cache_zeroing=False,
+        hash_block_size=16,
+        cache_hit_alignment_tokens=16,
+    )
+    padded = SimpleNamespace(**vars(kv_cache_config), padded=True)
+    pad_calls = []
+
+    def pad(config, layout, granule):
+        pad_calls.append((config, layout, granule))
+        return padded
+
+    monkeypatch.setattr(gpu_worker, "pad_kv_cache_segments", pad)
+    monkeypatch.setattr(gpu_worker, "granule_size", lambda device: 2 << 20)
+    monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value)
+    allocated = []
+    runner = SimpleNamespace(
+        initialize_kv_cache=lambda config, **kwargs: allocated.append(config),
+        extensible_kv_cache=SimpleNamespace(
+            reserved_headroom_bytes=0, committable_blocks=lambda: 42
+        ),
+    )
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            enable_extensible_kv_cache=True,
+            get_resolved_kv_cache_layout=lambda: KVCacheLayout.LBNHC,
+        ),
+        model_config=SimpleNamespace(enable_return_routed_experts=False),
+        vllm_config=SimpleNamespace(kv_transfer_config=None),
+        model_runner=runner,
+        _maybe_get_memory_pool_context=lambda tag: nullcontext(),
+        _v2_model_runner=lambda: runner,
+    )
+    Worker.initialize_from_config(worker, kv_cache_config)
+    assert pad_calls == [(kv_cache_config, KVCacheLayout.LBNHC, 2 << 20)]
+    assert len(allocated) == 1 and allocated[0] is padded
+    assert worker._kv_cache_config is padded
 
 
 @pytest.mark.parametrize(

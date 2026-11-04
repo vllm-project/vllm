@@ -114,7 +114,6 @@ from vllm.v1.worker.extensible_kv_cache import (
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
     pad_kv_cache_segments,
-    registers_kv_cache_memory,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -957,12 +956,11 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
-            if registers_kv_cache_memory(self.vllm_config):
-                kv_cache_config = pad_kv_cache_segments(
-                    kv_cache_config,
-                    self.cache_config.get_resolved_kv_cache_layout(),
-                    granule_size(torch.accelerator.current_device_index()),
-                )
+            kv_cache_config = pad_kv_cache_segments(
+                kv_cache_config,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                granule_size(torch.accelerator.current_device_index()),
+            )
             # The connector is created in `extend_kv_cache`, once the
             # memory it registers is final.
             self._kv_cache_config = kv_cache_config
