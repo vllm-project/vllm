@@ -1092,6 +1092,8 @@ class EngineCore:
         if level < 1:
             return pause_future
 
+        if level >= 2:
+            self._needs_reload_weights = True
         # Level 1+: Delegate to executor for GPU memory management
         model_executor = self.model_executor
         if pause_future is None:
@@ -1137,7 +1139,9 @@ class EngineCore:
 
         # Partial wakes intentionally keep the remaining allocations asleep.
         # Resume scheduling only once all executor memory is resident again.
-        fully_awake = not self.model_executor.is_sleeping
+        fully_awake = (
+            not self.model_executor.is_sleeping and not self._needs_reload_weights
+        )
         if fully_awake:
             self.resume_scheduler()
         return fully_awake
@@ -1217,6 +1221,12 @@ class EngineCore:
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
+        if method == "reload_weights":
+            self._needs_reload_weights = False
+
+            if not self.model_executor.is_sleeping:
+                self.resume_scheduler()
+
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
     def set_weight_version(self, weight_version: str) -> None:
