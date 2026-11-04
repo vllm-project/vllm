@@ -736,7 +736,7 @@ void topkGatingSoftplusSqrtLauncherHelper(
   // targets one of the two families CMake defines
   // VLLM_TOPK_SOFTPLUS_SQRT_WAVE{64,32}_ONLY, so only the arm that can actually
   // run is instantiated - compiling both used to double the number of device
-  // kernels emitted for this file.
+  // kernels emitted by the units that include this header.
   #if defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
     #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
       LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
@@ -882,8 +882,10 @@ void topkGatingSoftplusSqrtKernelLauncher(
 
 // The launcher is instantiated in topk_softplus_sqrt_<gating>_<indices>.cu, one
 // unit per (gating dtype, topk_indices dtype) pair, so that ninja generates the
-// device code for each pair in parallel. Declaring the instantiations extern
-// here keeps this file (the dispatch) from instantiating them a second time.
+// device code for each pair in parallel. Every unit includes this header, so
+// the extern declarations below also reach the dispatch unit
+// (topk_softplus_sqrt.cu), which only calls the launcher and must not
+// instantiate the kernels itself.
 #define VLLM_TOPK_SOFTPLUS_SQRT_DECLARE(EXT, IndType, InputType, HashIndType) \
   EXT template void                                                           \
   topkGatingSoftplusSqrtKernelLauncher<IndType, InputType, HashIndType>(      \
