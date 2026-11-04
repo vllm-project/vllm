@@ -86,3 +86,15 @@ The `dbo_register_recv_hook` method registers a callback that can be returned by
 The `dbo_maybe_run_recv_hook` method runs a callback that’s set by the `dbo_register_recv_hook` function if that callback exists.
 
 The `dbo_yield` method puts the current thread to sleep and wakes up the other UBatch thread.
+
+## SubGPU Pipelining
+
+SubGPU pipelining (`--subgpu-pipelining`, experimental, Model Runner V2 only) reuses the DBO runtime to overlap a different pair of operations. It splits the SMs into two CUDA green-context pools and runs the attention of one micro-batch on the attention pool while the rest of the layer of the other micro-batch runs on the rest pool. Long-context decode attention is bound by HBM bandwidth and the rest of the layer by tensor-core throughput or launch latency, so the two overlap when the attention kernel can saturate HBM from a partial pool.
+
+`UBatchRunner` creates the pools (`vllm/v1/worker/gpu/green_context_pools.py`): the micro-batches' compute stream is the attention pool's stream and each micro-batch's comm stream is its own stream in the rest pool. Models place their stages with `dbo_subgpu_ensure_attn()` and `dbo_subgpu_ensure_rest()`, which do nothing outside a SubGPU micro-batch; gpt-oss runs only its full-attention kernels on the attention pool. The micro-batches start and must end on the attention pool's stream, which is also the stream FULL CUDA graphs are captured and replayed on.
+
+* `--subgpu-attn-sms` and `--subgpu-rest-sms` (default 64 and 84) size the pools; one of them must be a multiple of 8.
+* `--subgpu-rest-streams` (default 2) sets the number of streams in the rest pool.
+* `--subgpu-schedule dbo` runs the same micro-batching on the whole GPU without pools, as a baseline.
+
+The mode pays off only with FULL CUDA graphs, and capturing green-context streams requires CUDA 13.4 or later. Micro-batching follows the DBO token thresholds. With `--data-parallel-size 1` the runner decides per step by the thresholds alone, and without expert parallelism no all-to-all backend is needed. The gain depends on the decode attention kernel saturating HBM from the attention pool's SMs; with a kernel that needs the whole GPU for that, the mode is slower than running the batch whole.
