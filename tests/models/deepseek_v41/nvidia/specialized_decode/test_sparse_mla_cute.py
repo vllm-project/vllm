@@ -147,7 +147,7 @@ def test_cuda_graph_replay_matches_eager() -> None:
 def test_declines_unsupported() -> None:
     c = make_case(4, 640, seed=3)
     out = torch.empty((4, H, D), dtype=torch.bfloat16, device=DEVICE)
-    base = [c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"], out]
+    base = (c["q"], c["swa_pool"], c["comp_pool"], c["indices"], c["lens"], out)
     assert supports_sparse_mla_cute(*base, 0.1, 1.0, c["sinks"])
     # Tensor scales, BF16 sinks, a 768-wide set, a BF16 query.
     assert not supports_sparse_mla_cute(*base, torch.tensor(0.1), 1.0, c["sinks"])
