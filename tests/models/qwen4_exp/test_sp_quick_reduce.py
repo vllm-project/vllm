@@ -102,39 +102,58 @@ def _require_quick_reduce() -> QuickAllReduce:
     return qr_comm
 
 
+def _assert_reduce_scatter(rank: int, rows: int) -> None:
+    x = _partials(rows, rank)
+    padded = rows + rows % 2  # the odd tensors are padded to the group size first
+    chunk = padded // 2
+    reference = tensor_model_parallel_all_reduce(x.float())
+    reference = torch.nn.functional.pad(reference, (0, 0, 0, padded - rows))
+    out = amd_sp.sp_reduce_scatter_quantized(x)
+    assert out.shape == (chunk, HIDDEN), (rows, out.shape)
+    block = reference[rank * chunk : (rank + 1) * chunk]
+    error = _nmse(out, block)
+    assert NMSE_FLOOR < error < NMSE_BOUND, (rows, error)
+    assert _max_row_nmse(out, block) < ROW_NMSE_BOUND, rows
+
+
+def _assert_all_gather(rank: int, chunk: int) -> None:
+    shard = _partials(chunk, rank, seed=200)
+    exact = common_sp.sp_all_gather(shard)
+    out = amd_sp.sp_all_gather_quantized(shard)
+    assert out.shape == (2 * chunk, HIDDEN), (chunk, out.shape)
+    error = _nmse(out, exact)
+    assert NMSE_FLOOR < error < NMSE_BOUND, (chunk, error)
+    assert _max_row_nmse(out, exact) < ROW_NMSE_BOUND, chunk
+    # The codec runs on every block, the rank's own included, so all ranks hold
+    # the same tensor.
+    gathered = tensor_model_parallel_all_gather(out.contiguous(), dim=0)
+    assert torch.equal(gathered[: out.shape[0]], gathered[out.shape[0] :])
+
+
 def _check_reduce_scatter(rank: int, config: VllmConfig) -> None:
     _require_quick_reduce()
-    # 2060 and 2064 rows leave 1030 and 1032 rows per rank: not whole tiles at
-    # this width, so the padding path runs; 2048 rows are whole tiles. The odd
-    # 2063 is padded to a multiple of the group size first, as in the layer.
-    for rows in (2060, 2048, 2063):
-        x = _partials(rows, rank)
-        padded = rows + rows % 2
-        chunk = padded // 2
-        reference = tensor_model_parallel_all_reduce(x.float())
-        reference = torch.nn.functional.pad(reference, (0, 0, 0, padded - rows))
-        out = amd_sp.sp_reduce_scatter_quantized(x)
-        assert out.shape == (chunk, HIDDEN), (rows, out.shape)
-        block = reference[rank * chunk : (rank + 1) * chunk]
-        error = _nmse(out, block)
-        assert NMSE_FLOOR < error < NMSE_BOUND, (rows, error)
-        assert _max_row_nmse(out, block) < ROW_NMSE_BOUND, rows
+    # A block must be a multiple of 16 rows at this width (80 KiB: the kernels
+    # need whole 32 KiB tiles over both blocks). 2060 and 2063 (padded to 2064)
+    # leave 1030 and 1032 rows per rank and take the padding path; 2048 and 2080
+    # need none, and 2080 is 325 tiles: an odd count, so half-tile blocks.
+    for rows in (2060, 2048, 2063, 2080):
+        _assert_reduce_scatter(rank, rows)
 
 
 def _check_all_gather(rank: int, config: VllmConfig) -> None:
     _require_quick_reduce()
-    for chunk in (1030, 1024):
-        shard = _partials(chunk, rank, seed=200)
-        exact = common_sp.sp_all_gather(shard)
-        out = amd_sp.sp_all_gather_quantized(shard)
-        assert out.shape == (2 * chunk, HIDDEN), (chunk, out.shape)
-        error = _nmse(out, exact)
-        assert NMSE_FLOOR < error < NMSE_BOUND, (chunk, error)
-        assert _max_row_nmse(out, exact) < ROW_NMSE_BOUND, chunk
-        # The codec runs on every block, the rank's own included, so all ranks
-        # hold the same tensor.
-        gathered = tensor_model_parallel_all_gather(out.contiguous(), dim=0)
-        assert torch.equal(gathered[: out.shape[0]], gathered[out.shape[0] :])
+    for chunk in (1030, 1024, 1040):  # padded, whole tiles, odd tile count
+        _assert_all_gather(rank, chunk)
+
+
+def _check_small_blocks(rank: int, config: VllmConfig) -> None:
+    """With the minimum size lowered: full tensors of 5, 15 and 25 tiles (5
+    tiles per 32 rows at this width), whose blocks are 2.5, 7.5 and 12.5 tiles."""
+    _require_quick_reduce()
+    for rows in (32, 96, 160):
+        _assert_reduce_scatter(rank, rows)
+    for chunk in (16, 48, 80):
+        _assert_all_gather(rank, chunk)
 
 
 def _check_exact_fallbacks(rank: int, config: VllmConfig) -> None:
@@ -303,7 +322,13 @@ def test_sp_quick_reduce(sp_quick_reduce_env, check) -> None:
     mp.spawn(_run, args=(get_open_port(), check), nprocs=2)
 
 
+@pytest.mark.parametrize(
+    "check",
+    [_check_layer_launches, _check_small_blocks],
+    ids=lambda check: check.__name__.removeprefix("_check_"),
+)
 @multi_gpu_test(num_gpus=2)
-def test_sp_quick_reduce_layer_launches(sp_quick_reduce_env, monkeypatch) -> None:
+def test_sp_quick_reduce_small_sizes(sp_quick_reduce_env, monkeypatch, check) -> None:
+    """Checks that need the minimum size lowered, which the others rely on."""
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB", "0")
-    mp.spawn(_run, args=(get_open_port(), _check_layer_launches), nprocs=2)
+    mp.spawn(_run, args=(get_open_port(), check), nprocs=2)

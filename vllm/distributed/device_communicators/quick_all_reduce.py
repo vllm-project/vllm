@@ -314,11 +314,11 @@ class QuickAllReduce:
             vllm_config.parallel_config.enable_hc_sp_quick_reduce
         ):
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import get_cdna_version
 
         if (
             self.world_size != 2
-            or not on_gfx950()
+            or get_cdna_version() != 4  # gfx950: the only arch run
             or not all(
                 hasattr(flydsl_int4, name)
                 for name in ("reduce_scatter", "all_gather", "compile_sp")
@@ -445,16 +445,18 @@ class QuickAllReduce:
         return self._flydsl_sp
 
     def _sp_chunk_rows(self, inp: torch.Tensor, chunk: int) -> int | None:
-        """Rows per rank, padded to whole tiles, or None to stay exact.
+        """Rows per rank, padded to the kernels' granularity, or None to stay exact.
 
-        The kernels move whole `_SP_TILE_BYTES` tiles per full tensor, so each
-        rank's block is zero-padded to a multiple of `unit` rows. The decision
+        The kernels need the full tensor to be whole `_SP_TILE_BYTES` tiles, so
+        each rank's block is zero-padded to a multiple of `unit` rows, the
+        fewest that make it a multiple of a tile / world_size. The decision
         depends on shapes only: every rank of the group reaches the same one.
         """
         if inp.dtype != torch.bfloat16 or not inp.is_contiguous():
             return None
         row_bytes = inp.shape[1] * inp.element_size()
-        unit = self._SP_TILE_BYTES // math.gcd(self._SP_TILE_BYTES, row_bytes)
+        block_bytes = self._SP_TILE_BYTES // self.world_size
+        unit = block_bytes // math.gcd(block_bytes, row_bytes)
         padded = -(-chunk // unit) * unit
         full_bytes = self.world_size * padded * row_bytes
         min_size = self.qr_min_size

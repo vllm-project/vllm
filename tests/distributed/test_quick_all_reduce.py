@@ -108,21 +108,24 @@ class _FakeFlyDSLInt4:
         self.allreduce_calls += 1
 
     def reduce_scatter(self, inp, out):
-        self._check_aligned(inp, out)
+        self._check_tensors(inp, out, full=inp)
         self.sp_calls.append(("reduce_scatter", inp, out))
         out.copy_(inp[: out.shape[0]])
 
     def all_gather(self, inp, out):
-        self._check_aligned(inp, out)
+        self._check_tensors(inp, out, full=out)
         self.sp_calls.append(("all_gather", inp, out))
         out[: inp.shape[0]] = inp
         out[inp.shape[0] :] = inp + 1
 
     @staticmethod
-    def _check_aligned(inp, out):
-        # AITER's QuickAllReduceInt4._check_tensors raises on misaligned buffers.
+    def _check_tensors(inp, out, *, full):
+        # AITER's QuickAllReduceInt4._check_tensors raises on misaligned buffers
+        # and on a full tensor that is not a whole number of 32 KiB tiles.
         if inp.data_ptr() % 16 or out.data_ptr() % 16:
             raise ValueError("requires 16-byte-aligned input/output")
+        if full.numel() * full.element_size() % (32 * KB):
+            raise ValueError("the full tensor must be a whole number of tiles")
 
     def compile_sp(self, full, shard):
         self.sp_calls.append(("compile_sp", full, shard))
@@ -526,9 +529,11 @@ def _sp_rows(num_rows: int) -> torch.Tensor:
     return values.to(torch.bfloat16)
 
 
-def test_sp_reduce_scatter_pads_each_block_to_whole_tiles():
+def test_sp_reduce_scatter_pads_each_block_to_half_tiles():
     quick_reduce, fake = _make_sp_quick_allreduce()
-    chunk, padded = 1030, 1056  # 33 * 32 rows: 32 rows are 5 whole tiles
+    # 65 * 16 rows: 16 rows are 80 KiB, half a tile times 5, so the full tensor
+    # of 2 blocks is a whole number of tiles (325)
+    chunk, padded = 1030, 1040
     inp = _sp_rows(2 * chunk)
 
     out = quick_reduce.quick_reduce_scatter(inp)
@@ -547,7 +552,7 @@ def test_sp_reduce_scatter_pads_each_block_to_whole_tiles():
 
 def test_sp_all_gather_pads_each_block_and_keeps_rank_order():
     quick_reduce, fake = _make_sp_quick_allreduce()
-    chunk, padded = 1030, 1056
+    chunk, padded = 1030, 1040
     inp = _sp_rows(chunk)
 
     out = quick_reduce.quick_all_gather(inp)
@@ -562,9 +567,9 @@ def test_sp_all_gather_pads_each_block_and_keeps_rank_order():
     assert torch.equal(out[chunk:], inp + 1)
 
 
-def test_sp_whole_tile_blocks_are_not_copied():
+def test_sp_aligned_blocks_are_not_copied():
     quick_reduce, fake = _make_sp_quick_allreduce()
-    chunk = 1024  # a multiple of 32 rows
+    chunk = 1040  # a multiple of 16 rows, not of 32: half-tile blocks are enough
     inp = _sp_rows(2 * chunk)
     shard = _sp_rows(chunk)
 
@@ -603,6 +608,28 @@ def test_sp_ineligible_inputs_return_none(case):
     assert quick_reduce.quick_reduce_scatter(inp) is None
     assert quick_reduce.quick_all_gather(inp) is None
     assert not fake.sp_calls
+
+
+@pytest.mark.parametrize(
+    "hidden, chunk, padded",
+    [
+        (2560, 1030, 1040),  # 5,120 B rows: 16 rows are 5 * 16 KiB
+        (1024, 1030, 1032),  # 2,048 B rows: 8 rows are 16 KiB
+        (4096, 1031, 1032),  # 8,192 B rows: 2 rows are 16 KiB
+        (3000, 1030, 2048),  # 6,000 B rows: 1,024 rows are 375 * 16 KiB
+        (2560, 1040, 1040),  # already a multiple: nothing to pad
+    ],
+)
+def test_sp_pad_unit_is_the_fewest_rows_of_whole_half_tiles(hidden, chunk, padded):
+    quick_reduce, fake = _make_sp_quick_allreduce(min_size_mb=0, max_size_mb=64)
+    inp = torch.zeros(chunk, hidden, dtype=torch.bfloat16)
+
+    out = quick_reduce.quick_all_gather(inp)
+
+    # the fake refuses a full tensor that is not a whole number of tiles
+    ((_, src, kernel_out),) = fake.sp_calls
+    assert src.shape == (padded, hidden) and kernel_out.shape == (2 * padded, hidden)
+    assert out.shape == (2 * chunk, hidden)
 
 
 def _misaligned_rows(rows: int) -> torch.Tensor:
@@ -645,11 +672,13 @@ def test_sp_min_size_override_admits_small_messages():
 
 
 def _init_flydsl_sp(
-    monkeypatch, world_size: int, flydsl_int4, flag: bool | None, gfx950: bool = True
+    monkeypatch, world_size: int, flydsl_int4, flag: bool | None, cdna: int = 4
 ):
-    """`flag` None stands for no VllmConfig being set."""
+    """`flag` None stands for no VllmConfig being set; `cdna` 4 is gfx950."""
     monkeypatch.setitem(
-        sys.modules, "vllm.platforms.rocm", SimpleNamespace(on_gfx950=lambda: gfx950)
+        sys.modules,
+        "vllm.platforms.rocm",
+        SimpleNamespace(get_cdna_version=lambda: cdna),
     )
     quick_reduce = _make_quick_allreduce_for_test()
     quick_reduce.world_size = world_size
@@ -685,15 +714,11 @@ def test_sp_init_is_inert_without_the_flag(monkeypatch, flag):
     assert not enabled and not fake.sp_calls
 
 
-@pytest.mark.parametrize(
-    "world_size, gfx950", [(4, True), (2, False)], ids=["tp4", "not_gfx950"]
-)
-def test_sp_init_stays_exact_where_it_was_not_validated(
-    monkeypatch, world_size, gfx950
-):
+@pytest.mark.parametrize("world_size, cdna", [(4, 4), (2, 3)], ids=["tp4", "gfx942"])
+def test_sp_init_stays_exact_where_it_was_not_validated(monkeypatch, world_size, cdna):
     fake = _FakeFlyDSLInt4()
 
-    enabled, _ = _init_flydsl_sp(monkeypatch, world_size, fake, True, gfx950)
+    enabled, _ = _init_flydsl_sp(monkeypatch, world_size, fake, True, cdna)
 
     assert not enabled and not fake.sp_calls
 
