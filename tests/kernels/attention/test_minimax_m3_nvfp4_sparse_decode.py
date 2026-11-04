@@ -287,12 +287,7 @@ def _assert_mxfp8_equals_quantized_bf16(q, cache, topk, table, seq_lens, qlen, *
     assert (got_s[rows:] == 0xA5).all()
 
 
-@pytest.mark.parametrize("ctx", [30_000, 150_000, 500_000])
-@pytest.mark.parametrize("qlen", [4, 8])
-@pytest.mark.parametrize("num_reqs", [1, 2, 3, 5, 8, 12, 16, 24])
-def test_decode_mxfp8_output_matches_quantized_bf16(num_reqs, qlen, ctx):
-    """The MXFP8 epilogue equals ``mxfp8_e4m3_quantize`` of the same kernel's
-    bf16 output, bit for bit, at the default split choice for each batch."""
+def _assert_multi_request_mxfp8(num_reqs, qlen, ctx, **kw):
     torch.manual_seed(num_reqs * 7 + qlen)
     nb = (ctx + BLOCK - 1) // BLOCK
     # Every request reads the same pages (read-only): a small cache at any context.
@@ -307,7 +302,24 @@ def test_decode_mxfp8_output_matches_quantized_bf16(num_reqs, qlen, ctx):
     seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
     topk = _selections(lens, qlen)
     q = (torch.randn(num_reqs * qlen, GROUP, D, device="cuda") * 0.02).bfloat16()
-    _assert_mxfp8_equals_quantized_bf16(q, cache, topk, table, seq_lens, qlen)
+    _assert_mxfp8_equals_quantized_bf16(q, cache, topk, table, seq_lens, qlen, **kw)
+
+
+@pytest.mark.parametrize("ctx", [30_000, 150_000, 500_000])
+@pytest.mark.parametrize("qlen", [4, 8])
+@pytest.mark.parametrize("num_reqs", [1, 2, 3, 5, 8, 12, 16, 24])
+def test_decode_mxfp8_output_matches_quantized_bf16(num_reqs, qlen, ctx):
+    """The MXFP8 epilogue equals ``mxfp8_e4m3_quantize`` of the same kernel's
+    bf16 output, bit for bit, at the default split choice for each batch."""
+    _assert_multi_request_mxfp8(num_reqs, qlen, ctx)
+
+
+@pytest.mark.parametrize("splits", [2, 4])
+@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24])
+def test_decode_mxfp8_output_multi_request_xcd_splits(num_reqs, splits):
+    """DSpark 7 rows (8 per request) on the 8-XCD grid, explicit split counts
+    across the request ranges a split heuristic distinguishes."""
+    _assert_multi_request_mxfp8(num_reqs, 8, 150_000, splits=splits, xcd_count=8)
 
 
 @pytest.mark.parametrize("splits", [1, 2, 4, 8])
