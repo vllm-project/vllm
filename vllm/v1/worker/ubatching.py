@@ -47,6 +47,9 @@ class UBatchContext:
         self.schedule = schedule
         self.token_offset = token_offset
         self.recv_hook = None
+        # The stream of the microbatch that registered recv_hook (see
+        # dbo_register_recv_hook); None runs the hook on the current stream.
+        self.recv_hook_stream: torch.cuda.Stream | None = None
 
     def __enter__(self):
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
@@ -121,9 +124,22 @@ class UBatchContext:
         self._wait_comm_done()
 
     def maybe_run_recv_hook(self):
-        if self.recv_hook is not None:
-            self.recv_hook()
-            self.recv_hook = None
+        if self.recv_hook is None:
+            return
+        hook, stream = self.recv_hook, self.recv_hook_stream
+        self.recv_hook = None
+        self.recv_hook_stream = None
+        if stream is None or stream == current_stream():
+            hook()
+            return
+        # The hook completes the peer microbatch's receive, so its kernels
+        # belong on the peer's stream, ahead of the work that consumes the
+        # received data. Under DBO both microbatches share one compute stream
+        # and this never triggers; under SubGPU pipelining each microbatch's
+        # rest stage has its own stream and a microbatch exits on the
+        # attention pool while its peer's receive may still be pending.
+        with torch.cuda.stream(stream):
+            hook()
 
     def yield_(self):
         self.current_stream = current_stream()
@@ -215,6 +231,8 @@ def dbo_register_recv_hook(recv_hook):
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % _NUM_UBATCHES]
         next_ctx.recv_hook = recv_hook
+        # The peer runs the hook on behalf of this microbatch: on this stream.
+        next_ctx.recv_hook_stream = current_stream()
 
 
 def dbo_get_previous_event(func, *args, **kwargs):

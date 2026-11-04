@@ -32,8 +32,11 @@ from vllm.v1.worker.gpu.ubatch_utils import UBatchRunner, UBatchState
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
+    dbo_maybe_run_recv_hook,
+    dbo_register_recv_hook,
     dbo_subgpu_ensure_attn,
     dbo_subgpu_ensure_rest,
+    dbo_yield,
 )
 
 DECODE_THRESHOLD = 32
@@ -109,11 +112,21 @@ def test_one_rank_microbatches_by_the_thresholds():
 
 
 class _TwoStageModel(torch.nn.Module):
-    """Toy layer: an attention stage on the attention pool, the rest elsewhere."""
+    """Toy layer: an attention stage on the attention pool, the rest elsewhere.
 
-    def __init__(self, streams: list[tuple[int, torch.cuda.Stream, torch.cuda.Stream]]):
+    With `hook_streams` the rest stage also plays the MoE's all-to-all protocol:
+    run the peer's pending receive hook, register its own and yield. Each hook
+    records the stream it ran on under its microbatch's id.
+    """
+
+    def __init__(
+        self,
+        streams: list[tuple[int, torch.cuda.Stream, torch.cuda.Stream]],
+        hook_streams: dict[int, torch.cuda.Stream] | None = None,
+    ):
         super().__init__()
         self.streams = streams
+        self.hook_streams = hook_streams
 
     def forward(self, input_ids, positions, intermediate_tensors=None, **kwargs):
         dbo_subgpu_ensure_attn()
@@ -122,6 +135,16 @@ class _TwoStageModel(torch.nn.Module):
         dbo_subgpu_ensure_rest()
         rest_stream = current_stream()
         out = out + positions.float().unsqueeze(-1)
+        if self.hook_streams is not None:
+            dbo_maybe_run_recv_hook()
+            ubatch_id = dbo_current_ubatch_id()
+            hook_streams = self.hook_streams
+
+            def hook() -> None:
+                hook_streams[ubatch_id] = current_stream()
+
+            dbo_register_recv_hook(hook)
+            dbo_yield()
         # Microbatches must end on the stream they started on.
         dbo_subgpu_ensure_attn()
         self.streams.append((dbo_current_ubatch_id(), attn_stream, rest_stream))
@@ -145,7 +168,9 @@ def _make_runner(vllm_config: VllmConfig) -> UBatchRunner:
 
 
 def _run_two_stage_model(
-    runner: UBatchRunner, vllm_config: VllmConfig
+    runner: UBatchRunner,
+    vllm_config: VllmConfig,
+    hook_streams: dict[int, torch.cuda.Stream] | None = None,
 ) -> dict[int, tuple[torch.cuda.Stream, torch.cuda.Stream]]:
     device = torch.device("cuda:0")
     num_tokens = 16
@@ -163,7 +188,9 @@ def _run_two_stage_model(
         forward_contexts=[create_forward_context(None, vllm_config) for _ in range(2)],
     )
     streams: list[tuple[int, torch.cuda.Stream, torch.cuda.Stream]] = []
-    output = runner.run(_TwoStageModel(streams), model_inputs, ubatch_state)
+    output = runner.run(
+        _TwoStageModel(streams, hook_streams), model_inputs, ubatch_state
+    )
     torch.cuda.synchronize()
 
     expected = model_inputs["input_ids"].float().unsqueeze(-1) * 2 + model_inputs[
@@ -199,6 +226,27 @@ def test_microbatches_run_on_the_pools():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_receive_hooks_run_on_the_registering_microbatch_stream():
+    """A receive hook is run by the peer microbatch (at its next all-to-all or
+    on exit, when it is back on the attention pool) but completes the
+    registering microbatch's receive: it must run on that microbatch's rest
+    stream, ahead of the work that consumes the received data."""
+    pytest.importorskip("cuda.bindings")
+    total_sms = torch.cuda.get_device_properties(0).multi_processor_count
+    vllm_config = _make_config(subgpu_attn_sms=8, subgpu_rest_sms=total_sms - 8)
+    runner = _make_runner(vllm_config)
+    pools = runner.subgpu_pools
+    assert pools is not None
+
+    hook_streams: dict[int, torch.cuda.Stream] = {}
+    by_ubatch = _run_two_stage_model(runner, vllm_config, hook_streams)
+    assert set(hook_streams) == {0, 1}
+    for ubatch_id, (_, rest) in by_ubatch.items():
+        assert hook_streams[ubatch_id] == rest
+        assert hook_streams[ubatch_id] != pools.attn_stream
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 def test_one_rank_forward_contexts_carry_no_dp_metadata():
     """DP metadata describes the ranks' token counts; a single rank has none."""
     vllm_config = _make_config(subgpu_schedule="dbo")
@@ -221,6 +269,8 @@ def test_dbo_schedule_keeps_the_whole_gpu():
     assert runner.subgpu_pools is None
     assert runner.comm_streams is None
 
-    by_ubatch = _run_two_stage_model(runner, vllm_config)
-    for attn, rest in by_ubatch.values():
+    hook_streams: dict[int, torch.cuda.Stream] = {}
+    by_ubatch = _run_two_stage_model(runner, vllm_config, hook_streams)
+    for ubatch_id, (attn, rest) in by_ubatch.items():
         assert attn == rest
+        assert hook_streams[ubatch_id] == attn
