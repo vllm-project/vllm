@@ -363,6 +363,17 @@ def resolve_quantization_config(
     ) -> QuantSpec | None:
         if base_spec is None or override_spec is None:
             return override_spec or base_spec
+        if (
+            base_spec.hadamard_size is not None
+            and "weight" in override_spec.fields_set
+            and override_spec.weight != base_spec.weight
+        ):
+            raise ValueError(
+                "quantization_config cannot change the weight of a "
+                f"Hadamard-rotated shorthand ({base_spec} -> {override_spec}); "
+                "use --quantization online and set `hadamard_size` on the spec "
+                "instead."
+            )
         return QuantSpec(
             **{name: getattr(base_spec, name) for name in base_spec.fields_set}
             | {name: getattr(override_spec, name) for name in override_spec.fields_set}

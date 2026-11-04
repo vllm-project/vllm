@@ -340,3 +340,32 @@ def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
     layer_cls = LinearBase if linear is not None else RoutedExperts
     with pytest.raises(NotImplementedError, match="hadamard_size"):
         config.resolve_quant_method_cls(layer_cls, "model.layers.0.mlp.down_proj")
+
+
+@pytest.mark.parametrize(
+    ("quantization", "linear", "expected_hadamard"),
+    [
+        # `--quantization online` takes the rotation from the spec.
+        ("online", {"weight": "mxfp4", "hadamard_size": 64}, 64),
+        # A compatible override keeps the shorthand's rotation.
+        ("mxfp4_hadamard32", {"activation": None}, 32),
+        # Re-pointing a rotated shorthand at another weight is rejected.
+        ("mxfp4_hadamard32", {"weight": "fp8_per_block_static"}, None),
+    ],
+)
+def test_hadamard_size_composes_with_quantization_config(
+    quantization, linear, expected_hadamard
+):
+    if expected_hadamard is None:
+        with pytest.raises(ValueError, match="Hadamard-rotated shorthand"):
+            resolve_quantization_config(quantization, {"linear": linear})
+        return
+
+    args = resolve_quantization_config(quantization, {"linear": linear})
+    assert args is not None and args.linear is not None
+    assert args.linear.hadamard_size == expected_hadamard
+    resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+        LinearBase, "model.layers.0.self_attn.o_proj"
+    )
+    assert resolved is not None
+    assert resolved[3].hadamard_size == expected_hadamard
