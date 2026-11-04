@@ -306,15 +306,24 @@ class HiSparseCoordinator:
         )
         if state.copies_recorded_blocks >= num_host_blocks:
             return
-        rows = [
-            manager.get_residency_row(request_id) for manager in self.resident_managers
+        num_pages = min(
+            num_host_blocks,
+            *(
+                len(manager.req_to_blocks.get(request_id, ()))
+                for manager in self.resident_managers
+            ),
+        )
+        pages = [
+            host_idx
+            for host_idx in range(state.copies_recorded_blocks, num_pages)
+            if host_idx not in state.pending_pages
         ]
-        num_pages = min(num_host_blocks, *map(len, rows))
-        for host_idx in range(state.copies_recorded_blocks, num_pages):
-            if host_idx not in state.pending_pages:
-                self._store_copy(
-                    host_blocks[host_idx], tuple(row[host_idx] for row in rows)
-                )
+        columns = [
+            manager.get_residency_pages(request_id, pages)
+            for manager in self.resident_managers
+        ]
+        for host_idx, blocks in zip(pages, zip(*columns)):
+            self._store_copy(host_blocks[host_idx], blocks)
         state.copies_recorded_blocks = max(
             state.copies_recorded_blocks, num_host_blocks
         )
@@ -381,19 +390,28 @@ class HiSparseCoordinator:
         page_indices: Iterable[int],
     ) -> None:
         """Release the pages' resident blocks to the pool, in the given order."""
-        rows = [
-            manager.get_residency_row(request_id) for manager in self.resident_managers
+        num_unpinnable = (
+            min(
+                len(manager.req_to_blocks.get(request_id, ()))
+                for manager in self.resident_managers
+            )
+            - ACTIVE_TAIL_PAGES
+        )
+        pages = [
+            page_idx
+            for page_idx in page_indices
+            if page_idx < num_unpinnable
+            and page_idx not in state.pending_pages
+            and page_idx in state.valid_pages
         ]
-        num_unpinnable = min(map(len, rows), default=0) - ACTIVE_TAIL_PAGES
+        if not pages:
+            return
+        columns = [
+            manager.get_residency_pages(request_id, pages)
+            for manager in self.resident_managers
+        ]
         released: list[KVCacheBlock] = []
-        for page_idx in page_indices:
-            if (
-                page_idx >= num_unpinnable
-                or page_idx in state.pending_pages
-                or page_idx not in state.valid_pages
-            ):
-                continue
-            blocks = [row[page_idx] for row in rows]
+        for page_idx, blocks in zip(pages, zip(*columns)):
             if any(block.is_null for block in blocks):
                 continue
             for block in blocks:
@@ -633,25 +651,32 @@ class HiSparseCoordinator:
         if host_blocks is None:
             return
         state = self._get_request_state(request_id)
-        rows = [
-            manager.get_residency_row(request_id) for manager in self.resident_managers
+        num_pages = min(
+            len(host_blocks),
+            *(
+                len(manager.req_to_blocks.get(request_id, ()))
+                for manager in self.resident_managers
+            ),
+        )
+        pages = [
+            page_idx
+            for page_idx in page_indices
+            if page_idx < num_pages
+            and page_idx not in state.pending_pages
+            and not host_blocks[page_idx].is_null
         ]
-        num_resident_pages = min(map(len, rows))
+        columns = [
+            manager.get_residency_pages(request_id, pages)
+            for manager in self.resident_managers
+        ]
         pinned_host_blocks: list[KVCacheBlock] = []
         pinned_blocks: list[KVCacheBlock] = []
-        for page_idx in page_indices:
+        for page_idx, blocks in zip(pages, zip(*columns)):
             if budget == 0:
                 break
-            if (
-                page_idx in state.pending_pages
-                or page_idx >= len(host_blocks)
-                or page_idx >= num_resident_pages
-            ):
+            if any(block.is_null for block in blocks):
                 continue
             host_block = host_blocks[page_idx]
-            blocks = tuple(row[page_idx] for row in rows)
-            if host_block.is_null or any(block.is_null for block in blocks):
-                continue
             budget -= 1
             pinned_host_blocks.append(host_block)
             pinned_blocks.extend(blocks)
@@ -952,6 +977,8 @@ class HiSparseCoordinator:
             state.publication = None
         for manager in self.resident_managers:
             blocks = manager.get_residency_row(request_id)
+            released: list[KVCacheBlock] = []
+            dropped: list[int] = []
             # Tail first, so a prefix loses its tail pages before its head.
             for page_idx in reversed(range(len(blocks))):
                 block = blocks[page_idx]
@@ -965,10 +992,12 @@ class HiSparseCoordinator:
                     page_idx in state.valid_pages
                     and page_idx not in state.pending_pages
                 ):
-                    manager.block_pool.unpin_blocks([block], self._on_block_reused)
+                    released.append(block)
                 else:
                     continue
-                manager.drop_resident_page(request_id, page_idx)
+                dropped.append(page_idx)
+            manager.block_pool.unpin_blocks(released, self._on_block_reused)
+            manager.drop_resident_pages(request_id, dropped)
 
 
 def get_hisparse_coordinator(

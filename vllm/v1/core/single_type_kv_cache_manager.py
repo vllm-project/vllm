@@ -3,7 +3,7 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.distributed.kv_events import MEDIUM_CPU
@@ -2585,8 +2585,15 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         self, request_id: str, pages: Mapping[int, KVCacheBlock]
     ) -> list[int]:
         """Point null prefix pages at pinned GPU copies; return the adopted pages."""
-        row = self.get_residency_row(request_id)
-        adopted = [idx for idx in pages if idx < len(row) and row[idx].is_null]
+        num_pages = len(self.req_to_blocks.get(request_id, ()))
+        indices = [idx for idx in pages if idx < num_pages]
+        adopted = [
+            idx
+            for idx, block in zip(
+                indices, self.get_residency_pages(request_id, indices)
+            )
+            if block.is_null
+        ]
         if adopted:
             changes = self.residency_changes.setdefault(request_id, {})
             for idx in adopted:
@@ -2603,6 +2610,14 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
             changes[block_idx] = self._null_block
         return block
 
+    def drop_resident_pages(
+        self, request_id: str, block_indices: Iterable[int]
+    ) -> None:
+        """Stop reading resident pages from the GPU."""
+        changes = self.residency_changes.setdefault(request_id, {})
+        for block_idx in block_indices:
+            changes[block_idx] = self._null_block
+
     def get_resident_page(self, request_id: str, block_idx: int) -> KVCacheBlock | None:
         blocks = self.req_to_blocks.get(request_id)
         if blocks is None or block_idx >= len(blocks):
@@ -2612,6 +2627,17 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         if changes:
             block = changes.get(block_idx, block)
         return None if block.is_null else block
+
+    def get_residency_pages(
+        self, request_id: str, block_indices: Sequence[int]
+    ) -> list[KVCacheBlock]:
+        """The request's pages with residency changes applied; host-only pages
+        are the null block. Every index must be within the request's row."""
+        blocks = self.req_to_blocks[request_id]
+        changes = self.residency_changes.get(request_id)
+        if not changes:
+            return [blocks[idx] for idx in block_indices]
+        return [changes.get(idx, blocks[idx]) for idx in block_indices]
 
     def get_residency_row(self, request_id: str, start: int = 0) -> list[KVCacheBlock]:
         """The request's row from ``start`` with residency changes applied. Unlike
