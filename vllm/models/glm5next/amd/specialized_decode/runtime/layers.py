@@ -298,6 +298,9 @@ class _Width:
         r[:n, ROW_SLOT].copy_(step.attn_metadata[mla].slot_mapping[:n])
         r[:n, ROW_POOL_SLOT].copy_(step.attn_metadata[icache].slot_mapping[:n])
         r[:n, ROW_TAIL_SLOT].copy_(step.attn_metadata[tail].slot_mapping[:n])
+        # graph padding rows (MLA slot < 0) keep stale positions; as position -1
+        # they skip the indexer scoring and attention sized by the position
+        r[:n, ROW_POS].masked_fill_(r[:n, ROW_SLOT] < 0, -1)
         if n < self.width:
             r[n:, ROW_POS : ROW_TAIL_SLOT + 1].fill_(-1)
         self.rows_step = step
