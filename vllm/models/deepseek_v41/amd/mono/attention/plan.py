@@ -5,6 +5,8 @@ rank's share of them, task counts and the scratch (mailbox) layout."""
 
 from dataclasses import dataclass
 
+from ..common.arch import GFX942
+
 HIDDEN = 5120
 Q_RANK = 1280
 KV_DIM = 512
@@ -21,7 +23,10 @@ TOPK = 512
 EPS = 1e-20
 
 ROWS = 16  # GEMV rows a task
-TILE = 16  # tokens a GEMV pass (an MFMA's N)
+# The tokens a GEMV pass takes, at most an MFMA's N (16). A gfx942 pass takes 6
+# tokens, as the seam and MoE stages do (``stages.gemv.TILE``), so that K1's x
+# tiles and K2's wo_a and wo_b tiles stay within its 64 KB of LDS.
+TILE = 6 if GFX942 else 16
 HEAD_TILE = 16  # heads an attention MFMA takes
 WOA_ROWS = 32  # a wo_a task's rows: one MX group of its output
 MAX_TOKENS = 48
@@ -29,7 +34,6 @@ MAX_TOKENS = 48
 # KV record (V4 fp8_ds_mla): 576 B data rows (448 e4m3 | 64 bf16), then 8 B of
 # scales a token (7 UE8M0 + pad) after the block's rows
 DATA = 576
-SCALE_BYTES = 8
 
 # attention: a split is 16 keys; a token has at most TOPK + WINDOW keys
 BK = 16
@@ -53,7 +57,7 @@ class Dims:
     tp: int
 
     def __post_init__(self):
-        assert self.tp in (2, 4), self.tp
+        assert self.tp in (2, 4, 8), self.tp
 
     @property
     def heads(self) -> int:
@@ -61,7 +65,16 @@ class Dims:
 
     @property
     def head_tiles(self) -> int:
-        return self.heads // HEAD_TILE
+        """16-head MFMA tiles a rank: TP8's 8 heads take one, half of it
+        padding (``heads_pad``)."""
+        return cdiv(self.heads, HEAD_TILE)
+
+    @property
+    def heads_pad(self) -> int:
+        """The heads the split stage's LDS and MFMAs hold: whole head tiles.
+        The padded heads' columns are computed (each head is its own score
+        maximum and its own PV column) but never stored."""
+        return self.head_tiles * HEAD_TILE
 
     @property
     def groups(self) -> int:
@@ -144,7 +157,7 @@ def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
     """K2's scratch regions, laid out past ``start``: published data (plain)
     and flag pairs."""
     ck = (
-        64 if d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256 else 128
+        64 if GFX942 or (d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256) else 128
     )  # back.chunk_keys
     nchunk = cdiv(KEYS, ck)
     return byte_layout(

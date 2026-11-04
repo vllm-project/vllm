@@ -67,6 +67,7 @@ class _RocmKvInsert:
             torch.arange(num_tokens + 8, dtype=torch.float32, device=DEVICE), inv_freq
         )
         self.attn = SimpleNamespace(
+            use_pcp=False,
             kv_mxfp8=self.kv_mxfp8,
             compressor=None,
             indexer=None,

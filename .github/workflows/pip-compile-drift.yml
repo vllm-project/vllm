@@ -16,15 +16,14 @@ jobs:
     if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       with:
         python-version: "3.12"
-    - run: python -m pip install pre-commit
     - name: Re-resolve all lockfiles (retries index errors)
       run: |
         for attempt in 1 2 3; do
-          if pre-commit run pip-compile --hook-stage manual --all-files --show-diff-on-failure --color=always; then
+          if uvx pre-commit run pip-compile --hook-stage manual --all-files --show-diff-on-failure --color=always; then
             exit 0
           fi
           # A failed attempt may have rewritten the lockfiles; reset them so a

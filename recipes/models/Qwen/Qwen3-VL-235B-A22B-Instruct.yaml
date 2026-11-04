@@ -1,0 +1,343 @@
+meta:
+  title: "Qwen3-VL-235B-A22B-Instruct"
+  slug: "qwen3-vl-235b-a22b-instruct"
+  provider: "Qwen"
+  description: "Qwen3-VL flagship MoE vision-language model with 235B total / 22B active parameters, supporting images, video, and long context."
+  date_added: 2025-09-28
+  date_updated: 2026-04-17
+  tasks:
+    - multimodal
+    - text
+  performance_headline: "Strong on images, video, and text — #1 open model on text on lmarena.ai at release"
+  related_recipes: []
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "Qwen/Qwen3-VL-235B-A22B-Instruct"
+  min_vllm_version: "0.11.0"
+  architecture: moe
+  parameter_count: "235B"
+  active_parameters: "22B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+  docker_image:
+    amd: "vllm/vllm-openai-rocm:v0.28.0"
+
+dependencies:
+  - note: "Recommended for offline multimodal inference (image/video pre-processing helpers)"
+    command: "uv pip install qwen-vl-utils==0.0.14"
+    optional: true
+
+features:
+  text_only:
+    description: "Skip loading the vision encoder for text-only workloads — frees VRAM for KV cache. Mutually exclusive with encoder_parallel."
+    args:
+      - "--language-model-only"
+  encoder_parallel:
+    description: "Run the vision encoder in data-parallel mode — avoids TP comm overhead on the small encoder. Mutually exclusive with text_only."
+    args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+  long_context:
+    description: "Extend the 262K context to 1M tokens with YaRN. Static scaling costs quality on
+      short prompts and the wider window inflates the KV budget, so it is opt-in."
+    args:
+      - "--hf-overrides"
+      - '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":3.0,"original_max_position_embeddings":262144,"mrope_section":[24,20,20],"mrope_interleaved":true}}}'
+      - "--max-model-len"
+      - "1000000"
+    env:
+      VLLM_ALLOW_LONG_MAX_MODEL_LEN: "1"
+
+opt_in_features:
+  - text_only
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 564
+    description: "Full BF16 — ideal on H200/B200 with 8 GPUs"
+  fp8:
+    model_id: "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8"
+    precision: fp8
+    vram_minimum_gb: 282
+    # FP8 block_n=128 + moe_intermediate_size=1536 → TP must divide 12; cap at 4.
+    tp: 4
+    description: "Qwen official FP8 checkpoint for optimal H100 memory efficiency"
+  nvfp4:
+    model_id: "nvidia/Qwen3-VL-235B-A22B-Instruct-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 141
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHat)"
+    vram_minimum_gb: 282
+    description: "RedHatAI FP8 (E4M3) with dynamic per-token activation quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_fp8_block:
+    model_id: "RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHat)"
+    vram_minimum_gb: 282
+    description: "RedHatAI FP8 block quantization"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 150
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  hopper:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--async-scheduling"
+    extra_env: {}
+  blackwell:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--async-scheduling"
+    extra_env: {}
+  amd:
+    extra_args:
+      - "--mm-encoder-tp-mode"
+      - "data"
+      - "--async-scheduling"
+      - "--enable-chunked-prefill"
+    extra_env:
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
+      HIP_FORCE_DEV_KERNARG: "1"
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MHA: "1"
+      VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: "1"
+      SAFETENSORS_FAST_GPU: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3-VL](https://github.com/QwenLM/Qwen3-VL) is the most powerful vision-language model in the Qwen series, delivering upgrades to text understanding & generation, visual perception & reasoning, extended context, spatial/video dynamics, and agent interaction. The flagship `Qwen3-VL-235B-A22B-Instruct` is a MoE model that requires at least 8 GPUs with ≥80 GB memory each (A100/H100/H200 class).
+
+  ## Prerequisites
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+
+  # Install vLLM >= 0.11.0
+  uv pip install -U vllm
+
+  # Install Qwen-VL utility library (recommended for offline inference)
+  uv pip install qwen-vl-utils==0.0.14
+  ```
+
+  ## Deployment Configurations
+
+  ### H100 (Image + Video, FP8)
+  ```bash
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+    --tensor-parallel-size 8 \
+    --mm-encoder-tp-mode data \
+    --enable-expert-parallel \
+    --async-scheduling
+  ```
+
+  ### H100 (Image-Only, FP8, TP4)
+  ```bash
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+    --tensor-parallel-size 4 \
+    --limit-mm-per-prompt.video 0 \
+    --async-scheduling \
+    --gpu-memory-utilization 0.95 \
+    --max-num-seqs 128
+  ```
+
+  ### A100 & H100 (Image-Only, BF16)
+  ```bash
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+    --tensor-parallel-size 8 \
+    --limit-mm-per-prompt.video 0 \
+    --async-scheduling
+  ```
+
+  ### A100 & H100 (Image + Video, BF16)
+  ```bash
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+    --tensor-parallel-size 8 \
+    --max-model-len 128000 \
+    --async-scheduling
+  ```
+
+  ### H200 & B200
+  ```bash
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+    --tensor-parallel-size 8 \
+    --mm-encoder-tp-mode data \
+    --async-scheduling
+  ```
+
+  ### MI300X/MI325X/MI355X (BF16, TP8)
+  ```bash
+  export SAFETENSORS_FAST_GPU="1"
+  export HIP_FORCE_DEV_KERNARG="1"
+  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+  export VLLM_ROCM_USE_AITER="1"
+  export VLLM_ROCM_USE_AITER_MHA="1"
+  export VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT="1"
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+    --tensor-parallel-size 8 \
+    --mm-encoder-tp-mode data \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --gpu-memory-utilization 0.94 \
+    --max-model-len 32768 \
+    --max-num-seqs 10240 \
+    --max-num-batched-tokens 32768 \
+    --attention-backend ROCM_AITER_FA
+  ```
+
+  ### MI300X/MI325X/MI355X (FP8, TP8)
+  ```bash
+  export SAFETENSORS_FAST_GPU="1"
+  export HIP_FORCE_DEV_KERNARG="1"
+  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+  export VLLM_ROCM_USE_AITER="1"
+  export VLLM_ROCM_USE_AITER_MHA="1"
+  export VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT="1"
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+    --tensor-parallel-size 8 \
+    --mm-encoder-tp-mode data \
+    --enable-expert-parallel \
+    --async-scheduling \
+    --enable-chunked-prefill \
+    --limit-mm-per-prompt '{"image": 1}' \
+    --gpu-memory-utilization 0.94 \
+    --max-model-len 32768 \
+    --max-num-seqs 10240 \
+    --max-num-batched-tokens 32768 \
+    --kv-cache-dtype fp8 \
+    --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_AND_PIECEWISE", "custom_ops": ["+rms_norm", "+quant_fp8"]}' \
+    --attention-backend ROCM_AITER_FA
+  ```
+
+  > The above configuration runs efficiently at high concurrencies (up to 512) for context lengths up to 8k. If TPOT is not satisfactory, lower `--max-num-batched-tokens`. For longer contexts, `--max-num-seqs` and `--max-num-batched-tokens` may need retuning. 
+
+  ### MI300X / MI355X (FP8, EAGLE3 Speculative Decoding)
+
+  Adds EAGLE3 speculative decoding (`RedHatAI/Qwen3-VL-235B-A22B-Instruct-speculator.eagle3`) on top of the FP8 target. **`--attention-backend ROCM_AITER_FA` is mandatory** — the default `ROCM_ATTN` path makes SD slower than baseline on ROCm. Keep `VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=0` and omit `--async-scheduling` (incompatible with SD).
+
+  ```bash
+  export SAFETENSORS_FAST_GPU="1"
+  export HIP_FORCE_DEV_KERNARG="1"
+  export HIP_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
+  export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+  export VLLM_ROCM_USE_AITER="1"
+  export VLLM_ROCM_USE_AITER_MHA="1"
+  export VLLM_ROCM_USE_AITER_RMSNORM="0"
+  export VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT="0"
+
+  vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct-FP8 \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.94 \
+    --distributed-executor-backend mp \
+    --enable-chunked-prefill \
+    --max-model-len 16384 \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 8192 \
+    --mm-encoder-tp-mode data \
+    --enable-expert-parallel \
+    --attention-backend ROCM_AITER_FA \
+    --compilation-config '{"mode": 3, "cudagraph_mode": "FULL_AND_PIECEWISE", "custom_ops": ["-rms_norm"], "pass_config": {"fuse_norm_quant":false}}' \
+    --speculative-config '{"model": "RedHatAI/Qwen3-VL-235B-A22B-Instruct-speculator.eagle3", "method": "eagle3", "num_speculative_tokens": 4}'
+  ```
+
+  ## Configuration Tips
+
+  - Use `--limit-mm-per-prompt.video 0` if your server only serves image inputs to save memory.
+  - `OMP_NUM_THREADS=1` reduces CPU contention during preprocessing.
+  - The model's context length is 262K. Reduce `--max-model-len` (e.g. 128000) if you don't need the full range.
+  - `--async-scheduling` overlaps scheduling with decoding for better throughput.
+  - `--mm-encoder-tp-mode data` deploys the vision encoder in data-parallel fashion for better performance.
+  - If your inputs are mostly unique, pass `--mm-processor-cache-gb 0` to skip caching overhead.
+  - Extend context to 1M tokens with the **Long Context** toggle, which applies YaRN via
+    `--hf-overrides` and raises `--max-model-len`. Static YaRN costs quality on short prompts.
+
+  Text-only mode: pass `--limit-mm-per-prompt.video 0 --limit-mm-per-prompt.image 0` to free memory for KV cache when serving text-only traffic.
+
+  ## Client Usage
+
+  ```python
+  import time
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1", timeout=3600)
+
+  messages = [{
+      "role": "user",
+      "content": [
+          {"type": "image_url", "image_url": {"url": "https://ofasys-multimodal-wlcb-3-toshanghai.oss-accelerate.aliyuncs.com/wpf272043/keepme/image/receipt.png"}},
+          {"type": "text", "text": "Read all the text in the image."},
+      ],
+  }]
+
+  start = time.time()
+  response = client.chat.completions.create(
+      model="Qwen/Qwen3-VL-235B-A22B-Instruct",
+      messages=messages,
+      max_tokens=2048,
+  )
+  print(f"Response costs: {time.time() - start:.2f}s")
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - OOM on A100 / H100 BF16: reduce `--max-model-len`, drop to image-only, or switch to the FP8 checkpoint.
+  - If enabling `--mm-encoder-tp-mode data` raises memory pressure, lower `--gpu-memory-utilization`.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-VL-235B-A22B-Instruct-FP8)
+  - [Qwen3-VL GitHub](https://github.com/QwenLM/Qwen3-VL)
+  - [vLLM multimodal inputs guide](https://docs.vllm.ai/en/latest/features/multimodal_inputs.html)
