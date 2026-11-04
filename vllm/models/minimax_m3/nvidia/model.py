@@ -598,6 +598,7 @@ class MiniMaxM3MoE(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.experts",
+            ckpt_names=("w1", "w2", "w3"),
         )
 
     def _init_mega_moe_experts(

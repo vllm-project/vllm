@@ -560,6 +560,7 @@ class KimiMoE(nn.Module):
                 num_expert_group=config.num_expert_group,
                 topk_group=config.topk_group,
                 prefix=f"{prefix}.experts",
+                ckpt_names=("w1", "w2", "w3"),
                 scoring_func=config.moe_router_activation_func,
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 routed_scaling_factor=self.routed_scaling_factor,

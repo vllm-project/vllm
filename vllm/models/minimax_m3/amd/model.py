@@ -568,6 +568,7 @@ class MiniMaxM3MoE(nn.Module):
             shared_expert_prefix=f"{prefix}.shared_experts",
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            ckpt_names=("w1", "w2", "w3"),
         )
 
     @staticmethod
