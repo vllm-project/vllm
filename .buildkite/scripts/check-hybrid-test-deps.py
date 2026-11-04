@@ -64,7 +64,8 @@ def main() -> None:
         sys.exit(
             "The test image's hybrid test dependencies do not match the pins in "
             "tools/build_hybrid_test_wheels.sh (arm64 and Rubin images skip "
-            "them):\n" + "\n".join(problems)
+            "them, and a failed torch-nightly build warns in the image build log "
+            "and leaves them out):\n" + "\n".join(problems)
         )
 
     # Importing loads each package's CUDA extension, so a build against a

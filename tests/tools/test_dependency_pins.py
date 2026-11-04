@@ -269,7 +269,9 @@ def test_hybrid_test_deps_check_exits_with_every_problem(tmp_path, monkeypatch):
         check.main()
     assert str(exit_info.value) == (
         "The test image's hybrid test dependencies do not match the pins in "
-        "tools/build_hybrid_test_wheels.sh (arm64 and Rubin images skip them):\n"
+        "tools/build_hybrid_test_wheels.sh (arm64 and Rubin images skip them, and "
+        "a failed torch-nightly build warns in the image build log and leaves "
+        "them out):\n"
         "mamba_ssm: installed None, expected 2.3.0\n"
         f"{tmp_path / 'missing.txt'} is missing"
     )

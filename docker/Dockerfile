@@ -294,7 +294,10 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # mamba-ssm and causal-conv1d for the hybrid-model tests, built from pinned
 # commits. Its inputs are the torch version (a content-checksummed COPY) and
 # the files below, so it rebuilds only when one of those changes. No arm64 or
-# Rubin job runs these tests, so those builds leave /wheels empty.
+# Rubin job runs these tests, so those builds leave /wheels empty. A failed build
+# fails the image, except on torch nightly: its torch changes every run and its
+# builds have no layer cache, so it warns, and only the hybrid jobs fail (in
+# check-hybrid-test-deps.py) instead of the whole nightly run.
 FROM base-toolchain AS hybrid-test-wheels
 ARG TARGETPLATFORM
 ARG INSTALL_RUBIN_PRERELEASE
@@ -322,7 +325,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi \
     && uv pip install --python /opt/venv/bin/python3 --require-hashes --reinstall \
         -r requirements/build/hybrid-test-deps.txt \
-    && MAX_JOBS=${max_jobs} bash tools/build_hybrid_test_wheels.sh /wheels
+    && { MAX_JOBS=${max_jobs} bash tools/build_hybrid_test_wheels.sh /wheels \
+         || { [ "${PYTORCH_NIGHTLY}" = "1" ] \
+              && echo "WARNING: mamba-ssm/causal-conv1d failed to build against torch nightly" \
+              && rm -rf /wheels/*; }; }
 #################### HYBRID TEST WHEELS IMAGE ####################
 
 #################### RUST BUILD IMAGE ####################
