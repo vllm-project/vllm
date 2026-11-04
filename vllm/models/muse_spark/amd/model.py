@@ -69,6 +69,7 @@ from vllm.transformers_utils.configs.muse_spark import (
     MuseSparkTextConfig,
 )
 
+from .mono import MuseSparkMono, maybe_attach_mono
 from .muse_moe_runner import (
     MuseMoERunner,
     MuseSparkQuarkOCPMXFusedMoE,
@@ -213,7 +214,7 @@ class MuseSpark1xMoE(nn.Module):
         hidden_size = config.moe_hidden_size
         # Plain F.linear: AITER's gfx950 tuned-GEMM table picks lossy split-K
         # BF16-accumulating kernels for these shapes.
-        self.pooler = ReplicatedLinear(
+        self.pooler: ReplicatedLinear | None = ReplicatedLinear(
             config.hidden_size,
             hidden_size,
             bias=False,
@@ -221,7 +222,7 @@ class MuseSpark1xMoE(nn.Module):
             prefix=f"{prefix}.pooler",
         )
         self.pooler.quant_method = MuseSparkTorchLinearMethod()
-        self.unpooler = ReplicatedLinear(
+        self.unpooler: ReplicatedLinear | None = ReplicatedLinear(
             hidden_size,
             config.hidden_size,
             bias=False,
@@ -230,28 +231,33 @@ class MuseSpark1xMoE(nn.Module):
         )
         self.unpooler.quant_method = MuseSparkTorchLinearMethod()
 
-        self.pre_expert_norm = MuseSpark1xRMSNorm(
-            hidden_size=hidden_size,
-            eps=config.rms_norm_eps,
-            has_weight=True,
-            is_post_norm=False,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=2 * layer_idx + 2,
-            output_norm_gain_center_type="zero",
-        )
+        if self.pooler is not None:
+            self.pre_expert_norm: MuseSpark1xRMSNorm | None = MuseSpark1xRMSNorm(
+                hidden_size=hidden_size,
+                eps=config.rms_norm_eps,
+                has_weight=True,
+                is_post_norm=False,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=2 * layer_idx + 2,
+                output_norm_gain_center_type="zero",
+            )
+        else:
+            self.pre_expert_norm = None
 
         self.intermediate_size = config.moe_intermediate_size
 
-        self.post_expert_norm = MuseSpark1xRMSNormWithInputScale(
-            hidden_size=hidden_size,
-            eps=config.post_norm_eps,
-            has_weight=True,
-            is_post_norm=True,
-            zero_centered_gamma=True,
-            post_norm_gain_center_type="one",
-            residual_id=None,
-            output_norm_gain_center_type="zero",
+        self.post_expert_norm: MuseSpark1xRMSNorm | None = (
+            MuseSpark1xRMSNormWithInputScale(
+                hidden_size=hidden_size,
+                eps=config.post_norm_eps,
+                has_weight=True,
+                is_post_norm=True,
+                zero_centered_gamma=True,
+                post_norm_gain_center_type="one",
+                residual_id=None,
+                output_norm_gain_center_type="zero",
+            )
         )
         self.experts: nn.Module = FusedMoEFactory(
             num_experts=config.num_local_experts,
@@ -318,13 +324,21 @@ class MuseSpark1xMoE(nn.Module):
     def _experts_take_expanded_input(self) -> bool:
         """Whether the experts consume one input row per route (AITER MXFP4)."""
         norm = self.pre_expert_norm
-        return norm.variance_size_override is None and isinstance(
-            self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+        return (
+            norm is not None
+            and norm.variance_size_override is None
+            and isinstance(
+                self.experts.routed_experts.quant_method, MuseSparkQuarkOCPMXFusedMoE
+            )
         )
 
     def _pool(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.pooler is None:
+            return hidden_states
         hidden_states, _ = self.pooler(hidden_states)
         norm = self.pre_expert_norm
+        if norm is None:
+            return hidden_states
         if self._experts_take_expanded_input and hidden_states.is_contiguous():
             return fused_rmsnorm_expand(
                 hidden_states,
@@ -349,7 +363,8 @@ class MuseSpark1xMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        experts_out, _ = self.unpooler(experts_out)
+        if self.unpooler is not None:
+            experts_out, _ = self.unpooler(experts_out)
 
         if self.is_sequence_parallel:
             experts_out = tensor_model_parallel_all_gather(experts_out, 0)
@@ -651,7 +666,10 @@ class MuseSpark1xAttention(nn.Module):
             attn_output = self.attn(q, None, None)
         else:
             attn_output = self.attn(q, k, v)
+        return self.back(attn_output, og)
 
+    def back(self, attn_output: torch.Tensor, og: torch.Tensor | None) -> torch.Tensor:
+        """O-norm, O-gate and the output projection."""
         if self.fuse_o_norm_gate:
             assert og is not None
             attn_output = attn_output.reshape(-1, self.num_heads, self.head_dim)
@@ -830,6 +848,12 @@ class MuseSpark1xDecoderLayer(nn.Module):
         assert stream.dtype == self.residual_dtype
 
         attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
+        return self.after_attention(stream, attn_out)
+
+    def after_attention(
+        self, stream: torch.Tensor, attn_out: torch.Tensor
+    ) -> MuseSpark1xResidualStream:
+        """Attention boundary and FFN; the FFN boundary is returned unblended."""
         ffn_in, stream = norm_residual_then_norm(
             MuseSpark1xResidualStream(
                 stream=stream,
@@ -902,6 +926,8 @@ class MuseSpark1xModel(LlamaModel):
 
         self.fuse_across_layers = get_pp_group().world_size == 1
         self.make_empty_intermediate_tensors = self._make_empty_intermediate_tensors
+        # Set after weight loading under --monokernel.
+        self.mono: MuseSparkMono | None = None
 
     def _make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
@@ -943,8 +969,12 @@ class MuseSpark1xModel(LlamaModel):
         aux_hidden_states: list[torch.Tensor] = []
         if get_pp_group().is_first_rank:
             self._maybe_add_hidden_state(aux_hidden_states, self.start_layer, x, None)
+        mono_out = None
+        if self.mono is not None:
+            mono_out = self.mono.try_forward(self, positions, x, aux_hidden_states)
         for idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer], start=self.start_layer
+            self.layers[self.start_layer : self.end_layer] if mono_out is None else [],
+            start=self.start_layer,
         ):
             x = layer(positions, x)
             if not self.fuse_across_layers and isinstance(x, MuseSpark1xResidualStream):
@@ -956,6 +986,8 @@ class MuseSpark1xModel(LlamaModel):
                     else x
                 )
                 aux_hidden_states.append(state)
+        if mono_out is not None:
+            x = mono_out
 
         if not get_pp_group().is_last_rank:
             assert isinstance(x, torch.Tensor)  # fuse_across_layers is off here
@@ -1020,6 +1052,7 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             layer_type = self.decoder_layer_cls
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, layer_type=layer_type)
+        self.vllm_config = vllm_config
 
         # qkv_proj fuses Q+K+V+OG, so LoRA must treat it as one module.
         self.packed_modules_mapping = {  # type: ignore[misc]
@@ -1112,6 +1145,8 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
+        if self.model.mono is not None:
+            self.model.mono.poll_health()
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states)
         if logits is None:
@@ -1119,6 +1154,8 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         return self._apply_output_transform(logits)
 
     def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.model.mono is not None:
+            self.model.mono.poll_health()
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.logits_processor(self.lm_head, hidden_states, skip_gather=True)
         return self._apply_output_transform(logits)
@@ -1165,15 +1202,19 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
                 yield name, weight
 
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(
-            interleaved_weights(), mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
         n_gates = materialize_residual_path_constants(self)
         logger.info(
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
-        return loaded
+        # The experts are in their kernel layout only after the per-layer
+        # quant finalize, which runs between load_weights and this hook. The
+        # monokernel also needs the cached coefficients and the folded router
+        # weights from above.
+        maybe_attach_mono(self)
 
 
 __all__ = [

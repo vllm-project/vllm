@@ -379,6 +379,11 @@ vllm serve Qwen/Qwen3-VL-8B-Instruct \
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
 
+You can also pass a one-dimensional `torch.Tensor` directly. vLLM detaches
+the tensor, moves it to CPU, and converts it to a NumPy array before audio
+processing, so tensors on CUDA devices and tensors with `requires_grad=True`
+are supported.
+
 Full example: [examples/generate/multimodal/audio_language_offline.py](../../examples/generate/multimodal/audio_language_offline.py)
 
 #### Chunking Long Audio for Transcription
