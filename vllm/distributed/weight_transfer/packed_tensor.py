@@ -258,7 +258,12 @@ def packed_nccl_broadcast_consumer(
             streams[buffer_idx].wait_event(prev_received)
         prev_received = torch.Event()
         prev_received.record(streams[buffer_idx])
-        copies = [t for _, t in unpacked if t._base is not packed and t.numel()]
+        storage = packed.untyped_storage().data_ptr()
+        copies = [
+            t
+            for _, t in unpacked
+            if t.numel() and t.untyped_storage().data_ptr() != storage
+        ]
         for tensor in (packed, *copies):
             for stream in (*streams, caller_stream):
                 tensor.record_stream(stream)

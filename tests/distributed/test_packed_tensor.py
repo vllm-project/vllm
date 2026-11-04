@@ -140,8 +140,18 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.dtype == dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
 
-    def test_roundtrip_mixed_dtypes(self):
+    def test_roundtrip_mixed_dtypes(self, monkeypatch):
         """Test roundtrip with mixed data types."""
+        # Only the packed buffers and the copies of misaligned entries need
+        # record_stream; views into a buffer are covered by the buffer's.
+        recorded: list[torch.Tensor] = []
+        record_stream = torch.Tensor.record_stream
+
+        def spy(tensor, stream):
+            recorded.append(tensor)
+            record_stream(tensor, stream)
+
+        monkeypatch.setattr(torch.Tensor, "record_stream", spy)
         # Create params with mixed dtypes
         params = [
             # Odd-sized, so every later entry is misaligned for its dtype.
@@ -188,6 +198,8 @@ class TestPackedBroadcastRoundtrip:
             assert unpacked.shape == original_tensor.shape
             assert unpacked.dtype == original_tensor.dtype
             assert torch.allclose(unpacked, original_tensor, rtol=1e-4, atol=1e-6)
+        assert recorded
+        assert all(t.storage_offset() == 0 for t in recorded)
 
     @pytest.mark.parametrize("target_size", [100, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size):
@@ -318,19 +330,17 @@ class DelayedFirstBroadcastGroup:
 
 
 class SentinelBroadcastGroup:
-    """Immediately fills each pack with its own sentinel, recording each pack's
-    address and whether ``pending`` (once set) was still incomplete."""
+    """Immediately fills each pack with its own sentinel, recording whether
+    ``pending`` (once set) was still incomplete."""
 
     def __init__(self, sentinels: list[float]):
         self.sentinels = sentinels
         self.pending: torch.Event | None = None
-        self.ptrs: list[int] = []
         self.pending_at_receive: list[bool] = []
         self.calls = 0
 
     def broadcast(self, tensor, src):
         tensor.view(torch.float32).fill_(self.sentinels[self.calls])
-        self.ptrs.append(tensor.data_ptr())
         self.pending_at_receive.append(
             self.pending is not None and not self.pending.query()
         )
@@ -498,6 +508,8 @@ def test_unpack_misaligned_entry(dtype):
     """An odd-sized entry shifts the next one off its dtype's alignment
     (#64936); it is copied, while aligned entries stay views."""
     params = [
+        ("prefix", torch.arange(8, dtype=torch.uint8)),
+        ("aligned", torch.arange(2, dtype=dtype)),
         ("scale", torch.tensor([1, 2, 3], dtype=torch.uint8)),
         ("weight", torch.arange(6, dtype=dtype).view(2, 3)),
     ]
@@ -516,7 +528,10 @@ def test_unpack_misaligned_entry(dtype):
         assert name == expected_name
         assert actual.dtype == expected.dtype
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert result[0][1].data_ptr() == chunk.packed_tensor.data_ptr()
+    base = chunk.packed_tensor.data_ptr()
+    assert result[1][1].data_ptr() == base + 8
+    weight_offset = 8 + 2 * dtype.itemsize + 3
+    assert result[3][1].data_ptr() != base + weight_offset
 
 
 # --- Unit Tests: pack_tensors ---
@@ -820,6 +835,8 @@ class TestPackedIpcRoundtrip:
     def test_roundtrip_basic(self):
         """Test basic IPC producer -> consumer roundtrip."""
         params = [
+            # Odd-sized, so every later entry is misaligned for its dtype.
+            ("prefix", torch.tensor([1, 2, 3], dtype=torch.uint8).cuda()),
             ("w1", torch.randn(10, 20, dtype=torch.float32).cuda()),
             ("scale", torch.tensor(1.5, dtype=torch.float32).cuda()),
             ("w2", torch.randn(5, dtype=torch.float16).cuda()),
