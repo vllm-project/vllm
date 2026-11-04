@@ -64,6 +64,19 @@ class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
             )
 
 
+def _set_deepseek_indexer_logits_dtype(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek indexer logits to BF16 where the MQA logits kernels
+    also reduce in BF16 (SM100) and to FP32 elsewhere."""
+    from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+
+    attention_config = vllm_config.attention_config
+    attention_config.indexer_logits_dtype = (
+        attention_config.resolve_indexer_logits_dtype(
+            "bfloat16" if mqa_logits_use_mx_scales() else "float32"
+        )
+    )
+
+
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -77,6 +90,8 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         if cache_config.cache_dtype == "bfloat16":
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+        _set_deepseek_indexer_logits_dtype(vllm_config)
 
 
 class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
@@ -530,6 +545,7 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
             attention_config.indexer_sparse_logits = _indexer_sparse_logits_supported(
                 vllm_config
             )
+        _set_deepseek_indexer_logits_dtype(vllm_config)
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
