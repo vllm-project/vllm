@@ -169,9 +169,7 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
         num_prompt_tokens=32,
         prefill_token_ids=None,
         block_ids=([0, 1],),
-        block_hashes=[
-            BlockHash(f"h{i}".encode()) for i in range(32 // hash_block_size)
-        ],
+        block_hashes=[f"h{i}".encode() for i in range(32 // hash_block_size)],
     )
     return SimpleNamespace(
         request=request,
@@ -286,7 +284,7 @@ def test_pending_load_for_non_chosen_connector_is_dropped():
     scheduler = _make_bare_scheduler()
     request = SimpleNamespace(
         request_id="req-0",
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
     blocks = SimpleNamespace(get_block_ids=lambda: ([1, 2], [9]))
     scheduler.load_specs["req-0"] = LoadSpec(
@@ -405,7 +403,7 @@ def _setup_decode_request(
     _add_unfinished_request(
         scheduler,
         token_ids=token_ids,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         prefill_end_tokens=32,
     )
     tracker = scheduler._request_trackers["req-0"]
@@ -423,7 +421,7 @@ def test_cached_request_with_spec_decode_does_not_save_scheduled_drafts():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(44)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
+        block_hashes=[b"h0", b"h1"],
         prefill_end_tokens=48,
     )
 
@@ -443,7 +441,7 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         prefill_end_tokens=48,
     )
 
@@ -553,7 +551,7 @@ def test_preemption_removes_tracker():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(44)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1")],
+        block_hashes=[b"h0", b"h1"],
         prefill_end_tokens=48,
     )
     scheduler._request_trackers["req-0"].has_pending_offload = True
@@ -568,7 +566,7 @@ def test_preemption_clears_stale_load_state():
     _make_pending_load_unfinished_request(
         scheduler,
         num_tokens=48,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         block_ids=([10, 11, 12],),
     )
     scheduler.load_specs["req-0"] = LoadSpec(
@@ -628,7 +626,7 @@ def test_pending_load_does_not_co_queue_save():
     _make_pending_load_unfinished_request(
         scheduler,
         num_tokens=48,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
     scheduler.load_specs["req-0"] = LoadSpec(
         vllm_cached_tokens=0,
@@ -695,7 +693,7 @@ def test_resumed_from_preemption_with_load_skips_save():
     _make_resumed_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         num_computed_tokens=0,
     )
     scheduler.load_specs["req-0"] = LoadSpec(
@@ -724,7 +722,7 @@ def test_resumed_from_preemption_without_load_still_saves():
     _make_resumed_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         num_computed_tokens=0,
     )
 
@@ -756,7 +754,7 @@ def test_running_request_not_in_resumed_req_ids_appends_blocks():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         prefill_end_tokens=48,
     )
 
@@ -783,7 +781,7 @@ def test_resumed_request_in_resumed_req_ids_replaces_blocks():
     _make_resumed_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         num_computed_tokens=0,
     )
     # Stale pre-preemption tracker that must be overwritten, not appended to.
@@ -921,7 +919,7 @@ def test_partial_tail_is_resolved_once_on_the_prompt_completing_save():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(bytes([i])) for i in range(12)],
+        block_hashes=[bytes([i]) for i in range(12)],
         prefill_end_tokens=45,
     )
     block_ids = ([0, 1, 2], [50])
@@ -1090,7 +1088,7 @@ def test_full_external_hit_keeps_kvpool_cached_tokens_block_aligned():
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1121,7 +1119,7 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1145,14 +1143,14 @@ def test_partial_hash_hit_block_aligned_local_loads_partial_tail():
         request_id="req-0",
         num_tokens=32,
         block_hashes=[
-            BlockHash(b"h0"),
-            BlockHash(b"h1"),
-            BlockHash(b"h2"),
-            BlockHash(b"h3"),
-            BlockHash(b"h4"),
-            BlockHash(b"h5"),
-            BlockHash(b"h6"),
-            BlockHash(b"h7"),
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
+            b"h6",
+            b"h7",
         ],
     )
 
@@ -1180,14 +1178,14 @@ def test_partial_hash_hit_no_remote_gain_skips_load():
         request_id="req-0",
         num_tokens=32,
         block_hashes=[
-            BlockHash(b"h0"),
-            BlockHash(b"h1"),
-            BlockHash(b"h2"),
-            BlockHash(b"h3"),
-            BlockHash(b"h4"),
-            BlockHash(b"h5"),
-            BlockHash(b"h6"),
-            BlockHash(b"h7"),
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
+            b"h6",
+            b"h7",
         ],
     )
 
@@ -1213,7 +1211,7 @@ def test_sub_block_prompt_looks_up_with_fine_grained():
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=12,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1235,7 +1233,7 @@ def test_sub_block_prompt_not_looked_up_without_fine_grained():
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=12,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1259,7 +1257,7 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     request = SimpleNamespace(
         request_id="req-0",
         num_tokens=48,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
     )
 
     need_to_allocate, load_async = scheduler.get_num_new_matched_tokens(
@@ -1328,7 +1326,7 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     out = _add_pending_partial_tail_request(
         scheduler,
         num_tokens=13,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         block_ids=([0],),
     )
 
@@ -1383,7 +1381,7 @@ def test_finished_partial_tail_is_pre_pinned_as_store_job(
     block_ids = (attention_ids, [50])
     request = SimpleNamespace(
         request_id="req-0",
-        block_hashes=[BlockHash(bytes([i])) for i in range(prompt_tokens // 4)],
+        block_hashes=[bytes([i]) for i in range(prompt_tokens // 4)],
         num_computed_tokens=prompt_tokens,
         num_prompt_tokens=prompt_tokens,
     )
@@ -1622,12 +1620,12 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
     request = SimpleNamespace(
         all_token_ids=list(range(24)),
         block_hashes=[
-            BlockHash(b"h0"),
-            BlockHash(b"h1"),
-            BlockHash(b"h2"),
-            BlockHash(b"h3"),
-            BlockHash(b"h4"),
-            BlockHash(b"h5"),
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
+            b"h5",
         ],
         num_output_placeholders=0,
         num_prompt_tokens=12,
@@ -1669,7 +1667,7 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
 def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_tokens):
     request = SimpleNamespace(
         all_token_ids=list(range(64)),
-        block_hashes=[BlockHash(bytes([i])) for i in range(16)],
+        block_hashes=[bytes([i]) for i in range(16)],
         num_output_placeholders=0,
         num_prompt_tokens=num_prompt_tokens,
     )
@@ -1776,7 +1774,7 @@ def test_store_job_pins_current_non_null_non_mamba_blocks():
     scheduler._store_group_ids = (0, 1)
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
-        block_hashes=[BlockHash(bytes([i])) for i in range(12)],
+        block_hashes=[bytes([i]) for i in range(12)],
         num_prompt_tokens=48,
         num_output_placeholders=0,
     )
@@ -1913,11 +1911,11 @@ def test_resumed_partial_tail_uses_exact_boundary():
         scheduler,
         num_tokens=20,
         block_hashes=[
-            BlockHash(b"h0"),
-            BlockHash(b"h1"),
-            BlockHash(b"h2"),
-            BlockHash(b"h3"),
-            BlockHash(b"h4"),
+            b"h0",
+            b"h1",
+            b"h2",
+            b"h3",
+            b"h4",
         ],
         block_ids=([0, 1],),
     )
@@ -1944,7 +1942,7 @@ def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
     )
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
-        block_hashes=[BlockHash(bytes([i])) for i in range(12)],
+        block_hashes=[bytes([i]) for i in range(12)],
         num_output_placeholders=0,
         num_prompt_tokens=37,
     )
@@ -1981,7 +1979,7 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     out = _add_pending_partial_tail_request(
         scheduler,
         num_tokens=13,
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         block_ids=([0],),
     )
     pool = scheduler._gpu_block_pool
@@ -2010,7 +2008,7 @@ def test_store_job_blocks_are_released_once_every_rank_reports():
     _add_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
-        block_hashes=[BlockHash(b"h0"), BlockHash(b"h1"), BlockHash(b"h2")],
+        block_hashes=[b"h0", b"h1", b"h2"],
         prefill_end_tokens=48,
     )
     pool = scheduler._gpu_block_pool
