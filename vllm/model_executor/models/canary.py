@@ -21,7 +21,6 @@ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
-from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -56,8 +55,6 @@ from .interfaces import (
     SupportsTranscription,
 )
 from .utils import WeightsMapper, make_layers, maybe_prefix
-
-logger = init_logger(__name__)
 
 # See https://huggingface.co/nvidia/canary-1b-v2
 CANARY_SUPPORTED_LANGS = {
@@ -454,13 +451,13 @@ class CanaryForConditionalGeneration(
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
+        # Unlike models that default to "en", fail: Canary would return
+        # English text for non-English audio.
         if language is None:
-            logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe audio in "
-                "a different language, pass the `language` field in the "
-                "TranscriptionRequest."
+            raise ValueError(
+                "Canary cannot detect the audio's language; pass `language` "
+                f"(one of {list(cls.supported_languages)})."
             )
-            language = "en"
         # The decoder prompt needs one of the trained language tokens, so
         # unlike the base class, do not fall back for other languages.
         if language not in cls.supported_languages:
@@ -500,9 +497,6 @@ class CanaryForConditionalGeneration(
                     f"Unsupported target language {target_language!r}; expected "
                     f"one of {list(cls.supported_languages)}."
                 )
-            # Canary cannot detect the audio's language, and `validate_language`
-            # defaults a missing one to "en", so a translation without
-            # `language` would silently become English transcription.
             if source_language == target_language:
                 raise ValueError(
                     "Canary translation needs `language` (the audio's language) "
