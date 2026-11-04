@@ -30,6 +30,13 @@ requires_qsa_kernels = pytest.mark.skipif(
 )
 
 
+_HISPARSE_KV_TRANSFER_CONFIG = {
+    "kv_connector": "HiSparseConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {"host_pool_gib": 1},
+}
+
+
 def test_qsa_mtp_index_share_updates_cache_but_skips_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1606,6 +1613,7 @@ def _run_qsa_hisparse_prefill_case(
             hisparse_config=HiSparseConfig(),
             indexer_kv_dtype="fp8" if indexer_fp8 else "bf16",
         ),
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
     ).create_engine_config()
     with (
         set_current_vllm_config(vllm_config),
@@ -1636,7 +1644,7 @@ def _run_qsa_hisparse_prefill_case(
                 ("_v_scale", torch.tensor(v_scale)),
             ]
         )
-        owner.process_weights_after_loading(torch.bfloat16)
+        owner.process_weights_after_loading()
     # Even when fusion is supported, main KV writes must use the HiSparse
     # resident target exercised below instead of the ordinary cache.
     assert owner.use_fused_qk_norm_rope_gate
@@ -2070,6 +2078,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
             hisparse_config=HiSparseConfig(),
             indexer_kv_dtype="fp8" if indexer_fp8 else "bf16",
         ),
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
     ).create_engine_config()
     with (
         set_current_vllm_config(vllm_config),
@@ -2100,7 +2109,7 @@ def test_qsa_hisparse_full_graph_verify_reads_reclaimed_history(
                 ("_v_scale", torch.tensor(v_scale)),
             ]
         )
-        owner.process_weights_after_loading(torch.bfloat16)
+        owner.process_weights_after_loading()
     cache = owner.hisparse_cache
     assert cache is not None
     row_width = heads * 2 * dim
@@ -2619,6 +2628,7 @@ def _run_qsa_hisparse_worker_case(
             flash_attn_version=4,
             hisparse_config=HiSparseConfig(device_buffer_size=2112),
         ),
+        kv_transfer_config=_HISPARSE_KV_TRANSFER_CONFIG,
     ).create_engine_config()
     with (
         set_current_vllm_config(vllm_config),
@@ -2718,7 +2728,7 @@ def _run_qsa_hisparse_worker_case(
             owner.o_proj.weight[torch.arange(256, device=device), output_columns] = 1
         # The hooks below observe the unfused selection and K/V writer.
         owner.use_fused_qsa_prepare = False
-        owner.process_weights_after_loading(torch.bfloat16)
+        owner.process_weights_after_loading()
         for side_cache in (
             owner.indexer.raw_key_cache,
             owner.indexer.compressed_key_cache,
