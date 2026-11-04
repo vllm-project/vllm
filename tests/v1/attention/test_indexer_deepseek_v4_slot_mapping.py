@@ -56,7 +56,7 @@ def test_adaptive_indexer_uses_configured_max_decode_len():
         dtype=torch.bfloat16,
     )
     vllm_config = create_vllm_config(
-        model_name="hmellor/tiny-random-LlamaForCausalLM",
+        model_name="vllm-project/tiny-random-LlamaForCausalLM",
         max_model_len=1024,
     )
     vllm_config.speculative_config = SpeculativeConfig(

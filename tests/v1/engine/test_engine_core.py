@@ -47,7 +47,7 @@ from ...utils import create_new_process_for_each_test, multi_gpu_test
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.

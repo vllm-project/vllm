@@ -368,6 +368,7 @@ def _chain(gemm: RoutedExpertGemm, x, logits, ids, is_padding=None):
     from vllm.model_executor.layers.fused_moe.router.dsv4_topk import dsv4_topk
 
     config = gemm.front_config
+    assert config is not None
     weights, topk_ids = dsv4_topk(
         logits,
         config.bias,
@@ -1255,7 +1256,7 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
                 layer_names=[f"g{i}.l{j}" for j in range(2)],
                 kv_cache_spec=None,
                 kv_cache_group_id=i,
-                metadata_builders=[builder],
+                metadata_builders=[builder],  # type: ignore[list-item]
             )
         ]
         for i, builder in enumerate(builders)
@@ -1271,7 +1272,7 @@ def test_metadata_graph_replay_matches_eager_build(monkeypatch, readers):
                     layer_names=[f"g{i}.r{j}" for j in range(2)],
                     kv_cache_spec=None,
                     kv_cache_group_id=i,
-                    metadata_builders=[_ReaderBuilder(10 + i, 64)],
+                    metadata_builders=[_ReaderBuilder(10 + i, 64)],  # type: ignore[list-item]
                 )
             )
 
