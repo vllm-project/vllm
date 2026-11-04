@@ -53,6 +53,7 @@ from vllm.utils.flashinfer import (
     flashinfer_xqa_batch_decode_with_kv_cache,
     force_use_trtllm_attention,
     has_flashinfer_nvfp4_kv_head_dim_512,
+    has_flashinfer_prims_ts_shared_decode_workspace,
     pin_host_range_buf,
     supports_trtllm_attention,
     use_trtllm_attention,
@@ -1025,18 +1026,65 @@ class _PrimsTSDecodePlanner:
         # lengths, and a persistent buffer keeps the address graph-stable.
         self._seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
 
+        plan_keys = [
+            (num_decodes, q_len)
+            for q_len in range(1, 2 + num_spec_tokens)
+            for num_decodes in range(1, max_num_reqs + 1)
+        ]
         start = time.perf_counter()
         mem_before = torch.accelerator.memory_allocated(device)
-        for q_len in range(1, 2 + num_spec_tokens):
-            for num_decodes in range(1, max_num_reqs + 1):
-                self._wrappers[(num_decodes, q_len)] = self._plan(num_decodes, q_len)
+        # One buffer zeroed once serves every plan: PrimTS keeps its split
+        # counters at the buffer end and leaves them zero after each launch.
+        self._workspace: torch.Tensor | None = None
+        if has_flashinfer_prims_ts_shared_decode_workspace():
+            from flashinfer.attention.prims_ts import (
+                get_prims_ts_batch_decode_workspace_size,
+            )
+
+            workspace_size = max(
+                get_prims_ts_batch_decode_workspace_size(
+                    *self._plan_args(num_decodes),
+                    seq_len_q=q_len,
+                    kv_layout="HND",
+                    device=device,
+                    **self._plan_kwargs(q_len),
+                )
+                for num_decodes, q_len in plan_keys
+            )
+            self._workspace = torch.zeros(
+                workspace_size, dtype=torch.uint8, device=device
+            )
+        for num_decodes, q_len in plan_keys:
+            self._wrappers[(num_decodes, q_len)] = self._plan(num_decodes, q_len)
         logger.info(
             "Planned %d PrimTS decode batch sizes for head_dim %d in %.1f s "
-            "(%.1f MiB).",
+            "(%.1f MiB, %s).",
             len(self._wrappers),
             head_dim,
             time.perf_counter() - start,
             (torch.accelerator.memory_allocated(device) - mem_before) / 2**20,
+            "per-plan workspaces"
+            if self._workspace is None
+            else f"shared {self._workspace.numel() / 2**20:.1f} MiB workspace",
+        )
+
+    def _plan_args(self, num_decodes: int) -> tuple[int, ...]:
+        return (
+            num_decodes,
+            self.num_qo_heads,
+            self.num_kv_heads,
+            self.head_dim,
+            self.page_size,
+            self.max_model_len,
+        )
+
+    def _plan_kwargs(self, q_len: int) -> dict[str, Any]:
+        return dict(
+            q_dtype=self.q_data_type,
+            kv_dtype=torch.uint8,
+            out_dtype=self.o_data_type,
+            mask_type="causal" if self.window_left >= 0 or q_len > 1 else "dense",
+            window_left=self.window_left,
         )
 
     def _plan(self, num_decodes: int, q_len: int) -> Any:
@@ -1045,18 +1093,10 @@ class _PrimsTSDecodePlanner:
         wrapper = BatchDecodePagedTSWrapper(kv_layout="HND")
         wrapper.plan(
             self.device,
-            num_decodes,
-            self.num_qo_heads,
-            self.num_kv_heads,
-            self.head_dim,
-            self.page_size,
-            self.max_model_len,
+            *self._plan_args(num_decodes),
             max_q_len=q_len,
-            q_dtype=self.q_data_type,
-            kv_dtype=torch.uint8,
-            out_dtype=self.o_data_type,
-            mask_type="causal" if self.window_left >= 0 or q_len > 1 else "dense",
-            window_left=self.window_left,
+            workspace_buffer=self._workspace,
+            **self._plan_kwargs(q_len),
         )
         return wrapper
 
