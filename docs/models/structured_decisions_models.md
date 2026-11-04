@@ -393,3 +393,63 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### KnowLine
+
+The KnowLine decision models are a Qwen3.5-MoE checkpoint post-trained to
+answer decisions as the first token after a literal `Answer:`. The
+architecture is the stock model's, so the checkpoint opts in with a
+`knowline_config` field in its model config; until the checkpoint ships
+one, the same field can be passed on the command line:
+
+```bash
+vllm serve PelaAI/KnowLine-35B-A3B-Gen1.5 \
+    --hf-overrides '{"knowline_config": {}}' \
+    --compilation-config '{
+        "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64,
+            72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176,
+            184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304,
+            320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512,
+            528, 544, 560, 576, 592, 608, 624, 640, 656, 672, 688, 704, 720,
+            736, 752, 768, 784, 800, 816, 832, 848, 864, 880, 896, 912, 928,
+            944, 960, 976, 992, 1008, 1024, 1088, 2176, 3264, 4352, 5440,
+            6528, 7616, 8704, 9792, 10880, 11968, 13056, 14144, 15232, 16384],
+        "max_cudagraph_capture_size": 16384}'
+```
+
+- The server writes the prompt the checkpoint was trained on, so picks and
+  probabilities match the reference server shipped with the checkpoint: the
+  state as chat turns (a list of `{role, content}` messages), then one user
+  turn with the instruction, the question and its lettered options (`A.`,
+  `B.`, ...), the assistant opener with thinking off, and `Answer:`. A JSON
+  state is flattened to indented text, not JSON. A chat template that
+  rejects the conversation folds the ask into the last user turn, or
+  renders the whole chat as one user message.
+- Labels run `A` to `Z`, then `AA` on, each one token right after
+  `Answer:`, so a choice can have up to 255 options and a score up to 255
+  levels. Every label must be one token, or serving is disabled.
+- This is a hybrid model (GDN linear attention). With prefix caching, vLLM
+  prefills any prompt over one 1088-token mamba block as a single chunk,
+  and that chunk must replay a piecewise CUDA graph: the default capture
+  sizes stop at 1024 tokens, and larger chunks run the compiled pieces
+  kernel by kernel, several times slower. The `--compilation-config` above
+  appends the mamba block's multiples to the default capture sizes, up to
+  the 16,384-token chunked-prefill budget; size the list to your own
+  budget.
+- Up to 128 options, the read asks for the labels' logprobs directly, so
+  `diagnostics.label_mass` is the labels' share over the whole vocabulary
+  and `argmax_is_label` reports the model's actual first token. Above 128
+  the read masks the vocabulary to the labels, which renormalizes over
+  them: `label_mass` is then near 1 and `argmax_is_label` always true, and
+  the questions need `--logprobs-mode processed_logprobs` plus
+  `--max-logprobs 255` (or higher).
+- A request reads the state and the question a second time when the
+  single-pass request fits the marker's `twice_max_tokens` bound, 3000 by
+  default, as the checkpoint was trained.
+- Answers keep the trained shapes: a `noul` answers the probability of true
+  alone, with no probabilities or confidence; a `choice`'s and `score`'s
+  `confidence` is a certainty proxy, one minus the normalized entropy of
+  the labels; a `score`'s `legend` echoes the criteria as they came in.
+- The model reads text: `images`, `audio` and `videos` return 400. Top-level
+  `instructions` return 400, since the prompt is fixed. Other
+  `chat_template_kwargs` reach the template, with thinking off.

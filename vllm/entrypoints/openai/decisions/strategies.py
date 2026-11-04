@@ -46,10 +46,12 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.math_utils import round_up
 
+from . import knowline
 from .question_types import (
     LABELS,
     QUESTION_TYPES,
     Question,
+    QuestionType,
     StructuredDecisionError,
     label_softmax,
 )
@@ -149,6 +151,10 @@ class ReadStrategy(ABC):
     modalities: frozenset[str] = frozenset()
     #: Whether read_joint answers several questions from one canvas.
     joint_reads: bool = False
+    #: The question types this strategy parses and answers with, or None to
+    #: use the stock registry. A model whose answers follow its own contract,
+    #: like KnowLine's, serves its own.
+    question_types: Mapping[str, QuestionType] | None = None
 
     def __init__(self, context: ReadContext):
         self.context = context
@@ -166,8 +172,10 @@ class ReadStrategy(ABC):
     @abstractmethod
     def limits(self) -> DecisionLimits: ...
 
-    def render_state(self, state: Any) -> str:
-        """The request's state as the model reads it."""
+    def render_state(self, state: Any) -> Any:
+        """The request's state as the model reads it: text for most
+        strategies, or the request's turns unchanged for a strategy that
+        renders them through the chat template."""
         return state_text(state)
 
     def num_requests(self, questions: list[Question], joint: bool = False) -> int:
@@ -190,6 +198,44 @@ class ReadStrategy(ABC):
     ) -> list[QuestionRead]:
         """Like read, with questions sharing canvases. Only if joint_reads."""
         raise NotImplementedError
+
+    async def _warm_shared_prefix(
+        self,
+        prompts: Sequence[Sequence[int]],
+        request_id: str,
+        *,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None,
+        trace_headers: Mapping[str, str] | None,
+    ) -> None:
+        """Prefill the tokens every question starts with, before the reads.
+
+        The reads share the state only through the prefix cache. Reads that
+        start together cannot reuse each other's recurrent state, so on hybrid
+        models each of them would prefill the state again. Attention-only
+        models share the blocks within a step and skip this.
+        """
+        engine_client = self.context.engine_client
+        if (
+            len(prompts) < 2
+            or not engine_client.model_config.is_hybrid
+            or not engine_client.vllm_config.cache_config.enable_prefix_caching
+        ):
+            return
+        shared = common_prefix_len(prompts)
+        if shared < MIN_WARM_PREFIX_TOKENS:
+            return
+        generator = engine_client.generate(
+            tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
+            SamplingParams(max_tokens=1, temperature=0.0),
+            f"{request_id}-prefix",
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+        )
+        async for _ in generator:
+            pass
 
     @abstractmethod
     async def read(
@@ -367,44 +413,6 @@ class NextTokenStrategy(ReadStrategy):
             ctx.engine_client.model_config, engine_input
         ).token_ids
         return engine_input, list(prompt_ids or [])
-
-    async def _warm_shared_prefix(
-        self,
-        prompts: Sequence[Sequence[int]],
-        request_id: str,
-        *,
-        lora_request: LoRARequest | None,
-        priority: int,
-        cache_salt: str | None,
-        trace_headers: Mapping[str, str] | None,
-    ) -> None:
-        """Prefill the tokens every question starts with, before the reads.
-
-        The reads share the state only through the prefix cache. Reads that
-        start together cannot reuse each other's recurrent state, so on hybrid
-        models each of them would prefill the state again. Attention-only
-        models share the blocks within a step and skip this.
-        """
-        engine_client = self.context.engine_client
-        if (
-            len(prompts) < 2
-            or not engine_client.model_config.is_hybrid
-            or not engine_client.vllm_config.cache_config.enable_prefix_caching
-        ):
-            return
-        shared = common_prefix_len(prompts)
-        if shared < MIN_WARM_PREFIX_TOKENS:
-            return
-        generator = engine_client.generate(
-            tokens_input(list(prompts[0][:shared]), cache_salt=cache_salt),
-            SamplingParams(max_tokens=1, temperature=0.0),
-            f"{request_id}-prefix",
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            priority=priority,
-        )
-        async for _ in generator:
-            pass
 
     async def _prompts(
         self,
@@ -1444,6 +1452,194 @@ class D3Strategy(ReadStrategy):
         return reads
 
 
+class KnowLineStrategy(ReadStrategy):
+    """KnowLine decision models: a Qwen3.5-MoE checkpoint post-trained to
+    answer a decision as the first token after a literal ``Answer:``. The
+    prompt and the answers are the checkpoint's trained format (see
+    knowline.py), so picks and probabilities match the reference server
+    shipped with the checkpoint.
+
+    Each question is one read of its prompt, scored at the reply's first
+    token. Up to ``MAX_LOGPROB_TOKEN_IDS`` options read through
+    ``logprob_token_ids``, so the logprobs are the labels' over the whole
+    vocabulary. Above that count the labels outnumber ``logprob_token_ids``,
+    so the read masks the vocabulary to them instead: the mask renormalizes
+    over the labels, one read returns every label's logprob, and the server
+    needs ``--logprobs-mode processed_logprobs``, because a raw mode returns
+    the logprobs before the mask."""
+
+    #: The read-twice layout's bound, in tokens, when the checkpoint's
+    #: marker does not carry its own.
+    TWICE_MAX_TOKENS = 3000
+
+    def __init__(self, context: ReadContext):
+        super().__init__(context)
+        self.tokenizer = context.online_renderer.renderer.get_tokenizer()
+        try:
+            self.labels, label_ids = knowline.discover_labels(
+                self.tokenizer, self._template_kwargs(None)
+            )
+        except Exception as e:
+            # A discovery failure must disable the decisions endpoints, like
+            # an unsupported model, not crash startup.
+            raise ValueError(f"KnowLine label discovery failed: {e}") from e
+        self.label_token = dict(zip(self.labels, label_ids))
+        self.question_types = knowline.knowline_question_types(self.labels)
+        model_config = context.engine_client.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        config = getattr(hf_config, "knowline_config", None) or {}
+        self.twice_max_tokens = int(
+            config.get("twice_max_tokens", self.TWICE_MAX_TOKENS)
+        )
+        self.max_model_len = model_config.max_model_len
+        self.max_logprobs = model_config.max_logprobs
+        self.logprobs_mode = model_config.logprobs_mode
+
+    def limits(self) -> DecisionLimits:
+        return DecisionLimits(
+            max_questions=knowline.MAX_QUESTIONS, max_options=len(self.labels)
+        )
+
+    def render_state(self, state: Any) -> Any:
+        # The trained format reads the state as chat turns, so chat-shaped
+        # states reach read() as the request sent them.
+        return state
+
+    def _template_kwargs(
+        self, chat_template_kwargs: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """The template renders with thinking off, as the format trains."""
+        if (chat_template_kwargs or {}).get("enable_thinking"):
+            raise StructuredDecisionError(
+                "a read is the reply's first token, so thinking must be off"
+            )
+        return {
+            **self.context.default_chat_template_kwargs,
+            # A trusted request template overrides the server's own; serving
+            # rejects an untrusted one before the read.
+            "chat_template": self.context.chat_template,
+            **(chat_template_kwargs or {}),
+            "add_generation_prompt": True,
+            "tokenize": False,
+            "enable_thinking": False,
+        }
+
+    async def read(
+        self,
+        questions: list[Question],
+        instructions: str | None,
+        state: Any,
+        *,
+        request_id: str,
+        chat_template_kwargs: dict[str, Any] | None,
+        lora_request: LoRARequest | None,
+        priority: int,
+        cache_salt: str | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        media: Mapping[str, Sequence[str]] | None = None,
+    ) -> list[QuestionRead]:
+        if instructions:
+            raise StructuredDecisionError(
+                "this model reads a fixed prompt, so it takes no instructions"
+            )
+        # The bounds a masked read needs, checked before any rendering.
+        for q in questions:
+            if len(q.options) > MAX_LOGPROB_TOKEN_IDS:
+                if self.logprobs_mode != "processed_logprobs":
+                    raise StructuredDecisionError(
+                        f"question {q.id!r} has {len(q.options)} options; "
+                        f"over {MAX_LOGPROB_TOKEN_IDS} the read masks the "
+                        "labels and needs --logprobs-mode processed_logprobs, "
+                        f"not {self.logprobs_mode}"
+                    )
+                if 0 <= self.max_logprobs < len(q.options):
+                    raise StructuredDecisionError(
+                        f"question {q.id!r} reads {len(q.options)} label "
+                        f"logprobs, but the server allows {self.max_logprobs}; "
+                        f"restart with --max-logprobs {len(q.options)} or "
+                        "higher"
+                    )
+        rendered = knowline.render_prompts(
+            self.tokenizer,
+            state,
+            questions,
+            template_kwargs=self._template_kwargs(chat_template_kwargs),
+            twice_max_tokens=self.twice_max_tokens,
+        )
+        engine_inputs: list[EngineInput] = []
+        params: list[SamplingParams] = []
+        label_groups: list[list[int]] = []
+        for q in questions:
+            _, prompt_ids, n_options = rendered[q.id]
+            ids = [self.label_token[label] for label in q.labels]
+            if len(prompt_ids) + 1 > self.max_model_len:
+                raise StructuredDecisionError(
+                    f"question {q.id!r}: the prompt must fit "
+                    f"{self.max_model_len - 1} tokens, got {len(prompt_ids)}"
+                )
+            engine_inputs.append(tokens_input(prompt_ids, cache_salt=cache_salt))
+            if n_options > MAX_LOGPROB_TOKEN_IDS:
+                # Too many labels for logprob_token_ids: mask the rest out.
+                params.append(
+                    SamplingParams(
+                        max_tokens=1,
+                        temperature=0.0,
+                        allowed_token_ids=ids,
+                        logprobs=n_options,
+                    )
+                )
+            else:
+                params.append(
+                    SamplingParams(
+                        max_tokens=1,
+                        temperature=0.0,
+                        logprob_token_ids=ids,
+                    )
+                )
+            label_groups.append(ids)
+        await self._warm_shared_prefix(
+            [entry[1] for entry in rendered.values()],
+            request_id,
+            lora_request=lora_request,
+            priority=priority,
+            cache_salt=cache_salt,
+            trace_headers=trace_headers,
+        )
+        reads = await next_token_label_reads(
+            self.context.engine_client,
+            engine_inputs,
+            params,
+            request_id,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+            priority=priority,
+            slots=[[(0, ids)] for ids in label_groups],
+        )
+        return [
+            self._question_read(r.result, ids, r.logprobs)
+            for ids, r in zip(label_groups, reads)
+        ]
+
+    @staticmethod
+    def _question_read(
+        result: RequestOutput, ids: list[int], logprobs: list[float]
+    ) -> QuestionRead:
+        """The read's answer. Through ``logprob_token_ids`` the logprobs are
+        the labels' over the whole vocabulary; a masked read renormalizes
+        over the labels instead, so its label_mass sits near 1."""
+        token_ids = result.outputs[0].token_ids
+        read = QuestionRead(
+            probs=label_softmax(logprobs),
+            label_mass=sum(math.exp(lp) for lp in logprobs),
+            argmax_is_label=len(token_ids) > 0 and token_ids[0] in ids,
+        )
+        read.input_tokens = len(result.prompt_token_ids or ())
+        read.output_tokens = len(token_ids)
+        read.cached_tokens = result.num_cached_tokens or 0
+        read.cache_write_tokens = result.num_cache_creation_tokens or 0
+        return read
+
+
 READ_STRATEGIES: dict[str, type[ReadStrategy]] = {
     "ClefFlashForJointSchema": ClefFlashStrategy,
     "ClefOmniForJointSchema": JointSchemaStrategy,
@@ -1468,7 +1664,14 @@ def select_read_strategy(
     model_config: ModelConfig, supported_tasks: Sequence[SupportedTask]
 ) -> type[ReadStrategy]:
     """Raise ValueError when the model cannot serve structured decisions."""
-    strategy = READ_STRATEGIES.get(model_config.architecture)
+    hf_config = getattr(model_config, "hf_config", None)
+    strategy: type[ReadStrategy] | None
+    if getattr(hf_config, "knowline_config", None) is not None:
+        # A KnowLine checkpoint opts in by its marker: the architecture is
+        # the stock model's, so the stock mapping stays for base models.
+        strategy = KnowLineStrategy
+    else:
+        strategy = READ_STRATEGIES.get(model_config.architecture)
     if strategy is None:
         raise ValueError(
             "The structured decisions API does not support "
