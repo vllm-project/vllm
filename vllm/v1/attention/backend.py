@@ -29,7 +29,6 @@ if TYPE_CHECKING:
         KVCacheSpec,
         KVQuantMode,
     )
-    from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 
 from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
@@ -685,32 +684,6 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
 
         """
         return None
-
-    def spec_verify_limit(
-        self,
-        *,
-        kv_cache_dtype: str,
-        sliding_window: int | None,
-        has_sinks: bool,
-        logits_soft_cap: float | None,
-        has_alibi: bool,
-        chunk_size: int | None,
-        rswa_window: int | None,
-        kv_sharing_target: str | None,
-    ) -> tuple["PlanKind", str]:
-        """The highest speculative plan kind this builder's backend verifies
-        correctly for a layer with these features, and why: the reason the
-        startup log gives when it lowers a speculator's plans.
-
-        ``"chain"`` assumes each verify row follows the one before it.
-        ``"tree"`` reads ``CommonAttentionMetadata.tree_ancestors`` (attention)
-        or ``tree_parents`` (recurrent layers) and applies every feature of the
-        layer (window, sinks, soft cap, ALiBi, chunk) by position
-        (``CommonAttentionMetadata.positions``). Features the layer does not
-        have are None or False. Read off the built builder, so an instance may
-        answer per layer group.
-        """
-        return "chain", f"{type(self).__name__} verifies chain"
 
     def _init_reorder_batch_threshold(
         self,

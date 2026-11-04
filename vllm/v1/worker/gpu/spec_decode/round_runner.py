@@ -131,9 +131,6 @@ class SpecRound:
             "decode context parallelism": runner.dcp_size > 1,
             "batch-sharded sampling": runner.batch_sharder is not None,
             "micro-batching": runner.parallel_config.use_ubatching,
-            f"model state {type(runner.model_state).__name__}": (
-                not type(runner.model_state).supports_tree_verify
-            ),
         }
         limits += [
             SpecLimit("chain", f"{what}: keeps verify rows in chain order")

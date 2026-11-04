@@ -30,15 +30,12 @@ class MambaBase(AttentionLayerBase):
     supports_dcp: bool = False
 
     # What the layer is to speculative decoding beyond a chain: the variant of
-    # its verify kernels ("gdn", "short_conv"), the key under which the
+    # its verify kernels ("gdn"), the key under which the
     # spec kernel registry (vllm/v1/worker/gpu/spec_decode/kernels.py) says
     # whether they take trees. Not inherited: a subclass that does not set it in
     # its own body runs kernels of its own, so it verifies chains only, whatever
     # its parent declares.
     spec_layer_variant: ClassVar[str | None] = None
-    # Whether the layer verifies a chain of drafts at all: False for a layer
-    # that decodes one token per request, which refuses speculative decoding.
-    spec_chain_supported: ClassVar[bool] = True
     # The provider kernel that verifies the layer's spec-decode rows, bound by
     # the spec kernel registry before capture; None runs the layer's own
     # kernels. Only layers with a ``spec_layer_variant`` read it.

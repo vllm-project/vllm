@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-layer spec capabilities: what a model's layers verify, and a tree
-speculator downgraded to chains on a model whose layers cannot verify trees.
+"""The startup rule: what a model's layers verify, and a tree speculator
+downgraded to chains on a model whose layers cannot verify trees.
 
 Each model is its layer mix: the real layer classes (built without weights) and
-KV cache specs, behind the metadata builders their backends use. Attention
-builders are stand-ins: the stock one verifies chains (the default), and
-``_TreeBuilder`` is a tree-capable builder with no window, sink, soft cap,
-ALiBi, chunk or RSWA term, as a plugin's tree attention would be.
+their KV cache specs.
 """
 
 import importlib
@@ -20,7 +17,6 @@ import torch
 
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CacheConfig, ParallelConfig
-from vllm.model_executor.layers.attention.mla_attention import QueryLenSupport
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
@@ -35,14 +31,6 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
-from vllm.v1.attention.backend import AttentionMetadataBuilder
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.short_conv_attn import (
-    PleShortConvAttentionMetadataBuilder,
-    ShortConvAttentionMetadataBuilder,
-)
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -68,48 +56,6 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
 from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
 from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
-
-# --- builders ----------------------------------------------------------------
-
-
-class _StockBuilder(AttentionMetadataBuilder):
-    """An attention builder that keeps the default: chains only."""
-
-    def __init__(self):
-        pass
-
-    def build(self, *args, **kwargs):
-        raise NotImplementedError
-
-
-class _TreeBuilder(_StockBuilder):
-    """A tree attention builder that verifies trees with none of the features."""
-
-    def spec_verify_limit(self, **features):
-        plain = not any(
-            features[name]
-            for name in (
-                "sliding_window",
-                "has_sinks",
-                "logits_soft_cap",
-                "has_alibi",
-                "chunk_size",
-                "rswa_window",
-            )
-        )
-        kind = "tree" if plain else "chain"
-        return kind, f"{type(self).__name__} verifies {kind}"
-
-
-class _UniformMLABuilder(_StockBuilder):
-    """An MLA decode builder (FlashMLA-like) that takes uniform rows only."""
-
-    query_len_support = QueryLenSupport.UNIFORM
-
-
-def _builder(cls):
-    return object.__new__(cls)
-
 
 # --- layers and specs --------------------------------------------------------
 
@@ -146,20 +92,16 @@ def _mamba(layer_cls):
     return object.__new__(layer_cls)
 
 
-def _group(builder, spec, layers):
-    return SimpleNamespace(
-        metadata_builders=[_builder(builder)],
-        kv_cache_spec=spec,
-        layer_names=list(layers),
-    )
+def _group(spec, layers):
+    return SimpleNamespace(kv_cache_spec=spec, layer_names=list(layers))
 
 
 def _model(*groups):
-    """``(attn_groups, layers)`` from ``(builder class, spec, {name: layer})``."""
+    """``(attn_groups, layers)`` from ``(spec, {name: layer})``."""
     layers = {}
     attn_groups = []
-    for builder, spec, group_layers in groups:
-        attn_groups.append([_group(builder, spec, group_layers)])
+    for spec, group_layers in groups:
+        attn_groups.append([_group(spec, group_layers)])
         layers.update(group_layers)
     return attn_groups, layers
 
@@ -199,23 +141,23 @@ def _layers(prefix, n, make):
     return {f"{prefix}.{i}": make() for i in range(n)}
 
 
-def _llama(builder):
-    return _model((builder, _FULL, _layers("attn", 4, _attn)))
+def _llama():
+    return _model((_FULL, _layers("attn", 4, _attn)))
 
 
 def _gpt_oss():
     # Alternating sliding-window and full layers, all with attention sinks.
     return _model(
-        (_TreeBuilder, _SWA, _layers("swa", 2, lambda: _attn(has_sink=True))),
-        (_TreeBuilder, _FULL, _layers("full", 2, lambda: _attn(has_sink=True))),
+        (_SWA, _layers("swa", 2, lambda: _attn(has_sink=True))),
+        (_FULL, _layers("full", 2, lambda: _attn(has_sink=True))),
     )
 
 
 def _gemma2():
     softcap = lambda: _attn(logits_soft_cap=50.0)  # noqa: E731
     return _model(
-        (_TreeBuilder, _SWA, _layers("swa", 2, softcap)),
-        (_TreeBuilder, _FULL, _layers("full", 2, softcap)),
+        (_SWA, _layers("swa", 2, softcap)),
+        (_FULL, _layers("full", 2, softcap)),
     )
 
 
@@ -227,20 +169,20 @@ def _rswa():
         dtype=torch.bfloat16,
         rswa_window=64,
     )
-    return _model((_TreeBuilder, rswa, _layers("rswa", 2, _attn)))
+    return _model((rswa, _layers("rswa", 2, _attn)))
 
 
 def _dsv3():
     mla = MLAAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=576, dtype=torch.bfloat16
     )
-    return _model((_UniformMLABuilder, mla, _layers("mla", 3, _attn)))
+    return _model((mla, _layers("mla", 3, _attn)))
 
 
-def _hybrid(layer_cls, builder, attn_builder=_TreeBuilder):
+def _hybrid(layer_cls):
     return _model(
-        (builder, _MAMBA, _layers("linear", 3, lambda: _mamba(layer_cls))),
-        (attn_builder, _FULL, _layers("attn", 1, _attn)),
+        (_MAMBA, _layers("linear", 3, lambda: _mamba(layer_cls))),
+        (_FULL, _layers("attn", 1, _attn)),
     )
 
 
@@ -255,80 +197,41 @@ def _import_class(qualname):
 # --- per-model plan kinds ----------------------------------------------------
 
 
-def test_llama_verifies_trees_on_a_tree_builder_and_chains_on_the_stock_one():
-    tree = _caps(_llama(_TreeBuilder))
-    assert tree.plan_kind == "tree"
-    assert tree.limits == ()
-    stock = _caps(_llama(_StockBuilder))
-    assert stock.plan_kind == "chain"
-    assert stock.limits == (
-        SpecLimit(
-            "chain", "attn:full_attention, 4 layers: _StockBuilder verifies chain"
-        ),
-    )
+def test_llama_verifies_trees():
+    caps = _caps(_llama())
+    assert caps.plan_kind == "tree"
+    assert caps.limits == ()
 
 
 @pytest.mark.parametrize(
     "model, kinds",
     [
-        (_gpt_oss, ["attn:sliding_window, 2 layers", "attn:full_attention, 2 layers"]),
-        (_gemma2, ["attn:sliding_window, 2 layers", "attn:full_attention, 2 layers"]),
+        (_gpt_oss, ["attn:sliding_window, 2 layers"]),
+        (_gemma2, ["attn:sliding_window, 2 layers"]),
         (_rswa, ["attn:full_attention, 2 layers"]),
     ],
     ids=["gpt-oss", "gemma2", "rswa"],
 )
-def test_attention_features_without_a_tree_term_verify_chains(model, kinds):
+def test_windowed_attention_verifies_chains(model, kinds):
     caps = _caps(model())
     assert caps.plan_kind == "chain"
     assert [limit.reason for limit in caps.limits] == [
-        f"{kind}: _TreeBuilder verifies chain" for kind in kinds
+        f"{kind}: not full attention" for kind in kinds
     ]
 
 
-def test_the_builder_sees_each_layers_features():
-    seen = []
-
-    class Recording(_StockBuilder):
-        def spec_verify_limit(self, **features):
-            seen.append(features)
-            return "tree", "verifies tree"
-
-    sink_swa = _attn(has_sink=True, logits_soft_cap=30.0, alibi_slopes=torch.ones(2))
-    rswa = RSWASpec(
-        block_size=16,
-        num_kv_heads=2,
-        head_size=64,
-        dtype=torch.bfloat16,
-        rswa_window=64,
-    )
-    _caps(_model((Recording, _SWA, {"a": sink_swa}), (Recording, rswa, {"b": _attn()})))
-    assert seen == [
-        dict(
-            kv_cache_dtype="auto",
-            sliding_window=128,
-            has_sinks=True,
-            logits_soft_cap=30.0,
-            has_alibi=True,
-            chunk_size=None,
-            rswa_window=None,
-            kv_sharing_target=None,
-        ),
-        dict(
-            kv_cache_dtype="auto",
-            sliding_window=None,
-            has_sinks=False,
-            logits_soft_cap=None,
-            has_alibi=False,
-            chunk_size=None,
-            rswa_window=64,
-            kv_sharing_target=None,
-        ),
-    ]
+def test_full_attention_features_keep_trees():
+    """Sinks, a soft cap and ALiBi on full attention do not lower the plan."""
+    layer = _attn(has_sink=True, logits_soft_cap=30.0, alibi_slopes=torch.ones(2))
+    assert _caps(_model((_FULL, {"a": layer}))).plan_kind == "tree"
 
 
 def test_dsv3_mla_verifies_chains():
     caps = _caps(_dsv3())
     assert caps.plan_kind == "chain"
+    assert [limit.reason for limit in caps.limits] == [
+        "attn:mla_attention, 3 layers: not full attention"
+    ]
     # A variable-length chain still runs.
     declared = SpecResources(
         max_candidates=4,
@@ -338,7 +241,7 @@ def test_dsv3_mla_verifies_chains():
 
 
 def test_qwen_gdn_verifies_trees_only_with_a_provider():
-    model = _hybrid(QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder)
+    model = _hybrid(QwenGatedDeltaNetAttention)
     caps = _caps(model)
     assert caps.plan_kind == "chain"
     assert [limit.reason for limit in caps.limits] == [
@@ -348,7 +251,7 @@ def test_qwen_gdn_verifies_trees_only_with_a_provider():
 
 
 def test_nemotron_h_verifies_chains():
-    model = _hybrid(MambaMixer2, Mamba2AttentionMetadataBuilder)
+    model = _hybrid(MambaMixer2)
     for kernels in (None, _provided()):
         caps = _caps(model, kernels=kernels)
         assert caps.plan_kind == "chain"
@@ -358,7 +261,7 @@ def test_nemotron_h_verifies_chains():
 
 
 def test_qwen_gdn_verifies_trees_with_state_slots_and_chains_by_replay():
-    model = _hybrid(QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder)
+    model = _hybrid(QwenGatedDeltaNetAttention)
     assert _caps(model, kernels=_provided()).plan_kind == "tree"
     for mode in ("replay", "recover"):
         caps = _caps(model, state_mode=mode, kernels=_provided())
@@ -367,24 +270,16 @@ def test_qwen_gdn_verifies_trees_with_state_slots_and_chains_by_replay():
 
 
 @pytest.mark.parametrize(
-    "layer, builder",
+    "layer",
     [
-        (OlmoHybridGatedDeltaNetAttention, GDNAttentionMetadataBuilder),
-        (KimiGatedDeltaNetAttention, GDNAttentionMetadataBuilder),  # Kimi Linear
+        OlmoHybridGatedDeltaNetAttention,
+        KimiGatedDeltaNetAttention,  # Kimi Linear
         # Qwen4Exp's PLE layer reports SHORT_CONV but runs its own layer.
-        (
-            "vllm.models.qwen4_exp.nvidia.ple_layer:Qwen4ExpPLELayer",
-            PleShortConvAttentionMetadataBuilder,
-        ),
-        (
-            "vllm.models.kimi_k3.nvidia.kda:KimiK3DeltaAttention",
-            GDNAttentionMetadataBuilder,
-        ),
-        (
-            "vllm.models.kimi_k3.amd.kda:KimiK3DeltaAttention",
-            "vllm.models.kimi_k3.amd.kda_metadata:KimiK3ROCmKDAMetadataBuilder",
-        ),
-        (ShortConv, ShortConvAttentionMetadataBuilder),
+        "vllm.models.qwen4_exp.nvidia.ple_layer:Qwen4ExpPLELayer",
+        "vllm.models.kimi_k3.nvidia.kda:KimiK3DeltaAttention",
+        "vllm.models.kimi_k3.amd.kda:KimiK3DeltaAttention",
+        ShortConv,  # LFM2
+        MambaMixer,  # Jamba, FalconMamba
     ],
     ids=[
         "olmo-hybrid",
@@ -393,30 +288,19 @@ def test_qwen_gdn_verifies_trees_with_state_slots_and_chains_by_replay():
         "kimi-k3-nvidia",
         "kimi-k3-amd",
         "lfm2-short-conv",
+        "jamba-mamba1",
     ],
 )
-def test_recurrent_layers_without_tree_kernels_verify_chains(layer, builder):
-    """A layer subclassing a tree-capable one (and a builder subclassing a
-    tree-capable builder) runs its own kernels: chains only."""
+def test_recurrent_layers_without_tree_kernels_verify_chains(layer):
+    """A layer subclassing a tree-capable one runs its own kernels: chains
+    only."""
     if isinstance(layer, str):
         layer = _import_class(layer)
-    if isinstance(builder, str):
-        builder = _import_class(builder)
-    caps = _caps(_hybrid(layer, builder))
+    caps = _caps(_hybrid(layer))
     assert caps.plan_kind == "chain"
-    [limit] = caps.limits
-    assert limit.reason in (
-        f"{layer.__name__}, 3 layers: declares no spec_layer_variant",
-        "mamba:short_conv@slots, 3 layers: no mamba:short_conv@slots/verify kernel",
-    )
-
-
-def test_jamba_mamba1_refuses_spec_decode():
-    caps = _caps(_hybrid(MambaMixer, Mamba1AttentionMetadataBuilder))
-    assert caps.plan_kind == "none"
-    declared = _TreeConfig().resources(8)
-    with pytest.raises(ValueError, match="MambaMixer, 3 layers: decodes one token"):
-        resolve_spec_resources(_TreeConfig(), declared, [caps])
+    assert [limit.reason for limit in caps.limits] == [
+        f"{layer.__name__}, 3 layers: declares no spec_layer_variant"
+    ]
 
 
 def test_draft_and_hidden_state_layers_do_not_count():
@@ -426,9 +310,9 @@ def test_draft_and_hidden_state_layers_do_not_count():
     draft = _attn()
     draft.is_draft_layer = True
     model = _model(
-        (_TreeBuilder, _FULL, _layers("attn", 2, _attn)),
-        (_StockBuilder, hidden, {"hidden": _attn()}),
-        (_StockBuilder, _FULL, {"draft": draft}),
+        (_FULL, _layers("attn", 2, _attn)),
+        (hidden, {"hidden": _attn()}),
+        (_SWA, {"draft": draft}),
     )
     assert _caps(model).plan_kind == "tree"
 
@@ -446,7 +330,6 @@ class _OwnTreeKernels(_OwnKernels):
 
 def test_spec_layer_variant_is_not_inherited():
     assert QwenGatedDeltaNetAttention.spec_layer_variant == "gdn"
-    assert ShortConv.spec_layer_variant == "short_conv"
     assert _OwnTreeKernels.spec_layer_variant == "gdn"
     for chain_only in (
         MambaBase,
@@ -456,29 +339,16 @@ def test_spec_layer_variant_is_not_inherited():
         KimiGatedDeltaNetAttention,
         MambaMixer,
         MambaMixer2,
+        ShortConv,
     ):
         assert chain_only.spec_layer_variant is None, chain_only
-
-
-def test_only_mamba1_declares_no_chain():
-    assert not MambaMixer.spec_chain_supported
-    for cls in (MambaMixer2, QwenGatedDeltaNetAttention, ShortConv, _OwnKernels):
-        assert cls.spec_chain_supported, cls
 
 
 # --- runner: settings lower to chain -----------------------------------------
 
 
-class _TreeState:
-    supports_tree_verify = True
-
-
-class _ChainState:
-    supports_tree_verify = False
-
-
 def _runner(**overrides):
-    attn_groups, layers = _llama(_TreeBuilder)
+    attn_groups, layers = _llama()
     runner = SimpleNamespace(
         cache_config=CacheConfig(),
         attn_groups=attn_groups,
@@ -489,7 +359,6 @@ def _runner(**overrides):
         dcp_size=1,
         batch_sharder=None,
         parallel_config=ParallelConfig(),
-        model_state=_TreeState(),
     )
     for name, value in overrides.items():
         setattr(runner, name, value)
@@ -510,7 +379,6 @@ def _resolve(runner, kernels=None) -> SpecCapabilities:
         ({"dcp_size": 2}, "decode context parallelism"),
         ({"batch_sharder": object()}, "batch-sharded sampling"),
         ({"parallel_config": ParallelConfig(enable_dbo=True)}, "micro-batching"),
-        ({"model_state": _ChainState()}, "model state _ChainState"),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(override, reason):
@@ -524,9 +392,7 @@ def test_runner_settings_lower_trees_to_chains(override, reason):
 
 
 def test_runner_reads_the_mamba_state_mode():
-    attn_groups, layers = _hybrid(
-        QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder
-    )
+    attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
     runner = _runner(
         attn_groups=attn_groups,
         compilation_config=SimpleNamespace(static_forward_context=layers),
@@ -538,18 +404,15 @@ def test_runner_reads_the_mamba_state_mode():
 
 
 @pytest.mark.parametrize(
-    "layer, builder, with_provider",
-    [
-        (MambaMixer2, Mamba2AttentionMetadataBuilder, "chain"),
-        (QwenGatedDeltaNetAttention, GDNAttentionMetadataBuilder, "tree"),
-    ],
+    "layer, with_provider",
+    [(MambaMixer2, "chain"), (QwenGatedDeltaNetAttention, "tree")],
     ids=["nemotron-h", "qwen-gdn"],
 )
 def test_tree_speculator_on_a_hybrid_without_a_provider_runs_as_a_chain(
-    layer, builder, with_provider
+    layer, with_provider
 ):
     """At startup the runner lowers the tree to a chain; nothing raises."""
-    attn_groups, layers = _hybrid(layer, builder)
+    attn_groups, layers = _hybrid(layer)
     runner = _runner(
         attn_groups=attn_groups,
         compilation_config=SimpleNamespace(static_forward_context=layers),
@@ -593,7 +456,7 @@ def _tree_caps():
     return SpecCapabilities.from_limits([])
 
 
-def _chain_caps(reason="attn:sliding_window, 2 layers: X verifies chain"):
+def _chain_caps(reason="attn:sliding_window, 2 layers: not full attention"):
     return SpecCapabilities.from_limits([SpecLimit("chain", reason)])
 
 
@@ -661,14 +524,12 @@ def test_adapt_resources_is_validated(changes, caps, problem):
 
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     """PP ranks hold different layers: rank 0 the trees, rank 1 a SWA layer."""
-    rank0 = _caps(_llama(_TreeBuilder))
-    rank1 = _caps(_model((_UniformMLABuilder, _SWA, {"swa.9": _attn()})))
+    rank0 = _caps(_llama())
+    rank1 = _caps(_model((_SWA, {"swa.9": _attn()})))
     caps = reduce_spec_capabilities([rank0, rank1])
     assert caps.plan_kind == "chain"
     assert caps.limits == rank0.limits + rank1.limits
     assert reduce_spec_capabilities([rank0, rank0]).plan_kind == "tree"
-    none = _caps(_hybrid(MambaMixer, Mamba1AttentionMetadataBuilder))
-    assert reduce_spec_capabilities([rank0, none, rank1]).plan_kind == "none"
 
 
 class _Executor:

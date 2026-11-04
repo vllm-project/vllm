@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,6 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class DefaultModelState(ModelState):
-    supports_tree_verify: ClassVar[bool] = True
     supports_prompt_embeds = True
 
     def __init__(

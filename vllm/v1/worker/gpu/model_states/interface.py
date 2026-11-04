@@ -42,10 +42,6 @@ class ModelSpecificAttnMetadata:
 class ModelState(ABC):
     supports_prompt_embeds: ClassVar[bool] = False
     """Whether this state implements user-provided prompt embeddings."""
-    supports_tree_verify: ClassVar[bool] = False
-    """Whether ``prepare_attn`` passes ``InputBatch.tree_parents`` and
-    ``tree_ancestors`` into the attention metadata, so its
-    batches can verify plans that are not chains."""
 
     def __init__(
         self,

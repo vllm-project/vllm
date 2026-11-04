@@ -45,36 +45,33 @@ recurrent-state row per draft. `SpecResources.plan_kind` follows from the fields
 Plan kinds are ordered `"none" < "chain" < "tree"` (`PlanKind` in
 `capabilities.py`):
 
-- `"none"`: the layer cannot verify drafts at all.
+- `"none"`: no speculative decoding.
 - `"chain"`: each verify row follows the one before it.
 - `"tree"`: each row has a parent and sees its ancestors.
 
-### Per-layer capabilities
+### Startup rule
 
-After the attention backends are built, each worker reports what its layers verify
-as a `SpecCapabilities`: a `plan_kind` and one `SpecLimit(plan_kind, reason)` per
-layer kind or setting that lowers it. The engine core reduces the reports of every rank: the model verifies the lowest plan
-kind of any layer on any rank.
+After the attention backends are built, each worker applies one rule to its target
+layers: the model verifies trees when every layer is full attention or has provider
+kernels for its kind, and chains otherwise. It reports the result as a
+`SpecCapabilities`: a `plan_kind` and one `SpecLimit(plan_kind, reason)` per layer
+kind or setting that lowers it. The engine core reduces the reports of every rank:
+the model verifies the lowest plan kind of any layer on any rank.
 
-Each kind of layer answers in its own way:
-
-- **Attention layers.** The metadata builder answers
-  `spec_verify_limit(*, kv_cache_dtype, sliding_window, has_sinks,
-  logits_soft_cap, has_alibi, chunk_size, rswa_window, kv_sharing_target)` for the
-  layer's features (`vllm/v1/attention/backend.py`) with the plan kind and the
-  reason the startup log shows. The default is `"chain"`. A builder that returns
-  `"tree"` reads `CommonAttentionMetadata.tree_ancestors` and applies every feature
-  of the layer by position (`CommonAttentionMetadata.positions`, the plan
-  positions).
+- **Attention layers.** A full attention layer (no sliding window, chunk or R-SWA
+  window) verifies trees when the registry commits its KV layout; the reference
+  `KvCompactor` does. Every other attention kind verifies chains. A backend that
+  serves a tree reads `CommonAttentionMetadata.tree_ancestors` and measures
+  position terms on `CommonAttentionMetadata.positions`, the plan positions.
 - **Recurrent layers** (`MambaBase` subclasses). A layer class verifies more than
   chains only when the class itself sets `spec_layer_variant`, for example
   `"gdn"`. Subclasses do not inherit it, so a subclass with its own forward
-  falls back to chains. A class with `spec_chain_supported = False` (Mamba1) reports
-  `"none"`. Above chains, a recurrent layer verifies the highest plan kind that its
-  kernels in the registry support (see [Kernel registry](#kernel-registry)).
+  falls back to chains. Above chains, a recurrent layer verifies the highest plan
+  kind that its kernels in the registry support (see
+  [Kernel registry](#kernel-registry)).
 - **Runner settings.** These lower trees to chains: pipeline parallelism,
-  prefill and decode context parallelism, batch-sharded sampling, micro-batching,
-  and a model state without tree support.
+  prefill and decode context parallelism, batch-sharded sampling and
+  micro-batching.
 
 ### Downgrade to chain
 
@@ -99,8 +96,7 @@ the adapted resources (see [Limits](#limits)). The speculator receives them in
 `resources.max_branching == 1`, every batch is `PlanInputs.chain_only`.
 
 A speculator that must not run with a lower plan kind raises in its
-`adapt_resources`. Startup also fails when a layer verifies no plans at all (plan
-kind `"none"`).
+`adapt_resources`.
 
 ## Every step, in call order
 
@@ -381,21 +377,22 @@ class MyTreeSpeculator(EagleSpeculator):
 ## Coverage by model family
 
 A model verifies the lowest plan kind of any of its layers. The table shows what each
-family verifies with the in-tree backends and kernels. A plugin attention backend
-whose builder answers `"tree"`, or a kernel provider, can raise a row.
+family verifies with the in-tree kernels. A kernel provider can raise a row.
 
 | Family | Layers | Plan kind | What decides it |
 | --- | --- | --- | --- |
-| Dense attention (Llama, Qwen3, Mistral) | FlashAttention, FlashInfer, Triton | chain | The builders keep the default `spec_verify_limit`. |
-| Sinks, soft cap, ALiBi, chunked local attention, R-SWA, KV sharing, quantized KV (for example gpt-oss, Gemma 2, Llama 4) | any in-tree backend | chain | The in-tree builders keep the default `spec_verify_limit`. |
-| MLA (DeepSeek V3, Kimi K2) | MLA backends | chain | MLA builders keep the default. |
-| Sparse attention with an indexer (DeepSeek V3.2, GLM-5) | indexer | chain | The indexer builder keeps the default. |
-| GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | chain | No `mamba:gdn@slots/verify` or `layout:mamba_state@slots/commit` kernel in tree. A provider of both raises it to tree, if the attention layers verify trees. |
+| Dense attention (Llama, Qwen3, Mistral) | full attention | tree | Full attention; the reference `KvCompactor` commits its KV. |
+| Sliding window, chunked local attention, R-SWA (for example gpt-oss, Gemma 2, Llama 4) | windowed attention | chain | Not full attention. |
+| MLA (DeepSeek V3, Kimi K2) | MLA | chain | Not full attention. |
+| Sparse attention with an indexer (DeepSeek V3.2, GLM-5) | indexer | chain | Not full attention. |
+| GDN hybrids (Qwen3-Next, Qwen3.5) | GDN | chain | No `mamba:gdn@slots/verify` or `layout:mamba_state@slots/commit` kernel in tree. A provider of both raises it to tree. |
 | Mamba2 hybrids (Nemotron-H, Zamba2, Falcon-H1, Granite hybrids) | Mamba2 | chain | `MambaMixer2` declares no `spec_layer_variant`: its layers take no verify kernel. |
 | KDA and other GDN subclasses (Kimi Linear, OLMo hybrid) | own layer classes | chain | No `spec_layer_variant` on the subclass. |
-| Linear attention (MiniMax-Text-01, Bailing) | `LinearAttention` | chain | No `spec_layer_variant`. |
-| Short conv (LFM2) | short conv | chain | No `verify` kernel for `mamba:short_conv@slots`. |
-| Mamba1 (Jamba, FalconMamba) | Mamba1 | none | `spec_chain_supported = False`. Speculative decoding refuses to start. |
+| Linear attention (MiniMax-Text-01, Bailing), short conv (LFM2), Mamba1 (Jamba, FalconMamba) | own layer classes | chain | No `spec_layer_variant`. |
+
+A tree on full attention needs an attention backend that reads
+`tree_ancestors`. The in-tree backends attend causally, so a tree speculator runs
+with a backend that serves trees.
 
 ## Limits
 

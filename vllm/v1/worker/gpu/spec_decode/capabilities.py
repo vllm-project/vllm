@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""What the target model can verify: per-layer spec capabilities.
+"""What the target model can verify: chains, or trees.
 
 A speculator declares the plans it wants to verify (``SpecResources.plan_kind``).
-Each worker walks its layers after the attention backends are built and reports
-the highest plan kind every layer verifies correctly, with a reason for each
-layer or setting that lowers it (``SpecCapabilities``). The engine core reduces
-the reports of every rank, lets the speculator adapt its resources to them
+Each worker applies one rule to its layers after the attention backends are
+built: the model verifies trees when every target layer is full attention or
+has provider kernels for its kind, and chains otherwise. It reports the result
+with a reason for each layer kind or setting that lowers it
+(``SpecCapabilities``). The engine core reduces the reports of every rank, lets
+the speculator adapt its resources to them
 (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
-to every worker. A model whose layers cannot verify trees therefore runs a tree
-speculator as a chain; only a layer that cannot verify a chain at all (plan kind
-``"none"``) refuses speculative decoding.
+to every worker. A tree speculator on a model that cannot verify trees
+therefore runs as a chain.
 """
 
 from collections import Counter
@@ -151,13 +152,13 @@ def layer_spec_limits(
     """The plan kind caps of the target's layers, one per (layer kind, reason)
     with its layer count.
 
-    A layer verifies what the spec kernels it needs support for it
+    A model verifies trees when every target layer is full attention or has
+    provider kernels for its kind; otherwise it verifies chains. A layer
+    verifies what the spec kernels it needs support for it
     (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
-    kernels). An attention layer is further capped by what its metadata
-    builder's ``spec_verify_limit`` returns for the layer's features. A
-    recurrent layer (``MambaBase``) verifies nothing when its class sets
-    ``spec_chain_supported = False`` and chains when it declares no
-    ``spec_layer_variant``. Only the layers of :func:`spec_layers` count.
+    kernels). Other attention kinds, and recurrent layers (``MambaBase``) that
+    declare no ``spec_layer_variant``, verify chains. Only the layers of
+    :func:`spec_layers` count.
     """
     from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec
@@ -166,19 +167,26 @@ def layer_spec_limits(
         kernels = KernelRegistry()
     # (plan kind, what the layers are, why) -> number of layers
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
-    for group, name, spec, layer in spec_layers(attn_groups, layers):
+    for _, name, spec, layer in spec_layers(attn_groups, layers):
         if isinstance(layer, MambaBase):
-            num_layers[_mamba_layer_limit(name, layer, kernels, mamba_state_mode)] += 1
-            continue
-        kind = attn_layer_kind(spec)
-        plan_kind, why = group.metadata_builders[0].spec_verify_limit(
-            **attn_layer_features(layer, spec)
+            variant = type(layer).spec_layer_variant
+            if variant is None:
+                what = type(layer).__name__
+                num_layers[("chain", what, "declares no spec_layer_variant")] += 1
+                continue
+            # The state mode is part of the key: the slots kernels read a state
+            # slot per draft row, which replay and recovery do not keep.
+            kind = SpecLayerKind("mamba", variant, mamba_state_mode)
+            layout = "mamba_state"
+        else:
+            kind = attn_layer_kind(spec)
+            if kind.variant != "full_attention" or _has_window(layer, spec):
+                num_layers[("chain", kind.key(), "not full attention")] += 1
+                continue
+            layout = attn_layout(layer, spec)
+        plan_kind, why = kernels.plan_kind(
+            SpecLayerSpec(name, kind, layer, layout=layout)
         )
-        kernel_kind, kernel_why = kernels.plan_kind(
-            SpecLayerSpec(name, kind, layer, layout=attn_layout(layer, spec))
-        )
-        if plan_kind_rank(kernel_kind) < plan_kind_rank(plan_kind):
-            plan_kind, why = kernel_kind, kernel_why
         num_layers[(plan_kind, kind.key(), why)] += 1
     return [
         SpecLimit(plan_kind, f"{what}, {n} layer{'s' * (n != 1)}: {why}")
@@ -187,24 +195,12 @@ def layer_spec_limits(
     ]
 
 
-def _mamba_layer_limit(
-    name: str, layer: Any, kernels: "KernelRegistry", state_mode: str
-) -> tuple[PlanKind, str, str]:
-    from vllm.v1.worker.gpu.spec_decode.kernels import SpecLayerSpec
-
-    layer_cls = type(layer)
-    if not layer_cls.spec_chain_supported:
-        return ("none", layer_cls.__name__, "decodes one token per request")
-    variant = layer_cls.spec_layer_variant
-    if variant is None:
-        return ("chain", layer_cls.__name__, "declares no spec_layer_variant")
-    # The state mode is part of the key: the slots kernels read a state slot
-    # per draft row, which replay and recovery do not keep.
-    kind = SpecLayerKind("mamba", variant, state_mode)
-    plan_kind, why = kernels.plan_kind(
-        SpecLayerSpec(name, kind, layer, layout="mamba_state")
+def _has_window(layer: Any, spec: Any) -> bool:
+    """Whether a full attention layer attends to a window or chunk only."""
+    return any(
+        getattr(spec, name, None) or getattr(layer, name, None)
+        for name in ("sliding_window", "attention_chunk_size", "rswa_window")
     )
-    return (plan_kind, kind.key(), why)
 
 
 def attn_layer_kind(spec: Any) -> SpecLayerKind:
@@ -229,27 +225,6 @@ def attn_layout(layer: Any, spec: Any) -> str:
     return "paged_token"
 
 
-def attn_layer_features(layer: Any, spec: Any) -> dict[str, Any]:
-    """The keyword arguments of ``AttentionMetadataBuilder.spec_verify_limit``
-    for an attention layer with KV cache spec ``spec``. Features the layer does
-    not have are None or False (e.g. a soft cap of 0 is no soft cap)."""
-    from vllm.v1.kv_cache_interface import SinkFullAttentionSpec
-
-    impl = getattr(layer, "impl", None)
-    return dict(
-        kv_cache_dtype=getattr(layer, "kv_cache_dtype", "auto"),
-        sliding_window=getattr(spec, "sliding_window", None)
-        or getattr(layer, "sliding_window", None),
-        has_sinks=bool(getattr(layer, "has_sink", False))
-        or isinstance(spec, SinkFullAttentionSpec),
-        logits_soft_cap=getattr(impl, "logits_soft_cap", None) or None,
-        has_alibi=getattr(impl, "alibi_slopes", None) is not None,
-        chunk_size=getattr(spec, "attention_chunk_size", None),
-        rswa_window=getattr(spec, "rswa_window", None),
-        kv_sharing_target=getattr(layer, "kv_sharing_target_layer_name", None),
-    )
-
-
 def resolve_spec_resources(
     speculator_config: "SpeculatorConfig",
     declared: "SpecResources",
@@ -258,10 +233,9 @@ def resolve_spec_resources(
     """The resources speculation runs with: the speculator's declaration adapted
     to what every rank verifies (``capabilities``, one per worker).
 
-    Logs one line per cap that lowers the declared plan kind. Raises when a
-    layer verifies no plans at all, and when the adapted resources exceed the
-    declared ones or the capabilities. A speculator that must not run with a
-    lower plan kind raises in its ``adapt_resources``.
+    Logs one line per cap that lowers the declared plan kind. Raises when the
+    adapted resources exceed the declared ones or the capabilities. A speculator
+    that must not run with a lower plan kind raises in its ``adapt_resources``.
     """
     caps = reduce_spec_capabilities(capabilities)
     lowering = [
@@ -269,11 +243,6 @@ def resolve_spec_resources(
         for limit in caps.limits
         if plan_kind_rank(limit.plan_kind) < plan_kind_rank(declared.plan_kind)
     ]
-    if caps.plan_kind == "none":
-        raise ValueError(
-            "Speculative decoding is not supported by this model: "
-            + "; ".join(limit.reason for limit in lowering)
-        )
     for limit in lowering:
         logger.info(
             "spec decode: %s -> %s (%s)",
