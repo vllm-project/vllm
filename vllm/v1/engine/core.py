@@ -24,6 +24,7 @@ import zmq
 import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.config.pooler import POOLER_CONFIG_LOG_FIELDS
+from vllm.config.watermarking import warn_watermarking_override
 from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
@@ -56,6 +57,7 @@ from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
+    finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
@@ -138,6 +140,7 @@ class EngineCore:
     # object.__new__.
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
+    _kv_cache_reclaimable = False
 
     def __init__(
         self,
@@ -309,6 +312,12 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Disable it, everywhere, where it cannot be used.
+            executor = self.model_executor
+            reason = executor.extensible_kv_cache_unsupported_reason(kv_cache_specs)
+            if reason is not None:
+                executor.disable_extensible_kv_cache(reason)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
@@ -375,6 +384,10 @@ class EngineCore:
                 if participating
                 else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
+        # With an extensible KV cache, `num_blocks` is the reserved capacity
+        # until the post-warmup measurement below.
+        extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
@@ -396,6 +409,19 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        compilation_times = []
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+        if extensible:
+            num_blocks = finalize_extensible_kv_cache(
+                vllm_config,
+                kv_cache_configs,
+                scheduler_kv_cache_config,
+                compilation_times,
+            )
+            self.model_executor.extend_kv_cache(num_blocks)
+        # Under the extensible KV cache, workers create the connector in
+        # `extend_kv_cache`, so ask for its block count only afterwards.
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
@@ -411,8 +437,6 @@ class EngineCore:
             vllm_config.cache_config.simple_cpu_offload_num_blocks = (
                 aligned_num_cpu_blocks
             )
-        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
@@ -998,6 +1022,7 @@ class EngineCore:
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
                 self._reset_caches()
+                self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -1045,9 +1070,21 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
+
+    def _set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
+        """Tell the workers whether their extensible KV cache holds nothing to
+        keep, as from a pause that cleared it until the resume, so that a weight
+        reload may borrow its memory."""
+        if reclaimable == self._kv_cache_reclaimable:
+            return
+        self._kv_cache_reclaimable = reclaimable
+        executor = self.model_executor
+        if executor.vllm_config.cache_config.enable_extensible_kv_cache:
+            executor.collective_rpc("set_kv_cache_reclaimable", args=(reclaimable,))
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -1158,6 +1195,14 @@ class EngineCore:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
+    def is_inference_ready(self) -> bool:
+        """Whether the engine can accept and process new requests: it is not
+        paused (including for a checkpoint) or asleep, and no weight update has
+        left the weights incomplete."""
+        return not self.is_sleeping() and not any(
+            self.collective_rpc("has_incomplete_weight_update")
+        )
+
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
 
@@ -1228,6 +1273,21 @@ class EngineCore:
             request.mm_features = self.mm_receiver_cache.get_and_update_features(
                 request.mm_features
             )
+
+        watermark_config = self.vllm_config.watermark_config
+        params = request.sampling_params
+        # Greedy decoding and trace replay cannot be watermarked; leave their
+        # flag as the frontend resolved it.
+        if (
+            watermark_config
+            and watermark_config.enforce
+            and params
+            and params.temperature != 0
+            and params.trace_decode_token_ids is None
+        ):
+            if params.watermarking is False:
+                warn_watermarking_override()
+            params.watermarking = True
 
         frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
         req = Request.from_engine_core_request(

@@ -336,6 +336,11 @@ class EngineCoreOutput(
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
 
+    # Whether the sampler watermarks this request, after EngineCore enforcement.
+    # Sent once, on the first output, when watermark_config is set. Appended last
+    # for array_like compatibility.
+    watermarking: bool | None = None
+
     # One trailing nil byte on ordinary array-like outputs.
     stream_output: StreamOutput | None = None
 
