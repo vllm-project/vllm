@@ -34,7 +34,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.worker.gpu.attn_utils import bind_kv_caches
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
-from vllm.v1.worker.utils import layer_kernel_block_size, layer_spec_for_tensor
+from vllm.v1.worker.utils import (
+    layer_kernel_block_size,
+    layer_spec_for_tensor,
+    view_kernel_block_size,
+)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -231,7 +235,9 @@ class ExtensibleKVCache:
                 raw_view = self.buffer.segment_view(0)
                 kv_caches.update((name, raw_view) for name in tensor.layers)
                 continue
-            kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
+            kernel_block_size = view_kernel_block_size(
+                spec, tensor, layer_kernel_block_size(group_id, kernel_block_sizes)
+            )
             for layer_idx, layer_name in enumerate(tensor.layers):
                 segment, offset = self._locate(
                     tensor.offset + layer_idx * tensor.layer_stride
