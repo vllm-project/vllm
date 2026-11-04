@@ -9,7 +9,7 @@ from tests.models.language.pooling.embed_utils import run_embedding_correctness_
 
 @pytest.mark.parametrize(
     "model",
-    ["jason9693/Qwen2.5-1.5B-apeach"],
+    ["vllm-project/Qwen2.5-1.5B-apeach"],
 )
 @pytest.mark.parametrize("dtype", ["half"])
 def test_classify_models(
@@ -98,9 +98,9 @@ def test_embed_models(
 @pytest.mark.parametrize(
     "model",
     [
-        "intfloat/e5-small",
+        "vllm-project/e5-small",
         "Alibaba-NLP/gte-Qwen2-1.5B-instruct",  # is_causal == False
-        "papluca/xlm-roberta-base-language-detection",
+        "vllm-project/xlm-roberta-base-language-detection",
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
