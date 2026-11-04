@@ -11,6 +11,7 @@ token outside the top k, where chat keeps k entries and completions k + 1; the
 greedy end-to-end parity tests never produce that case.
 """
 
+import numpy as np
 import pytest
 
 from tests.entrypoints.openai.chat_completion.test_serving_chat import (
@@ -24,7 +25,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateLogProbs
 from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
-from vllm.logprobs import append_logprobs_for_next_position
+from vllm.logprobs import append_logprobs_for_next_position, create_sample_logprobs
 from vllm.renderers.online_derenderer import (
     _chat_top_logprobs_limit,
     _completion_top_logprobs_limit,
@@ -33,6 +34,8 @@ from vllm.renderers.online_derenderer import (
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.v1.engine.logprobs import LogprobsProcessor
+from vllm.v1.outputs import LogprobsLists
 
 MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
@@ -210,3 +213,57 @@ def test_completion_position_without_logprobs_stays_none(
     )
     assert derendered.top_logprobs == coupled.top_logprobs
     assert derendered.top_logprobs[3] is None
+
+
+def test_completion_top_logprobs_keeps_sampled_entry_on_string_collision(
+    serving_completion,
+):
+    """`/v1/completions` keys `top_logprobs` by token string, and byte-fragment
+    candidates all decode to "". A later candidate must not overwrite the
+    sampled token's entry, or that of a more likely candidate."""
+    tokenizer = get_tokenizer("Qwen/Qwen3-0.6B")
+    k = 3
+    # Generating a space and Thai digit U+0E58: " " (220), then 8158, the first
+    # two of its three bytes. 3023 and 378 are other two-byte leading fragments.
+    rows = np.array([[220, 220, 3023, 378], [8158, 8158, 3023, 378]])
+    logprobs = np.array(
+        [[-0.25, -0.25, -12.25, -14.0], [-0.5, -0.5, -12.25, -14.0]],
+        dtype=np.float32,
+    )
+    processor = LogprobsProcessor(
+        tokenizer=tokenizer,
+        logprobs=create_sample_logprobs(flat_logprobs=False),
+        prompt_logprobs=None,
+        cumulative_logprob=0.0,
+        num_logprobs=k,
+        num_prompt_logprobs=None,
+    )
+    processor._update_sample_logprobs(
+        LogprobsLists(
+            logprob_token_ids=rows,
+            logprobs=logprobs,
+            sampled_token_ranks=np.array([1, 1]),
+        )
+    )
+    token_ids = rows[:, 0].tolist()
+
+    coupled = serving_completion._create_completion_logprobs(
+        token_ids=token_ids,
+        top_logprobs=processor.logprobs,
+        num_output_top_logprobs=k,
+        tokenizer=tokenizer,
+    )
+    assert coupled.tokens == [" ", ""]
+    assert coupled.top_logprobs == [{" ": -0.25, "": -12.25}, {"": -0.5}]
+
+    request = CompletionRequest(model=MODEL_NAME, prompt="hi", logprobs=k)
+    generated = _generate(token_ids, processor.logprobs)
+    derendered = _convert_chat_logprobs_to_completion_logprobs(
+        _resolve_logprobs(
+            generated,
+            tokenizer,
+            top_limit=_completion_top_logprobs_limit(request),
+        ),
+        generated,
+    )
+    assert derendered.model_dump() == coupled.model_dump()
