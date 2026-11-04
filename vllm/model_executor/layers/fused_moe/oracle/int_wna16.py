@@ -98,9 +98,10 @@ def backend_to_kernel_cls(
     elif backend == WNA16MoEBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             CPUExpertsInt4,
+            CPUExpertsWNA16,
         )
 
-        return [CPUExpertsInt4]
+        return [CPUExpertsInt4, CPUExpertsWNA16]
     elif backend == WNA16MoEBackend.ZEN_CPU:
         from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
             ZentorchExpertsInt4,
@@ -424,6 +425,7 @@ def make_wna16_moe_kernel(
     )
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         CPUExpertsInt4,
+        CPUExpertsWNA16,
     )
     from vllm.model_executor.layers.fused_moe.experts.int4_emulation_moe import (
         Int4EmulationTritonExperts,
@@ -449,6 +451,7 @@ def make_wna16_moe_kernel(
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
+        CPUExpertsWNA16,
         ZentorchExpertsInt4,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
@@ -1670,6 +1673,8 @@ def convert_to_wna16_moe_kernel_format(
             quant_config.group_size,
         )
     elif backend == WNA16MoEBackend.CPU:
+        if quant_config.num_bits == 8:
+            return None
         return _process_weights_cpu(
             quant_config,
             w13,

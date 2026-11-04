@@ -424,6 +424,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         if converted is None:
             self._setup_kernel(layer)
+            if self.wna16_backend == WNA16MoEBackend.CPU:
+                self.moe_kernel.fused_experts.process_weights_after_loading(layer)
             return
 
         (
