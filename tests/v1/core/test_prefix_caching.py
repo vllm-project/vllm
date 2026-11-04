@@ -5668,6 +5668,38 @@ def test_block_lookup_cache_multi_blocks_per_key():
     assert cache.pop(key1, 12) is None
 
 
+@pytest.mark.parametrize("num_copies", [2, 512])
+def test_block_lookup_cache_duplicate_eviction_preserves_order(num_copies):
+    """Arbitrary removal and reinsertion preserve the oldest surviving copy."""
+    blocks = [KVCacheBlock(i) for i in range(num_copies)]
+    cache = BlockHashToBlockMap(blocks)
+    key = BlockHashWithGroupId(b"shared-prefix")
+    for block in blocks:
+        cache.insert(key, block)
+    if num_copies > 2:
+        assert not gc.is_tracked(cache._dup_ids[key])
+
+    for block in blocks[1::2]:
+        assert cache.pop(key, block.block_id) is block
+        assert not cache.contain(key, block.block_id)
+        assert cache.get_one_block(key) is blocks[0]
+    for block in blocks[1::2]:
+        cache.insert(key, block)
+        cache.insert(key, block)
+
+    order = blocks[::2] + blocks[1::2]
+    for block in order[:-1]:
+        assert cache.get_one_block(key) is block
+        assert cache.pop(key, block.block_id) is block
+    survivor = order[-1]
+    cache.insert(key, blocks[0])
+    assert cache.get_one_block(key) is survivor
+    assert cache.pop(key, survivor.block_id) is survivor
+    assert cache.get_one_block(key) is blocks[0]
+    assert cache.pop(key, blocks[0].block_id) is blocks[0]
+    assert cache.get_one_block(key) is None
+
+
 def test_can_fit_full_sequence_swa_cap_admits_long_prompt():
     """Hybrid full+SWA model with a pool sized at the startup minimum should
     admit a prompt longer than the SWA cap, because SlidingWindowManager
