@@ -55,8 +55,7 @@ def _config(num_tokens: int) -> tuple[int, int, int, int, int]:
 def supports_router_bf16x3(num_experts: int, hidden_size: int) -> bool:
     return all(
         num_experts % bn == 0 and hidden_size % (splits * bk) == 0
-        for configs in _CONFIGS.values()
-        for _, _, bn, bk, splits, _ in configs
+        for _, _, bn, bk, splits, _ in _device_configs()
     )
 
 
