@@ -5594,6 +5594,28 @@ def test_register_kv_caches_excludes_nonprefix_cacheable_layers():
     )
 
 
+def test_register_kv_caches_uses_committed_block_count():
+    """An extensible KV cache creates the connector with its committed block
+    count while cache_config.num_gpu_blocks still holds the warmup size."""
+    num_blocks = 6
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+    worker.cache_config.num_gpu_blocks = 16
+    store_layout = MagicMock()
+    worker.token_dbs[0].store_layout = store_layout
+    cache = torch.zeros(num_blocks, 4, dtype=torch.float16)
+
+    _register_with_mocked_threads(worker, {"layer0": cache})
+
+    registered_caches, registered_num_blocks = (
+        store_layout.register_kv_caches.call_args.args
+    )
+    assert registered_num_blocks == num_blocks
+    assert registered_caches[0] is cache
+    worker.store.register_buffer.assert_called_once_with(
+        cache.data_ptr(), cache.untyped_storage().nbytes()
+    )
+
+
 def test_register_kv_caches_separate_head_groups():
     # LHBNC gives each head group its own region; the K/V split doubles heads.
     layout = KVCacheLayout.LHBNC
