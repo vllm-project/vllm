@@ -87,6 +87,21 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
     - Set the same value on prefill and decode instances. A decoder without it does not renew, so its requests that wait longer than the lease lose their prefilled KV; a prefiller without it rejects renewals, and the decoder logs a warning. Prefill instances from releases without this option log an error for each renewal they receive, so upgrade them before enabling it on decode instances.
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
+## KV load failures
+
+Decoder-side topology, worker-rank lookup, and pull-metadata preparation errors
+are reported as KV load failures instead of leaving the request waiting for a
+transfer that never started. `kv_load_failure_policy` in `--kv-transfer-config`
+defaults to `"fail"`; set it to `"recompute"` to recompute failed KV loads locally.
+An invalid parallel topology still needs to be corrected for future transfers.
+
+When a request pulls from multiple producer workers, a preparation failure for
+one peer does not complete the request until the other peer tasks have settled.
+Cancelling a receiver task after it sends a pull request does not prove that the
+producer has stopped writing: the connector logs the cancellation and retains
+the pending destination blocks rather than reporting completion. This case
+requires worker recovery; cancellation is not a native transfer-drain mechanism.
+
 ## Prometheus metrics
 
 The following Prometheus metrics are exported when MooncakeConnector is active, each with the standard `model_name` and `engine` labels:
