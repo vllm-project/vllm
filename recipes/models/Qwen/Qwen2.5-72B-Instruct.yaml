@@ -1,0 +1,96 @@
+meta:
+  title: "Qwen2.5-72B-Instruct"
+  slug: "qwen2.5-72b-instruct"
+  provider: "Qwen"
+  description: "Qwen2.5 72.7B dense instruction-tuned model with optional IAXL KVShrink KV offload to the Xeon host."
+  date_added: 2026-11-04
+  date_updated: 2026-11-04
+  tasks:
+    - text
+  related_recipes:
+    - "Qwen/Qwen2.5-32B"
+    - "Qwen/Qwen2.5-VL-72B-Instruct"
+  hardware:
+    b200: verified
+
+model:
+  model_id: "Qwen/Qwen2.5-72B-Instruct"
+  min_vllm_version: "0.6.2"
+  architecture: dense
+  parameter_count: "72.7B"
+  active_parameters: "72.7B"
+  context_length: 32768
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with the Hermes parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+  long_context:
+    description: "YaRN RoPE scaling to the model card's 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
+    args:
+      - "--hf-overrides"
+      - '{"max_position_embeddings":131072,"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+      - "--max-model-len"
+      - "131072"
+
+opt_in_features:
+  - long_context
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 175
+    description: "Full precision BF16"
+
+compatible_strategies:
+  - single_node_tp
+  - multi_node_tp
+
+kv_offload_support:
+  iaxl: verified
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 2
+
+guide: |
+  ## Overview
+
+  Qwen2.5-72B-Instruct is the 72.7B dense instruction-tuned model in the
+  Qwen2.5 series, with 80 layers and grouped-query attention (64 query heads,
+  8 KV heads). Its `config.json` serves a 32,768-token context; the opt-in
+  long-context feature applies the model card's static YaRN scaling for up to
+  131,072 tokens.
+
+  The B200 configuration uses BF16 with TP=2. IAXL KVShrink can offload KV cache
+  to a compressed store in the DRAM of a GPU server's Intel Xeon host. It needs
+  a Xeon host that exposes QAT (or IAA) devices.
+
+  ## Client usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "Qwen/Qwen2.5-72B-Instruct",
+      "messages": [
+        {"role": "system", "content": "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."},
+        {"role": "user", "content": "Give me a short introduction to large language models."}
+      ],
+      "temperature": 0.7,
+      "top_p": 0.8
+    }'
+  ```
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen2.5-72B-Instruct)
+  - [Qwen vLLM deployment guide](https://qwen.readthedocs.io/en/latest/deployment/vllm.html)
+  - [intel-accel-for-llm (IAXL) KVShrink](https://github.com/intel/intel-accel-for-llm#kvshrink-vllm-example)
