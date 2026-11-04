@@ -9,7 +9,7 @@ use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBacke
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
     Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
-    ParserSelection, ReasoningEffort, RendererSelection,
+    ParserSelection, ReasoningEffort, RendererSelection, SystemFingerprintMode,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -260,6 +260,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -1198,6 +1200,73 @@ fn frontend_args_json_passes_output_logging_into_config() {
 }
 
 #[test]
+fn fingerprint_flags_select_system_fingerprint_mode() {
+    let serve = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .system_fingerprint_mode
+    };
+    let frontend = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().system_fingerprint_mode
+    };
+
+    assert_eq!(serve(&[]), SystemFingerprintMode::Full);
+    assert_eq!(
+        serve(&["--fingerprint-mode", "hash"]),
+        SystemFingerprintMode::Hash
+    );
+    assert_eq!(
+        serve(&["--fingerprint-mode", "none"]),
+        SystemFingerprintMode::None
+    );
+    assert_eq!(
+        serve(&[
+            "--fingerprint-mode",
+            "custom",
+            "--fingerprint-value",
+            "fp-1"
+        ]),
+        SystemFingerprintMode::Custom("fp-1".to_string())
+    );
+    // Like Python, `custom` without a value reports no fingerprint.
+    assert_eq!(
+        serve(&["--fingerprint-mode", "custom"]),
+        SystemFingerprintMode::None
+    );
+    // Python ignores the value in other modes.
+    assert_eq!(
+        serve(&["--fingerprint-value", "fp-1"]),
+        SystemFingerprintMode::Full
+    );
+    assert_eq!(
+        frontend(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","fingerprint_mode":"custom","fingerprint_value":"fp-1"}"#
+        ),
+        SystemFingerprintMode::Custom("fp-1".to_string())
+    );
+}
+
+#[test]
 fn frontend_args_json_passes_access_log_flags_into_config() {
     let config_for = |args_json: &str| {
         let cli = Cli::try_parse_from([
@@ -1818,6 +1887,8 @@ fn frontend_args_accept_json() {
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -2746,6 +2817,8 @@ fn serve_args_accept_handshake_aliases() {
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -3051,6 +3124,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                     33554432,
                 ),
             },
+            system_fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3179,6 +3253,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                     33554432,
                 ),
             },
+            system_fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3420,6 +3495,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                     33554432,
                 ),
             },
+            system_fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [

@@ -536,6 +536,8 @@ class EngineCoreReadyResponse:
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
+    config_hash: str | None = None
+    enable_expert_parallel: bool = False
 
 
 ready_response = EngineCoreReadyResponse(
@@ -582,6 +584,8 @@ ready_response = EngineCoreReadyResponse(
         "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
         "speculative_config": None,
     },
+    config_hash="0123456789",
+    enable_expert_parallel=True,
 )
 
 nixl_stats = {

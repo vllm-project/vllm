@@ -132,6 +132,13 @@ pub struct EngineCoreReadyResponse {
     /// hashes from the frontend.
     #[serde(default)]
     pub prefix_hash_config: Option<PrefixHashConfig>,
+    /// `compute_hash()` of the engine's initialized `VllmConfig`, the last part
+    /// of `system_fingerprint`; `None` if hashing failed.
+    #[serde(default)]
+    pub config_hash: Option<String>,
+    /// Whether expert parallelism is enabled.
+    #[serde(default)]
+    pub enable_expert_parallel: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

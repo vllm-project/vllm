@@ -38,6 +38,9 @@ pub struct AppState {
     pub chat: ChatLlm,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// `system_fingerprint` of chat and completion responses, fixed at
+    /// startup.
+    pub system_fingerprint: Option<String>,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.
@@ -77,6 +80,7 @@ impl AppState {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
+            system_fingerprint: None,
             cors: CorsConfig::default(),
             access_log: AccessLogConfig::default(),
             server_info: None,
@@ -92,6 +96,12 @@ impl AppState {
     /// Set HTTP/API-server behavior switches.
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
+        self
+    }
+
+    /// Set the `system_fingerprint` of chat and completion responses.
+    pub fn with_system_fingerprint(mut self, system_fingerprint: Option<String>) -> Self {
+        self.system_fingerprint = system_fingerprint;
         self
     }
 

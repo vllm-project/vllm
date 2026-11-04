@@ -22,6 +22,7 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 use vllm_metrics::CustomHistogramBuckets;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::fingerprint::SystemFingerprintMode;
 use crate::routes::openai::utils::types::ReasoningEffort;
 
 /// Default keep-alive idle timeout (seconds); also the head-read bound
@@ -380,6 +381,8 @@ pub struct Config {
     pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// What `system_fingerprint` reports on chat and completion responses.
+    pub system_fingerprint_mode: SystemFingerprintMode,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
     /// HTTP access log settings.

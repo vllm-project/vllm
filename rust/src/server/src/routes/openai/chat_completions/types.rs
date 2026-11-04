@@ -446,6 +446,8 @@ pub(super) struct ChatCompletionStreamResponse {
     pub choices: Vec<ChatCompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the last chunk.
+    pub system_fingerprint: Option<String>,
     /// Set only on the first chunk.
     #[serde(flatten)]
     pub prompt: Option<ChatCompletionStreamPrompt>,
@@ -461,6 +463,7 @@ impl ChatCompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            system_fingerprint: None,
             prompt: None,
             kv_transfer_params: None,
         }
