@@ -4,7 +4,9 @@
 
 Each test compares greedy tokens and logprobs with a run without speculative
 decoding and checks that it drafted (or, at budget 1, that it did not), so it
-cannot pass vacuously. The speculators are the test-only ones in ``utils``.
+cannot pass vacuously. The speculators are the test-only ones of the
+``vllm_add_test_speculators`` general plugin in ``tests/plugins``, which
+registers them in every vLLM process.
 """
 
 import asyncio
@@ -25,13 +27,8 @@ from vllm.v1.metrics.reader import get_metrics_snapshot
 from .utils import (
     _skip_if_insufficient_gpus_for_tp,
     compute_acceptance_len,
-    register_test_speculators,
+    require_test_speculators,
 )
-
-# Custom speculative methods must be registered in every process: fork the
-# engine and worker processes after registering them here.
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
-register_test_speculators()
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA"),
@@ -40,6 +37,12 @@ pytestmark = [
         reason="the round contract is the V2 model runner's",
     ),
 ]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _test_speculators_plugin():
+    require_test_speculators()
+
 
 DENSE = "Qwen/Qwen3-0.6B"
 HYBRID = "Qwen/Qwen3.5-0.8B"

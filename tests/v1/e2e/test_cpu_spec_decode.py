@@ -9,7 +9,7 @@ import pytest
 from tests.models.utils import check_logprobs_close
 from tests.v1.e2e.spec_decode.utils import (
     compute_acceptance_len,
-    register_test_speculators,
+    require_test_speculators,
 )
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
@@ -22,9 +22,6 @@ if not current_platform.is_cpu():
 
 # Bound the KV cache so the run does not scale with host memory.
 os.environ.setdefault("VLLM_CPU_KVCACHE_SPACE", "1")
-# The test-only speculators must be registered in the engine process too.
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
-register_test_speculators()
 
 MODEL = "Qwen/Qwen3-0.6B"
 NUM_LOGPROBS = 5
@@ -189,6 +186,7 @@ def test_v2_round_contract_matches_baseline(baseline_refs, method, drafts):
     """A budget of 1 is plain decode with no drafts; a tree speculator's plan
     (the n-gram chain, laid out and committed as a tree) decodes like no
     speculation and accepts drafts."""
+    require_test_speculators()
     llm = _make_llm(speculative_config={"method": method, **_NGRAM})
     try:
         assert llm.llm_engine.vllm_config.use_v2_model_runner
