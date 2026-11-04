@@ -50,6 +50,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     RoutedExperts,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     resolve_layer_fused_shared_expert,
@@ -504,6 +505,7 @@ class MiniMaxM3MoE(nn.Module):
             shared_expert_prefix=f"{prefix}.shared_experts",
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            ckpt_names=("w1", "w2", "w3"),
         )
 
     @staticmethod
@@ -1869,9 +1871,6 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.get_expert_mapping()
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -1900,10 +1899,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
                 name = name.replace(".shared_experts.down_proj.", f".experts.{sid}.w2.")
 
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # Routed experts (w1/w2/w3) are handled below; don't let the
+                # Routed experts (w1/w2/w3) are loaded above; don't let the
                 # stacked mapping rewrite them.
                 if ("block_sparse_moe.experts." in name) and name not in params_dict:
                     continue
@@ -1919,47 +1923,21 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    remapped = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped is None:
-                        continue
-                    name = remapped
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Modules not modeled yet (e.g. attention) are skipped until
-                    # they are ported.
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                remapped = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped is None:
+                    continue
+                name = remapped
+                if is_pp_missing_parameter(name, self):
+                    continue
+                # Modules not modeled yet (e.g. attention) are skipped until
+                # they are ported.
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 

@@ -27,9 +27,7 @@ from transformers import PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
@@ -367,16 +365,6 @@ class MiniMaxM3MTP(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        # Map expert weights w1/w2/w3 to gate/down/up.
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts,
-        )
-
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         loaded_mtp_layers: set[int] = set()
@@ -388,11 +376,18 @@ class MiniMaxM3MTP(nn.Module):
                 continue
             name = mapped_name
 
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
+                if mtp_layer is not None:
+                    loaded_mtp_layers.add(mtp_layer)
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
 
-                # Routed experts (w1/w2/w3) are handled below. Don't let the
+                # Routed experts (w1/w2/w3) are loaded above. Don't let the
                 # stacked mapping rewrite them.
                 if ("block_sparse_moe.experts." in name) and name not in params_dict:
                     continue
@@ -404,38 +399,13 @@ class MiniMaxM3MTP(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    expert_shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in name:
-                        continue
-
-                    name = name.replace(weight_name, param_name)
-                    if name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=expert_shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    remapped_name = maybe_remap_kv_scale_name(name, params_dict)
-                    if remapped_name is None or remapped_name not in params_dict:
-                        continue
-                    name = remapped_name
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is None or remapped_name not in params_dict:
+                    continue
+                name = remapped_name
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
             if mtp_layer is not None:

@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_NVFP4,
@@ -598,6 +599,7 @@ class MiniMaxM3MoE(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.experts",
+            ckpt_names=("w1", "w2", "w3"),
         )
 
     def _init_mega_moe_experts(
@@ -1696,8 +1698,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
+        # MegaMoE experts are not under a MoERunner, so they keep their own
+        # mapping; routed experts otherwise load through their MoE layer.
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self.get_expert_mapping()
+        expert_params_mapping = self.get_expert_mapping() if self.use_mega_moe else []
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -1728,10 +1732,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                     )
                     continue
 
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # Routed experts (w1/w2/w3) are handled below; don't let the
+                # Routed experts (w1/w2/w3) are handled separately; don't let the
                 # stacked mapping rewrite them.
                 if ("block_sparse_moe.experts." in name) and name not in params_dict:
                     continue
