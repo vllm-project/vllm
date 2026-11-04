@@ -65,7 +65,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 2,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 2
+            ),
             varlen_decode=self.enable_adaptive_verification,
         )
         super().init_cudagraph_manager(cudagraph_mode)
@@ -249,7 +251,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         # Every draft logits write goes through sample_draft.
         return True
 
-    def _generate_draft(
+    def _decode(
         self,
         num_reqs: int,
         num_tokens_padded: int,
@@ -436,7 +438,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 return self.draft_tokens[:num_reqs]
             return self.draft_tokens[:num_reqs, :1]
 
-        self._decode(
+        self._run_multi_step_decode(
             input_batch,
             num_rejected,
             num_reqs,
