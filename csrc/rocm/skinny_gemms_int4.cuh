@@ -33,7 +33,7 @@
 
 static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
-// K must be a multiple of this; checked host-side in wvSplitK_int4_g.
+// K must be a multiple of this; checked host-side in wvSplitK_int4_g_impl.
 static constexpr int kInt4KAlign = 16;
 
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
