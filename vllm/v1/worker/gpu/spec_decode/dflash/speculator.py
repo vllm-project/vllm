@@ -705,6 +705,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         return self.draft_tokens[:num_reqs]
 
+
 @triton.jit
 def _select_context_window_indices_kernel(
     query_start_loc,
@@ -749,6 +750,7 @@ def select_context_window_indices(
         triton.next_power_of_2(keep),
     )
     return indices, valid
+
 
 # Extra programs that pad the buffers past the batch (up to max_num_tokens).
 _NUM_PAD_PROGRAMS = 32
