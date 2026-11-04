@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+PrefillSchedulePolicy = Literal["cadence", "delayer"]
 
 
 @config
@@ -218,7 +219,30 @@ class SchedulerConfig:
 
     A deferred step carries no prefill at all, including chunks of an
     already-admitted prompt, so a long prompt can take up to N times as many
-    steps to finish prefilling."""
+    steps to finish prefilling.
+
+    With `prefill_schedule_policy="delayer"`, N is instead the minimum number
+    of steps between two prefill-carrying steps: the N - 1 steps after a
+    prefill decode only."""
+
+    prefill_schedule_policy: PrefillSchedulePolicy = "cadence"
+    """How data-parallel ranks of a MoE model decide when to prefill. The
+    ranks step in lockstep, so a step in which any rank prefills is a long
+    step for all of them.
+
+    - "cadence" (the default) admits prefill on every
+    `prefill_schedule_interval`-th step; each rank prefills whatever it has.
+    - "delayer" exchanges the ranks' prefill state once per step and holds
+    prefill until the ranks can run it in the same step with a well-filled
+    batch, within bounded waits. It trades TTFT for fewer prefill-carrying
+    steps, which suits high-concurrency, prefill-heavy (e.g. multi-turn
+    agentic) workloads. Engines without MoE data parallelism fall back to
+    "cadence"."""
+
+    prefill_max_wait_ms: float | None = Field(default=None, gt=0)
+    """With `prefill_schedule_policy="delayer"`, release held prefill once the
+    oldest waiting request has queued this long since arrival. None (the
+    default) leaves only the delayer's step-count bounds."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
@@ -322,6 +346,14 @@ class SchedulerConfig:
             logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+            )
+
+        if (
+            self.prefill_max_wait_ms is not None
+            and self.prefill_schedule_policy != "delayer"
+        ):
+            raise ValueError(
+                "prefill_max_wait_ms requires prefill_schedule_policy='delayer'."
             )
 
         self.verify_max_model_len(max_model_len)
