@@ -8,6 +8,7 @@ import math
 import torch
 
 from vllm.config.watermarking import WatermarkPRFName
+from vllm.logger import init_logger
 from vllm.v1.watermarking.detector import WatermarkDetector
 from vllm.v1.watermarking.prfs import PhiloxPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
@@ -16,6 +17,9 @@ from vllm.v1.watermarking.watermarker import (
     WatermarkSample,
     _validate_context_width,
 )
+from vllm.v1.worker.gpu.sample.synthid import is_supported, synthid_sample
+
+logger = init_logger(__name__)
 
 # High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
 _STREAM_DOMAIN = 0x53594E54 << 32
@@ -33,7 +37,7 @@ class SynthIDWatermarker(Watermarker):
         self,
         key: int,
         context_width: int = 4,
-        depth: int = 32,
+        depth: int = 22,
         prf: WatermarkPRFName = "philox",
     ) -> None:
         _validate_context_width(context_width)
@@ -44,6 +48,11 @@ class SynthIDWatermarker(Watermarker):
         self.prf = selected_prf
         self._context_width = context_width
         self.depth = depth
+        # The first fused call runs in the engine's profile run, before CUDA
+        # graph capture. A kernel that cannot compile on this GPU fails there
+        # and the tournament falls back to torch for the rest of the run.
+        self._fused_verified = False
+        self._fused_failed = False
 
     @property
     def context_width(self) -> int:
@@ -67,21 +76,11 @@ class SynthIDWatermarker(Watermarker):
 
         return probs
 
-    def _use_triton(self, logits: torch.Tensor) -> bool:
-        return type(self.prf) is PhiloxPRF and logits.device.type == "cuda"
-
     def watermark_logits(
         self,
         logits: torch.Tensor,
         contexts: torch.Tensor,
     ) -> torch.Tensor:
-        if self._use_triton(logits):
-            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
-
-            # Masked tokens stay -inf, as below.
-            return synthid_watermark_logits(
-                logits, contexts, self.prf.key, self.depth, stream=_STREAM_DOMAIN
-            )
         vocabulary = torch.arange(logits.shape[-1], device=logits.device)
         probs = torch.softmax(logits, dim=1, dtype=torch.float32)  # [B, V]
 
@@ -115,29 +114,53 @@ class SynthIDWatermarker(Watermarker):
         if random_sampler is None:
             raise ValueError("SynthID-Text requires a random sampler")
 
-        if self._use_triton(logits) and logits.dtype != torch.float64:
-            from vllm.v1.worker.gpu.sample.watermark import synthid_watermark_logits
-
-            # The kernel applies skip_mask in its final pass, with the same
-            # result as the torch.where below.
-            watermarked_logits = synthid_watermark_logits(
-                logits,
-                contexts,
-                self.prf.key,
-                self.depth,
-                stream=_STREAM_DOMAIN,
-                skip_mask=skip_mask,
-            )
-        else:
-            watermarked_logits = self.watermark_logits(logits, contexts)
-            if skip_mask is not None:
-                watermarked_logits = torch.where(
-                    skip_mask.unsqueeze(-1), logits, watermarked_logits
+        if not self._fused_failed and is_supported():
+            if self._fused_verified:
+                return self._sample_fused(logits, contexts, random_sampler, skip_mask)
+            try:
+                sample = self._sample_fused(logits, contexts, random_sampler, skip_mask)
+            except Exception:
+                logger.warning(
+                    "The fused SynthID-Text kernels failed on this GPU; "
+                    "sampling with the torch implementation instead.",
+                    exc_info=True,
                 )
+                self._fused_failed = True
+            else:
+                self._fused_verified = True
+                return sample
+
+        watermarked_logits = self.watermark_logits(logits, contexts)
+        if skip_mask is not None:
+            watermarked_logits = torch.where(
+                skip_mask.unsqueeze(-1), logits, watermarked_logits
+            )
         return WatermarkSample(
             token_ids=random_sampler(watermarked_logits),
             logits=logits,
         )
+
+    def _sample_fused(
+        self,
+        logits: torch.Tensor,
+        contexts: torch.Tensor,
+        random_sampler: RandomSampler,
+        skip_mask: torch.Tensor | None,
+    ) -> WatermarkSample:
+        token_ids = synthid_sample(
+            logits,
+            contexts,
+            self.prf.key,
+            self.depth,
+            random_sampler.expanded_idx_mapping,
+            random_sampler.temperatures,
+            random_sampler.seeds,
+            random_sampler.positions,
+            stream=_STREAM_DOMAIN,
+            skip_mask=skip_mask,
+            use_fp64=random_sampler.use_fp64,
+        )
+        return WatermarkSample(token_ids=token_ids, logits=logits)
 
     def _sample_watermarked(
         self,
@@ -181,7 +204,7 @@ class SynthIDWatermarkDetector(WatermarkDetector):
         self,
         key: int,
         context_width: int = 4,
-        depth: int = 32,
+        depth: int = 22,
         p_value_threshold: float = 0.01,
         prf: WatermarkPRFName = "philox",
         deduplicate_contexts: bool = True,
