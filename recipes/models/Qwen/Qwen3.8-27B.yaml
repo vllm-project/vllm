@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "27B-parameter dense hybrid-attention model with linear attention on 48 of 64 layers, a vision tower, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-14
-  date_updated: 2026-10-15
+  date_updated: 2026-11-04
   tasks:
     - multimodal
     - text
@@ -26,6 +26,16 @@ meta:
     # --enforce-eager; rtx_5090_2x covers FP8 and both NVFP4 builds at TP2.
     rtx_5090: verified
     rtx_5090_2x: verified
+    # Consumer Ampere (sm86), verified 2026-09-12 on vLLM 0.29.0 (image
+    # vllm/vllm-openai:latest), TP2 across two 24 GB RTX 3090 with PCIe BAR1 P2P
+    # enabled and GPU0 power-locked to 350 W. The `int4_awq` variant (AWQ INT4:
+    # 4-bit weights, gated-delta-net layers kept BF16) was booted, served, and
+    # answered verifiable text + single-video prompts at 262144 context with FP8
+    # KV and an explicit 6.0 GiB KV cap. Text decode 67.0 / 138.6 / 236.8 tok/s
+    # at C1 / C2 / C4 (MTP off). No NVLink: PCIe P2P is a hard prerequisite, and
+    # single-video serving needs --mm-encoder-tp-mode weights (see the guide and
+    # the encoder_parallel rtx_3090_2x override).
+    rtx_3090_2x: verified
     rtx_pro_6000: verified
     dgx_spark_gb10: verified
     arc_pro_b60: verified
@@ -143,6 +153,15 @@ features:
     args:
       - "--mm-encoder-tp-mode"
       - "data"
+    # data mode dumps a single video's activations on one GPU (~6.6 GiB at the
+    # 100M pixel budget) and OOMs a 24 GB card beyond one concurrent vision
+    # request; weight-sharding balances them ~2.9 GiB per card. The override only
+    # applies to rtx_3090_2x; every other hardware keeps the data default.
+    hardware_overrides:
+      rtx_3090_2x:
+        args:
+          - "--mm-encoder-tp-mode"
+          - "weights"
   long_context:
     description: "YaRN RoPE scaling past the native 262,144-token window to 1,000,000 tokens. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts; for ~524K, halve the factor to 2.0."
     args:
@@ -253,6 +272,52 @@ variants:
     vram_minimum_gb: 24
     supported_hardware: [h100, h200, b200, b300, gb200, gb300, rtx_5090, rtx_5090_2x]
     description: "Red Hat AI compressed-tensors W4A16 INT4 build — 19.5 GB: 1 GPU, runs on Hopper too."
+  int4_awq:
+    model_id: "cyankiwi/Qwen3.8-27B-AWQ-INT4"
+    precision: int4
+    label: "AWQ INT4"
+    # 21,030,810,248 B on disk = 21.0 GB. 4-bit AWQ weights; the gated-delta-net
+    # (linear-attention) layers are kept in BF16, so this is not a uniform 4-bit
+    # build. x1.2 sizing floor rounds up to 26 GB.
+    vram_minimum_gb: 26
+    supported_hardware: [rtx_3090_2x]
+    description: "AWQ INT4 — 4-bit weights (GDN layers kept in BF16), 21.0 GB of weights: too big for one 24 GB card, served at TP2 across two; verified on 2x RTX 3090 (Ampere)."
+    hardware_overrides:
+      rtx_3090_2x:
+        # sm86 has no FP8 / NVFP4 compute, so 4-bit is the only low-precision
+        # path that fits 24 GB. Ampere serving knobs; tool_calling and reasoning
+        # come from the top-level features, the encoder mode from the
+        # encoder_parallel rtx_3090_2x override.
+        extra_args:
+          - "--dtype"
+          - "float16"
+          - "--max-model-len"
+          - "262144"
+          - "--kv-cache-dtype"
+          - "fp8"
+          # Auto-alloc off --gpu-memory-utilization leaves ~200 MiB on GPU0 and
+          # OOMs on large-video prefill; cap the KV pool explicitly.
+          - "--kv-cache-memory-bytes"
+          - "6442450944"
+          # config.json declares float32 GDN state; halve it.
+          - "--mamba-cache-dtype"
+          - "float16"
+          - "--mamba-ssm-cache-dtype"
+          - "float16"
+          - "--max-num-seqs"
+          - "6"
+          - "--enable-prefix-caching"
+          - "--mm-processor-cache-type"
+          - "shm"
+          - "--mm-shm-cache-max-object-size-mb"
+          - "2048"
+        extra_env:
+          # True = CUDA VMM multi-handle, which conflicts with the single-handle
+          # CUDA IPC that CustomAllreduce / NCCL require (vllm#42609 / #43923).
+          PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:False"
+          # vLLM's P2P probe mis-reports against the patched BAR1-P2P driver.
+          VLLM_SKIP_P2P_CHECK: "1"
+          NCCL_SHM_DISABLE: "0"
   mxfp4:
     model_id: "RedHatAI/Qwen3.8-27B-MXFP4"
     precision: mxfp4
@@ -342,6 +407,71 @@ guide: |
 
   True W4A4 on Blackwell. The in-checkpoint MTP head, long-context YaRN and tool calling all
   carry over from the base recipe.
+
+  ### 2x RTX 3090 (Ampere, sm86) — AWQ INT4 at TP2
+
+  Verified 2026-09-12 on vLLM 0.29.0 (image `vllm/vllm-openai:latest`), TP2 across two
+  24 GB RTX 3090. This is the consumer Ampere path: no FP8/NVFP4 compute, no NVLink, so
+  the only low-precision build that fits 24 GB is 4-bit, and the cards must do PCIe P2P.
+
+  **Prerequisites — a 3090 pair will not serve this model without all three:**
+
+  - **PCIe P2P enabled.** Consumer cards lack the MAILBOXP2P hardware, so P2P requires the
+    BAR1 P2P driver patch (the `open-gpu-kernel-modules` fork; UMD/KMD on the same version,
+    `iommu=pt`, ACS disabled) and the ReBAR VBIOS flashed on both cards to 32 GB BAR1.
+    Confirm with `nvidia-smi topo -p2p r` returning `OK`. Without P2P, TP's per-layer
+    all-reduce falls back to host-memory SHM (~12.5 GB/s) and decode is starved — TP ends
+    up slower than pipeline parallel.
+  - **GPU0 power lock at 350 W.** The ASUS card ships at a 390 W OC cap its board cannot
+    deliver; under load it trips `hw_power_brake_slowdown` and clocks are held to ~1400 MHz,
+    costing ~20% throughput on a TP2 run that waits on the slow card. `nvidia-smi -pl 350 -i 0`
+    (persisted at boot).
+  - **`--mm-encoder-tp-mode weights`.** The default `data` mode dumps a single video's
+    activations on one GPU (~6.6 GiB at the 100M pixel budget) and OOMs a 24 GB card at more
+    than one concurrent vision request. `weights` shards the encoder and balances the
+    activations ~2.9 GiB per card — required for single-video stability. This recipe ships
+    that as an `rtx_3090_2x` override on the `encoder_parallel` feature.
+
+  ```bash
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False
+  export VLLM_SKIP_P2P_CHECK=1
+  export NCCL_SHM_DISABLE=0
+
+  vllm serve cyankiwi/Qwen3.8-27B-AWQ-INT4 \
+    --tensor-parallel-size 2 \
+    --max-model-len 262144 \
+    --kv-cache-dtype fp8 \
+    --kv-cache-memory-bytes 6442450944 \
+    --mamba-cache-dtype float16 \
+    --mamba-ssm-cache-dtype float16 \
+    --dtype float16 \
+    --max-num-seqs 6 \
+    --enable-prefix-caching \
+    --mm-encoder-tp-mode weights \
+    --mm-processor-cache-type shm \
+    --mm-shm-cache-max-object-size-mb 2048 \
+    --reasoning-parser qwen3 \
+    --enable-auto-tool-choice --tool-call-parser qwen3_coder
+  ```
+
+  The explicit `--kv-cache-memory-bytes 6442450944` (6.0 GiB) is deliberate: leaving the KV
+  pool to `--gpu-memory-utilization` auto-alloc pushes it to ~6.9 GiB and leaves ~200 MiB on
+  GPU0, which a large-video prefill then OOMs. Capping it holds ~6 GiB of headroom per card.
+  MTP is not qualified on this build and stays off by default: the workload is
+  prefill-dominated (a ~48k-token video prompt against a few hundred output tokens), and the
+  unquantized BF16 MTP head stays resident and eats the GPU0 headroom a video prefill needs.
+  Turning it off raised the KV pool from 351,637 to 385,367 tokens on the same 6.0 GiB budget
+  with no decode regression.
+
+  Text decode throughput (TP2, MTP off, GPU0 locked to 350 W):
+
+  | Concurrency | 1 | 2 | 4 | 6 |
+  |---|---|---|---|---|
+  | tok/s | 67.0 | 138.6 | 236.8 | 329.6 |
+
+  Single 60 s video sub-chunks (~48k vision tokens at the 100M pixel budget) run stably in
+  `weights` mode; the per-call cost is prefill-dominated (~60–80 s), so an offline batch
+  backfill at concurrency 1 keeps up with 24/7 footage.
 
   ### 2x RTX 5090 (consumer Blackwell, sm120)
 
@@ -486,6 +616,7 @@ guide: |
 
   - Model card: https://huggingface.co/Qwen/Qwen3.8-27B
   - FP8 checkpoint: https://huggingface.co/Qwen/Qwen3.8-27B-FP8
+  - AWQ INT4 checkpoint: https://huggingface.co/cyankiwi/Qwen3.8-27B-AWQ-INT4
   - NVFP4 build (NVIDIA): https://huggingface.co/nvidia/Qwen3.8-27B-NVFP4
   - NVFP4 build (Inferact): https://huggingface.co/Inferact/Qwen3.8-27B-NVFP4
   - MXFP4 build (RedHatAI): https://huggingface.co/RedHatAI/Qwen3.8-27B-MXFP4
