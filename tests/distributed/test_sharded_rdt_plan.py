@@ -845,7 +845,7 @@ class TestChunkModuleScatters:
         ]
 
     def test_scatters_carry_their_own_dtype(self):
-        """dtype rides the record from the bake, where it is the fake's dtype
+        """Dtype rides the record from the bake, where it is the fake's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
         layer = _FakeLayer("l")
@@ -1110,7 +1110,7 @@ class TestSignalCompleteness:
     signaled parks a producer credit and hangs end_sync."""
 
     def _moe_planner(self, worker_experts, *, ep_size=4, n_experts=8, n_layers=2):
-        """pre / n_layers MoE layers / post. Each layer: one norm (its own
+        """Pre / n_layers MoE layers / post. Each layer: one norm (its own
         module, stamp -1) + n_experts expert names stamped ``e // n_local``.
         The worker's bake covers only ``worker_experts`` (its placement);
         foreign expert names never copied => dropped entirely, as in the real
@@ -1173,7 +1173,7 @@ class TestSignalCompleteness:
         assert self._signals(plan) == list(range(len(group_lens)))
 
     def test_placement_changes_only_the_chunk_count_never_the_signals(self):
-        """linear experts 0-3 hit 2 owner classes; round_robin 0,2,4,6
+        """Linear experts 0-3 hit 2 owner classes; round_robin 0,2,4,6
         hits all 4. More chunks per group, identical signal set."""
         plans = {}
         for label, experts in (("linear", [0, 1, 2, 3]), ("round_robin", [0, 2, 4, 6])):

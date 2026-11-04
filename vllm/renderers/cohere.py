@@ -94,13 +94,13 @@ from enum import Enum
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -165,7 +165,7 @@ POSITION_TO_SOURCE_KEY = "_position_to_source"
 # melody-shape content list the renderer emits.
 #
 # Motivation: OpenAI's ``ChatCompletionContentPartParam`` union (in
-# ``vllm/entrypoints/chat_utils.py``) only allows ``text`` / ``image_url``
+# ``vllm/renderers/chat_utils.py``) only allows ``text`` / ``image_url``
 # / ``audio`` / ``video`` / ``file`` content parts on tool messages, so
 # ``{"type": "document", "document": {...}}`` blocks -- valid in Cohere
 # v2 -- get rejected by vLLM's shared chat validator before they can
@@ -244,7 +244,7 @@ def _try_import_melody():
         raise ImportError(
             "The `cohere` tokenizer/renderer mode requires the "
             "`cohere_melody` package. Install it via "
-            "`pip install 'cohere-melody>=0.11.1'` or build from "
+            "`pip install 'cohere-melody>=0.14.0'` or build from "
             "https://github.com/cohere-ai/melody."
         ) from e
 

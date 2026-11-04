@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test that MessageQueue uses the local node's IP for binding,
+"""Test that MessageQueue uses the local node's IP for binding,
 not a remote master_addr. This validates the fix for cross-node
 data-parallel where each DP group leader must bind to its own IP.
 

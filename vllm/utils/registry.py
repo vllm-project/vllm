@@ -6,8 +6,7 @@ _T = TypeVar("_T", bound=type)
 
 
 class ExtensionManager:
-    """
-    A registry for managing pluggable extension classes.
+    """A registry for managing pluggable extension classes.
 
     This class provides a simple mechanism to register and instantiate
     extension classes by name. It is commonly used to implement plugin
@@ -26,15 +25,11 @@ class ExtensionManager:
     """
 
     def __init__(self) -> None:
-        """
-        Initialize an empty extension registry.
-        """
+        """Initialize an empty extension registry."""
         self.name2class: dict[str, type] = {}
 
     def register(self, name: str):
-        """
-        Decorator to register a class with the given name.
-        """
+        """Decorator to register a class with the given name."""
 
         def wrap(cls_to_register: _T) -> _T:
             self.name2class[name] = cls_to_register
@@ -43,9 +38,7 @@ class ExtensionManager:
         return wrap
 
     def load(self, cls_name: str, *args, **kwargs) -> Any:
-        """
-        Instantiate and return a registered extension class by name.
-        """
+        """Instantiate and return a registered extension class by name."""
         cls = self.name2class.get(cls_name)
         assert cls is not None, f"Extension class {cls_name} not found"
         return cls(*args, **kwargs)

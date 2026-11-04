@@ -110,8 +110,13 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #
 #export HOME=/tmp
 export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+# Remote-code modules are rewritten by every rank on every node at import; keep
+# those writes off the shared NFS cache.
+export HF_MODULES_CACHE="${HF_MODULES_CACHE:-/tmp/hf_modules}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
-export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
+# Engine startup gets the same budget as the P/D health gate.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-${HEALTH_TIMEOUT_S:-5400}}"
+export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS="${VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS:-3600}"
 
 # ----------------------------------------------------------------- scale
 # DP/EP group formation timeout across nodes (seconds).
@@ -146,6 +151,25 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 
 # Pin to gfx950 to avoid jit compilation failures with other archs on this cluster.
 export MORI_GPU_ARCHS="gfx950"
+
+# Required on this cluster's NIC setup; without the host proxy the EP dispatch
+# path fails to come up.
+export MORI_ENABLE_HOST_PROXY="${MORI_ENABLE_HOST_PROXY:-1}"
+
+# NIXL UCX defaults: RC on ionic_0, GPU-direct RDMA.
+if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
+    export UCX_TLS="${UCX_TLS:-rc_verbs,ud_verbs,tcp,self,rocm}"
+    export UCX_NET_DEVICES="${UCX_NET_DEVICES:-ionic_0:1,lo}"
+    export UCX_IB_GID_INDEX="${UCX_IB_GID_INDEX:-${_IB_GID_INDEX}}"
+    export UCX_UD_VERBS_ETH_DGID_CHECK="${UCX_UD_VERBS_ETH_DGID_CHECK:-n}"
+    export UCX_IB_GPU_DIRECT_RDMA="${UCX_IB_GPU_DIRECT_RDMA:-yes}"
+    export UCX_RMA_PPLN_ENABLE="${UCX_RMA_PPLN_ENABLE:-y}"
+    export UCX_PROTO_EMULATION_ENABLE="${UCX_PROTO_EMULATION_ENABLE:-n}"
+    export UCX_KEEPALIVE_INTERVAL="${UCX_KEEPALIVE_INTERVAL:-inf}"
+    export UCX_UD_VERBS_RX_QUEUE_LEN="${UCX_UD_VERBS_RX_QUEUE_LEN:-1024}"
+    export UCX_RCACHE_MAX_UNRELEASED="${UCX_RCACHE_MAX_UNRELEASED:-1024}"
+    export ACCURACY_NUM_CONCURRENT="${ACCURACY_NUM_CONCURRENT:-1}"
+fi
 
 # ----------------------------------------------------------------- benchmark
 export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"

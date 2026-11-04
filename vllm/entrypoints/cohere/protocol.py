@@ -44,7 +44,7 @@ from cohere.types import (
     ToolV2,
     UserChatMessageV2,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
@@ -175,6 +175,12 @@ class CohereChatV2Request(BaseModel):
     # vLLM-specific extensions (not in Cohere spec). These mirror what the
     # Anthropic and OpenAI surfaces already expose so V2 callers can reach
     # the same engine knobs when needed.
+    watermarking: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to apply the engine's configured watermark to this request."
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -204,6 +210,16 @@ class CohereChatV2Request(BaseModel):
                 value=v,
             )
         return v
+
+    @model_validator(mode="after")
+    def _validate_tool_choice(self) -> CohereChatV2Request:
+        if self.tool_choice == "REQUIRED" and not self.tools:
+            raise VLLMValidationError(
+                'tool_choice="REQUIRED" requires at least one tool in tools.',
+                parameter="tool_choice",
+                value=self.tool_choice,
+            )
+        return self
 
     @field_validator("messages", mode="before")
     @classmethod

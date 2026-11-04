@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Test the piecewise compilation with a simple model, comparing the output
+"""Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
 
 This is a tractable model, the weights and computation are specially designed

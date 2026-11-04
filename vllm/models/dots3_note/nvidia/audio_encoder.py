@@ -194,7 +194,7 @@ class WhisperPositionalEmbedding(nn.Embedding):
 
 
 class WhisperAttention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -346,8 +346,7 @@ class WhisperEncoderLayer(nn.Module):
         rotary_cos: torch.Tensor | None = None,
         rotary_sin: torch.Tensor | None = None,
     ) -> tuple[Any, ...]:
-        """
-        Args:
+        """Args:
             hidden_states: Input to the layer of shape `(batch, seq_len,
                 embed_dim)`, or `(total_tokens, embed_dim)` when `cu_seqlens_q`
                 is given.
@@ -365,6 +364,7 @@ class WhisperEncoderLayer(nn.Module):
         Returns:
             A tuple of the output hidden states, followed by the attention
             weights if `output_attentions` is `True`.
+
         """
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -435,12 +435,12 @@ class DotsSpeechPreTrainedModel(PreTrainedModel):
 
 
 class DotsSpeechEncoder(DotsSpeechPreTrainedModel):
-    """
-    Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
+    """Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
     [`WhisperEncoderLayer`].
 
     Args:
         config: WhisperConfig
+
     """
 
     def __init__(self, config: WhisperConfig):
