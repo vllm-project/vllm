@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -25,6 +26,57 @@ class VerifyAndUpdateConfig:
         return
 
 
+class AliceAIForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        if getattr(hf_config, "kda_allow_negative_eigenvalues", None) is not False:
+            raise NotImplementedError(
+                "AliceAI requires kda_allow_negative_eigenvalues=false"
+            )
+        if getattr(hf_config, "router_score_function", None) != "sigmoid":
+            raise ValueError("AliceAI requires router_score_function='sigmoid'")
+        if getattr(hf_config, "router_bias_correction", None) is not True:
+            raise ValueError("AliceAI requires router_bias_correction=true")
+        mtp_layers = getattr(hf_config, "mtp_num_hidden_layers", 0)
+        if mtp_layers:
+            logger.warning(
+                "AliceAI checkpoint declares %s MTP layer(s), but this "
+                "implementation ignores the MTP configuration and weights; "
+                "MTP speculative decoding is unavailable.",
+                mtp_layers,
+            )
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        if vllm_config.parallel_config.pipeline_parallel_size != 1:
+            raise NotImplementedError(
+                "AliceAI does not support pipeline parallelism; "
+                "pipeline_parallel_size=1 is required"
+            )
+
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.uses_aux_hidden_states:
+            raise NotImplementedError(
+                "AliceAI does not support speculative method "
+                f"{speculative_config.method!r} because it requires auxiliary "
+                "hidden states"
+            )
+
+
+def _set_deepseek_indexer_logits_dtype(vllm_config: "VllmConfig") -> None:
+    """Default DeepSeek indexer logits to BF16 where the MQA logits kernels
+    also reduce in BF16 (SM100) and to FP32 elsewhere."""
+    from vllm.utils.deep_gemm import mqa_logits_use_mx_scales
+
+    attention_config = vllm_config.attention_config
+    attention_config.indexer_logits_dtype = (
+        attention_config.resolve_indexer_logits_dtype(
+            "bfloat16" if mqa_logits_use_mx_scales() else "float32"
+        )
+    )
+
+
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -38,6 +90,32 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
         if cache_config.cache_dtype == "bfloat16":
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
+
+        _set_deepseek_indexer_logits_dtype(vllm_config)
+
+
+class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        if not get_kv_quant_mode(vllm_config.cache_config.cache_dtype).is_nvfp4:
+            return
+        # The NVFP4 KV attention kernels (MSA's CUTLASS Q8KV4 prefill) need 16
+        # query heads per KV head on each rank; fail before the workers start.
+        text_config = vllm_config.model_config.hf_text_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        num_heads = text_config.num_attention_heads // tp_size
+        num_kv_heads = max(1, text_config.num_key_value_heads // tp_size)
+        if num_heads != 16 * num_kv_heads:
+            raise ValueError(
+                "MiniMax-M3 does not support an NVFP4 KV cache with "
+                f"tensor_parallel_size={tp_size} yet: each rank holds {num_heads} "
+                f"query heads over {num_kv_heads} KV head(s), and the NVFP4 "
+                "attention kernels need 16 per KV head. Use a smaller "
+                "tensor_parallel_size (with data/expert parallelism) or another "
+                "kv_cache_dtype."
+            )
 
 
 class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
@@ -53,12 +131,10 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            # MTP shares the target's KV cache layout; a separate draft model
-            # must not inherit a default it was never validated with.
             spec_config = vllm_config.speculative_config
             if (
                 spec_config is not None
-                and spec_config.method != "mtp"
+                and spec_config.method not in ("mtp", "dspark", "dflash")
                 and spec_config.kv_cache_dtype is None
             ):
                 spec_config.kv_cache_dtype = "auto"
@@ -68,6 +144,32 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         vllm_config.parallel_config.set_dcp_defaults(
             comm_backend="a2a", q_replicate=True
         )
+
+
+class Glm5NextModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.cache_dtype != "auto"
+            or not current_platform.is_cuda()
+            or not current_platform.is_device_capability_family(100)
+            or getattr(vllm_config.model_config.hf_text_config, "index_topk", None)
+            is None
+        ):
+            return
+
+        cache_config.cache_dtype = "fp8"
+        logger.info_once("Using fp8 KV cache for GLM-5.3-Flash")
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.method != "mtp"
+            and spec_config.kv_cache_dtype is None
+        ):
+            spec_config.kv_cache_dtype = "auto"
 
 
 class Ernie4_5_VLMoeForConditionalGenerationConfig(VerifyAndUpdateConfig):
@@ -281,6 +383,12 @@ class Gemma4Config(VerifyAndUpdateConfig):
                         "for all layers to avoid mixed FA3/FA4 penalty.",
                         head_dims,
                     )
+        elif current_platform.is_xpu():
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions %s. Leaving the "
+                "attention backend choice to the XPU platform.",
+                head_dims,
+            )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
@@ -386,7 +494,59 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+def _indexer_sparse_logits_supported(vllm_config: "VllmConfig") -> bool:
+    """Whether the DeepSeek V4.1 sparse-logits indexer can run: a two-level
+    (candidate block) model on SM100 with DeepGEMM's sparse MQA kernels and
+    DeepSelect, no decode/prefill context parallelism, and a DeepSelect top-k
+    backend. Mirrors DeepseekV41SparseIndexerMetadataBuilder's checks."""
+    from vllm.platforms import current_platform
+
+    hf_config = vllm_config.model_config.hf_text_config
+    block = getattr(hf_config, "candidate_block_size", 0)
+    topk_blocks = getattr(hf_config, "candidate_topk_blocks", 0)
+    parallel = vllm_config.parallel_config
+    if (
+        block <= 0
+        or topk_blocks <= 0
+        or not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+        or parallel.decode_context_parallel_size > 1
+        or parallel.prefill_context_parallel_size > 1
+        or vllm_config.kernel_config.sparse_indexer_topk_backend
+        not in ("auto", "deep_select")
+    ):
+        return False
+    from vllm.model_executor.kernels.attention.dsa.sparse_mqa_logits import (
+        check_deep_select_layout,
+        has_deep_select,
+        pick_sparse_block_kv,
+    )
+    from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
+
+    if not (has_deep_gemm_sparse_mqa() and has_deep_select()):
+        return False
+    try:
+        pick_sparse_block_kv(block)
+        check_deep_select_layout(
+            topk_blocks * block, getattr(hf_config, "index_topk", 0)
+        )
+    except ValueError:
+        return False
+    return True
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # indexer_sparse_logits=None (default): enable the sparse-logits
+        # indexer wherever it is supported; True / False are kept as given.
+        attention_config = vllm_config.attention_config
+        if attention_config.indexer_sparse_logits is None:
+            attention_config.indexer_sparse_logits = _indexer_sparse_logits_supported(
+                vllm_config
+            )
+        _set_deepseek_indexer_logits_dtype(vllm_config)
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -471,14 +631,48 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
         # from 67 to 83.
+        from vllm.platforms import current_platform
+
         compilation_config = vllm_config.compilation_config
-        # Only override when the user has not set either of
-        # cudagraph_capture_sizes or max_cudagraph_capture_size.
-        if (
-            compilation_config.cudagraph_capture_sizes is None
-            and compilation_config.max_cudagraph_capture_size is None
+        use_v2_model_runner = vllm_config.use_v2_model_runner
+        # Only override when the user has not set any capture size, and not on
+        # SM100 with model runner V2, whose defaults are already wider.
+        if all(
+            getattr(compilation_config, name) is None
+            for name in (
+                "cudagraph_capture_sizes",
+                "max_cudagraph_capture_size",
+                "prefill_cudagraph_capture_token_sizes",
+                "max_prefill_cudagraph_capture_tokens",
+                "decode_cudagraph_capture_request_sizes",
+                "max_decode_cudagraph_capture_requests",
+            )
+        ) and not (
+            use_v2_model_runner and current_platform.is_device_capability_family(100)
         ):
-            compilation_config.max_cudagraph_capture_size = 1024
+            if use_v2_model_runner:
+                # Cover every target decode query length as the legacy 1024-token cap
+                # does. Data parallelism turns dynamic speculative decoding off later.
+                query_lens = (
+                    vllm_config.get_decode_cudagraph_query_lens(
+                        vllm_config.uniform_decode_query_len
+                    )
+                    if vllm_config.parallel_config.data_parallel_size == 1
+                    else [vllm_config.uniform_decode_query_len]
+                )
+                # The token sizes the legacy 1024-token cap captures.
+                max_tokens = min(
+                    vllm_config.scheduler_config.max_num_batched_tokens, 1024
+                )
+                sizes = {1, 2, 4, *range(8, 256, 8), *range(256, 1024, 16)}
+                compilation_config.prefill_cudagraph_capture_token_sizes = sorted(
+                    {s for s in sizes if s < max_tokens} | {max_tokens}
+                )
+                compilation_config.max_decode_cudagraph_capture_requests = 1024 // min(
+                    query_lens
+                )
+            else:
+                compilation_config.max_cudagraph_capture_size = 1024
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
             )
@@ -692,7 +886,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     model_config.architecture,
                 )
             assert vllm_config.scheduler_config.enable_chunked_prefill, (
-                "Chunked prefill is required for mamba cache mode 'align'."
+                "Chunked prefill is required for Mamba prefix caching."
             )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
@@ -707,6 +901,28 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 )
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = model_config.max_model_len
+
+
+class MiniMaxM3SparseForConditionalGenerationConfig(MiniMaxM3SparseConfig):
+    INDEX_CACHE_KEYS = ("use_index_cache", "index_topk_freq", "index_skip_topk_offset")
+
+    @classmethod
+    def verify_and_update_model_config(cls, model_config: "ModelConfig") -> None:
+        """Reject IndexCache overrides set on the outer VL config, where the
+        ROCm text model never reads them."""
+        from vllm.platforms import current_platform
+
+        overrides = model_config.hf_overrides
+        if not current_platform.is_rocm() or not isinstance(overrides, dict):
+            return
+        misplaced = [key for key in cls.INDEX_CACHE_KEYS if key in overrides]
+        if misplaced:
+            suggested = {"text_config": {key: overrides[key] for key in misplaced}}
+            raise ValueError(
+                "MiniMax-M3 reads IndexCache settings from text_config, so "
+                f"top-level {', '.join(misplaced)} would be ignored. Pass them as "
+                f"--hf-overrides '{json.dumps(suggested)}'."
+            )
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
@@ -753,6 +969,15 @@ class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
         if mm_config is not None:
             video_kwargs = mm_config.media_io_kwargs.setdefault("video", {})
             video_kwargs.setdefault("video_backend", "nemotron_vl")
+
+
+class Nemotron3_5TranscribeForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
 
 
 class NomicBertModelConfig(VerifyAndUpdateConfig):
@@ -912,11 +1137,21 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+
         Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
         text_config = vllm_config.model_config.hf_text_config
         if text_config.hc_count <= 1:
             raise ValueError("Qwen4Exp requires hc_count > 1")
         parallel_config = vllm_config.parallel_config
+        # MoE SP also enables HC SP without the explicit HC flag.
+        if (
+            current_platform.is_cuda_alike()
+            and parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size != 1
+        ):
+            raise ValueError("Qwen4Exp MoE SP requires PP=1")
+
         uses_ple_or_qsa = bool(text_config.ple_layer_ids) or (
             getattr(text_config, "indexer_n_heads", None) is not None
         )
@@ -925,14 +1160,6 @@ class Qwen4ExpForConditionalGenerationConfig(Qwen3_5ForConditionalGenerationConf
         ):
             raise NotImplementedError(
                 "Qwen4Exp PLE/QSA does not support dual-batch overlap or microbatching"
-            )
-        # Checked again in Qwen4ExpModelState; rejecting it here keeps the
-        # engine from loading weights first.
-        if text_config.ple_layer_ids and parallel_config.pipeline_parallel_size > 1:
-            raise NotImplementedError(
-                "Qwen4Exp N-gram PLE embedding requires pipeline_parallel_size=1 "
-                "because non-first pipeline ranks do not receive the raw input_ids "
-                "it needs. Please run with PP=1."
             )
         multimodal_config = vllm_config.model_config.multimodal_config
         if multimodal_config is not None and multimodal_config.language_model_only:
@@ -1006,6 +1233,54 @@ class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
             config.is_causal = is_causal
 
 
+class D3ForSequenceClassificationConfig(Qwen3_5ForConditionalGenerationConfig):
+    """Apply the contract declared by a Decision 3.0 `decision_config.json`."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        hf_config = model_config.hf_config
+        decision = getattr(hf_config, "decision_config", None)
+        if not isinstance(decision, dict):
+            raise ValueError("Decision 3.0 checkpoints need a decision_config.json")
+        if decision.get("format_version") != 1:
+            raise ValueError(
+                "unsupported decision_config.json format_version "
+                f"{decision.get('format_version')!r}; vLLM reads version 1"
+            )
+        if decision.get("pooling", "last") != "last":
+            raise ValueError(
+                f"unsupported decision_config.json pooling {decision['pooling']!r}"
+            )
+        attention_mode = decision.get("attention_mode", "causal")
+        if attention_mode not in ("causal", "noncausal_full_attention"):
+            raise ValueError(
+                f"unsupported decision_config.json attention_mode {attention_mode!r}"
+            )
+        codes = decision.get("codes")
+        token_ids = decision.get("token_ids")
+        if not codes or not isinstance(token_ids, list) or len(codes) != len(token_ids):
+            raise ValueError(
+                "decision_config.json must list one token id per answer code"
+            )
+
+        # The full attention layers read the whole prompt in both directions;
+        # the Gated DeltaNet layers stay causal.
+        is_causal = attention_mode == "causal"
+        for config in {
+            id(config): config for config in (hf_config, model_config.hf_text_config)
+        }.values():
+            config.is_causal = is_causal
+        # One readout row per answer code.
+        hf_config.id2label = dict(enumerate(codes))
+
+        # Probabilities only exist over a question's own options, so the head
+        # returns raw code logits unless activation is requested.
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -1051,8 +1326,10 @@ class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "AliceAIForCausalLM": AliceAIForCausalLMConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
+    "D3ForSequenceClassification": D3ForSequenceClassificationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV4ForConditionalGeneration": DeepseekV4ForCausalLMConfig,
     "DeepseekV41ForCausalLM": DeepseekV4ForCausalLMConfig,
@@ -1065,6 +1342,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForCausalLM": Gemma4Config,
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
+    "Glm5NextForCausalLM": Glm5NextModelConfig,
+    "Glm5NextForConditionalGeneration": Glm5NextModelConfig,
     "GlmMoeDsaForCausalLM": GlmMoeDsaForCausalLM,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
@@ -1081,11 +1360,21 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
+    "MiniMaxM3SparseForCausalLM": MiniMaxM3SparseConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MiniMaxM3SparseForConditionalGeneration": (
+        MiniMaxM3SparseForConditionalGenerationConfig
+    ),
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
+    "NemotronH_Nano_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Super_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "NemotronH_Omni_Reasoning_V3": NemotronHNanoVLV2Config,
+    "Nemotron3_5TranscribeForConditionalGeneration": (
+        Nemotron3_5TranscribeForConditionalGenerationConfig
+    ),
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,

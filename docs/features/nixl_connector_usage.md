@@ -63,6 +63,19 @@ vllm serve <MODEL> \
 !!! note
     Backend availability depends on how NIXL was built and what plugins are present in your environment. Refer to the [NIXL repository](https://github.com/ai-dynamo/nixl) for available backends and build instructions.
 
+#### UCX backend parameters
+
+`kv_connector_extra_config.ucx_backend_params` passes extra init parameters to NIXL's UCX backend. Values are strings. For example, NIXL creates UCX with `ucx_error_handling_mode=peer` by default; UCX then uses only transports that can detect peer failure, which can exclude intra-node GPU transports such as `rocm_ipc`. To trade that error handling for those transports:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector":"NixlConnector",
+    "kv_role":"kv_both",
+    "kv_connector_extra_config":{"ucx_backend_params":{"ucx_error_handling_mode":"none"}}
+  }'
+```
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
@@ -398,7 +411,7 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 ### For NVIDIA GB-series GPUs
 
-GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set `--enable-cumem-allocator` or `--enable-sleep-mode` flags, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
+GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
 ## Experimental Feature
 

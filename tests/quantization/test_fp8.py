@@ -6,6 +6,7 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -56,6 +57,92 @@ MODELS = [
 ]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Humming requires CUDA.")
+@pytest.mark.parametrize("block_quant", [False, True])
+def test_humming_fp8_matches_checkpoint_forward(
+    tmp_path, dist_init, workspace_init, block_quant
+):
+    """FP8 preprocessing must keep weights consistent with gate/up scales."""
+    from transformers import LlamaConfig
+
+    from vllm.config import VllmConfig
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        convert_to_humming_moe_kernel_format,
+    )
+
+    LlamaConfig(
+        hidden_size=256,
+        intermediate_size=256,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        architectures=["LlamaForCausalLM"],
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), dtype="bfloat16", skip_tokenizer_init=True
+        ),
+        kernel_config=KernelConfig(moe_backend="humming"),
+    )
+    quant_config = Fp8Config(
+        is_checkpoint_fp8_serialized=True,
+        activation_scheme="dynamic" if block_quant else "static",
+        weight_block_size=[128, 128] if block_quant else None,
+    )
+    with set_current_vllm_config(config), torch.device(DEVICE_TYPE):
+
+        def create(prefix):
+            return FusedMoEFactory(
+                num_experts=2,
+                top_k=1,
+                hidden_size=256,
+                intermediate_size=256,
+                params_dtype=torch.bfloat16,
+                quant_config=quant_config,
+                prefix=prefix,
+            ).routed_experts
+
+        layer = create("humming.oracle")
+        reference = create("humming.checkpoint")
+        for name, parameter in layer.named_parameters():
+            parameter.data.fill_(1.0)
+        scale_name = "weight_scale_inv" if block_quant else "weight_scale"
+        scale = getattr(layer, f"w13_{scale_name}")
+        scale.data.copy_(
+            0.125 * 2 ** (torch.arange(scale.numel()).reshape(scale.shape) % 4)
+        )
+        reference.load_state_dict(layer.state_dict())
+        if block_quant:
+            schema: dict[str, Any] = {
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+            }
+        else:
+            schema = {
+                "quant_method": "compressed-tensors",
+                "format": "float-quantized",
+                "type": "float",
+                "num_bits": 8,
+                "symmetric": True,
+                "strategy": "tensor",
+            }
+        convert_to_humming_moe_kernel_format(reference, quant_config=schema)
+        reference.quant_method._init_moe_kernel(reference)
+        layer.quant_method.process_weights_after_loading(layer)
+        if block_quant:
+            assert layer.w13_weight_scale_inv is layer.w13_weight_scale
+            assert layer.w2_weight_scale_inv is layer.w2_weight_scale
+
+        inputs = torch.full((8, 256), 0.01, dtype=torch.bfloat16)
+        topk_weights = torch.ones((8, 1), dtype=torch.float32)
+        topk_ids = torch.arange(8, dtype=torch.int32).remainder(2).view(8, 1)
+        with set_forward_context(None, config, num_tokens=8):
+            actual = layer.forward_modular(inputs, topk_weights, topk_ids)
+            expected = reference.forward_modular(inputs, topk_weights, topk_ids)
+        assert torch.isfinite(actual).all()
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DSV4.1 requires CUDA")
 @pytest.mark.parametrize("tp_rank", [0, 1])
 @pytest.mark.parametrize("scale_dtype", [torch.uint8, torch.float8_e8m0fnu])
@@ -79,7 +166,9 @@ def test_deepseek_v41_mxfp8_scale_loading(
     quant_config._resolved_expert_dtype = "fp4"
     for module in (model_module, linear_module):
         monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
-        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        linear_module, "get_tensor_model_parallel_rank", lambda: tp_rank
+    )
     block = torch.nn.Module()
     block.attn = torch.nn.Module()
     block.attn.wq_b = ColumnParallelLinear(
@@ -316,6 +405,84 @@ def test_deepseek_v41_declines_quark_configs():
         )
         is None
     )
+
+
+_DSV41_NVFP4 = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head", "mtp.*"],
+}
+_DSV4_NVFP4_DSPARK = {
+    "moe_quant_algo": "NVFP4",
+    "ignore": ["*.attn.*", "*.ffn.shared_experts.*", "head"],
+}
+
+
+@pytest.mark.parametrize(
+    ("ckpt_quant_cfg", "prefix", "expected"),
+    [
+        pytest.param(_DSV41_NVFP4, "model.layers.1.ffn.experts", "nvfp4", id="target"),
+        pytest.param(
+            _DSV41_NVFP4,
+            "language_model.model.layers.0.ffn.experts",
+            "nvfp4",
+            id="target-vl-prefix",
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.40.ffn.experts", "mxfp4", id="ignored-mtp0"
+        ),
+        pytest.param(
+            _DSV41_NVFP4, "model.layers.42.ffn.experts", "mxfp4", id="ignored-mtp2"
+        ),
+        pytest.param(
+            _DSV4_NVFP4_DSPARK,
+            "model.layers.41.ffn.experts",
+            "nvfp4",
+            id="quantized-mtp1",
+        ),
+        pytest.param(
+            {"moe_quant_algo": "NVFP4"},
+            "model.layers.40.ffn.experts",
+            "nvfp4",
+            id="no-ignore-list",
+        ),
+        pytest.param({}, "model.layers.1.ffn.experts", "mxfp4", id="not-nvfp4"),
+    ],
+)
+def test_deepseek_v41_nvfp4_export_keeps_ignored_experts_mxfp4(
+    monkeypatch, ckpt_quant_cfg, prefix, expected
+):
+    """NVFP4 exports keep the routed experts they ``ignore`` in MXFP4, e.g. the
+    bundled DSpark draft (``mtp.*``, built as ``layers.{40 + k}``) of
+    DeepSeek-V4.1-Flash-NVFP4. The ignore list is read from the checkpoint
+    passed to ``from_config``: the current hf_config below carries none."""
+    import vllm.model_executor.layers.quantization.modelopt as modelopt
+    import vllm.models.deepseek_v41.quant_config as dsv41_qc
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+
+    hf_config = SimpleNamespace(
+        expert_dtype="fp4",
+        quantization_config={"moe_quant_algo": ckpt_quant_cfg.get("moe_quant_algo")},
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config, hf_text_config=SimpleNamespace(num_hidden_layers=40)
+    )
+    monkeypatch.setattr(
+        dsv41_qc,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(model_config=model_config),
+    )
+    monkeypatch.setattr(
+        dsv41_qc, "Mxfp4MoEMethod", lambda moe_config, **kwargs: "mxfp4"
+    )
+    monkeypatch.setattr(modelopt, "ModelOptNvFp4FusedMoE", lambda **kwargs: "nvfp4")
+
+    config = dsv41_qc.DeepseekV4FP8Config.from_config(
+        {"quant_method": "fp8", "activation_scheme": "dynamic", **ckpt_quant_cfg}
+    )
+    monkeypatch.setattr(config, "_get_nvfp4_config", lambda: None)
+    layer = RoutedExperts.__new__(RoutedExperts)
+    layer.moe_config = None
+    assert config.get_quant_method(layer, prefix) == expected
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="DeepGEMM requires CUDA")
@@ -579,14 +746,15 @@ def test_static_fp8_moe_input_scales_remain_scalar() -> None:
 )
 @pytest.mark.parametrize("model_id", MODELS)
 @pytest.mark.parametrize(
-    "force_marlin", [True, False] if current_platform.is_cuda() else [False]
+    "linear_backend",
+    ["auto", "marlin", "humming"] if current_platform.is_cuda() else ["auto"],
 )
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
 def test_model_load_and_run(
     model_id: str,
-    force_marlin: bool,
+    linear_backend: str,
     use_rocm_aiter: bool,
     monkeypatch,
     dist_init,
@@ -596,8 +764,8 @@ def test_model_load_and_run(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     kernel_config = KernelConfig(
-        linear_backend="marlin" if force_marlin else "auto",
-        moe_backend="marlin" if force_marlin else "auto",
+        linear_backend=linear_backend,
+        moe_backend="marlin" if linear_backend == "marlin" else "auto",
     )
     model, vllm_config = load_model_without_vllm_runner(
         model_id,

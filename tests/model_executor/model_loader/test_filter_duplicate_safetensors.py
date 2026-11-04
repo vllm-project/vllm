@@ -137,3 +137,32 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
         ["model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors"],
         sorted(f.name for f in mtp_checkpoint.glob("*.safetensors")),
     ]
+
+
+def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
+    """A source with explicit allow patterns (e.g. a standalone head file in
+    the repo root) must not be validated against the backbone's index."""
+    save_file(
+        {"backbone.weight": torch.zeros(1)},
+        tmp_path / "model-00001-of-00001.safetensors",
+    )
+    save_file({"head.weight": torch.zeros(1)}, tmp_path / "joint_head.safetensors")
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {"weight_map": {"backbone.weight": "model-00001-of-00001.safetensors"}}
+        )
+    )
+
+    loader = DefaultModelLoader(LoadConfig())
+    secondary = DefaultModelLoader.Source(
+        model_or_path=str(tmp_path),
+        revision=None,
+        prefix="pooler.head.",
+        allow_patterns_overrides=["joint_head.safetensors"],
+    )
+    assert [n for n, _ in loader._get_weights_iterator(secondary)] == [
+        "pooler.head.head.weight"
+    ]
+    # The primary source still filters files the backbone index doesn't list.
+    primary = DefaultModelLoader.Source(model_or_path=str(tmp_path), revision=None)
+    assert [n for n, _ in loader._get_weights_iterator(primary)] == ["backbone.weight"]

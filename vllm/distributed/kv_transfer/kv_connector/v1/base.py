@@ -56,6 +56,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kv_transfer import KVTransferConfig
     from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
@@ -193,6 +194,13 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @classmethod
+    def supports_lookahead_block_hashes(
+        cls, kv_transfer_config: "KVTransferConfig"
+    ) -> bool:
+        """Whether the connector supports core lookahead hashing."""
+        return False
+
     @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
@@ -204,6 +212,11 @@ class KVConnectorBase_V1(ABC):
         return False, as a dropped save is just a future cache miss.
         """
         return self._kv_transfer_config.is_kv_producer
+
+    @classmethod
+    def supports_sleep_mode(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+        """Whether the connector can follow the KV cache remap of sleep mode."""
+        return True
 
     def __init__(
         self,
@@ -291,6 +304,15 @@ class KVConnectorBase_V1(ABC):
             kv_caches: dictionary of layer names, kv cache
 
         """
+        return
+
+    def unregister_kv_caches(self) -> None:
+        """Drop KV cache registrations before sleep. Transfers are already
+        drained. Idempotent."""
+        return
+
+    def restore_kv_caches(self) -> None:
+        """Redo `unregister_kv_caches` after wake-up. Idempotent."""
         return
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
@@ -603,6 +625,18 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def may_load_async(self, request: "Request") -> bool:
+        """Whether ``get_num_new_matched_tokens`` may return
+        ``load_kv_async=True`` for this request. With --max-num-inflight-kv-loads,
+        such requests can start loading while the running batch is full.
+
+        Called whenever the request enters the waiting queues, so must be cheap.
+        A false positive holds back other async loads until a slot is free.
+        Defaults to the P/D ``do_remote_prefill`` flag.
+        """
+        params = request.kv_transfer_params
+        return bool(params and params.get("do_remote_prefill"))
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """Update KVConnector state from worker-side connectors output.
 
@@ -621,7 +655,7 @@ class KVConnectorBase_V1(ABC):
         """Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the blocks
+        The connector may assume responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:

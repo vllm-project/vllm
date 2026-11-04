@@ -8,23 +8,26 @@ request is queued before the first step, so the first prefill has the same
 shape in both runs. Give the engine its own process and the comparison turns
 into a coin toss: prefill starts before the last requests arrive over IPC, so
 one boot batches two requests where the other batches one. The batch shape
-sets the GEMM reduction order, logprobs shift by up to ~0.25, and near-ties
-flip — measured at up to 5 of 16 completions, with sharding disabled on both
-sides. A real sharding bug — rows routed to the wrong request, misaligned
-gathers — produces many-nats divergence and scrambled top-k sets."""
+sets the GEMM reduction order and can make near-ties flip. A real sharding
+bug — rows routed to the wrong request, misaligned gathers — produces
+many-nats divergence and scrambled top-k sets."""
 
 import pytest
+import torch
 
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    tensor_model_parallel_all_gather,
+)
 from vllm.logprobs import Logprob, LogprobsOnePosition
 
 MODEL = "meta-llama/Llama-3.2-1B-Instruct"
+GPT_OSS_MODEL = "trl-internal-testing/tiny-GptOssForCausalLM"
+GPT_OSS_REVISION = "e82685101216af1953707faa42567d232a5e4d45"
 
 # Misrouted rows move logprobs by nats; anything under this is float noise.
-# With matched batches the two boots agreed bitwise over 320 positions, so the
-# bound is not expected to be reached.
 LOGPROB_TOL = 0.5
 
 PROMPTS = [
@@ -58,37 +61,73 @@ def _is_sharded_sampling_active(worker) -> bool:
     return worker.model_runner.batch_sharder is not None
 
 
-def _sampling_params() -> list[SamplingParams]:
-    return [SAMPLING_PARAMS[i % len(SAMPLING_PARAMS)] for i in range(len(PROMPTS))]
+def _local_logits_match_full(worker) -> dict[str, bool]:
+    """Reassemble rank-local logits and compare with the full path."""
+    model = worker.model_runner.model
+    hidden_size = model.config.hidden_size
+    dtype = model.lm_head.weight.dtype
+    hidden_states = torch.linspace(
+        -1,
+        1,
+        steps=2 * hidden_size,
+        device=worker.model_runner.device,
+        dtype=dtype,
+    ).view(2, hidden_size)
+
+    full_logits = model.compute_logits(hidden_states)
+    local_logits = model.compute_logits_local(hidden_states)
+    assert local_logits.shape[-1] == model.lm_head.num_embeddings_per_partition
+    gathered_logits = tensor_model_parallel_all_gather(local_logits)
+    gathered_logits = gathered_logits[..., : model.config.vocab_size]
+
+    has_full_logits = full_logits is not None
+    return {
+        "has_full_logits": has_full_logits,
+        "matches": not has_full_logits or torch.equal(full_logits, gathered_logits),
+    }
 
 
-def _generate(monkeypatch: pytest.MonkeyPatch, disable_sharding: bool):
+def _sampling_params(num_prompts: int) -> list[SamplingParams]:
+    return [SAMPLING_PARAMS[i % len(SAMPLING_PARAMS)] for i in range(num_prompts)]
+
+
+def _generate(
+    disable_sharding: bool,
+    model: str,
+    prompts: list[str],
+    sampling_params: list[SamplingParams],
+    revision: str | None,
+):
     llm = LLM(
-        model=MODEL,
+        model=model,
+        revision=revision,
+        tokenizer_revision=revision,
         tensor_parallel_size=2,
         enable_batch_sharded_sampling=not disable_sharding,
         max_model_len=1024,
-        # More requests than ranks, so round-robin slot ownership splits the
-        # batch across both ranks.
+        # Keep capacity at least as large as the TP size. The actual request
+        # count may be smaller to exercise an empty rank.
         max_num_seqs=len(PROMPTS),
         enforce_eager=True,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.7,
         # Timing-based kernel selection is the dominant source of cross-boot
         # numeric noise; disable it so the comparison bounds stay tight.
-        kernel_config={"enable_flashinfer_autotune": False},
+        enable_flashinfer_autotune=False,
     )
     try:
         # Guard against a vacuous comparison: verify every worker is in the
         # intended sampling mode.
         modes = llm.llm_engine.collective_rpc(_is_sharded_sampling_active)
         assert all(mode == (not disable_sharding) for mode in modes), modes
-        params = _sampling_params()
-        # Two waves: the second reuses the request slots freed by the first
-        # (in whatever order requests finished), covering the cross-rank
-        # slot-recycling path that request ownership derives from.
-        wave1 = llm.generate(PROMPTS, params)
-        wave2 = llm.generate(PROMPTS[::-1], params[::-1])
+        if not disable_sharding:
+            logits_checks = llm.llm_engine.collective_rpc(_local_logits_match_full)
+            assert any(check["has_full_logits"] for check in logits_checks)
+            assert all(check["matches"] for check in logits_checks)
+        # The second wave reuses request slots freed by the first,
+        # covering the cross-rank slot-recycling path that ownership uses.
+        wave1 = llm.generate(prompts, sampling_params)
+        wave2 = llm.generate(prompts[::-1], sampling_params[::-1])
         return wave1 + wave2
     finally:
         del llm
@@ -178,25 +217,11 @@ def test_logprob_comparison_rejects_missing_top_k_rank(rank: int | None):
         _assert_logprob_dicts_close(lps, lps, "missing rank", num_logprobs=1)
 
 
-@multi_gpu_test(num_gpus=2)
-def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
-    """Generation, logprobs, and prompt logprobs match between batch-sharded
-    sampling and the replicated fallback."""
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
-    # Required for the collective_rpc mode check below.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    # Queue every request before the first step, so both boots schedule the
-    # same batches -- see the module docstring.
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
-    ref_outputs = _generate(monkeypatch, disable_sharding=True)
-    shard_outputs = _generate(monkeypatch, disable_sharding=False)
-
-    assert len(ref_outputs) == len(shard_outputs) == 2 * len(PROMPTS)
-    params = _sampling_params()
+def _assert_outputs_match(ref_outputs, shard_outputs, params) -> None:
+    assert len(ref_outputs) == len(shard_outputs) == len(params)
     divergent = []
     for i, (ref, out, sampling_params) in enumerate(
-        zip(ref_outputs, shard_outputs, params + params[::-1])
+        zip(ref_outputs, shard_outputs, params)
     ):
         ref_completion = ref.outputs[0]
         out_completion = out.outputs[0]
@@ -244,7 +269,60 @@ def test_sharded_sampling_outputs_match(monkeypatch: pytest.MonkeyPatch):
                 )
 
     assert not divergent, (
-        f"{len(divergent)}/{2 * len(PROMPTS)} completions diverged at "
+        f"{len(divergent)}/{len(params)} completions diverged at "
         f"(prompt, position) {divergent}; the sampling modes did not agree "
         "token for token with in-process scheduling"
     )
+
+
+def _configure_test_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Required for the collective_rpc mode check below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Queue every request before the first step, so both boots schedule the
+    # same batches -- see the module docstring.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize(
+    ("model", "revision", "prompts"),
+    [
+        pytest.param(MODEL, None, PROMPTS, id="llama"),
+        pytest.param(MODEL, None, PROMPTS[:1], id="llama-empty-rank"),
+        pytest.param(
+            GPT_OSS_MODEL,
+            GPT_OSS_REVISION,
+            PROMPTS,
+            id="gpt-oss",
+        ),
+    ],
+)
+def test_sharded_sampling_outputs_match(
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    revision: str | None,
+    prompts: list[str],
+):
+    """Generation, logprobs, and prompt logprobs match between batch-sharded
+    sampling and the replicated fallback."""
+    _configure_test_environment(monkeypatch)
+    sampling_params = _sampling_params(len(prompts))
+
+    ref_outputs = _generate(
+        disable_sharding=True,
+        model=model,
+        prompts=prompts,
+        sampling_params=sampling_params,
+        revision=revision,
+    )
+    shard_outputs = _generate(
+        disable_sharding=False,
+        model=model,
+        prompts=prompts,
+        sampling_params=sampling_params,
+        revision=revision,
+    )
+
+    expected_params = sampling_params + sampling_params[::-1]
+    _assert_outputs_match(ref_outputs, shard_outputs, expected_params)

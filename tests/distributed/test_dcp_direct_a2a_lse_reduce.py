@@ -857,6 +857,18 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             num_ubatches=2,
         )
 
+        def lse_layout(value: torch.Tensor) -> torch.Tensor:
+            if env["TEST_LSE_LAYOUT"] == "transposed":
+                # FlashAttention MLA returns [H,T], viewed as [T,H]. Allocate
+                # explicitly to preserve its strides even when T == 1.
+                storage = torch.empty(
+                    value.shape[1], value.shape[0], device=device, dtype=lse_dtype
+                )
+                storage.copy_(value.transpose(0, 1))
+                value = storage.transpose(0, 1)
+                assert value.stride() == (1, value.shape[0])
+            return value
+
         def check(num_tokens: int, iteration: int, padded: bool) -> None:
             generator = torch.Generator(device=device)
             generator.manual_seed(1234 + rank + iteration * world_size)
@@ -881,9 +893,16 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             if padded:
                 assert not partial_output.is_contiguous()
                 assert not partial_lse.is_contiguous()
+            partial_lse = lse_layout(partial_lse)
             active_ubatch[0] = iteration % 2
             actual = workspace.lse_reduce(partial_output, partial_lse, is_lse_base_on_e)
             torch.accelerator.synchronize()
+
+            # Layout alone must not alter even one output bit.
+            packed = workspace.lse_reduce(
+                partial_output, partial_lse.contiguous(), is_lse_base_on_e
+            )
+            torch.testing.assert_close(actual, packed, rtol=0, atol=0)
 
             reference_output = partial_output.contiguous()
             reference_lse = partial_lse.contiguous()
@@ -935,6 +954,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
                 dtype=lse_dtype,
                 generator=generator,
             )
+            partial_lse = lse_layout(partial_lse)
 
             # Cover globally empty, rank-local empty, and non-empty sequences.
             def is_empty(seq_idx: int, source_rank: int) -> bool:
@@ -956,7 +976,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             query_start_loc = torch.cat(
                 (
                     query_lens_tensor.new_zeros(1),
-                    query_lens_tensor.cumsum(0),
+                    query_lens_tensor.cumsum(0, dtype=torch.int32),
                 )
             )
             empty_rows = torch.repeat_interleave(seq_lens == 0, query_lens_tensor)
@@ -977,7 +997,10 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
             gathered_output = [
                 torch.empty_like(partial_output) for _ in range(world_size)
             ]
-            gathered_lse = [torch.empty_like(partial_lse) for _ in range(world_size)]
+            gathered_lse = [
+                torch.empty_like(partial_lse, memory_format=torch.contiguous_format)
+                for _ in range(world_size)
+            ]
             dist.all_gather(gathered_output, partial_output.contiguous())
             dist.all_gather(gathered_lse, partial_lse.contiguous())
             head_slice = slice(rank * heads_per_rank, (rank + 1) * heads_per_rank)
@@ -1034,6 +1057,7 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         partial_lse = partial_lse_storage[:, :total_heads]
         assert not partial_output.is_contiguous()
         assert not partial_lse.is_contiguous()
+        partial_lse = lse_layout(partial_lse)
         torch.accelerator.synchronize()
         active_ubatch[0] = 1
         graph = torch.cuda.CUDAGraph()
@@ -1042,6 +1066,11 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         for _ in range(3):
             graph.replay()
         torch.accelerator.synchronize()
+
+        packed = workspace.lse_reduce(
+            partial_output, partial_lse.contiguous(), is_lse_base_on_e
+        )
+        torch.testing.assert_close(actual, packed, rtol=0, atol=0)
 
         reference_output = partial_output.contiguous()
         reference_lse = partial_lse.contiguous()
@@ -1081,14 +1110,22 @@ def _distributed_direct_a2a_worker(env: dict[str, str]) -> None:
         ),
     ],
 )
-def test_distributed_direct_a2a_matches_reference(world_size: int):
+@pytest.mark.parametrize(
+    "lse_layout,lse_dtype,lse_base_e",
+    [("packed", "bfloat16", "0"), ("transposed", "float32", "1")],
+)
+def test_distributed_direct_a2a_matches_reference(
+    world_size: int, lse_layout: str, lse_dtype: str, lse_base_e: str
+):
+    """Combine packed and FlashAttention MLA LSE, including graph replay."""
     _distributed_run(
         _distributed_direct_a2a_worker,
         world_size=world_size,
         extra_env={
             "TEST_DTYPE": "bfloat16",
-            "TEST_LSE_DTYPE": "bfloat16",
-            "LSE_BASE_E": "0",
+            "TEST_LSE_DTYPE": lse_dtype,
+            "TEST_LSE_LAYOUT": lse_layout,
+            "LSE_BASE_E": lse_base_e,
         },
     )
 
