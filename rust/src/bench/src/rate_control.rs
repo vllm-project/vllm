@@ -13,8 +13,28 @@ pub struct RequestSchedule {
     /// Cumulative absolute delay from start (seconds) for each request.
     pub delays: Vec<f64>,
     /// Instantaneous rate for each request (for ramp-up logging).
-    #[allow(dead_code)]
     pub rates: Vec<f64>,
+}
+
+impl RequestSchedule {
+    /// Integer request rates a ramp-up schedule steps through, each paired with
+    /// the delay (seconds) of the first request sent at or above it.
+    ///
+    /// Mirrors Python's `rps_change_events`: the start rate at delay 0, then
+    /// every integer rate up to the last one reached. Rates that a single
+    /// request jumps over share that request's delay.
+    pub fn rps_change_offsets(&self, start_rps: f64) -> Vec<(u64, f64)> {
+        let mut last = start_rps as u64;
+        let mut events = vec![(last, 0.0)];
+        for (&rate, &delay) in self.rates.iter().zip(&self.delays) {
+            let current = rate as u64;
+            if current > last {
+                events.extend((last + 1..=current).map(|rps| (rps, delay)));
+                last = current;
+            }
+        }
+        events
+    }
 }
 
 /// Compute the per-request rate, accounting for optional ramp-up.
@@ -187,5 +207,18 @@ mod tests {
         for i in 1..sched.rates.len() {
             assert!(sched.rates[i] >= sched.rates[i - 1]);
         }
+    }
+
+    #[test]
+    fn test_rps_change_offsets() {
+        let sched = RequestSchedule {
+            delays: vec![0.5, 1.0, 1.5, 2.0],
+            rates: vec![2.0, 2.9, 3.5, 6.0],
+        };
+        // Start rate at 0; 3 at the third request; 4..=6 all at the fourth.
+        assert_eq!(
+            sched.rps_change_offsets(2.0),
+            vec![(2, 0.0), (3, 1.5), (4, 2.0), (5, 2.0), (6, 2.0)]
+        );
     }
 }
