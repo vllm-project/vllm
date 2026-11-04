@@ -282,7 +282,9 @@ class Glm5NextMoE(nn.Module):
 
         swiglu_limit = config.swiglu_limit
         vllm_config = get_current_vllm_config()
-        self.use_mega_moe = _use_mega_moe(vllm_config)
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
         self.is_fused_shared_expert_enabled = False
         if config.n_shared_experts is not None and not self.use_mega_moe:
             self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
@@ -794,7 +796,9 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         config = vllm_config.model_config.hf_text_config
         _validate_supported_config(config)
         self.config = config
-        self.use_mega_moe = _use_mega_moe(vllm_config)
+        self.use_mega_moe = (
+            vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        )
 
         self.vocab_size = config.vocab_size
         self.device = current_platform.device_type
@@ -1462,10 +1466,6 @@ def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> in
             "experts as a separate MLP."
         )
     return n_shared_experts
-
-
-def _use_mega_moe(vllm_config: VllmConfig) -> bool:
-    return vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
 
 
 def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
