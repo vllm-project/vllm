@@ -453,11 +453,20 @@ def main() -> None:
     )
 
     def make_inputs(num_tokens: int) -> tuple[torch.Tensor, torch.Tensor]:
+        generator = torch.Generator(device=device).manual_seed(num_tokens)
         hidden = torch.randn(
-            num_tokens, args.hidden_size, device=device, dtype=torch.bfloat16
+            num_tokens,
+            args.hidden_size,
+            device=device,
+            dtype=torch.bfloat16,
+            generator=generator,
         )
         logits = torch.randn(
-            num_tokens, args.num_experts, device=device, dtype=torch.float32
+            num_tokens,
+            args.num_experts,
+            device=device,
+            dtype=torch.float32,
+            generator=generator,
         )
         return hidden, logits
 
@@ -472,15 +481,6 @@ def main() -> None:
             except build_errors as exc:
                 print(f"skip {backend.value}: {exc}")
 
-        if not args.skip_check:
-            hidden, logits = make_inputs(CHECK_TOKENS)
-            topk_weights, topk_ids = routing.select_experts(hidden, logits)
-            expected = reference_moe(hidden, weights, topk_weights, topk_ids)
-            print(f"\nrelative error vs FP32 reference ({CHECK_TOKENS} tokens):")
-            for name, forward in invokes.items():
-                error = relative_error(forward(hidden, logits), expected)
-                print(f"  {name:32s} {error:.4f}")
-
         try:
             invokes[NVFP4_REFERENCE] = make_nvfp4_invoke(
                 make_moe_config(
@@ -491,6 +491,19 @@ def main() -> None:
             )
         except build_errors as exc:
             print(f"skip {NVFP4_REFERENCE}: {exc}")
+
+        if not args.skip_check:
+            hidden, logits = make_inputs(CHECK_TOKENS)
+            topk_weights, topk_ids = routing.select_experts(hidden, logits)
+            expected = reference_moe(hidden, weights, topk_weights, topk_ids)
+            print(f"\nrelative error vs FP32 reference ({CHECK_TOKENS} tokens):")
+            for name, forward in invokes.items():
+                out = forward(hidden, logits)
+                if name == NVFP4_REFERENCE:
+                    usable = out.shape == hidden.shape and bool(out.isfinite().all())
+                    print(f"  {name:32s} n/a, own weights (shape/finite ok: {usable})")
+                    continue
+                print(f"  {name:32s} {relative_error(out, expected):.4f}")
 
         names = list(invokes)
         print("\nmedian latency (us), router logits to MoE output")
