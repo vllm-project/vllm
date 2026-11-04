@@ -503,6 +503,10 @@ _MULTIMODAL_MODELS = {
         "lfm3_audio",
         "Lfm3AudioForConditionalGeneration",
     ),
+    "Lfm3OmniForConditionalGeneration": (
+        "lfm3_omni",
+        "Lfm3OmniForConditionalGeneration",
+    ),
     "Lfm3VlForConditionalGeneration": ("lfm3_vl", "Lfm3VlForConditionalGeneration"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
