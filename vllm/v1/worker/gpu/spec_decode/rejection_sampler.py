@@ -240,9 +240,9 @@ class RejectionSampler:
         contexts = self.sampler._get_contexts(
             expanded_idx_mapping, expanded_local_pos, draft_sampled
         )
-        watermarking_skip_mask = None
+        watermarking_skip_mask = (contexts < 0).any(dim=-1)
         if self.sampler.deduplicate_contexts != "none":
-            watermarking_skip_mask = self.sampler._get_repeated_contexts(
+            watermarking_skip_mask |= self.sampler._get_repeated_contexts(
                 expanded_idx_mapping, contexts, expanded_local_pos
             )
         return {
@@ -293,6 +293,9 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
+            skip_masked_vocab_blocks=bool(
+                np.any(self.sampler.may_mask_logits[idx_mapping_np])
+            ),
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

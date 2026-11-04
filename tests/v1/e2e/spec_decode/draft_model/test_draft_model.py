@@ -51,6 +51,7 @@ class ArgsTest:
     num_prompts: int = 200
     max_num_seqs: int = 100
     enable_prefix_caching: bool | None = None
+    enable_adaptive_verification: bool = False
     chat_template_kwargs: dict | None = None
     reject_full_acceptance: bool = False
     engine_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -441,6 +442,7 @@ def vllm_runner_kwargs(args: ArgsTest) -> dict[str, Any]:
             "enforce_eager": args.enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
             "parallel_drafting": args.parallel_drafting,
+            "enable_adaptive_verification": args.enable_adaptive_verification,
         },
         max_num_seqs=args.max_num_seqs,
         max_model_len=args.max_model_len,
