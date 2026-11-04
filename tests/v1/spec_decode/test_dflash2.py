@@ -818,47 +818,40 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
 
 
 def test_context_kv_skips_rope_on_nope_layers(monkeypatch):
-    """Context keys carry RoPE exactly where the layer's queries do, so a NoPE
-    layer listed in ``no_rope_layers`` gets unrotated context keys."""
+    """Context keys carry RoPE exactly where the layer's queries do, so a layer
+    listed in ``no_rope_layers`` caches unrotated context keys."""
     from vllm.model_executor.models import qwen3_dflash
-
-    config = SimpleNamespace(num_hidden_layers=3, no_rope_layers=[1])
-    rope_layers = [
-        i for i in range(3) if qwen3_dflash._dflash_layer_uses_rope(config, i)
-    ]
-    assert rope_layers == [0, 2]
 
     def fake_rope(positions, query, key, head_size, cache, is_neox):
         # Marks rotated keys with 100 + position.
         query.add_(positions[:, None].to(query.dtype) + 100)
 
     monkeypatch.setattr(qwen3_dflash.ops, "rotary_embedding", fake_rope)
-    num_ctx, head_dim = 2, 4
-    keys = torch.arange(3 * num_ctx * head_dim, dtype=torch.float32)
-    keys = keys.view(3, num_ctx, 1, head_dim)
+    num_layers, num_ctx, head_dim = 3, 2, 4
+    keys = torch.arange(num_layers * num_ctx * head_dim, dtype=torch.float32)
+    keys = keys.view(num_layers, num_ctx, 1, head_dim)
     cached: dict[int, torch.Tensor] = {}
+
+    def store(i):
+        return lambda attn, k, v, cache, slots: cached.__setitem__(i, k.clone())
+
     model = SimpleNamespace(
-        _num_attn_layers=3,
+        _num_attn_layers=num_layers,
         _kv_size=head_dim,
         _head_dim=head_dim,
         _num_kv_heads=1,
+        _nope_layers=(1,),
         _project_context_kv=lambda *args: (keys.clone(), torch.zeros_like(keys)),
         _normalize_context_k=lambda k: k.clone(),
-        _rope_layer_runs=qwen3_dflash._contiguous_ranges(rope_layers),
         _rope_cos_sin_cache=torch.zeros(1),
         _rope_head_size=head_dim,
         _rope_is_neox=True,
         layers=[SimpleNamespace(self_attn=SimpleNamespace(v_scale=None))],
         _attn_layers=[
             SimpleNamespace(
-                kv_cache=None,
-                impl=SimpleNamespace(
-                    do_kv_cache_update=lambda attn, k, v, cache, slots, i=i: (
-                        cached.__setitem__(i, k.clone())
-                    )
-                ),
+                kv_cache=None, impl=SimpleNamespace(do_kv_cache_update=store(i))
             )
-            for i in range(3)
+            for i in range(num_layers)
         ],
     )
 
@@ -871,14 +864,6 @@ def test_context_kv_skips_rope_on_nope_layers(monkeypatch):
     torch.testing.assert_close(cached[0], rotated[0])
     torch.testing.assert_close(cached[1], keys[1])
     torch.testing.assert_close(cached[2], rotated[2])
-
-
-def test_no_rope_layers_rejects_llama4_mask():
-    from vllm.model_executor.models import qwen3_dflash
-
-    config = SimpleNamespace(num_hidden_layers=2, no_rope_layers=[1, 0])
-    with pytest.raises(ValueError, match="NoPE layer indices"):
-        qwen3_dflash._dflash_layer_uses_rope(config, 0)
 
 
 def test_score_edges_keeps_out_of_vocabulary_anchors_in_range():

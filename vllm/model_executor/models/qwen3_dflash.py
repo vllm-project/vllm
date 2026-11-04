@@ -106,17 +106,6 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     )
 
 
-def _contiguous_ranges(indices: list[int]) -> list[tuple[int, int]]:
-    """Half-open ``(start, end)`` ranges covering sorted ``indices``."""
-    ranges: list[tuple[int, int]] = []
-    for i in indices:
-        if ranges and ranges[-1][1] == i:
-            ranges[-1] = (ranges[-1][0], i + 1)
-        else:
-            ranges.append((i, i + 1))
-    return ranges
-
-
 def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
     return not current_platform.is_cpu() and all(
@@ -199,19 +188,6 @@ def _resolve_layer_attention(
     return sliding_window, _dflash_layer_causal(config, layer_idx)
 
 
-def _dflash_layer_uses_rope(config: Qwen3Config, layer_idx: int) -> bool:
-    """Whether a draft layer applies RoPE; ``no_rope_layers`` lists NoPE layers."""
-    no_rope_layers = getattr(config, "no_rope_layers", None) or ()
-    is_mask = set(no_rope_layers) <= {0, 1}
-    if is_mask and len(no_rope_layers) == config.num_hidden_layers:
-        # Llama 4 spells this as a per-layer 0/1 mask, which is ambiguous here.
-        raise ValueError(
-            "DFlash no_rope_layers must list the NoPE layer indices, got "
-            f"{no_rope_layers} for {config.num_hidden_layers} layers."
-        )
-    return layer_idx not in no_rope_layers
-
-
 class DFlashQwen3Attention(nn.Module):
     """Attention for DFlash speculative decoding.
 
@@ -277,15 +253,12 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rotary_emb = (
-            get_rope(
-                self.head_dim,
-                max_position=max_position,
-                is_neox_style=is_neox_style,
-                rope_parameters=rope_parameters,
-            )
-            if use_rope
-            else None
+        self.use_rope = use_rope
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=max_position,
+            is_neox_style=is_neox_style,
+            rope_parameters=rope_parameters,
         )
 
         self.attention_sink_bias = (
@@ -349,7 +322,7 @@ class DFlashQwen3Attention(nn.Module):
             k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
         ).view(k_shape)
 
-        if self.rotary_emb is not None:
+        if self.use_rope:
             q, k = self.rotary_emb(positions, q, k)
 
         if self.v_scale is not None:
@@ -406,7 +379,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             sliding_window=sliding_window,
             causal=causal,
             is_neox_style=is_neox_style,
-            use_rope=_dflash_layer_uses_rope(config, layer_idx),
+            use_rope=layer_idx not in (getattr(config, "no_rope_layers", None) or ()),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -451,6 +424,8 @@ class DFlashQwen3DecoderLayer(nn.Module):
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
     decoder_layer_cls = DFlashQwen3DecoderLayer
+    # Draft layers in ``no_rope_layers``; their context keys skip RoPE.
+    _nope_layers: tuple[int, ...] = ()
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_regex={
@@ -668,25 +643,20 @@ class DFlashQwen3Model(nn.Module):
 
         self._build_context_kv_buffers(layers_attn, has_bias)
 
-        # RoPE parameters, shared by every layer that applies RoPE. Context K
-        # is layer-major, so each run of consecutive RoPE layers is one
-        # contiguous batch for the fused kernel.
-        rope_layers = [
-            i for i, attn in enumerate(layers_attn) if attn.rotary_emb is not None
-        ]
-        self._rope_layer_runs = _contiguous_ranges(rope_layers)
-        if rope_layers:
-            rope0 = layers_attn[rope_layers[0]].rotary_emb
-            self._rope_head_size = rope0.head_size
-            self._rope_cos_sin_cache = rope0.cos_sin_cache
-            self._rope_is_neox = rope0.is_neox_style
+        # RoPE parameters
+        self._rope_head_size = attn0.rotary_emb.head_size
+        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
+        self._rope_is_neox = attn0.rotary_emb.is_neox_style
         # Validation that RoPE params are the same across all layers
-        for i in rope_layers[1:]:
-            rope = layers_attn[i].rotary_emb
+        for attn in layers_attn[1:]:
             assert (
-                rope.head_size == self._rope_head_size
-                and rope.is_neox_style == self._rope_is_neox
+                attn.rotary_emb.head_size == self._rope_head_size
+                and attn.rotary_emb.is_neox_style == self._rope_is_neox
             ), "All layers must have the same RoPE parameters for DFlash precomputation"
+
+        self._nope_layers = tuple(
+            i for i, attn in enumerate(layers_attn) if not attn.use_rope
+        )
 
         # Layer metadata
         self._num_attn_layers = len(layers_attn)
@@ -814,22 +784,25 @@ class DFlashQwen3Model(nn.Module):
         all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
         all_k_normed = self._normalize_context_k(all_k)
 
-        # --- Fused RoPE across consecutive RoPE layers ---
-        # View each run as [layers * num_ctx, kv] so RoPE sees one big batch
-        # (no copy). In-place RoPE: pass K as the "query" arg with key=None.
-        for start, end in self._rope_layer_runs:
-            run_k = all_k_normed[start:end].view((end - start) * num_ctx, kv)
-            cos_sin_cache = self._rope_cos_sin_cache
-            if cos_sin_cache.dtype != run_k.dtype:
-                cos_sin_cache = cos_sin_cache.to(dtype=run_k.dtype)
-            ops.rotary_embedding(
-                context_positions.repeat(end - start),
-                run_k,
-                None,
-                self._rope_head_size,
-                cos_sin_cache,
-                self._rope_is_neox,
-            )
+        # --- Fused RoPE across all layers ---
+        # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
+        # In-place RoPE: pass K as the "query" arg with key=None.
+        all_k_flat = all_k_normed.view(L * num_ctx, kv)
+        nope_k = [all_k_normed[i].clone() for i in self._nope_layers]
+        positions_repeated = context_positions.repeat(L)
+        cos_sin_cache = self._rope_cos_sin_cache
+        if cos_sin_cache.dtype != all_k_flat.dtype:
+            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
+        ops.rotary_embedding(
+            positions_repeated,
+            all_k_flat,
+            None,
+            self._rope_head_size,
+            cos_sin_cache,
+            self._rope_is_neox,
+        )
+        for i, k in zip(self._nope_layers, nope_k):
+            all_k_normed[i].copy_(k)
 
         if context_slot_mapping is None:
             return
@@ -839,7 +812,7 @@ class DFlashQwen3Model(nn.Module):
             all_v.mul_(v_scale)
 
         # --- Per-layer cache insert ---
-        all_k_final = all_k_normed.view(L, num_ctx, nkv, hd)
+        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
         for i in range(L):
             slot_mapping = (
