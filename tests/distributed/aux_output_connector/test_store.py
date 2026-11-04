@@ -3,7 +3,7 @@
 
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import Mock, patch
@@ -11,7 +11,15 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pytest
 import torch
+from transformers import LlamaConfig
 
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.distributed.aux_output_connector import store as store_module
 from vllm.distributed.aux_output_connector.artifacts import (
     AuxOutputBuffer,
@@ -43,9 +51,11 @@ from vllm.distributed.aux_output_connector.worker import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import LogprobsTensors, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu import async_utils
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 pytestmark = pytest.mark.cpu_test
@@ -756,29 +766,93 @@ def test_logprob_publication_normalizes_per_request_width(sampler_widths):
     ids=["streaming-prompt-extension", "speculative-stop-trim"],
 )
 def test_logprob_rows_follow_absolute_sample_positions(
-    first_prompt_len, first_token_start, first_count, next_prompt_len, next_token_start
+    tmp_path,
+    monkeypatch,
+    first_prompt_len,
+    first_token_start,
+    first_count,
+    next_prompt_len,
+    next_token_start,
 ):
-    worker = _make_worker(1, logprobs_only=True)
+    import vllm.distributed.aux_output_connector.worker as aux_worker
 
-    def run_step(prompt_len, token_start, count, token_id):
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        num_hidden_layers=1,
+        hidden_size=8,
+        intermediate_size=16,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+    ).save_pretrained(tmp_path)
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path),
+            skip_tokenizer_init=True,
+            dtype="float32",
+            max_model_len=32,
+        ),
+        cache_config=CacheConfig(block_size=_BLOCK_SIZE),
+        device_config=DeviceConfig(device="cpu"),
+        scheduler_config=SchedulerConfig(
+            max_model_len=32,
+            is_encoder_decoder=False,
+            max_num_batched_tokens=4,
+            max_num_seqs=1,
+            enable_chunked_prefill=True,
+            async_scheduling=False,
+        ),
+    )
+    config.aux_output_config.enable_return_logprobs = True
+    monkeypatch.setattr(
+        aux_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    worker = AuxOutputWorkerConnector(vllm_config=config, model=torch.nn.Identity())
+    worker.initialize_output_storage(
+        KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+
+    block_hashes = [bytes([index]) * 32 for index in range(5)]
+    boundaries = tuple(range(_BLOCK_SIZE, 6 * _BLOCK_SIZE, _BLOCK_SIZE))
+
+    def metadata_for(request_id, prompt_len, *, include_hashes=False):
         metadata = AuxOutputConnectorMetadata(
             generation=0,
-            requests={"aux": 1},
+            requests={request_id: 1},
             block_hashes={},
             finished_requests=(),
-            logprobs={"aux": "fingerprint"},
-            prompt_lens={"aux": prompt_len},
-            logprob_widths={"aux": 1},
+            logprobs={request_id: "fingerprint"},
+            prompt_lens={request_id: prompt_len},
+            logprob_block_hashes=(
+                {request_id: PackedBlockHashes(b"".join(block_hashes), 32)}
+                if include_hashes
+                else {}
+            ),
+            logprob_boundary_token_ids=(
+                {request_id: boundaries} if include_hashes else {}
+            ),
+            logprob_widths={request_id: 1},
         )
-        worker.begin_step(metadata)
-        pending = worker.prepare_output(
-            _input_batch(
-                ["aux"],
-                np.array([token_start]),
-                np.array([0, count]),
-                num_scheduled_tokens=[count],
-            )
+
+        return metadata
+
+    def input_batch(request_id, token_start, count):
+        batch = InputBatch.make_dummy(
+            1, count, InputBuffers(1, count, torch.device("cpu")), is_padding=False
         )
+        return replace(
+            batch,
+            req_ids=[request_id],
+            num_computed_tokens_np=np.array([token_start], dtype=np.int32),
+        )
+
+    def run_step(request_id, prompt_len, token_start, count, token_id):
+        worker.begin_step(
+            metadata_for(request_id, prompt_len, include_hashes=token_start == 3)
+        )
+        pending = worker.prepare_output(input_batch(request_id, token_start, count))
         assert pending is not None
         pending.enqueue_cpu_copy(
             np.array([count], dtype=np.int32),
@@ -789,17 +863,21 @@ def test_logprob_rows_follow_absolute_sample_positions(
                 torch.zeros(count, dtype=torch.int32),
             ),
         )
-        pending.process_output()
+        return pending.process_output()
 
-    run_step(first_prompt_len, first_token_start, first_count, 10)
-    run_step(next_prompt_len, next_token_start, 1, 20)
+    run_step("source", first_prompt_len, first_token_start, first_count, 10)
+    run_step("source", next_prompt_len, next_token_start, 1, 20)
 
-    rows = concat_rows(list(worker._requests["aux"].logprob_rows.values()))
-    assert rows is not None
     expected_start = max(next_prompt_len, next_token_start + 1)
-    assert expected_start in rows.positions
-    row = np.flatnonzero(rows.positions == expected_start)[0]
-    assert rows.token_ids[row, 0] == 20
+    worker.begin_step(metadata_for("replay", next_prompt_len, include_hashes=True))
+    pending = worker.prepare_output(input_batch("replay", expected_start - 1, 1))
+    assert pending is not None
+    pending.enqueue_cpu_copy(np.ones(1, dtype=np.int32), np.zeros(1, dtype=np.int32))
+
+    replay = pending.process_output()["replay"].logprobs
+    assert replay is not None
+    np.testing.assert_array_equal(replay.logprob_token_ids, [[20]])
+    np.testing.assert_array_equal(replay.logprobs, [[-0.5]])
     worker.close()
 
 
