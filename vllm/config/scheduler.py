@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import CompileFactors, config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -255,15 +255,8 @@ class SchedulerConfig:
         return resolve_obj_by_qualname(self.scheduler_cls)
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
         # max_num_batched_tokens need to be included in the hash due
         # to two reasons:
@@ -276,10 +269,29 @@ class SchedulerConfig:
         #   https://github.com/vllm-project/vllm/issues/29585
         # PLE and other model components allocate static per-request buffers.
         # Their shapes are captured in compiled graphs.
-        return {
-            "max_num_batched_tokens": self.max_num_batched_tokens,
-            "max_num_seqs": self.max_num_seqs,
+        ignored_factors = {
+            "runner_type",
+            "max_num_scheduled_tokens",
+            "max_num_active_seqs",
+            "long_prefill_token_threshold",
+            "long_prefill_token_threshold_adaptive",
+            "max_num_queued_reqs",
+            "max_num_queued_tokens",
+            "enable_chunked_prefill",
+            "is_multimodal_model",
+            "max_num_encoder_input_tokens",
+            "encoder_cache_size",
+            "policy",
+            "disable_chunked_mm_input",
+            "scheduler_cls",
+            "disable_hybrid_kv_cache_manager",
+            "scheduler_reserve_full_isl",
+            "watermark",
+            "prefill_schedule_interval",
+            "async_scheduling",
+            "stream_interval",
         }
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod

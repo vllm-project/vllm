@@ -10,7 +10,7 @@ from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
 
 from vllm import version
-from vllm.config.utils import CompileFactors, config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 DetailedTraceModules = Literal["model", "worker", "all"]
 
@@ -125,18 +125,26 @@ class ObservabilityConfig:
         )
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        # This config does not affect the compiled graph.
-        return {}
+        ignored_factors = {
+            "show_hidden_metrics_for_version",
+            "otlp_traces_endpoint",
+            "collect_detailed_traces",
+            "per_request_spec_decode_metrics",
+            "kv_cache_metrics",
+            "kv_cache_metrics_sample",
+            "custom_histogram_buckets",
+            "cudagraph_metrics",
+            "enable_layerwise_nvtx_tracing",
+            "enable_mfu_metrics",
+            "enable_mm_processor_stats",
+            "enable_logging_iteration_details",
+            "jit_monitor_mode",
+            "jit_monitor_verbose",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     @field_validator("show_hidden_metrics_for_version")
     @classmethod

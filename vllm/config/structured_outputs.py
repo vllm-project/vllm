@@ -5,7 +5,7 @@ from typing import Literal, Self
 
 from pydantic import model_validator
 
-from vllm.config.utils import CompileFactors, config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -45,18 +45,18 @@ class StructuredOutputsConfig:
     """Whether to use structured input for reasoning."""
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        # This config does not affect the compiled graph.
-        return {}
+        ignored_factors = {
+            "backend",
+            "disable_any_whitespace",
+            "disable_additional_properties",
+            "reasoning_parser",
+            "reasoning_parser_plugin",
+            "enable_in_reasoning",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:

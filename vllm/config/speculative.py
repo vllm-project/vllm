@@ -15,7 +15,13 @@ from vllm.config.cache import CacheDType
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
-from vllm.config.utils import CompileFactors, config, normalize_value, replace
+from vllm.config.utils import (
+    CompileFactors,
+    config,
+    get_compile_factors,
+    normalize_value,
+    replace,
+)
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_hf_text_config, iter_rope_parameters
 from vllm.transformers_utils.repo_utils import get_subfolder_path
@@ -723,28 +729,61 @@ class SpeculativeConfig:
     """Number of largest target probabilities used by FLy's entropy gate."""
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        factors: CompileFactors = {
-            # Eagle3 and extract_hidden_states affect the computation graph because
-            # they return intermediate hidden states in addition to the final hidden
-            # state.
-            "uses_aux_hidden_states": self.uses_aux_hidden_states,
-            # A custom speculator may compile a different draft model graph.
-            "custom_method": self.custom_method,
-            "speculator_options": normalize_value(self.speculator_options),
-            "speculator": normalize_value(self.speculator_config.hash_factors()),
+        ignored_factors = {
+            "enforce_eager",
+            "num_speculative_tokens",
+            "model",
+            "method",
+            "draft_tensor_parallel_size",
+            "tensor_parallel_size",
+            "quantization",
+            "moe_backend",
+            "attention_backend",
+            "kv_cache_dtype",
+            "max_model_len",
+            "revision",
+            "code_revision",
+            "index_share_for_mtp_iteration",
+            "disable_padded_drafter_batch",
+            "disable_eagle_block_drop",
+            "disable_lookahead_block_hashes",
+            "draft_lm_head_quantization",
+            "use_local_argmax_reduction",
+            "use_heterogeneous_vocab",
+            "prompt_lookup_max",
+            "prompt_lookup_min",
+            "parallel_drafting",
+            "target_model_config",
+            "target_parallel_config",
+            "num_speculative_tokens_per_batch_size",
+            "draft_parallel_config",
+            "suffix_decoding_max_tree_depth",
+            "suffix_decoding_max_cached_requests",
+            "suffix_decoding_corpus_tokens",
+            "suffix_decoding_max_spec_factor",
+            "suffix_decoding_min_token_prob",
+            "draft_load_config",
+            "rejection_sample_method",
+            "synthetic_acceptance_rates",
+            "synthetic_acceptance_length",
+            "enable_adaptive_verification",
+            "draft_sample_method",
+            "dspark_draft_topk",
+            "xpress_topc",
+            "fly_window_size",
+            "fly_entropy_threshold",
+            "fly_entropy_top_k",
         }
+        factors = get_compile_factors(self, ignored_factors)
+        # Eagle3 and extract_hidden_states affect the computation graph because
+        # they return intermediate hidden states in addition to the final hidden
+        # state.
+        factors["uses_aux_hidden_states"] = self.uses_aux_hidden_states
+        factors["speculator"] = normalize_value(self.speculator_config.hash_factors())
         if self.draft_model_config is not None:
-            factors["draft_model"] = self.draft_model_config.compile_factors()
             # The specific layers used also affect the computation graph.
             layer_ids = getattr(
                 self.draft_model_config.hf_config,

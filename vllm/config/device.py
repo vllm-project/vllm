@@ -7,7 +7,7 @@ from typing import Literal
 import torch
 from pydantic import ConfigDict, SkipValidation
 
-from vllm.config.utils import CompileFactors, config
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
@@ -27,20 +27,15 @@ class DeviceConfig:
     `__post_init__`."""
 
     def compile_factors(self) -> CompileFactors:
-        """WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
-
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        # no factors to consider.
-        # the device/platform information will be summarized
-        # by torch/vllm automatically.
-        return {}
+        # Device/platform info is captured by the torch and vLLM factors.
+        ignored_factors = {
+            "device",
+            "device_type",
+        }
+        return get_compile_factors(self, ignored_factors)
 
     def __post_init__(self):
         if self.device == "auto":

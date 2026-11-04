@@ -18,7 +18,7 @@ from pydantic_core import core_schema
 
 import vllm.envs as envs
 from vllm.config.ec_transfer import ECTransferConfig
-from vllm.config.utils import CompileFactors, config, normalize_value
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -670,18 +670,31 @@ class MultiModalConfig:
         )
 
     def compile_factors(self) -> CompileFactors:
-        """Factors of the multimodal encoder that affect its compiled graph.
-
-        WARNING: Whenever a new field is added to this config, add it here if it
-        affects the encoder's computation graph.
+        """WARNING: Whenever a new field is added to this config, add it to
+        `ignored_factors` if it does not affect the computation graph.
         """
-        return {
-            "mm_encoder_attn_backend": normalize_value(self.mm_encoder_attn_backend),
-            "mm_encoder_tp_mode": self.mm_encoder_tp_mode,
-            "mm_encoder_attn_dtype": self.mm_encoder_attn_dtype,
-            "mm_encoder_fp8_scale_path": self.mm_encoder_fp8_scale_path,
-            "mm_device_do_normalize": self.mm_device_do_normalize,
+        ignored_factors = {
+            "language_model_only",
+            "limit_per_prompt",
+            "enable_mm_embeds",
+            "media_io_kwargs",
+            "mm_processor_kwargs",
+            "mm_processor_cache_gb",
+            "mm_processor_cache_type",
+            "mm_hasher_algorithm",
+            "mm_shm_cache_max_object_size_mb",
+            "mm_encoder_only",
+            "mm_encoder_fp8_scale_save_path",
+            "mm_encoder_fp8_scale_save_margin",
+            "interleave_mm_strings",
+            "skip_mm_profiling",
+            "video_pruning_rate",
+            "video_pruning_method",
+            "mm_tensor_ipc",
+            "allow_missing_mm_embeddings",
+            "mm_ipc_gpu_memory_gb",
         }
+        return get_compile_factors(self, ignored_factors)
 
     def get_limit_per_prompt(self, modality: str) -> int:
         """Get the maximum number of input items allowed per prompt
