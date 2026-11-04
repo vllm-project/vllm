@@ -669,6 +669,42 @@ def test_consumer_resolves_mm_embedding_inputs(
     assert mm_config.enable_mm_embeds is expected
 
 
+@pytest.mark.parametrize(
+    ("role", "language_model_only", "expected"),
+    [
+        # Every modality limited to 0: a dummy embedding item would be
+        # rejected by the limits when sizing the multimodal budget.
+        ("kv_consumer", False, False),
+        ("ec_consumer", False, False),
+        # Skips the encoder but still takes embeddings from the EC connector.
+        ("ec_consumer", True, True),
+    ],
+)
+def test_text_only_consumer_stays_text_only(
+    role: str, language_model_only: bool, expected: bool
+):
+    mm_config = MultiModalConfig(language_model_only=language_model_only)
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    model_config.supports_multimodal_inputs = False
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        ECTransferConfig(ec_connector="ECExampleConnector", ec_role=role)
+        if role == "ec_consumer"
+        else None
+    )
+    vllm_config.kv_transfer_config = (
+        KVTransferConfig(kv_connector="ExampleConnector", kv_role=role)
+        if role == "kv_consumer"
+        else None
+    )
+
+    VllmConfig._resolve_mm_embedding_inputs(vllm_config)
+
+    assert mm_config.enable_mm_embeds is expected
+
+
 def test_vllm_config_runs_the_mm_processor_device_check():
     """Startup must reach the check; the rule itself is covered above.
 

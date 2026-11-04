@@ -3156,12 +3156,17 @@ class VllmConfig:
         A text-only deployment (every modality limited to 0) is sent no
         embeddings and stays text-only: enabling embedding inputs there would
         have the multimodal budget build a dummy item the limits then reject.
+        ``--language-model-only`` is not text-only here: it skips the encoder
+        but an EC consumer still takes embeddings.
         """
         model_config = self.model_config
         if model_config is None:
             return
         mm_config = model_config.multimodal_config
-        if mm_config is None or not model_config.supports_multimodal_inputs:
+        if mm_config is None or (
+            not mm_config.language_model_only
+            and not model_config.supports_multimodal_inputs
+        ):
             return
 
         ec_config = self.ec_transfer_config
