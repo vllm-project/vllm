@@ -3078,7 +3078,9 @@ class MoRIIOConnectorWorker:
         A READ still in flight when the wait gives up fails the step in both
         modes: RDMA may still write into its blocks, so the forward must not
         consume them. If every READ is terminal, the failed requests are
-        reported to the scheduler once _pop_done_transfers sees them.
+        reported to the scheduler once _pop_done_transfers sees them, except
+        when request-level recovery would free blocks that a failed transfer
+        may still write into (see _failed_reads_are_quiet).
         """
         statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
@@ -3096,10 +3098,32 @@ class MoRIIOConnectorWorker:
                     len(statuses),
                 )
                 raise
+            if not (self._block_load_errors_supported or self._failed_reads_are_quiet):
+                logger.exception(
+                    "MoRIIO READ failed before the forward; failing the step "
+                    "because with qp_per_transfer > 1 a failed transfer may "
+                    "still be writing into its blocks."
+                )
+                raise
             logger.exception(
                 "MoRIIO reads did not complete before the forward; proceeding "
                 "to transfer cleanup."
             )
+
+    @property
+    def _failed_reads_are_quiet(self) -> bool:
+        """Whether a failed READ whose statuses are all terminal has stopped
+        writing, so request-level recovery may release its blocks.
+
+        MoRI-IO reports a transfer failed at its first error completion. On a
+        single QP, later work requests are flushed without DMA; an xGMI status
+        completes with its copy. With several QPs per transfer, the others may
+        still be writing.
+        """
+        return (
+            self.moriio_config.backend == "xgmi"
+            or self.moriio_config.qp_per_transfer == 1
+        )
 
     @property
     def _block_load_errors_supported(self) -> bool:

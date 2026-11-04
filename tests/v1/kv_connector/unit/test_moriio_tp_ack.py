@@ -482,13 +482,24 @@ def test_failed_read_reports_blocks_only_for_one_group(
 
 
 @pytest.mark.parametrize(
-    ("has_mamba", "single_group"), [(True, False), (True, True), (False, False)]
+    ("has_mamba", "single_group", "backend", "qps", "fails_step"),
+    [
+        (True, False, "rdma", 1, False),
+        (True, True, "rdma", 1, False),
+        (False, False, "rdma", 1, False),
+        (True, False, "xgmi", 4, False),
+        (True, False, "rdma", 4, True),
+        (False, False, "rdma", 4, True),
+        (False, True, "rdma", 4, False),
+    ],
 )
-def test_terminal_read_failure_reaches_scheduler_for_every_layout(
-    has_mamba, single_group
+def test_terminal_read_failure_fails_the_step_only_while_dma_may_continue(
+    has_mamba, single_group, backend, qps, fails_step
 ):
-    """Once every READ is terminal no DMA is pending, so the step proceeds and
-    the failure is reported instead of killing the engine."""
+    """Once every READ is terminal the failure is reported instead of killing
+    the engine, unless request-level recovery would free blocks that another
+    QP of a failed transfer may still write into. Block-level recovery for a
+    single KV cache group is unchanged."""
 
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
@@ -500,10 +511,15 @@ def test_terminal_read_failure_reaches_scheduler_for_every_layout(
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
     worker._single_kv_cache_group = single_group
+    worker.moriio_config = SimpleNamespace(backend=backend, qp_per_transfer=qps)
     worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
-    worker._await_reads_issued_this_step()
+    if fails_step:
+        with pytest.raises(TransferError, match="failed"):
+            worker._await_reads_issued_this_step()
+    else:
+        worker._await_reads_issued_this_step()
     assert worker._reads_issued_this_step == []
 
 
@@ -620,7 +636,9 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
     worker._has_mamba = has_mamba
     worker._single_kv_cache_group = True
     worker.world_size = 1
-    worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
+    worker.moriio_config = SimpleNamespace(
+        recv_abort_timeout=600.0, backend="rdma", qp_per_transfer=1
+    )
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=5.0)
     monkeypatch.setattr(worker.moriio_wrapper, "send_notify", lambda *a, **kw: None)
     worker._reads_issued_this_step = [failed_a, pending_b]

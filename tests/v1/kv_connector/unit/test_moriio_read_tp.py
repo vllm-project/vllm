@@ -163,7 +163,10 @@ def _make_reader(
     # _groups() puts attention groups before mamba, as the READ payload does.
     worker._hybrid_payload_index_by_layer = dict(worker.layer_to_group)
     worker.moriio_config = SimpleNamespace(
-        backend=backend, transfer_timeout=30.0, recv_abort_timeout=600.0
+        backend=backend,
+        transfer_timeout=30.0,
+        recv_abort_timeout=600.0,
+        qp_per_transfer=1,
     )
     worker._get_built_session = get_built_session
     worker.moriio_wrapper = SimpleNamespace(
