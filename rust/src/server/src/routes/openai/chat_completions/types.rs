@@ -426,6 +426,9 @@ pub(super) struct ChatCompletionMessage {
     pub content: Option<String>,
     // OpenAI fields the Rust frontend never produces; always `None`.
     pub refusal: Option<String>,
+    /// Omitted rather than `null`, like Python: the OpenAI spec types it as an
+    /// array, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
     pub audio: Option<Value>,
     pub function_call: Option<FunctionCallResponse>,

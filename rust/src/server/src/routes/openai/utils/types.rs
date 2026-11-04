@@ -637,13 +637,17 @@ pub enum MessageContent {
 
 /// Mirrors the Python vLLM `UsageInfo` class.
 ///
-/// Do not skip serializing `None` fields here: non-streaming response types
-/// should serialize `None` as explicit `null`.
+/// Do not skip serializing `None` fields here, except where Python omits them
+/// (`prompt_tokens_details`): non-streaming response types should serialize
+/// `None` as explicit `null`.
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
     pub prompt_tokens: usize,
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
+    /// Omitted rather than `null` when not reported, like Python: the OpenAI
+    /// spec types it as an object, not nullable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
     /// Reasoning-token breakdown. `None` when the frontend cannot count
     /// reasoning tokens: on chat without a reasoning parser, and always on
@@ -725,7 +729,8 @@ mod usage_tests {
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
-        assert!(usage.prompt_tokens_details.is_none());
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert!(json.get("prompt_tokens_details").is_none(), "{json}");
     }
 
     #[test]
