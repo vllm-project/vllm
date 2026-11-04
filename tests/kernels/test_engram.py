@@ -813,7 +813,7 @@ def test_engram_use_thp_lookup_and_fallback(monkeypatch, register_fails, use_thp
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
-def test_engram_shared_prefetch_stream_waits_per_layer():
+def test_engram_shared_prefetch_stream_waits_per_layer(monkeypatch):
     """Consuming a layer must not wait for later layers on the shared stream."""
     stream = torch.cuda.Stream()
     modules = []
@@ -829,13 +829,24 @@ def test_engram_shared_prefetch_stream_waits_per_layer():
         modules.append(module)
     hashes = torch.randint(1024, 3072, (8, 2, 24), device="cuda", dtype=torch.int32)
     modules[0].prepare_embeddings(hashes[:, 0])
-    with torch.cuda.stream(stream):
-        torch.cuda._sleep(100_000_000)  # ~50 ms ahead of the second lookup
     modules[1].prepare_embeddings(hashes[:, 1])
-    rows = modules[0].embed(hashes[:, 0])
+
+    # Independent CUDA streams can serialize; check the requested dependency
+    # instead of assuming the second lookup is still running at a given time.
+    waits = []
+    wait_event = torch.cuda.Stream.wait_event
+
+    def record_wait_event(consumer, event):
+        waits.append((consumer, event))
+        return wait_event(consumer, event)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.cuda.Stream, "wait_event", record_wait_event)
+        rows = modules[0].embed(hashes[:, 0])
+
+    assert modules[0]._prefetch_done is not None
+    assert waits == [(torch.cuda.current_stream(), modules[0]._prefetch_done)]
     torch.cuda.current_stream().synchronize()
-    assert modules[1]._prefetch_done is not None
-    assert not modules[1]._prefetch_done.query(), "waited for the second lookup"
     layer = modules[0].embed_tokens
     expected = _reference_lookup(
         layer.weight.cuda(),

@@ -382,12 +382,13 @@ __device__ __forceinline__ bool exact_topk_refine_registers(
     const float4 (&vecs)[VecsPerThread], int32_t* __restrict__ output,
     uint32_t length, uint32_t coarse_bin, uint32_t num_above, void* _smem);
 
-template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize,
-          uint32_t StartRound, uint32_t FinalCandidateCapacity, typename InT>
+template <uint32_t TopK, uint32_t BlockSize, uint32_t VecSize = 1,
+          uint32_t StartRound = 0, uint32_t FinalCandidateCapacity = 0,
+          typename InT>
 __device__ void exact_topk_rescan(const InT* __restrict__ scores,
                                   int32_t* __restrict__ output, uint32_t length,
-                                  void* _smem, uint32_t initial_prefix,
-                                  uint32_t initial_remaining);
+                                  void* _smem, uint32_t initial_prefix = 0,
+                                  uint32_t initial_remaining = TopK);
 
 template <uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,

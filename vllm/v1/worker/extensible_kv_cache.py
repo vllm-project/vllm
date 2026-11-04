@@ -24,7 +24,8 @@ from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
 from vllm.utils.extensible_tensor import ExtensibleTensor
 from vllm.utils.math_utils import round_up
-from vllm.utils.mem_utils import format_gib
+from vllm.utils.mem_utils import device_memory_info, format_gib
+from vllm.v1.hisparse.binding import rebind_hisparse_device_caches
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheTensor,
@@ -54,7 +55,7 @@ logger = init_logger(__name__)
 # the allocator could serve it, and adversarial workloads reached up to 45%.
 # ROCr also maps kernel scratch outside the allocator when a kernel first needs
 # it, so ROCm keeps a larger floor.
-KV_CACHE_MARGIN_FLOOR_BYTES = (2 if current_platform.is_rocm() else 1) << 30
+KV_CACHE_MARGIN_FLOOR_BYTES = (3 if current_platform.is_rocm() else 1) << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
 # Part of the margin kept for allocations outside torch's caching allocator
 # (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
@@ -76,7 +77,7 @@ class ExtensibleKVCache:
     allocation splits into segments holding num_blocks blocks each: one per
     layer for block-compact layer-outermost layouts (sized by that layer's
     block stride, possibly padded apart by `pad_kv_cache_segments`), one
-    overall for block-outermost.
+    overall for block-outermost. Host-resident tensors live outside it.
     """
 
     def __init__(
@@ -85,7 +86,11 @@ class ExtensibleKVCache:
         device: torch.device,
         layout: KVCacheLayout,
     ):
-        tensors = kv_cache_config.kv_cache_tensors
+        tensors = [
+            tensor
+            for tensor in kv_cache_config.kv_cache_tensors
+            if not tensor.host_resident
+        ]
         assert tensors, "Extensible KV cache requires at least one KV cache tensor."
         sizes = {tensor.size for tensor in tensors}
         assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
@@ -208,19 +213,23 @@ class ExtensibleKVCache:
 
         `kv_cache_config.num_blocks` must equal the committed count. Connectors
         derive extents from `untyped_storage().nbytes()`, so they must not see the
-        reservation. None for layouts whose layers span several segments.
+        reservation. Host-resident layers are omitted. None for layouts whose
+        layers span several segments.
         """
         if not layout.is_block_compact:
             return None
         assert kv_cache_config.num_blocks == self.num_committed_blocks
         kv_caches: dict[str, torch.Tensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
+            if tensor.host_resident:
+                continue
             group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
             if not spec.has_layer_views:
-                # Laid out by the layer itself over the raw buffer; as at
-                # allocation, it keeps the whole reservation.
-                full_view = self.buffer.full_view()
-                kv_caches.update((name, full_view) for name in tensor.layers)
+                # Laid out by the layer itself over the raw buffer, as at
+                # allocation, now over just the committed blocks.
+                assert layout.is_block_outermost
+                raw_view = self.buffer.segment_view(0)
+                kv_caches.update((name, raw_view) for name in tensor.layers)
                 continue
             kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
             for layer_idx, layer_name in enumerate(tensor.layers):
@@ -246,7 +255,7 @@ class ExtensibleKVCache:
         a share of the headroom, never below what is already committed nor
         above the capacity.
         """
-        free_memory, _ = torch.accelerator.get_memory_info(self.buffer.device)
+        free_memory, _ = device_memory_info(self.buffer.device)
         headroom = free_memory + self.physical_bytes
         reserve = max(
             self.reserved_headroom_bytes,
@@ -288,20 +297,25 @@ class ExtensibleKVCache:
     ) -> list[KVCacheTensor]:
         """Tensor placements matching committed_views for num_blocks.
 
-        size is the committed total, as every tensor describes the one
-        allocation. Under block-outermost layouts the committed blocks are one
-        prefix of it, so the capacity placements still hold. Under layer-outermost
-        layouts each layer's view has its own storage over its committed prefix:
-        describe it as a one-layer tensor placed at the start of that storage.
+        size is the committed total, as every device tensor describes the one
+        allocation; host-resident tensors are unchanged. Under block-outermost
+        layouts the committed blocks are one prefix of it, so the capacity
+        placements still hold. Under layer-outermost layouts each layer's view
+        has its own storage over its committed prefix: describe it as a
+        one-layer tensor placed at the start of that storage.
         """
         size = num_blocks * self.bytes_per_block
         tensors = [
-            replace(tensor, size=size) for tensor in kv_cache_config.kv_cache_tensors
+            tensor if tensor.host_resident else replace(tensor, size=size)
+            for tensor in kv_cache_config.kv_cache_tensors
         ]
         if layout.is_block_outermost:
             return tensors
         committed: list[KVCacheTensor] = []
         for tensor in tensors:
+            if tensor.host_resident:
+                committed.append(tensor)
+                continue
             _, spec = layer_spec_for_tensor(kv_cache_config, tensor)
             for layer_idx, layer_name in enumerate(tensor.layers):
                 start = tensor.offset + layer_idx * tensor.layer_stride
@@ -469,12 +483,18 @@ def extend_kv_cache(
         kv_cache.physical_bytes / (1 << 30),
     )
     forward_context = runner.compilation_config.static_forward_context
-    kv_caches = kv_cache.committed_views(
+    committed = kv_cache.committed_views(
         runner.kv_cache_config,
         runner.cache_config.get_resolved_kv_cache_layout(),
         runner.kernel_block_sizes,
     )
-    if kv_caches is not None:
+    if committed is not None:
+        if runner.vllm_config.attention_config.hisparse_config is not None:
+            rebind_hisparse_device_caches(
+                forward_context=forward_context,
+                kv_cache_config=runner.kv_cache_config,
+                kv_caches=committed,
+            )
         # As in `initialize_kv_cache`, draft groups map their views too.
         attn_groups = [
             group
@@ -483,22 +503,24 @@ def extend_kv_cache(
             for group in groups
         ]
         bind_kv_caches(
-            kv_caches,
+            committed,
             forward_context,
             runner.kv_cache_config,
             runner.vllm_config,
             attn_groups,
         )
-        runner.kv_caches = [
-            cache for cache in kv_caches.values() if cache.device == runner.device
-        ]
-    else:
-        kv_caches = {
-            layer_name: layer.kv_cache
-            for layer_name, layer in forward_context.items()
-            if isinstance(getattr(layer, "kv_cache", None), torch.Tensor)
+        runner.kv_caches_by_layer = {
+            name: committed.get(name, view)
+            for name, view in runner.kv_caches_by_layer.items()
         }
-    runner.kv_connector = get_kv_connector(runner.vllm_config, kv_caches)
+        runner.kv_caches = [
+            cache
+            for cache in runner.kv_caches_by_layer.values()
+            if cache.device == runner.device
+        ]
+    runner.kv_connector = get_kv_connector(
+        runner.vllm_config, runner.kv_caches_by_layer
+    )
 
 
 def measure_kv_cache_bytes(
@@ -548,7 +570,7 @@ def measure_kv_cache_blocks(
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
-    free_memory, _ = torch.accelerator.get_memory_info(device)
+    free_memory, _ = device_memory_info(device)
     transient_peak = kv_cache.reserved_headroom_bytes
     available = measure_kv_cache_bytes(
         init_free_memory=init_free_memory,
@@ -649,7 +671,7 @@ def _release_for_weight_update(
     layer_bytes = max_layer_reload_bytes(model)
     needed = WEIGHT_UPDATE_PEAK_LAYER_FACTOR * layer_bytes
     free = (
-        torch.accelerator.get_memory_info()[0]
+        device_memory_info()[0]
         + torch.accelerator.memory_reserved()
         - torch.accelerator.memory_allocated()
     )
