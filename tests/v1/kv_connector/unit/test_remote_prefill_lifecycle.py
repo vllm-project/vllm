@@ -1155,3 +1155,51 @@ def test_deferred_lookup_does_not_block_parked_load():
         scheduler_output = scheduler.schedule()
         assert req_a.status == RequestStatus.RUNNING
         assert scheduler_output.num_scheduled_tokens[req_a.request_id] > 0
+
+
+@pytest.mark.parametrize("num_tokens", range(128 + 1, 128 + 3 * 16 + 1))
+def test_recomputed_token_window_survives_remote_prefill(num_tokens: int):
+    """Verify that after remote prefill KV load for sliding-window models,
+    the recomputed last prompt token's sliding window never attends to
+    the null block (Issue #65550).
+    """
+    block_size = 16
+    window = 128
+    vllm_config = create_vllm_config(block_size=block_size, max_num_batched_tokens=512)
+    kv_cache_config = make_kv_cache_config(block_size, swa_enabled=True, sw_size=window)
+    scheduler = create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=num_tokens,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+
+    # Step 1: Blocks NIXL writes are allocated; request waits for remote KV transfer.
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    # Step 2: The load finishes.
+    scheduler_output = scheduler.schedule()
+    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    model_runner_output.kv_connector_output = KVConnectorOutput(
+        finished_recving={request.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Step 3: Decoder recomputes the last prompt token (N - 1)
+    # to sample the first token.
+    scheduler_output = scheduler.schedule()
+    (new_request,) = scheduler_output.scheduled_new_reqs
+    assert new_request.num_computed_tokens == num_tokens - 1
+
+    # Its sliding window reads positions num_tokens - window to num_tokens - 1.
+    sliding_window_table = new_request.block_ids[1]
+    null_block = scheduler.kv_cache_manager.block_pool.null_block.block_id
+    oldest = num_tokens - window
+    msg = (
+        f"N={num_tokens}: recomputed token at {num_tokens - 1} reads {oldest},"
+        f" in block {oldest // block_size} of {sliding_window_table}"
+    )
+    assert sliding_window_table[oldest // block_size] != null_block, msg
