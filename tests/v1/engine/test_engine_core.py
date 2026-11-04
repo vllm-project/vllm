@@ -47,7 +47,7 @@ from ...utils import create_new_process_for_each_test, multi_gpu_test
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
@@ -426,6 +426,7 @@ def test_async_step_skips_sampling_for_mm_encoder_only(encoder_only):
     sampled.set_result(None if encoder_only else output)
     core.model_executor.execute_model.return_value = executed
     core.model_executor.sample_tokens.return_value = sampled
+    core._wait_for_output.side_effect = lambda future: future.result()
 
     EngineCore.step_with_batch_queue(core)
     if core.batch_queue:
