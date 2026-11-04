@@ -132,6 +132,9 @@ pub struct EngineCoreReadyResponse {
     /// hashes from the frontend.
     #[serde(default)]
     pub prefix_hash_config: Option<PrefixHashConfig>,
+    /// Whether this engine can return the final prompt hidden state.
+    #[serde(default)]
+    pub supports_inline_hidden_states: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
