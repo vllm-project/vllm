@@ -11,6 +11,7 @@ registers them in every vLLM process.
 
 import asyncio
 import importlib.util
+import json
 import os
 from contextlib import ExitStack
 
@@ -97,11 +98,12 @@ def _run(model: str, speculative_config: dict | None = None, **kwargs):
     return outputs, drafted, acceptance
 
 
-_BASELINES: dict[tuple, list] = {}
+_BASELINES: dict[tuple[str, str], list] = {}
 
 
 def _baseline(model: str, **kwargs):
-    key = (model, *sorted(kwargs.items()))
+    # The engine kwargs hold dicts (attention and compilation configs).
+    key = (model, json.dumps(kwargs, sort_keys=True))
     if key not in _BASELINES:
         _BASELINES[key] = _run(model, **kwargs)[0]
     return _BASELINES[key]
