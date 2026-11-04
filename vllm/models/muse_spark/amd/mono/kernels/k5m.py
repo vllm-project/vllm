@@ -88,7 +88,7 @@ from .k3 import _lay, dn_loads, fp4_mma, mx_chunk, sel_peer, task_ring
 DM = 4096
 INTER = 4096
 E = 256
-W = 8  # ranks in the TP = EP group
+W = 8  # ranks in the TP = EP group of the module-level defaults (builds take key.W)
 EL = E // W  # local experts
 TOPK = 8
 POST_EPS = 1e-8
@@ -101,12 +101,14 @@ REGION = {"a": 31, "z": 32, "ss": 33, "rs": 34}
 @dataclass(frozen=True)
 class BuildM:
     S: int = 32  # rows (32 / 64 / 96 / 128)
+    W: int = 8  # ranks in the TP = EP group (8, or 4 at S = 32)
 
 
 def build_vllm(S, W=8):
-    """The HM build vLLM launches for S rows of a TP = EP = 8 group."""
-    assert S in (32, 64, 96, 128) and W == 8, (S, W)
-    return BuildM(S=S)
+    """The HM build vLLM launches for S rows of a TP = EP = W group."""
+    assert S in (32, 64, 96, 128) and W in (4, 8), (S, W)
+    assert W == 8 or S == 32, (S, W)
+    return BuildM(S=S, W=W)
 
 
 def scratch_layout(S):
@@ -130,6 +132,8 @@ def build(key: BuildM):
     _KEYSTR = repr(key)
     S = key.S
     assert S in (32, 64, 96, 128), S
+    W = key.W  # shadows the module-level defaults for every closure below
+    EL = E // W
     CPR = BLOCKS // W  # 16-column blocks a rank owns in the EP reduce-scatter
     P = TOPK * S
     assert EL % WAVES == 0
@@ -140,6 +144,8 @@ def build(key: BuildM):
     UNR = S != 96  # down task loop as a ring (unroll 3, fixed slots)
     W13_BYTES = EL * 2 * INTER * (DM // 2)
     W13S_BYTES = EL * 2 * INTER * (DM // 32)
+    W2_BYTES = EL * DM * (INTER // 2)
+    W2S_BYTES = EL * DM * (INTER // 32)
     tag_par = lambda tag: tag & 1
 
     @fx.struct
@@ -177,7 +183,7 @@ def build(key: BuildM):
         g_: MGu
         d_: MDn
 
-    name = f"muse_k5m_s{S}"
+    name = f"muse_k5m_s{S}_w{W}"
 
     # ------------------------------------------------------------ tables
     @traced
@@ -571,7 +577,7 @@ def build(key: BuildM):
             "ssacc": rl.ssacc.ptr,
             "rsl": rl.rsl.ptr,
         }
-        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7]
+        pl = [peer0, peer1, peer2, peer3, peer4, peer5, peer6, peer7][:W]
         ep = uniform(ld_i32(epoch, 0, CM_DEV))
         tag = (ep & 0x1FFFFFF) * 64 + layer + 1
         setup(ids, rank, tid, lane, wave, rt, ms.lists.ptr, nrows)
@@ -596,7 +602,17 @@ def build(key: BuildM):
         task_ring(gu_ld, gu_c, q, task, it, t1, False, 1)
         # down: same tasks
         dn_ld = lambda t: dn_loads(
-            w2, w2s, w_post, rt["ve_u"], t, lane, wave, t < t1, VMAX
+            w2,
+            w2s,
+            w_post,
+            rt["ve_u"],
+            t,
+            lane,
+            wave,
+            t < t1,
+            VMAX,
+            W2_BYTES,
+            W2S_BYTES,
         )
         dq = [dn_ld(t0 + d) for d in range(PF_DN)]
         gpu.barrier()
