@@ -261,6 +261,23 @@ class ParserManager:
 
             return _MiniCPMVParser
 
+        if (
+            enable_auto_tools
+            and reasoning_parser_name == "deepseek_v41"
+            and tool_parser_name == "deepseek_v41"
+        ):
+            from vllm.parser.deepseek_v41 import DeepSeekV41ServingParser
+
+            r_cls = reasoning_parser_cls
+            t_cls = tool_parser_cls
+
+            class _DeepSeekV41Parser(DeepSeekV41ServingParser):
+                reasoning_parser_cls = r_cls
+                tool_parser_cls = t_cls
+                tool_strict_level = strict_level
+
+            return _DeepSeekV41Parser
+
         from vllm.parser.abstract_parser import DelegatingParser
 
         r_cls = reasoning_parser_cls

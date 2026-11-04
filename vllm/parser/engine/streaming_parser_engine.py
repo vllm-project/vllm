@@ -37,6 +37,11 @@ class _DropInfo:
     extra_token_ids: dict[int, str]
 
 
+@dataclass(slots=True)
+class _TokenOriginEvent(SemanticEvent):
+    token_id_spans: tuple[tuple[int, int], ...] = ()
+
+
 def _build_drop_info(
     config: ParserEngineConfig,
     tokenizer,
@@ -140,17 +145,30 @@ class StreamingParserEngine:
 
         self._resolved_token_ids = resolved_token_ids
         self._has_drops = drop_info is not None
+        self._composite_atoms = frozenset(
+            config.composite_token_id_terminals.values()
+        ) & frozenset(resolved_token_ids.values())
+        self._has_composite_ids = bool(self._composite_atoms)
 
         self._scanner = TokenIDScanner(
             resolved_token_ids,
             tokenizer,
+            strict_token_spans=self._has_composite_ids,
         )
 
         self._token_id_terminal_names: frozenset[str] = frozenset(
             resolved_token_ids.values()
         )
 
-        self._lexer = IncrementalLexer(lexer_shape, content_terminal=CONTENT_TERMINAL)
+        self._lexer = IncrementalLexer(
+            lexer_shape,
+            content_terminal=CONTENT_TERMINAL,
+            token_id_guards={
+                terminal: config.token_id_terminals[atom]
+                for terminal, atom in config.composite_token_id_terminals.items()
+                if atom in self._composite_atoms
+            },
+        )
 
         self._tool_terminals: frozenset[str] = frozenset(
             terminal
@@ -230,13 +248,17 @@ class StreamingParserEngine:
     ) -> list[SemanticEvent]:
         if delta_token_ids:
             self._ever_had_token_ids = True
+            self._lexer.require_token_ids = True
 
         # Fast path: skip scanner and lexer when the delta is plain
         # content with no special tokens and no terminal-starting chars.
+        # Token spans need the scanner even then: a delta's text may stop
+        # inside its last token, e.g. while a stop string is held back.
         if (
             delta_text
+            and not (self._has_composite_ids and self._ever_had_token_ids)
             and not self._lexer.buffer
-            and not self._scanner._deferred_terminals
+            and not self._scanner.has_pending
             and self._lexer._literal_first_chars.isdisjoint(delta_text)
         ):
             has_special = False
@@ -256,7 +278,11 @@ class StreamingParserEngine:
         if len(scanner_items) == 1 and isinstance(scanner_items[0], TextChunk):
             item = scanner_items[0]
             lex_tokens = self._lexer.feed(item.text, item.token_texts, item.token_count)
-            if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
+            if (
+                len(lex_tokens) == 1
+                and lex_tokens[0].terminal == CONTENT_TERMINAL
+                and not lex_tokens[0].token_id_spans
+            ):
                 events = self._emit_for_state(
                     lex_tokens[0].value,
                     token_count=lex_tokens[0].token_count,
@@ -276,6 +302,17 @@ class StreamingParserEngine:
         events: list[SemanticEvent] = []
         for item in items:
             if isinstance(item, PreLexedTerminal):
+                if item.terminal in self._composite_atoms:
+                    events.extend(
+                        self._process_lex_tokens(
+                            self._lexer.feed(
+                                item.text,
+                                token_count=1,
+                                token_id_spans=((0, len(item.text)),),
+                            )
+                        )
+                    )
+                    continue
                 events.extend(self._process_lex_tokens(self._lexer.flush()))
                 events.extend(self._on_terminal(item.terminal, item.text))
             elif isinstance(item, TextChunk):
@@ -363,10 +400,14 @@ class StreamingParserEngine:
         strict = self._token_id_terminal_names if self._ever_had_token_ids else None
         for tok in tokens:
             if tok.terminal == CONTENT_TERMINAL or (strict and tok.terminal in strict):
-                events.extend(self._on_content(tok.value, tok.token_count))
+                events.extend(
+                    self._on_content(tok.value, tok.token_count, tok.token_id_spans)
+                )
             else:
                 events.extend(
-                    self._on_terminal(tok.terminal, tok.value, tok.token_count)
+                    self._on_terminal(
+                        tok.terminal, tok.value, tok.token_count, tok.token_id_spans
+                    )
                 )
         return events
 
@@ -411,7 +452,11 @@ class StreamingParserEngine:
         return markers
 
     def _on_terminal(
-        self, terminal: str, value: str, token_count: int = 0
+        self,
+        terminal: str,
+        value: str,
+        token_count: int = 0,
+        token_id_spans: tuple[tuple[int, int], ...] = (),
     ) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
@@ -422,10 +467,10 @@ class StreamingParserEngine:
             # The projected skip state may not define the wrapper closer.
             if self.skip_tool_parsing and terminal in self._tool_exit_terminals:
                 self._in_skipped_tool_span = False
-            return self._emit_for_state(value, token_count)
+            return self._emit_for_state(value, token_count, token_id_spans)
 
         if self.skip_reasoning_parsing and terminal in self._reasoning_markup_terminals:
-            return self._emit_for_state(value, token_count)
+            return self._emit_for_state(value, token_count, token_id_spans)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             # Inkling reuses one terminal for tool, text, and reasoning exits.
@@ -480,11 +525,16 @@ class StreamingParserEngine:
                 return []
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
-            return self._emit_for_state(value, token_count)
+            return self._emit_for_state(value, token_count, token_id_spans)
 
         return self._apply_transition(transition, value, token_count)
 
-    def _emit_for_state(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+    def _emit_for_state(
+        self,
+        text: str,
+        token_count: int = 0,
+        token_id_spans: tuple[tuple[int, int], ...] = (),
+    ) -> list[SemanticEvent]:
         if self.state == ParserState.MESSAGE_HEADER:
             self._message_header_buffer += text
             self._message_header_token_count += token_count
@@ -494,15 +544,24 @@ class StreamingParserEngine:
                 return self._feed_json_collection_text(text)
             if self.config.tool_args_json:
                 return self._feed_args_text(text)
+            event_cls = _TokenOriginEvent if token_id_spans else SemanticEvent
+            origin = {"token_id_spans": token_id_spans} if token_id_spans else {}
             return [
-                SemanticEvent(
+                event_cls(
                     EventType.ARG_VALUE_CHUNK,
                     value=text,
                     tool_index=self.tool_index,
                     token_count=token_count,
+                    **origin,
                 )
             ]
         content_type = self.config.content_events.get(self.state)
+        if (
+            self.state == ParserState.TOOL_BETWEEN
+            and self._has_composite_ids
+            and self._ever_had_token_ids
+        ):
+            content_type = EventType.TEXT_CHUNK
         if content_type is not None:
             return [
                 SemanticEvent(
@@ -514,10 +573,15 @@ class StreamingParserEngine:
             ]
         return []
 
-    def _on_content(self, text: str, token_count: int = 0) -> list[SemanticEvent]:
+    def _on_content(
+        self,
+        text: str,
+        token_count: int = 0,
+        token_id_spans: tuple[tuple[int, int], ...] = (),
+    ) -> list[SemanticEvent]:
         if not text:
             return []
-        return self._emit_for_state(text, token_count)
+        return self._emit_for_state(text, token_count, token_id_spans)
 
     def _apply_transition(
         self,

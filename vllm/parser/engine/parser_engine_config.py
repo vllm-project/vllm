@@ -138,6 +138,9 @@ class ParserEngineConfig:
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
 
+    # Composite terminals require a genuine token-ID atom inside their spelling.
+    composite_token_id_terminals: dict[str, str] = field(default_factory=dict)
+
     def __post_init__(self) -> None:
         if self.arg_value_extender is not None and (
             self.arg_converter is None or not self.stream_arg_deltas
