@@ -481,8 +481,9 @@ class ConceptLMHLMIncrementalAttention(nn.Module):
             dim=-1,
         )
         query, key = self._apply_qk_norm(query, key)
-        positions = torch.tensor(
-            [position],
+        positions = torch.full(
+            (1,),
+            position,
             dtype=torch.long,
             device=hidden_states.device,
         )

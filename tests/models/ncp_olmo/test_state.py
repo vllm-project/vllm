@@ -13,6 +13,7 @@ import vllm.envs as envs
 from vllm.model_executor.models.ncp_olmo.model_state import NCPOlmoModelState
 from vllm.model_executor.models.ncp_olmo.state import (
     ConceptRequestStateStore,
+    HLMKVState,
     RequestStateError,
     active_tensor_buffer,
 )
@@ -118,6 +119,28 @@ def test_batch_invariant_hlm_advances_requests_individually(
     """Keep HLM arithmetic independent of incidental scheduler batching."""
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     _check_hlm_batch(ncp_model, exact=True)
+
+
+def test_hlm_decode_preserves_output_without_host_sync(ncp_model) -> None:
+    attention = ncp_model.highlevel.concept_predictor.hlm_block.layers[0].self_attention
+    torch.manual_seed(42)
+    hidden = torch.randn(
+        2, ncp_model.backend_config.hidden_size, device="cuda", dtype=torch.bfloat16
+    )
+    reference_state, checked_state = HLMKVState(), HLMKVState()
+    with torch.inference_mode():
+        attention(0, hidden[:1], reference_state)
+        attention(0, hidden[:1], checked_state)
+        expected = attention(1, hidden[1:], reference_state)
+        previous_mode = torch.cuda.get_sync_debug_mode()
+        try:
+            torch.cuda.set_sync_debug_mode("error")
+            actual = attention(1, hidden[1:], checked_state)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous_mode)
+
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert checked_state.length == reference_state.length == 2
 
 
 def test_batch_invariant_multichunk_prefill_advances_in_fixed_order(
