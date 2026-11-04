@@ -597,6 +597,7 @@ class KVCacheManager:
                 new_computed_blocks=new_computed_block_list,
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
+                num_tokens_main_model=num_tokens_main_model,
                 skip_zeroing_group_ids=skip_zeroing_group_ids,
             )
 

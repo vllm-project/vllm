@@ -314,9 +314,10 @@ def get_sliding_window_manager(
     block_pool,
     enable_caching=True,
     needs_kv_cache_zeroing=False,
+    manager_cls=SlidingWindowManager,
 ):
     # Tests don't exercise admission gating; pass a large cap that is a no-op.
-    return SlidingWindowManager(
+    return manager_cls(
         sliding_window_spec,
         block_pool=block_pool,
         enable_caching=enable_caching,
@@ -547,6 +548,44 @@ def test_dflash_window_load_holds_only_the_window(num_external_tokens):
         ),
     )
     assert held[0] == (num_external_tokens - spec.sliding_window + 1) // 4
+
+
+@pytest.mark.parametrize(
+    ("num_target_tokens", "resident_blocks"),
+    [
+        (40, [8, 9]),  # the load's window
+        (45, [8, 9, 10, 11]),
+        (52, [10, 11, 12]),  # the tail from token 42: no loaded block
+        (80, [17, 18, 19]),
+    ],
+)
+def test_dflash_window_chunk_after_load_backs_only_its_tail(
+    num_target_tokens, resident_blocks
+):
+    """A chunk past a KV-connector load leaves the loaded blocks below its tail
+    null, and reserves exactly the blocks it backs."""
+    block_pool = BlockPool(num_gpu_blocks=32, enable_caching=False, hash_block_size=4)
+    manager = get_sliding_window_manager(
+        new_dflash_window_spec(),
+        block_pool,
+        enable_caching=False,
+        manager_cls=DFlashSlidingWindowManager,
+    )
+    num_free_blocks = block_pool.get_num_free_blocks()
+
+    num_external_tokens = 40
+    num_blocks = manager.get_num_blocks_to_allocate(
+        "r", num_target_tokens, [], num_external_tokens, 0, num_target_tokens
+    )
+    manager.add_local_computed_blocks("r", [], 0, num_external_tokens)
+    manager.allocate_external_computed_blocks(
+        "r", 0, num_external_tokens, num_tokens_main_model=num_target_tokens
+    )
+    manager.allocate_new_blocks("r", num_target_tokens, num_target_tokens)
+
+    blocks = manager.req_to_blocks["r"]
+    assert [i for i, b in enumerate(blocks) if not b.is_null] == resident_blocks
+    assert num_free_blocks - block_pool.get_num_free_blocks() == num_blocks
 
 
 def get_chunked_local_attention_manager(

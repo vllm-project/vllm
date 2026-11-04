@@ -227,6 +227,7 @@ class SingleTypeKVCacheManager(ABC):
                 num_required_blocks, self.max_admission_blocks_per_request
             )
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
+        num_unbacked_blocks = self._num_unbacked_leading_blocks(num_tokens_main_model)
 
         if request_id in self.num_cached_block:
             # Fast-path: a running request won't have any new prefix-cache hits.
@@ -234,7 +235,9 @@ class SingleTypeKVCacheManager(ABC):
             # NOTE: With speculative decoding, request's blocks may be allocated
             # for draft tokens which are later rejected. In this case,
             # num_required_blocks may be smaller than num_req_blocks.
-            return max(num_required_blocks - num_req_blocks, 0)
+            return max(
+                num_required_blocks - max(num_req_blocks, num_unbacked_blocks), 0
+            )
 
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         num_local_computed_blocks = len(new_computed_blocks) + num_req_blocks
@@ -245,7 +248,8 @@ class SingleTypeKVCacheManager(ABC):
         # local-computed blocks inside the window, they contribute to the
         # required capacity; otherwise, skipped blocks dominate.
         num_new_blocks = max(
-            num_required_blocks - max(num_skipped_blocks, num_local_computed_blocks),
+            num_required_blocks
+            - max(num_skipped_blocks, num_local_computed_blocks, num_unbacked_blocks),
             0,
         )
 
@@ -331,6 +335,7 @@ class SingleTypeKVCacheManager(ABC):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         """Allocate new blocks for external (KV-connector) computed tokens.
 
@@ -344,6 +349,8 @@ class SingleTypeKVCacheManager(ABC):
             num_external_computed_tokens: The number of external computed tokens.
             record_for_zeroing: Whether the new blocks need zeroing. False when
                 the load writes them after this step, which zeroing would race.
+            num_tokens_main_model: The target-token end of the step this load
+                belongs to, as for `allocate_new_blocks`.
 
         """
         num_total_computed_tokens = (
@@ -360,9 +367,14 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         req_blocks = self.req_to_blocks[request_id]
-        num_new_blocks = max(
-            0, cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
-        )
+        num_computed_blocks = cdiv(num_total_computed_tokens, self.block_size)
+        # Connectors skip the nulls and load only the backed blocks.
+        num_null_blocks = min(
+            self._num_unbacked_leading_blocks(num_tokens_main_model),
+            num_computed_blocks,
+        ) - len(req_blocks)
+        req_blocks.extend([self._null_block] * max(num_null_blocks, 0))
+        num_new_blocks = max(0, num_computed_blocks - len(req_blocks))
         allocated_blocks = self.block_pool.get_new_blocks(num_new_blocks)
         req_blocks.extend(allocated_blocks)
         if self._record_new_block_ids and record_for_zeroing:
@@ -399,16 +411,27 @@ class SingleTypeKVCacheManager(ABC):
             cow_blocks.append(cow_block)
 
         req_blocks = self.req_to_blocks[request_id]
+        # The nulls are new block-table entries the worker must append too.
+        null_blocks = [self._null_block] * max(
+            self._num_unbacked_leading_blocks(num_tokens_main_model) - len(req_blocks),
+            0,
+        )
+        req_blocks.extend(null_blocks)
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_new_blocks = num_required_blocks - len(req_blocks)
         if num_new_blocks <= 0:
-            return cow_blocks
+            return null_blocks + cow_blocks
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             if self._record_new_block_ids:
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
-            return cow_blocks + new_blocks
+            return null_blocks + cow_blocks + new_blocks
+
+    def _num_unbacked_leading_blocks(self, num_tokens_main_model: int) -> int:
+        """Leading blocks that allocations, including external-token ones,
+        leave null beyond the attention skip."""
+        return 0
 
     @property
     def records_new_block_ids(self) -> bool:
@@ -1187,16 +1210,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 class DFlashSlidingWindowManager(SlidingWindowManager):
     """Drafter sliding-window KV that is only read near the sequence end.
 
-    An allocation backs only the blocks a draft step can read, those from
-    ``num_tokens_main_model - tail_tokens`` on; lower blocks are null, so a
-    long prefill chunk holds one tail rather than the whole chunk. The tail's
-    margin over the window covers in-flight drafts that may be rejected.
+    An allocation, including a KV-connector load's, backs only the blocks a
+    draft step can read, those from ``num_tokens_main_model - tail_tokens`` on;
+    lower blocks are null, so a long prefill chunk holds one tail rather than
+    the whole chunk. The tail's margin over the window covers in-flight drafts
+    that may be rejected.
 
-    Frees, first allocations (prefix hits and KV-connector loads) and hits see
-    no drafts in flight, so they use the window like plain sliding window. A
-    prefix hit at ``h`` for a request of ``L`` tokens needs cached blocks only
-    in ``[L - sliding_window + 1, h)``: the drafter reads only past the last
-    target token, and everything from ``h`` on is recomputed.
+    Frees and hits see no drafts in flight, so they use the window like plain
+    sliding window. A prefix hit at ``h`` for a request of ``L`` tokens needs
+    cached blocks only in ``[L - sliding_window + 1, h)``: the drafter reads
+    only past the last target token, and everything from ``h`` on is
+    recomputed.
     """
 
     def __init__(self, kv_cache_spec: DFlashSlidingWindowSpec, **kwargs) -> None:
@@ -1232,11 +1256,9 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         self._num_null_prefix_blocks.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
 
-    @staticmethod
-    def _first_resident_block(
-        num_target_tokens: int, tail_tokens: int, block_size: int
-    ) -> int:
-        return max(num_target_tokens - tail_tokens, 0) // block_size
+    def _num_unbacked_leading_blocks(self, num_tokens_main_model: int) -> int:
+        # Draft steps read only from the tail below the target tokens.
+        return max(num_tokens_main_model - self.tail_tokens, 0) // self.block_size
 
     def get_num_blocks_to_allocate(
         self,
@@ -1249,57 +1271,22 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         apply_admission_cap: bool = False,
         prefill_end: int = 0,
     ) -> int:
-        req_blocks = self.req_to_blocks.get(request_id, ())
         if apply_admission_cap:
             # Steps back only their own tail, so the peak holding is set by
             # the steps in flight, not by the sequence length: reserve the cap.
             assert self.max_admission_blocks_per_request is not None
-            num_held_blocks = sum(not block.is_null for block in req_blocks)
-            return max(self.max_admission_blocks_per_request - num_held_blocks, 0)
-
-        first_block = self._first_resident_block(
-            num_tokens_main_model, self.tail_tokens, self.block_size
-        )
-        num_required_blocks = cdiv(num_tokens, self.block_size)
-        if request_id in self.num_cached_block:
-            assert len(new_computed_blocks) == 0
-            return max(num_required_blocks - max(len(req_blocks), first_block), 0)
-
-        num_skipped_blocks = (
-            self.get_num_skipped_tokens(total_computed_tokens) // self.block_size
-        )
-        num_new_blocks = max(
-            num_required_blocks
-            - max(
-                num_skipped_blocks,
-                len(new_computed_blocks) + len(req_blocks),
-                first_block,
-            ),
-            0,
-        )
-        num_skipped_new_computed_blocks = max(0, num_skipped_blocks - len(req_blocks))
-        if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
-            num_new_blocks += 1
-        return num_new_blocks + self._get_num_evictable_blocks(
-            new_computed_blocks[num_skipped_new_computed_blocks:]
-        )
-
-    def allocate_new_blocks(
-        self, request_id: str, num_tokens: int, num_tokens_main_model: int
-    ) -> list[KVCacheBlock]:
-        req_blocks = self.req_to_blocks[request_id]
-        num_null_blocks = max(
-            self._first_resident_block(
-                num_tokens_main_model, self.tail_tokens, self.block_size
+            num_held_blocks = sum(
+                not block.is_null for block in self.req_to_blocks.get(request_id, ())
             )
-            - len(req_blocks),
-            0,
-        )
-        # The nulls are new block-table entries the worker must append too.
-        null_blocks = [self._null_block] * num_null_blocks
-        req_blocks.extend(null_blocks)
-        return null_blocks + super().allocate_new_blocks(
-            request_id, num_tokens, num_tokens_main_model
+            return max(self.max_admission_blocks_per_request - num_held_blocks, 0)
+        return super().get_num_blocks_to_allocate(
+            request_id,
+            num_tokens,
+            new_computed_blocks,
+            total_computed_tokens,
+            num_local_computed_tokens,
+            num_tokens_main_model,
+            prefill_end=prefill_end,
         )
 
     @classmethod
@@ -1427,6 +1414,7 @@ class CircularBufferManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         self._claim_ring_block(request_id, record_for_zeroing)
 
@@ -2358,6 +2346,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         # Cross-attention does not use prefix caching / external KV loads.
         return
@@ -2508,6 +2497,7 @@ class HiSparseSourceManager(FullAttentionManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         if num_external_computed_tokens <= 0:
             return
@@ -2522,6 +2512,7 @@ class HiSparseSourceManager(FullAttentionManager):
             num_local_computed_tokens,
             num_external_computed_tokens,
             record_for_zeroing,
+            num_tokens_main_model,
         )
         self.coordinator.update_import_reservation(
             request_id, len(self.req_to_blocks[request_id])
@@ -2670,6 +2661,7 @@ class HiSparseHotManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         self.require_hot(request_id)
 
@@ -2737,6 +2729,7 @@ class HiSparseResidentManager(_HiSparseAuxiliaryManager):
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
         record_for_zeroing: bool = True,
+        num_tokens_main_model: int = 0,
     ) -> None:
         """Reserve a writable final page; earlier imported pages stay on host."""
         assert num_external_computed_tokens > 0
