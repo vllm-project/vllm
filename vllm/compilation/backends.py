@@ -12,7 +12,6 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 import torch
@@ -40,6 +39,7 @@ from .caching import (
     VllmSerializableFunction,
     compute_env_and_config_hashes,
     get_code_factors,
+    read_code_files,
 )
 from .compiler_interface import (
     CompilerInterface,
@@ -1064,15 +1064,12 @@ class VllmBackend:
         ) = compute_env_and_config_hashes(vllm_config)
         compiler_factors = self.compiler_manager.compile_factors(vllm_config)
         compiler_hash = hash_factors(compiler_factors)
-        forward_code_files = sorted(
-            map(Path, set(self.compilation_config.traced_files)), key=Path.absolute
-        )
-
+        traced_files = self.compilation_config.traced_files
         logger.debug(
             "Traced files (to be considered for compilation cache):\n%s",
-            lazy(lambda: "\n".join(map(str, forward_code_files))),
+            lazy(lambda: "\n".join(sorted(map(str, traced_files)))),
         )
-        code_factors = get_code_factors(forward_code_files)
+        code_factors = get_code_factors(read_code_files(traced_files))
         code_hash = hash_factors({"files": code_factors})
         all_factors: dict[str, object] = {
             "env": env_factors,

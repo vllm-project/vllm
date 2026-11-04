@@ -7,6 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, overload
 from unittest.mock import patch
 
@@ -273,17 +274,16 @@ def _model_hash_key(fn: Callable[..., Any]) -> str:
 def _verify_source_unchanged(
     source_info: "SourceInfo", vllm_config: VllmConfig
 ) -> None:
-    from .caching import _compute_code_hash, _compute_code_hash_with_content
+    from .caching import get_code_factors, read_code_files
 
-    file_contents = {}
+    file_contents: dict[Path, str | None] = {}
     for source in source_info.inlined_sources:
-        module = sys.modules[source.module]
-        file = inspect.getfile(module)
+        file = Path(inspect.getfile(sys.modules[source.module]))
         vllm_config.compilation_config.traced_files.add(file)
         file_contents[file] = source.content
-    expected_checksum = _compute_code_hash_with_content(file_contents)
-    actual_checksum = _compute_code_hash(set(file_contents.keys()))
-    if expected_checksum != actual_checksum:
+    expected = get_code_factors(file_contents)
+    actual = get_code_factors(read_code_files(file_contents))
+    if expected != actual:
         raise RuntimeError(
             "Source code has changed since the last compilation. Recompiling the model."
         )
@@ -641,7 +641,7 @@ def _support_torch_compile(
         # properly when any of these files change.
 
         # 1. the file containing the top-level forward function
-        self.compilation_config.traced_files.add(original_code_object.co_filename)
+        self.compilation_config.traced_files.add(Path(original_code_object.co_filename))
 
         # 2. every time Dynamo sees a function call, it will inline
         # the function by calling InliningInstructionTranslator.inline_call_
@@ -651,7 +651,7 @@ def _support_torch_compile(
 
         def patched_inline_call(self_: Any) -> Any:
             code = self_.f_code
-            self.compilation_config.traced_files.add(code.co_filename)
+            self.compilation_config.traced_files.add(Path(code.co_filename))
             return inline_call(self_)
 
         # Disable the C++ compilation of symbolic shape guards. C++-fication

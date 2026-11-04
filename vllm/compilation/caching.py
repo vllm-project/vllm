@@ -6,7 +6,7 @@ import hashlib
 import inspect
 import os
 import pickle
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
@@ -24,7 +24,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.hashing import safe_hash
 
 try:
     from torch._dynamo.aot_compile import SerializableCallable
@@ -36,20 +35,28 @@ assert isinstance(SerializableCallable, type)
 logger = init_logger(__name__)
 
 
-def get_code_factors(forward_code_files: list[Path]) -> list[dict[str, str]]:
-    """Return per-file factors for compile cache hashing."""
-    code_factors: list[dict[str, str]] = []
-    for filepath in forward_code_files:
-        path_str = str(filepath)
-        entry: dict[str, str] = {"path": path_str}
-        if path_str == "<string>":
-            # Dynamically generated code (e.g., exec); nothing to hash.
-            code_factors.append(entry)
-            continue
+def read_code_files(files: Iterable[Path]) -> dict[Path, str | None]:
+    """Read traced source files. Files that can't be read map to None."""
+    contents: dict[Path, str | None] = {}
+    for path in files:
         try:
-            entry["hash"] = hash_factors({"content": filepath.read_text()})
+            contents[path] = path.read_text()
         except (OSError, UnicodeDecodeError):
-            logger.warning("Failed to read file %s", path_str)
+            # e.g. <string> from exec() or <frozen ...> modules
+            if not str(path).startswith("<"):
+                logger.warning("Failed to read file %s", path)
+            contents[path] = None
+    return contents
+
+
+def get_code_factors(contents: Mapping[Path, str | None]) -> list[dict[str, str]]:
+    """Per-file factors for the compile cache key, sorted by path."""
+    code_factors: list[dict[str, str]] = []
+    for path, content in sorted(contents.items()):
+        entry = {"path": str(path)}
+        # Dynamically generated code (e.g. <string> from exec) can't be checked.
+        if content is not None and not str(path).startswith("<"):
+            entry["hash"] = hash_factors({"content": content})
         code_factors.append(entry)
     return code_factors
 
@@ -614,34 +621,3 @@ def aot_compile_hash_factors(vllm_config: VllmConfig) -> list[str]:
         factors.extend(get_inductor_factors())
 
     return factors
-
-
-def _compute_code_hash_with_content(file_contents: dict[str, str]) -> str:
-    items = list(sorted(file_contents.items(), key=lambda x: x[0]))
-    hash_content = []
-    for filepath, content in items:
-        hash_content.append(filepath)
-        if filepath == "<string>":
-            # This means the function was dynamically generated, with
-            # e.g. exec(). We can't actually check these.
-            continue
-        hash_content.append(content)
-    result: str = safe_hash(
-        "\n".join(hash_content).encode(), usedforsecurity=False
-    ).hexdigest()
-    return result
-
-
-def _compute_code_hash(files: set[str]) -> str:
-    logger.debug(
-        "Traced files (to be considered for compilation cache):\n%s", "\n".join(files)
-    )
-    file_contents = {}
-    for filepath in files:
-        # Skip files that don't exist (e.g., <string>, <frozen modules>, etc.)
-        if not os.path.isfile(filepath):
-            file_contents[filepath] = ""
-        else:
-            with open(filepath) as f:
-                file_contents[filepath] = f.read()
-    return _compute_code_hash_with_content(file_contents)
