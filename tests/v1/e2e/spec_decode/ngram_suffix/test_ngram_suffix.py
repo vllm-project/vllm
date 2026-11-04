@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -87,6 +88,78 @@ def test_ngram_gpu_default_with_async_scheduling(
             == async_scheduling
         )
         evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
+
+
+def _uses_adaptive_verification(worker) -> bool:
+    return worker.model_runner.adaptive_verification is not None
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="The default is on only on CUDA."
+)
+@single_gpu_only
+def test_ngram_skips_fillers_by_default(
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Where the attention backend replays varlen decode graphs, n-gram
+    verifies only its matched drafts by default. Greedy outputs must match
+    verifying every slot, up to near-tie flips from the different batch
+    shapes."""
+    # Required for the collective_rpc check below.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    # Queue every request before the first step, so both runs schedule the
+    # same batches -- see tests/v1/e2e/general/test_sharded_sampling.py.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    # Enough requests that steps exceed the small-step floor and get trimmed.
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=32)
+    sampling_params = SamplingParams(temperature=0, max_tokens=128, logprobs=5)
+
+    def run(**speculative_overrides):
+        with vllm_runner(
+            "Qwen/Qwen3-0.6B",
+            block_size=None,
+            trust_remote_code=False,
+            enable_chunked_prefill=None,
+            attention_backend="TRITON_ATTN",
+            speculative_config={
+                "method": "ngram",
+                "num_speculative_tokens": 5,
+                "prompt_lookup_min": 2,
+                "prompt_lookup_max": 4,
+                **speculative_overrides,
+            },
+            max_model_len=2048,
+            max_num_seqs=len(test_prompts),
+            disable_log_stats=False,
+            compilation_config=CompilationConfig(),
+        ) as runner:
+            llm = runner.llm
+            active = llm.llm_engine.collective_rpc(_uses_adaptive_verification)
+            outputs = llm.chat(test_prompts, sampling_params)
+            accepted = get_spec_decode_metric_value(
+                llm.get_metrics(), "vllm:spec_decode_num_accepted_tokens"
+            )
+        return (
+            active,
+            accepted,
+            [
+                (list(o.outputs[0].token_ids), o.outputs[0].text, o.outputs[0].logprobs)
+                for o in outputs
+            ],
+        )
+
+    active, accepted, outputs = run()
+    ref_active, ref_accepted, ref_outputs = run(enable_adaptive_verification=False)
+    assert active == [True]
+    assert ref_active == [False]
+    assert accepted > 0 and ref_accepted > 0
+    check_logprobs_close(
+        outputs_0_lst=ref_outputs,
+        outputs_1_lst=outputs,
+        name_0="every_slot",
+        name_1="matched_drafts",
+    )
 
 
 @single_gpu_only

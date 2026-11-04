@@ -25,3 +25,11 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
+## Verifying only matched drafts
+
+Every step drafts `num_speculative_tokens` slots per request. Slots past the matched tokens, or all of them when nothing matched, are filled with the last sampled token and are almost never accepted. On Model Runner V2 with CUDA, [adaptive verification](adaptive_verification.md) is on by default for n-gram and skips these filler slots, so they no longer cost compute once the GPU is compute-bound at high concurrency. It uses no cost model: the previous step's matched count sets the next verification budget, current matched drafts rank before fillers, and steps of up to 128 tokens verify every slot. Because the budget is one step stale, newly matched drafts can be omitted and some filler slots can still be verified.
+
+The default turns it on for models whose layers are all attention, with full CUDA graphs and an attention backend that replays variable-length decode batches: FlashAttention 3 on Hopper (the default there) or `TRITON_ATTN`. Everywhere else every slot is verified, as before: on ROCm, with another attention backend, with LoRA, pipeline parallelism, `VLLM_BATCH_INVARIANT=1` or synthetic rejection sampling, and for hybrid models with Mamba or GDN layers. The startup log says whether it is on. With it on, how many slots a request verifies depends on the rest of the batch, and so do seeded samples.
+
+Set `"enable_adaptive_verification": false` to always verify every slot, or `true` to require it, for example on a hybrid model whose layers support it.

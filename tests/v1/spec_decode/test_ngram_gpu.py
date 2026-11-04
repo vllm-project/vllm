@@ -13,7 +13,7 @@ left-most. The expectations below reflect the GPU behavior.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 import torch
@@ -25,6 +25,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -44,11 +45,12 @@ def _make_vllm_config(
     max_num_seqs: int = 8,
     max_model_len: int = 64,
     method: str = "ngram_gpu",
+    adaptive_verification: bool = False,
 ) -> VllmConfig:
     model_config = ModelConfig(
         model="facebook/opt-125m",
         max_model_len=max_model_len,
-        enforce_eager=True,
+        enforce_eager=not adaptive_verification,
     )
     scheduler_config = SchedulerConfig.default_factory(
         max_num_seqs=max_num_seqs,
@@ -59,6 +61,7 @@ def _make_vllm_config(
         prompt_lookup_min=min_n,
         prompt_lookup_max=max_n,
         num_speculative_tokens=k,
+        enable_adaptive_verification=adaptive_verification,
     )
     return VllmConfig(
         model_config=model_config,
@@ -134,7 +137,12 @@ def _propose(
         last_sampled_t[slot, 0] = last
 
     idx_mapping = torch.tensor(slots, dtype=torch.int64, device=DEVICE)
-    input_batch = SimpleNamespace(num_reqs=B, idx_mapping=idx_mapping)
+    buffers = InputBuffers(max_num_reqs, max_num_reqs, DEVICE)
+    input_batch = replace(
+        InputBatch.make_dummy(B, B, buffers),
+        idx_mapping=idx_mapping,
+        idx_mapping_np=idx_mapping.cpu().numpy(),
+    )
 
     drafts = spec.propose(
         input_batch=input_batch,
@@ -268,6 +276,25 @@ def test_noncontiguous_idx_mapping():
         slots=[3, 0],
     )
     assert drafts == [[9, 7], [3, 1]]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="requires CUDA")
+def test_adaptive_confidences_mark_only_matched_drafts():
+    """With adaptive verification, matched slots get a nonzero confidence and
+    fillers (past the match, no match, or nothing sampled) get 0, so matched
+    drafts rank before them. The drafts are unchanged."""
+    cfg = _make_vllm_config(min_n=2, max_n=2, k=3, adaptive_verification=True)
+    spec = NgramGPUSpeculator(cfg, DEVICE, _make_request_state(cfg))
+    assert spec.enable_adaptive_verification
+    drafts = _propose(
+        spec,
+        [[1, 2, 1, 2], [4, 5, 6], [1, 2, 3, 1, 2]],
+        num_sampled=[1, 1, 0],
+        last_sampled=[55, 66, 77],
+    )
+    assert drafts == [[1, 2, 55], [66, 66, 66], [77, 77, 77]]
+    matched = spec.draft_token_confidence_probs[:3] > 0
+    assert matched.tolist() == [[True, True, False], [False] * 3, [False] * 3]
 
 
 def test_construction_validates_speculative_config():

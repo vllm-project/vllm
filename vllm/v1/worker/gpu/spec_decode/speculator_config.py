@@ -53,6 +53,10 @@ class SpeculatorConfig:
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
+    # Drafts are a matched prefix padded with fillers (confidence 0), and
+    # adaptive verification budgets from the previous matched count, without
+    # a cost model. It is then on by default where supported.
+    adaptive_verification_skips_fillers: ClassVar[bool] = False
     # The draft model has its own vocabulary, which must match the target's
     # unless use_heterogeneous_vocab is set.
     draft_has_own_vocab: ClassVar[bool] = False

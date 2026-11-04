@@ -98,11 +98,13 @@ def _ngram_finalize_kernel(
     scratch_ptr,  # *int64  [B, scratch_stride]
     scratch_stride,
     drafts_ptr,  # *int64  [B, K]  (output)
+    conf_ptr,  # *fp32  [B, K]  (output, if ADAPTIVE)
     L,
     N_BLOCKS,
     K: tl.constexpr,
     K_PO2: tl.constexpr,
     N_BLOCKS_PO2: tl.constexpr,
+    ADAPTIVE: tl.constexpr,
 ):
     b = tl.program_id(0).to(tl.int64)
     Lp1 = tl.cast(L, tl.int64) + 1
@@ -146,6 +148,12 @@ def _ngram_finalize_kernel(
     # ordinary (rejectable) drafts, so the fill value only affects efficiency.
     out = tl.where(slot_valid, gathered, last_tok)
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
+    if ADAPTIVE:
+        # Fillers get 0 so adaptive verification skips them. Matched slots get
+        # a constant below 1: their survival then falls with position, so the
+        # deepest drafts go first if the budget binds.
+        conf = tl.where(slot_valid, 0.9, 0.0)
+        tl.store(conf_ptr + b * K + k_iota, conf, mask=k_in_range)
 
 
 class NgramGPUSpeculator(BaseSpeculator):
@@ -202,6 +210,17 @@ class NgramGPUSpeculator(BaseSpeculator):
             dtype=torch.int64,
             device=device,
         )
+        self.draft_token_confidence_probs = torch.zeros(
+            (self.max_num_reqs, self.num_speculative_steps),
+            dtype=torch.float32,
+            device=device,
+        )
+
+    @property
+    def enable_adaptive_verification(self) -> bool:
+        # The model runner settles the default once the attention backends
+        # are known, after this speculator is built.
+        return bool(self.speculative_config.enable_adaptive_verification)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         del cudagraph_mode
@@ -265,11 +284,13 @@ class NgramGPUSpeculator(BaseSpeculator):
             self.scratch,
             self.scratch.stride(0),
             self.drafts,
+            self.draft_token_confidence_probs,
             self.max_model_len,
             self.n_blocks,
             self.num_speculative_steps,
             max(1, triton.next_power_of_2(self.num_speculative_steps)),
             max(1, triton.next_power_of_2(self.n_blocks)),
+            ADAPTIVE=self.enable_adaptive_verification,
             num_warps=2,
             num_stages=1,
         )
