@@ -204,11 +204,13 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # The Rust frontend has no `mistral` tokenizer mode or renderer.
+  # It also still rejects `tools: []` with HTTP 400, unlike the Python frontend.
   - >-
     pytest -v -s
     tool_use
     --ignore=tool_use/mistral
     --models llama3.2
+    -k "not test_chat_completion_with_empty_tools"
   # The Rust renderer rejects empty tool-call arguments in the history (Python treats them as {}).
   - pytest -v -s entrypoints/openai/chat_completion/test_completion_with_function_calling.py -k "not test_no_args_tool_call"
   - pytest -v -s entrypoints/tool_parsers/test_granite4_tool_parser.py
