@@ -542,6 +542,37 @@ def test_bind_kv_cache_keeps_scheduler_block_views_for_runner():
     assert (mla[3] == 7).all() and (indexer[3] == 7).all()
 
 
+def test_bind_kv_cache_orders_nested_attention_modules():
+    """Attention modules nested in a numbered list inside a decoder layer carry
+    two integers in their names. Binding infers the per-layer stride rather
+    than asserting on them, and keeps the runner's caches in model order."""
+    from vllm.model_executor.models.utils import get_num_attn_modules_per_layer
+
+    class _Layer:
+        def bind_kv_cache(self, kv_cache):
+            self.kv_cache = kv_cache
+
+    names = [
+        f"model.layers.{layer}.self_attn.loop_attns.{loop}.attn"
+        for loop in range(2)  # registration order: loop-major
+        for layer in range(2)
+    ]
+    kv_caches = {name: torch.full((1,), float(i)) for i, name in enumerate(names)}
+    ctx = {name: _Layer() for name in kv_caches}
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(
+        kv_caches,
+        ctx,
+        runner_kv_caches,
+        get_num_attn_modules_per_layer(kv_caches),
+    )
+
+    assert all(ctx[name].kv_cache is kv_caches[name] for name in names)
+    # Model order: layer-major, module index within the layer.
+    assert [int(t.item()) for t in runner_kv_caches] == [0, 2, 1, 3]
+
+
 @pytest.mark.parametrize("shared,rank", [(False, 0), (True, 0), (True, 1)])
 @pytest.mark.parametrize("has_copies", [False, True])
 def test_hisparse_host_copy_waits_for_writes_on_writer_only(

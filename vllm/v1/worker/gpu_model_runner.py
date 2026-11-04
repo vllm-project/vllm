@@ -84,6 +84,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.models.utils import get_num_attn_modules_per_layer
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -6925,9 +6926,7 @@ class GPUModelRunner(
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
-        num_attn_module = (
-            2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
-        )
+        num_attn_module = get_num_attn_modules_per_layer(kv_caches)
         attn_groups = [g for groups in self.attn_groups for g in groups]
         if self.speculative_config:
             attn_groups += getattr(self.drafter, "draft_attn_groups", [])
