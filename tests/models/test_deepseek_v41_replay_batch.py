@@ -560,9 +560,9 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
 
 
-def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
-    """A chunk ending 2 * WINDOW (the minimum without graphs) before its prompt's end
-    replays one row; later chunks reading back past it get a floor and a replay."""
+def test_prefill_replays_only_the_prompt_tail(state):
+    """Without graphs the last 2 * WINDOW prompt tokens replay: a chunk before them
+    replays one row, and chunks whose window reaches back past them get a floor."""
 
     def chunk(start, length, prompt=500):
         batch = replace(
@@ -573,11 +573,14 @@ def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
         return _prepare(state, batch, CUDAGraphMode.NONE)
 
     assert chunk(0, 200)[0].rows.tolist() == [199]
-    for start, length in ((200, 100), (300, 1), (301, 26)):
+    replay, build = chunk(200, 100)
+    assert replay.rows.tolist() == list(range(44, 100))
+    assert build.replay_start.tolist() == [244]
+    for start, length in ((300, 1), (301, 26), (327, 44), (370, 1)):
         replay, build = chunk(start, length)
         assert replay.rows.tolist() == list(range(length))
-        assert build.replay_start.tolist() == [200]
-    assert chunk(327, 100) == (None, None)
+        assert build.replay_start.tolist() == [244]
+    assert chunk(371, 100) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -586,17 +589,19 @@ def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
         ({}, 512 + 2 * WINDOW),
         ({"long_prefill_token_threshold": 640}, None),
         ({"supports_multimodal_inputs": True}, None),
+        ({"policy": "priority"}, None),
         ({"max_num_new_slots_for_drafting": 63}, None),  # taken per request
         ({"num_speculative_tokens": 64}, None),  # adaptive verification drops all
     ],
 )
 def test_skipped_tails_stay_out_of_graphs(override, min_remaining):
-    """Chunks that may read rows a one-row chunk skipped must miss CUDA graphs: a
+    """Chunks whose window reaches past the replayed tail must miss CUDA graphs: a
     chunk cut short runs with at least its prefill cap less every draft."""
     from vllm.models.deepseek_v41.nvidia import model_state
 
     config = SimpleNamespace(
         supports_multimodal_inputs=False,
+        policy="fcfs",
         cudagraph_mode=CUDAGraphMode.PIECEWISE,
         max_cudagraph_capture_size=512,
         max_num_seqs=256,
