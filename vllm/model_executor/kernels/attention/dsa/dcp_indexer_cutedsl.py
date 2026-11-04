@@ -46,9 +46,23 @@ def stable_topk_from_gathered_candidates_cutedsl(
     topk: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Select each row's global top-``topk`` from all ranks' candidates.
+
+    ``gathered`` is rank-major ``[world_size, rows, topk, 2]``, as produced by a
+    dim-0 all-gather of each rank's ``[rows, topk, 2]`` candidates, and is read
+    in place: a dim-1 gather into ``[rows, world_size * topk, 2]`` would cost a
+    full reorder copy.
+    """
+    assert gathered.dim() == 4 and gathered.shape[2:] == (topk, 2), (
+        f"Expected [world_size, rows, {topk}, 2] candidates, "
+        f"got {tuple(gathered.shape)}"
+    )
+    assert gathered.stride(-1) == 1 and gathered.stride(-2) == 2, (
+        f"Candidate pairs must be contiguous, got strides {gathered.stride()}"
+    )
     if out is None:
         out = torch.empty(
-            (gathered.shape[0], topk),
+            (gathered.shape[1], topk),
             dtype=torch.int32,
             device=gathered.device,
         )
@@ -301,6 +315,10 @@ class StableTopKFromGatheredCandidatesKernel(
             f"to be a multiple of {tb_size}, got {compile_key.num_candidates}"
         )
         keys_per_thread = compile_key.num_candidates // tb_size
+        # Each rank contributes topk candidates (rank-major input). Whole
+        # tb_size-wide slices then fall in one rank, so each thread key's rank
+        # and offset are compile-time constants plus tid.
+        assert topk % tb_size == 0, f"Expected {topk=} to be a multiple of {tb_size=}"
 
         @cute.struct
         class SharedStorage:
@@ -486,9 +504,9 @@ class StableTopKFromGatheredCandidatesKernel(
 
         @cute.kernel
         def device_kernel(input: cute.Tensor, out: cute.Tensor):
+            # input is rank-major [world_size, rows, topk, 2].
             row, _, _ = cute.arch.block_idx()
             tid, _, _ = cute.arch.thread_idx()
-            input_row = input[row, None, None]
             output_row = out[row, None]
             keys = cute.make_rmem_tensor((keys_per_thread,), Uint64)
 
@@ -500,9 +518,10 @@ class StableTopKFromGatheredCandidatesKernel(
                 output_row[i] = Int32(-1)
 
             for key_idx in cutlass.range_constexpr(keys_per_thread):
-                col = tid + Int32(key_idx * tb_size)
-                score = Float32(input_row[col, 0])
-                token_id = Int32(input_row[col, 1])
+                src_rank = Int32((key_idx * tb_size) // topk)
+                cand = tid + Int32((key_idx * tb_size) % topk)
+                score = Float32(input[src_rank, row, cand, 0])
+                token_id = Int32(input[src_rank, row, cand, 1])
                 keys[key_idx] = stable_key(score, token_id)
 
             if tid == Int32(0):
@@ -541,7 +560,7 @@ class StableTopKFromGatheredCandidatesKernel(
             out: cute.Tensor,
             stream: CUstream,
         ):
-            grid = (gathered.shape[0], 1, 1)
+            grid = (gathered.shape[1], 1, 1)  # rows (rank-major input)
             device_kernel(gathered, out).launch(
                 grid=grid,
                 block=(tb_size, 1, 1),
@@ -561,7 +580,9 @@ class StableTopKFromGatheredCandidatesKernel(
         if dcp_world_size <= 1:
             return []
         topk, _ = _dcp_merge_topk_and_interleave(vllm_config)
-        if topk <= 0:
+        # The merge only runs with topk in (512, 1024, 2048): whole tb_size
+        # slices of each rank's candidates.
+        if topk <= 0 or topk % self.tb_size != 0:
             return []
         return self._trace_dispatch(self.dispatch)(
             topk=topk,
@@ -570,10 +591,17 @@ class StableTopKFromGatheredCandidatesKernel(
 
     def warmup_inputs(self, compile_key: CompileKey) -> tuple[Any, ...]:
         num_rows = cute.sym_int()
+        # Rank-major [world_size, rows, topk, 2] candidates.
+        world_size = compile_key.num_candidates // compile_key.topk
         gathered = cute.runtime.make_fake_tensor(
             Float32,
-            (num_rows, compile_key.num_candidates, 2),
-            stride=(cute.sym_int64(divisibility=2), 2, 1),
+            (world_size, num_rows, compile_key.topk, 2),
+            stride=(
+                cute.sym_int64(divisibility=2),
+                cute.sym_int64(divisibility=2),
+                2,
+                1,
+            ),
             assumed_align=8,
         )
         out = make_fake_tensor(
@@ -593,7 +621,7 @@ class StableTopKFromGatheredCandidatesKernel(
     ) -> CuTeDSLLaunchSpec[CompileKey]:
         compile_key = self.dispatch(
             topk=topk,
-            num_candidates=gathered.shape[1],
+            num_candidates=gathered.shape[0] * topk,
         )
         return compile_key, (gathered, out)
 

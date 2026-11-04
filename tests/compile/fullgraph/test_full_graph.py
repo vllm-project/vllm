@@ -98,17 +98,6 @@ def test_full_graph(
         for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
-        # Test depyf integration works
-        (
-            CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=Path(tempfile.gettempdir()),
-            ),
-            "facebook/opt-125m",
-            {},
-        ),
-    ]
-    + [
         # graph inductor partition
         (
             CompilationConfig(
@@ -155,6 +144,23 @@ def test_custom_compile_config(
     run_model(compilation_config, model, **model_kwargs)
 
 
+@create_new_process_for_each_test()
+def test_depyf_integration(disable_vllm_compile_cache):
+    """Compile with depyf's debugging hooks installed.
+
+    ``disable_vllm_compile_cache`` is what makes this a test rather than a
+    formality: depyf only ever sees a compilation that actually runs, so served
+    from a warm cache this exercises none of its hooks.
+    """
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            debug_dump_path=Path(tempfile.gettempdir()),
+        ),
+        "facebook/opt-125m",
+    )
+
+
 def run_model(
     compile_config: CompilationMode | CompilationConfig, model: str, **model_kwargs
 ):
@@ -184,7 +190,10 @@ def run_model(
     # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
     wait_for_memory_to_settle(
         threshold_ratio=1.0
-        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+        - (
+            model_kwargs.get("gpu_memory_utilization")
+            or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+        )
     )
 
     llm = LLM(

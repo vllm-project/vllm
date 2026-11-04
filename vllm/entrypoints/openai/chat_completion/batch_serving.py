@@ -3,6 +3,7 @@
 
 import asyncio
 import time
+from collections import Counter
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
@@ -16,7 +17,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatMessage,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_prompt_tokens_details,
+)
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
@@ -29,6 +34,11 @@ from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+
+def _sum_or_none(counts: list[int | None]) -> int | None:
+    """Sum per-prompt counts; ``None`` unless every prompt reported one."""
+    return None if None in counts else sum(count or 0 for count in counts)
 
 
 class OpenAIServingChatBatch(OpenAIServingChat):
@@ -206,6 +216,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             tokenizer,
             request_metadata,
             self.parser_cls,
+            mm_token_counts=[_get_mm_token_counts(p) for p in engine_prompts],
         )
 
     async def chat_completion_full_generator_batch(
@@ -218,6 +229,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         parser_cls: type[Parser] | None = None,
+        mm_token_counts: list[dict[str, int]] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
@@ -239,6 +251,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         choices: list[ChatCompletionResponseChoice] = []
         total_prompt_tokens = 0
         total_completion_tokens = 0
+        cached_tokens: list[int | None] = []
+        cache_creation_tokens: list[int | None] = []
 
         for prompt_idx in range(len(generators)):
             final_res = final_results.get(prompt_idx)
@@ -257,6 +271,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             total_completion_tokens += sum(
                 len(output.token_ids) for output in final_res.outputs
             )
+            cached_tokens.append(final_res.num_cached_tokens)
+            cache_creation_tokens.append(final_res.num_cache_creation_tokens)
 
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
@@ -334,10 +350,20 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 )
                 choices.append(choice_data)
 
+        mm_total: Counter[str] = Counter()
+        for counts in mm_token_counts or ():
+            mm_total.update(counts)
+
         usage = UsageInfo(
             prompt_tokens=total_prompt_tokens,
             completion_tokens=total_completion_tokens,
             total_tokens=total_prompt_tokens + total_completion_tokens,
+            prompt_tokens_details=_make_prompt_tokens_details(
+                self.enable_prompt_tokens_details,
+                _sum_or_none(cached_tokens),
+                _sum_or_none(cache_creation_tokens),
+                mm_total,
+            ),
         )
         request_metadata.final_usage_info = usage
 

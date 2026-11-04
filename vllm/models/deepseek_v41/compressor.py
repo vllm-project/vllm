@@ -271,6 +271,14 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
+    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    state accumulates in."""
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        return torch.mm(input_, self.weight.T, out_dtype=torch.float32)
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
@@ -321,7 +329,7 @@ class DeepseekCompressor(nn.Module):
         wkv_wgate_sizes = (
             [self.head_dim, self.head_dim] if self.has_gate else [self.head_dim]
         )
-        self.fused_wkv_wgate = MergedColumnParallelLinear(
+        self.fused_wkv_wgate = DeepseekV4CompressorKVScoreLinear(
             self.hidden_size,
             wkv_wgate_sizes,
             bias=False,

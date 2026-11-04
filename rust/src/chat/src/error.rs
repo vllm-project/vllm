@@ -42,6 +42,11 @@ pub enum Error {
     UnsupportedMultimodalRenderer,
     #[error("unsupported multimodal content: {0}")]
     UnsupportedMultimodalContent(&'static str),
+    #[error(
+        "multimodal content in a non-leading system or developer message is not supported \
+         when the chat template does not support the `developer` role"
+    )]
+    UnsupportedMultimodalSystemFallback,
     #[error("`{modality}` input is not supported by this model")]
     UnsupportedModality { modality: String },
     #[error("At most {limit} {modality}(s) may be provided in one prompt.")]
@@ -129,10 +134,12 @@ impl Error {
             | Self::ToolChoiceFunctionNotFound { .. }
             | Self::UnsupportedChatRole { .. }
             | Self::UntrustedRequestChatTemplate
-            | Self::UnsupportedRequestChatTemplate => true,
+            | Self::UnsupportedRequestChatTemplate
+            | Self::Tokenizer(vllm_tokenizer::TokenizerError::Unavailable) => true,
             Self::Text(error) => error.is_request_validation_error(),
             Self::UnsupportedMultimodalRenderer
             | Self::UnsupportedMultimodalContent(_)
+            | Self::UnsupportedMultimodalSystemFallback
             | Self::UnsupportedModality { .. }
             | Self::InvalidPreprocessedMultimodal { .. }
             | Self::MmLimitExceeded { .. } => true,
