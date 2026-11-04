@@ -6,7 +6,11 @@ import pytest
 import torch
 from vllm_test_utils.monitor import monitor
 
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    device_memory_info,
+    memory_profiling,
+)
 
 from ..utils import create_new_process_for_each_test
 
@@ -174,3 +178,34 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu(is_cuda: bool, is_wsl: bool):
         assert snapshot.free_memory == mock_cuda_free
         assert snapshot.total_memory == mock_cuda_total
         mock_psutil.virtual_memory.assert_not_called()
+
+
+@pytest.mark.parametrize("is_wsl", [False, True])
+def test_device_memory_info_integrated_gpu_accounting(is_wsl: bool):
+    """The shared helper corrects native UMA and keeps CUDA's budget on WSL."""
+    mock_cuda_free = 40 * 1024**3
+    mock_cuda_total = 120 * 1024**3
+    mock_psutil_available = 100 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.in_wsl", return_value=is_wsl),
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        mock_accelerator.get_memory_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_platform.is_cuda.return_value = True
+        mock_vmem = MagicMock()
+        mock_vmem.available = mock_psutil_available
+        mock_psutil.virtual_memory.return_value = mock_vmem
+
+        expected_free = mock_cuda_free if is_wsl else mock_psutil_available
+        assert device_memory_info("cuda:0") == (expected_free, mock_cuda_total)
+        mock_platform.is_integrated_gpu.assert_called_once_with(0)
+
+        mock_platform.is_integrated_gpu.return_value = False
+        assert device_memory_info("cuda:0") == (mock_cuda_free, mock_cuda_total)

@@ -372,11 +372,11 @@ def test_kvcr_tier_adapts_request_and_load(monkeypatch, backpressure):
     assert bindings is not None
     assert bindings.key_adapter is not None
     monkeypatch.setenv("VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", "0")
-    decode = bindings.key_adapter.decode
+    encode_to_router = bindings.key_adapter.encode_to_router
     hash_123 = (123).to_bytes(8, "big")
-    assert decode(BlockKey(bytes(key))) == hash_123
-    assert decode(BlockKey(bytes(same_hash_other_group))) == hash_123
-    assert decode(BlockKey(bytes(other_key))) == (124).to_bytes(8, "big")
+    assert encode_to_router(BlockKey(bytes(key))) == hash_123
+    assert encode_to_router(BlockKey(bytes(same_hash_other_group))) == hash_123
+    assert encode_to_router(BlockKey(bytes(other_key))) == (124).to_bytes(8, "big")
 
     tier.submit_load(_job(7, ctx, key=key, chunk_id=2))
 
