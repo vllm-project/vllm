@@ -16,6 +16,7 @@ steps:
   - pytest -v -s benchmarks/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Benchmarks CLI"
       dind: false
       device: mi355_dpx

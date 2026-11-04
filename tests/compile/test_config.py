@@ -325,6 +325,11 @@ def test_splitting_ops_dynamic():
         "vllm::unified_attention_with_output"
     ]
 
+
+@pytest.mark.skipif(
+    current_platform.is_xpu(), reason="XPU disables attention + quant fusion"
+)
+def test_splitting_ops_dynamic_attn_fusion():
     # When attn_fusion pass enabled.
     config = VllmConfig(
         compilation_config=CompilationConfig(
