@@ -47,6 +47,22 @@ def test_extensible_tensor_grows_without_moving() -> None:
 
 
 @create_new_process_for_each_test("spawn")
+def test_views_survive_shared_pycapsule_new_restype_change() -> None:
+    """Other libraries (e.g. FlashInfer's MNNVL helpers) reset the shared
+    ``ctypes.pythonapi.PyCapsule_New.restype``; views must not depend on it."""
+    import ctypes
+
+    _skip_unless_vmm()
+    ctypes.pythonapi.PyCapsule_New.restype = ctypes.c_void_p
+    buffer = ExtensibleTensor(4096, device="cuda")
+    try:
+        buffer.resize_per_segment_(1024)
+        assert buffer.full_view().numel() == 4096
+    finally:
+        buffer.free()
+
+
+@create_new_process_for_each_test("spawn")
 def test_extensible_tensor_rejects_shrink_and_overflow() -> None:
     _skip_unless_vmm()
     buffer = ExtensibleTensor(1024, device="cuda")
