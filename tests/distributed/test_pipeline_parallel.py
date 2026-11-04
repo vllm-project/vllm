@@ -90,10 +90,18 @@ class PPTestSettings:
 
     def iter_params(self, model_id: str):
         opts = self.test_options
+        # Skip at collection: each case runs in a fresh process, which costs
+        # seconds to start even when the case only skips.
+        marks = pytest.mark.skipif(
+            opts.multi_node_only and not VLLM_MULTI_NODE,
+            reason="Not in multi-node setting",
+        )
 
         for parallel_setup in self.parallel_setups:
             for backend in self.distributed_backends:
-                yield (model_id, parallel_setup, backend, self.runner, opts)
+                yield pytest.param(
+                    model_id, parallel_setup, backend, self.runner, opts, marks=marks
+                )
 
 
 # NOTE: You can adjust tp_base and/or pp_base locally to fit the model in GPU
