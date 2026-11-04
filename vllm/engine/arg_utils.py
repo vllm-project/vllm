@@ -400,7 +400,12 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
                 "safetensors_prefetch_block_size",
                 "max_num_queued_tokens",
             }
-            if name == "max_model_len":
+            # The same, also accepting "auto" (or -1)
+            human_readable_int_or_auto_args = {
+                "max_model_len",
+                "cpu_offload_stage_min_tokens",
+            }
+            if name in human_readable_int_or_auto_args:
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
             elif name in human_readable_int_args:
@@ -1493,10 +1498,7 @@ class EngineArgs:
         )
         offload_group.add_argument(
             "--cpu-offload-stage-min-tokens",
-            **{
-                **uva_kwargs["cpu_offload_stage_min_tokens"],
-                "type": human_readable_int_or_auto,
-            },
+            **uva_kwargs["cpu_offload_stage_min_tokens"],
         )
         offload_group.add_argument(
             "--offload-group-size",
