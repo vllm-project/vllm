@@ -178,15 +178,22 @@ def translate_remote_addresses(
     addresses: np.ndarray,
     allocations: tuple[IpcAllocation, ...],
     mapped_bases: tuple[int, ...],
+    lengths: np.ndarray | None = None,
 ) -> np.ndarray:
     if len(allocations) != len(mapped_bases):
         raise ValueError("CUDA IPC allocation mapping is incomplete")
+    if lengths is None:
+        lengths = np.ones(len(addresses), dtype=np.int64)
+    if len(lengths) != len(addresses) or np.any(lengths <= 0):
+        raise ValueError("Invalid CUDA IPC descriptor lengths")
     translated = np.empty(len(addresses), dtype=np.int64)
-    for index, address in enumerate(addresses.tolist()):
+    for index, (address, length) in enumerate(
+        zip(addresses.tolist(), lengths.tolist(), strict=True)
+    ):
         for allocation, mapped_base in zip(allocations, mapped_bases, strict=True):
             start = allocation.exported_base
             end = start + allocation.length
-            if start <= address < end:
+            if start <= address and address + length <= end:
                 translated[index] = mapped_base + address - start
                 break
         else:
@@ -200,6 +207,7 @@ def coalesce_copy_spans(
     src_lengths: np.ndarray,
     dst_lengths: np.ndarray,
 ) -> list[CopySpan]:
+    """Merge adjacent or aliased ranges only when their byte mapping agrees."""
     lengths = np.asarray(src_lengths, dtype=np.int64)
     if not (
         len(src_addresses) == len(dst_addresses) == len(lengths) == len(dst_lengths)
@@ -207,23 +215,34 @@ def coalesce_copy_spans(
         raise ValueError("CUDA IPC source and destination descriptors differ")
     if not np.array_equal(lengths, np.asarray(dst_lengths, dtype=np.int64)):
         raise ValueError("CUDA IPC descriptor lengths differ")
+    ranges = sorted(
+        zip(
+            src_addresses.tolist(),
+            dst_addresses.tolist(),
+            lengths.tolist(),
+            strict=True,
+        ),
+        key=lambda span: span[1],
+    )
     spans: list[CopySpan] = []
-    for src, dst, length in zip(
-        src_addresses.tolist(),
-        dst_addresses.tolist(),
-        lengths.tolist(),
-        strict=True,
-    ):
+    for src, dst, length in ranges:
         if length <= 0:
             raise ValueError("CUDA IPC copy span must be non-empty")
-        contiguous = bool(
-            spans
-            and spans[-1].src + spans[-1].length == src
-            and spans[-1].dst + spans[-1].length == dst
-        )
-        if contiguous:
+        if spans:
             previous = spans[-1]
-            spans[-1] = CopySpan(previous.src, previous.dst, previous.length + length)
-        else:
-            spans.append(CopySpan(src, dst, length))
+            previous_end = previous.dst + previous.length
+            same_mapping = src - dst == previous.src - previous.dst
+            if dst < previous_end and not same_mapping:
+                raise ValueError(
+                    "CUDA IPC overlapping destinations map to different sources"
+                )
+            if dst <= previous_end and same_mapping:
+                # Hybrid FA/SSM descriptors can alias one physical cache page.
+                spans[-1] = CopySpan(
+                    previous.src,
+                    previous.dst,
+                    max(previous_end, dst + length) - previous.dst,
+                )
+                continue
+        spans.append(CopySpan(src, dst, length))
     return spans

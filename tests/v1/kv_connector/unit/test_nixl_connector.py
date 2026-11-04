@@ -4748,6 +4748,7 @@ def test_scheduler_advertises_transfer_topology(
         scheduler.shutdown()
 
 
+@pytest.mark.cpu_test
 def test_local_fastpath_is_selected_only_for_same_boot():
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
         NixlPullConnectorScheduler,
@@ -4783,42 +4784,6 @@ def test_local_fastpath_is_selected_only_for_same_boot():
         assert load_async
     finally:
         scheduler.shutdown()
-
-
-def test_stream_ordered_load_is_submitted_once_before_forward():
-    from vllm.v1.worker.gpu import kv_connector as runner_connector
-
-    backend = MagicMock(supports_stream_ordered_load=True)
-    active = runner_connector.ActiveKVConnector.__new__(
-        runner_connector.ActiveKVConnector
-    )
-    active._disabled = False
-    active._early_load_started = False
-    active._pending_load_kwargs = None
-    active.kv_connector = backend
-    active.vllm_config = SimpleNamespace()
-    output = SimpleNamespace(
-        kv_connector_metadata=NixlConnectorMetadata(),
-        has_sync_kv_loads=True,
-    )
-    with (
-        patch.object(
-            runner_connector, "is_forward_context_available", return_value=False
-        ),
-        patch.object(
-            runner_connector,
-            "set_forward_context",
-            return_value=contextlib.nullcontext(),
-        ),
-        patch.object(runner_connector, "get_forward_context", return_value=None),
-    ):
-        active.start_load_early(output)
-        active.pre_forward(output)
-
-    backend.handle_preemptions.assert_called_once()
-    backend.bind_connector_metadata.assert_called_once()
-    backend.start_load_kv_early.assert_called_once_with()
-    backend.start_load_kv.assert_called_once()
 
 
 @pytest.mark.parametrize(

@@ -218,7 +218,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
             return
 
-        if any(len(group) > 0 for group in meta.local_block_ids):
+        if meta.local_fastpath is not True and any(
+            len(group) > 0 for group in meta.local_block_ids
+        ):
             # The scheduler waits for finished_recving from *every* worker.
             # Under DCP a rank's slice can legitimately come out empty when its
             # interleaved positions fall past the end of the sequence. _read_blocks
@@ -479,7 +481,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         )
         remote_metadata, mapped_bases = peer
         remote_addresses = translate_remote_addresses(
-            remote_addresses, remote_metadata.allocations, mapped_bases
+            remote_addresses, remote_metadata.allocations, mapped_bases, remote_lengths
         )
         spans = coalesce_copy_spans(
             remote_addresses,
@@ -487,22 +489,28 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_lengths,
             local_lengths,
         )
-        destinations = sorted((span.dst, span.dst + span.length) for span in spans)
-        overlaps = any(
-            end > start for (_, end), (start, _) in zip(destinations, destinations[1:])
-        )
-        if overlaps:
-            raise ValueError("NIXL local fast path has overlapping destinations")
+        if request_id in self._local_fastpath_transfers:
+            raise ValueError(
+                "NIXL local fast path requires one read per request per rank"
+            )
 
         if self._local_fastpath_stream is None:
             self._local_fastpath_stream = torch.Stream(
                 device=torch.accelerator.current_device_index()
             )
         stream = self._local_fastpath_stream
-        src = torch.tensor([span.src for span in spans], dtype=torch.int64)
-        dst = torch.tensor([span.dst for span in spans], dtype=torch.int64)
-        sizes = torch.tensor([span.length for span in spans], dtype=torch.int64)
+        src = torch.tensor(
+            [span.src for span in spans], dtype=torch.int64, device="cpu"
+        )
+        dst = torch.tensor(
+            [span.dst for span in spans], dtype=torch.int64, device="cpu"
+        )
+        sizes = torch.tensor(
+            [span.length for span in spans], dtype=torch.int64, device="cpu"
+        )
         event = torch.Event()
+        # Destination initialization and the preceding forward must finish first.
+        stream.wait_stream(torch.accelerator.current_stream())
         with stream:
             swap_blocks_batch(src, dst, sizes)
             event.record(stream)
@@ -513,6 +521,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         )
         self._local_fastpath_waits.append(event)
         self._local_fastpath_transfers[request_id] = _LocalFastpathTransfer(event)
+        if not getattr(self, "_local_fastpath_logged", False):
+            logger.info(
+                "NIXL_LOCAL_CUDA_IPC_COPY submitted rank=%s spans=%s bytes=%s",
+                self.tp_rank,
+                len(spans),
+                sum(span.length for span in spans),
+            )
+            self._local_fastpath_logged = True
 
     def _read_blocks(
         self,

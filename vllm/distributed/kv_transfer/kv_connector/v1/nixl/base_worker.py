@@ -2008,7 +2008,6 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        self._mixed_mem_types = len(set(region_mem_types)) > 1
         self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (
@@ -2634,6 +2633,17 @@ class NixlBaseConnectorWorker:
             if nixl_agent_meta.block_size != self.block_size:
                 raise ValueError(
                     "NIXL local fast path currently requires matching block sizes"
+                )
+            if (
+                remote_dcp_size != 1
+                or nixl_agent_meta.pcp_size != 1
+                or nixl_agent_meta.kv_cache_layout != self.kv_cache_layout
+                or nixl_agent_meta.physical_blocks_per_logical_kv_block
+                != self._physical_blocks_per_logical_kv_block
+                or (nixl_agent_meta.region_group_ids or []) != self.region_group_ids
+            ):
+                raise ValueError(
+                    "NIXL local fast path requires matching cache geometry"
                 )
         if (
             self._supports_pp_hma
