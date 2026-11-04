@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The speculative round contract: plan types, plan layout, commit along a path.
+"""The speculative round contract: plan types, plan layout, tree accept, and the
+commit along the accepted path.
+
+A request's tree is ``parent``: ``parent[i]`` is the row that row ``i`` extends,
+``-1`` for the root (row 0), and a parent always precedes its child.
 
 The kernel tests run on a GPU, or on CPU under ``TRITON_INTERPRET=1`` (set before
 anything imports Triton).
@@ -8,26 +12,25 @@ anything imports Triton).
 
 import os
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
 import torch
 
-from tests.utils_tree import depths_and_ancestors, path_to, random_parents
 from vllm.config import CacheConfig
 from vllm.platforms import current_platform
-from vllm.v1.worker.gpu import model_runner as model_runner_module
+from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
+    FullAttentionSpec,
+    HiddenStateCacheSpec,
+)
 from vllm.v1.worker.gpu.input_batch import prepare_pos_seq_lens
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.spec_decode.commit import (
     KvCompactor,
-    accept_result_of,
     accepted_rows,
     kv_cache_layout,
 )
@@ -46,10 +49,11 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     AcceptResult,
     PlanShape,
     SpecResources,
+    VerifyOutput,
     VerifyPlan,
 )
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
-from vllm.v1.worker.gpu.spec_decode.speculator_config import SpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.tree_accept import accept_greedy_tree, walk_tree
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
 DEVICE = current_platform.device_type if HAS_GPU else "cpu"
@@ -59,11 +63,45 @@ requires_kernels = pytest.mark.skipif(
 )
 
 
-def test_plans_state_their_shape():
-    resources = SpecResources(
-        max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(None))
+# --- Reference trees --------------------------------------------------------
+
+
+def _random_parents(gen: np.random.Generator, num_rows: int) -> list[int]:
+    """A random tree: each row extends a uniformly drawn earlier row."""
+    return [-1] + [int(gen.integers(0, row)) for row in range(1, num_rows)]
+
+
+def _random_tree(gen: np.random.Generator, num_reqs: int, max_rows: int):
+    return np.array(
+        [_random_parents(gen, max_rows) for _ in range(num_reqs)], dtype=np.int32
     )
-    assert resources.max_branching == 1
+
+
+def _reference_layout(parent, counts):
+    """Each row's depth and its ancestor bitmask (bit ``j``: row ``j`` is on the
+    row's path from the root, the row itself included)."""
+    depth = np.zeros_like(parent)
+    ancestors = np.zeros(parent.shape, dtype=np.int64)
+    for b, count in enumerate(counts):
+        for row in range(count):
+            up = int(parent[b, row])
+            depth[b, row] = 0 if row == 0 else depth[b, up] + 1
+            ancestors[b, row] = (1 << row) | (0 if row == 0 else ancestors[b, up])
+    return depth, ancestors
+
+
+def _path_to(parent, row: int) -> list[int]:
+    """The rows from the root down to ``row``."""
+    path = [row]
+    while int(parent[path[-1]]) >= 0:
+        path.append(int(parent[path[-1]]))
+    return path[::-1]
+
+
+# --- Plan and resource types ------------------------------------------------
+
+
+def test_plan_validation():
     parent = torch.tensor([[-1, 0, 0, 1]], dtype=torch.int32)
     plan = VerifyPlan(
         parent=parent,
@@ -71,22 +109,42 @@ def test_plans_state_their_shape():
         tokens=torch.zeros(1, 4, dtype=torch.int32),
     )
     assert not plan.is_chain
-    result = AcceptResult(
-        path=torch.tensor([[0, 2]], dtype=torch.int32),
-        path_len=torch.tensor([2], dtype=torch.int32),
-        sampled=torch.tensor([[5, 6]]),
-    )
-    assert result.processed_logits is None
-
-
-def test_only_a_chain_plan_may_leave_its_rows_to_the_runner():
-    parent = torch.tensor([[-1, 0, 1]], dtype=torch.int32)
-    # The runner's own chain plan: counts and tokens are in its buffers.
+    # Only the runner's own chain plan leaves its counts and tokens to the runner.
     assert VerifyPlan(parent=parent, count=None, is_chain=True).tokens is None
     with pytest.raises(ValueError, match="count and tokens"):
         VerifyPlan(parent=parent, count=None)
     with pytest.raises(ValueError, match="count and tokens"):
-        VerifyPlan(parent=parent, count=torch.tensor([3], dtype=torch.int32))
+        VerifyPlan(parent=parent, count=torch.tensor([4], dtype=torch.int32))
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        (dict(max_candidates=0, capture_shapes=()), "max_candidates"),
+        (dict(max_candidates=2, capture_shapes=(PlanShape(3),)), "outside"),
+        (dict(max_candidates=2, capture_shapes=(PlanShape(0),)), "outside"),
+        (dict(max_candidates=2, capture_shapes=(), max_branching=0), "max_branching"),
+        (
+            dict(
+                max_candidates=4,
+                capture_shapes=(PlanShape(4), PlanShape(None), PlanShape(1)),
+            ),
+            None,
+        ),
+    ],
+)
+def test_spec_resources(kwargs, match):
+    if match is not None:
+        with pytest.raises(ValueError, match=match):
+            SpecResources(**kwargs)
+        return
+    resources = SpecResources(**kwargs)
+    assert resources.max_branching == 1
+    assert resources.uniform_counts == [1, 4]
+    assert resources.varlen
+
+
+# --- Plan layout ------------------------------------------------------------
 
 
 def _random_batch(gen: np.random.Generator, max_rows: int):
@@ -104,7 +162,8 @@ def _random_batch(gen: np.random.Generator, max_rows: int):
 
 
 def _chain_positions(idx_mapping, query_start_loc, num_computed, num_tokens):
-    positions = torch.full((num_tokens + 5,), -7, dtype=torch.int64, device=DEVICE)
+    """The positions the runner computes today."""
+    positions = torch.full((num_tokens,), -7, dtype=torch.int64, device=DEVICE)
     seq_lens = torch.zeros(len(idx_mapping) + 2, dtype=torch.int32, device=DEVICE)
     prepare_pos_seq_lens(
         torch.tensor(idx_mapping, dtype=torch.int32, device=DEVICE),
@@ -116,62 +175,10 @@ def _chain_positions(idx_mapping, query_start_loc, num_computed, num_tokens):
     return positions
 
 
-def _random_tree(gen: np.random.Generator, num_reqs: int, max_rows: int):
-    return np.array(
-        [random_parents(gen, max_rows) for _ in range(num_reqs)], dtype=np.int32
-    )
-
-
-def _reference_layout(parent, counts):
-    depth = np.zeros_like(parent)
-    ancestors = np.zeros(parent.shape, dtype=np.int64)
-    for b, count in enumerate(counts):
-        depth[b, :count], ancestors[b, :count] = depths_and_ancestors(parent[b, :count])
-    return depth, ancestors
-
-
-@requires_kernels
-@pytest.mark.parametrize("seed", range(6))
-def test_plan_layout_of_a_chain_keeps_todays_positions(seed):
-    """Laid out by the plan kernel, a chain's positions are the ones the runner
-    computes today, and each row's ancestors are the rows before it."""
-    gen = np.random.default_rng(seed)
-    max_rows = int(gen.integers(2, 9))
-    idx_mapping, qsl, num_computed, _, counts = _random_batch(gen, max_rows)
-    num_tokens = int(qsl[-1])
-    today = _chain_positions(idx_mapping, qsl, num_computed, num_tokens)
-    positions = today.clone()
-    num_reqs = len(counts)
-    plan = VerifyPlan(
-        parent=chain_parents(num_reqs, max_rows, torch.device(DEVICE)),
-        count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
-        tokens=torch.zeros(num_reqs, max_rows, dtype=torch.int32, device=DEVICE),
-    )
-    layout = PlanLayout(num_tokens + 5, max_rows, torch.device(DEVICE))
-    layout.apply(
-        plan,
-        plan.count,
-        torch.tensor(qsl, device=DEVICE),
-        positions,
-        torch.zeros(num_tokens + 5, dtype=torch.int32, device=DEVICE),
-        num_reqs,
-        num_tokens,
-    )
-
-    assert torch.equal(positions, today)
-    tree_ancestors = layout.tree_ancestors.cpu().numpy()
-    for b, count in enumerate(counts):
-        start = qsl[b + 1] - count
-        rows = np.arange(count)
-        assert (
-            tree_ancestors[start : start + count].tolist()
-            == ((1 << (rows + 1)) - 1).tolist()
-        )
-
-
-def _runner_and_batch(plan, positions, query_start_loc, max_branching=1):
-    """A runner whose block tables record the positions slot mappings are computed
-    from, and a batch carrying ``plan``."""
+def _runner_and_batch(plan, positions, query_start_loc, max_branching=1, max_rows=4):
+    """The runner members ``prepare_attn`` reads, with block tables that record
+    the positions slot mappings are computed from, and a batch carrying
+    ``plan``."""
     seen = {}
 
     def compute_slot_mappings(idx_mapping, qsl, positions, num_tokens_padded):
@@ -179,7 +186,6 @@ def _runner_and_batch(plan, positions, query_start_loc, max_branching=1):
         return "slot_mappings"
 
     num_tokens = positions.shape[0]
-    max_rows = 4
     runner = SimpleNamespace(
         pcp_manager=None,
         block_tables=SimpleNamespace(
@@ -209,72 +215,127 @@ def _runner_and_batch(plan, positions, query_start_loc, max_branching=1):
     return runner, batch, seen
 
 
-@pytest.mark.parametrize("with_drafts", [False, True])
-def test_runner_chain_plan_changes_nothing(with_drafts):
-    """A speculator that never branches: the chain plan the runner builds from its
-    drafts leaves positions and slot mappings as they were and launches nothing."""
-    plan = (
-        VerifyPlan(
-            parent=chain_parents(8, 4, torch.device(DEVICE)), count=None, is_chain=True
-        )
-        if with_drafts
-        else None
+def _spec_round(max_branching=2, max_num_tokens=16, max_rows=4, max_num_reqs=8):
+    resources = SpecResources(
+        max_candidates=max_rows, capture_shapes=(), max_branching=max_branching
     )
-    positions = torch.arange(10, 22, device=DEVICE)
-    qsl = torch.tensor([0, 4, 12], dtype=torch.int32, device=DEVICE)
-    runner, batch, seen = _runner_and_batch(plan, positions.clone(), qsl)
-
-    assert GPUModelRunner.prepare_attn(runner, batch) == (
-        ("block_table",),
-        "slot_mappings",
+    return SpecRound(
+        None,  # type: ignore[arg-type]
+        resources,
+        max_num_reqs,
+        max_num_tokens,
+        max_rows - 1,
+        torch.device(DEVICE),
     )
-    assert torch.equal(seen["positions"], positions)
-    assert torch.equal(batch.positions, positions)
-    assert batch.tree_parents is None and batch.tree_ancestors is None
 
 
 @requires_kernels
-def test_runner_lays_out_a_tree_after_the_chain_slot_mappings():
-    positions = torch.arange(10, 16, device=DEVICE)
-    qsl = torch.tensor([0, 2, 6], dtype=torch.int32, device=DEVICE)
-    parent = torch.tensor([[-1, 0, 0, 0], [-1, 0, 0, 1]], dtype=torch.int32)
-    tokens = torch.tensor([[0, 0, 0, 0], [0, 31, 32, 33]], dtype=torch.int32)
+@pytest.mark.parametrize("seed", range(4))
+def test_chain_layout_is_todays(seed):
+    """A chain keeps today's positions. Laid out by the plan kernel, each row's
+    ancestors are the rows before it; through the runner, a speculator that
+    never branches launches nothing, with or without drafts."""
+    gen = np.random.default_rng(seed)
+    max_rows = int(gen.integers(2, 9))
+    idx_mapping, qsl, num_computed, _, counts = _random_batch(gen, max_rows)
+    num_tokens, num_reqs = int(qsl[-1]), len(counts)
+    today = _chain_positions(idx_mapping, qsl, num_computed, num_tokens)
+    positions = today.clone()
     plan = VerifyPlan(
-        parent=parent.to(DEVICE),
-        count=torch.tensor([1, 4], dtype=torch.int32, device=DEVICE),
-        tokens=tokens.to(DEVICE),
+        parent=chain_parents(num_reqs, max_rows, torch.device(DEVICE)),
+        count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
+        tokens=torch.zeros(num_reqs, max_rows, dtype=torch.int32, device=DEVICE),
+    )
+    layout = PlanLayout(num_tokens, max_rows, torch.device(DEVICE))
+    layout.apply(
+        plan,
+        plan.count,
+        torch.tensor(qsl, device=DEVICE),
+        positions,
+        torch.zeros(num_tokens, dtype=torch.int32, device=DEVICE),
+        num_reqs,
+        num_tokens,
+    )
+
+    assert torch.equal(positions, today)
+    tree_ancestors = layout.tree_ancestors.cpu().numpy()
+    for b, count in enumerate(counts):
+        start = qsl[b + 1] - count
+        rows = np.arange(count)
+        assert (
+            tree_ancestors[start : start + count].tolist()
+            == ((1 << (rows + 1)) - 1).tolist()
+        )
+
+    runner_chain = VerifyPlan(
+        parent=chain_parents(num_reqs, max_rows, torch.device(DEVICE)),
+        count=None,
+        is_chain=True,
+    )
+    qsl_gpu = torch.tensor(qsl, device=DEVICE)
+    for runner_plan in (None, runner_chain):
+        runner, batch, seen = _runner_and_batch(
+            runner_plan, today.clone(), qsl_gpu, max_rows=max_rows
+        )
+        assert GPUModelRunner.prepare_attn(runner, batch) == (
+            ("block_table",),
+            "slot_mappings",
+        )
+        assert torch.equal(seen["positions"], today)
+        assert torch.equal(batch.positions, today)
+        assert batch.tree_parents is None and batch.tree_ancestors is None
+
+
+@requires_kernels
+@pytest.mark.parametrize("seed", range(4))
+def test_tree_layout_matches_reference(seed):
+    """The runner lays out random trees after the chain slot mappings. Plan rows
+    are the last ``count`` tokens of each query: each candidate sits at the
+    root's position plus its depth, with the plan's token, a query-local parent
+    and plan-relative ancestor bits. Tokens in front of a plan keep the chain
+    layout (causal, no ancestor bits). ``restore`` brings the chain back."""
+    gen = np.random.default_rng(100 + seed)
+    max_rows = int(gen.integers(2, 9))
+    idx_mapping, qsl, num_computed, query_lens, counts = _random_batch(gen, max_rows)
+    num_tokens, num_reqs = int(qsl[-1]), len(counts)
+    chain = _chain_positions(idx_mapping, qsl, num_computed, num_tokens)
+    parent = _random_tree(gen, num_reqs, max_rows)
+    tokens = gen.integers(100, 1000, (num_reqs, max_rows)).astype(np.int32)
+    plan = VerifyPlan(
+        parent=torch.tensor(parent, device=DEVICE),
+        count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
+        tokens=torch.tensor(tokens, device=DEVICE),
     )
     runner, batch, seen = _runner_and_batch(
-        plan, positions.clone(), qsl, max_branching=2
+        plan,
+        chain.clone(),
+        torch.tensor(qsl, device=DEVICE),
+        max_branching=2,
+        max_rows=max_rows,
     )
 
     GPUModelRunner.prepare_attn(runner, batch)
-    assert torch.equal(seen["positions"], positions)
-    # Request 1 verifies rows 2..5: root at 12, two children at 13, a grandchild at 14.
-    assert batch.positions.tolist() == [10, 11, 12, 13, 13, 14]
-    # The candidates' tokens come from the plan; the root keeps its token.
-    assert batch.input_ids.tolist() == [7, 7, 7, 31, 32, 33]
-    # Plan rows are the last ``count`` tokens of each query; request 0's first
-    # token is in front of its plan and keeps the chain layout (causal, bits 0).
-    assert batch.tree_parents.tolist() == [-1, 0, -1, 0, 0, 1]
-    assert batch.tree_ancestors.tolist() == [0, 0b1, 0b1, 0b11, 0b101, 0b1011]
+
+    depth, ancestors = _reference_layout(parent, counts)
+    want_pos, want_ids = chain.tolist(), [7] * num_tokens
+    want_parents, want_ancestors = [], []
+    for b, count in enumerate(counts):
+        offset = int(query_lens[b] - count)
+        root = int(qsl[b]) + offset
+        for t in range(int(query_lens[b])):
+            row = t - offset
+            want_parents.append(t - 1 if row <= 0 else offset + parent[b, row])
+            want_ancestors.append(0 if row < 0 else int(ancestors[b, row]))
+            if row > 0:
+                want_pos[root + row] = want_pos[root] + int(depth[b, row])
+                want_ids[root + row] = int(tokens[b, row])
+    assert torch.equal(seen["positions"], chain)
+    assert batch.positions.tolist() == want_pos
+    assert batch.input_ids.tolist() == want_ids
+    assert batch.tree_parents.tolist() == want_parents
+    assert batch.tree_ancestors.tolist() == want_ancestors
     runner.spec_round.restore(batch)
-    assert torch.equal(batch.positions, positions)
-
-
-@requires_kernels
-def test_runner_lays_out_chains_too_when_the_speculator_branches():
-    """With max_branching > 1 a chain (or a batch without drafts) is laid out as
-    the chain of its query rows, so the captured tree graph replays current
-    metadata: parents i - 1 and no ancestor bits (causal)."""
-    positions = torch.arange(10, 17, device=DEVICE)
-    qsl = torch.tensor([0, 2, 7], dtype=torch.int32, device=DEVICE)
-    runner, batch, _ = _runner_and_batch(None, positions.clone(), qsl, max_branching=3)
-
-    GPUModelRunner.prepare_attn(runner, batch)
-    assert torch.equal(batch.positions, positions)
-    assert batch.tree_parents.tolist() == [-1, 0, -1, 0, 1, 2, 3]
-    assert batch.tree_ancestors.tolist() == [0] * 7
+    assert torch.equal(batch.positions, chain)
 
 
 def _rope_state(num_dims, max_num_reqs, max_model_len, num_tokens, prefill, delta):
@@ -327,7 +388,7 @@ def _mrope_tree_batch(last_parent):
         qsl.cpu().numpy(),
         num_computed.cpu().numpy(),
         num_tokens,
-    )[:num_tokens]
+    )
     runner, batch, _ = _runner_and_batch(plan, chain.clone(), qsl, max_branching=2)
     batch.idx_mapping = idx_mapping
     req_states = SimpleNamespace(
@@ -338,109 +399,189 @@ def _mrope_tree_batch(last_parent):
     return runner, batch, req_states, model_state, chain, counts, parent
 
 
-def _paths(parent_row, count):
+def _leaf_paths(parent_row, count):
     """Every root-to-leaf path of a request's plan, as plan rows."""
-    children = {
-        i: [c for c in range(1, count) if parent_row[c] == i] for i in range(count)
-    }
-    paths, stack = [], [[0]]
-    while stack:
-        path = stack.pop()
-        kids = children[path[-1]]
-        if not kids:
-            paths.append(path)
-        stack.extend(path + [c] for c in kids)
-    return paths
+    leaves = set(range(count)) - {int(p) for p in parent_row[1:count]}
+    return [_path_to(parent_row, leaf) for leaf in sorted(leaves)]
 
 
 @requires_kernels
 @pytest.mark.parametrize("last_parent", range(3))
-def test_mrope_tree_positions_are_the_chain_positions_of_each_path(last_parent):
-    """M-RoPE positions of a laid-out plan: every section of a verify row is its
-    1-D plan position plus the request's M-RoPE offset, and along each
-    root-to-leaf path they are the positions that path verified as a chain gets.
-    Prefill rows keep their staged positions."""
+def test_mrope_tree_positions(last_parent):
+    """Every M-RoPE section of a verify row moves by plan position - chain
+    position, as the 1-D position does, so along each root-to-leaf path the
+    positions are the ones that path verified as a chain gets. Prefill rows keep
+    their staged positions. Request 1 (30 computed, offset -5) verifies parents
+    [-1, 0, 0, 1]; request 2 (41 computed, offset 7) [-1, 0, 1, last_parent]."""
     runner, batch, req_states, state, chain, counts, parent = _mrope_tree_batch(
         last_parent
     )
     GPUModelRunner.prepare_attn(runner, batch)
-    plan_pos = batch.positions.clone()
     rope = DefaultModelState.prepare_inputs(state, batch, req_states)["positions"]
     assert rope is not None
     rope = rope.clone().cpu()
     # The same request rows verified as a chain: no plan delta.
     batch.tree_pos_delta = None
-    chain_inputs = DefaultModelState.prepare_inputs(state, batch, req_states)
-    chain_rope = chain_inputs["positions"]
+    chain_rope = DefaultModelState.prepare_inputs(state, batch, req_states)["positions"]
     assert chain_rope is not None
     chain_rope = chain_rope.clone().cpu()
 
+    assert torch.equal(rope, chain_rope + (batch.positions - chain).cpu())
+    assert rope[:, 0].tolist() == [103, 203, 303]
     qsl = batch.query_start_loc.tolist()
-    delta = state.rope_state.prefill_delta.gpu.tolist()
-    for b, count in enumerate(counts):
-        start = qsl[b + 1] - count
-        slot = int(batch.idx_mapping[b])
-        if b == 0:  # prefill chunk: staged positions, untouched by the plan
-            assert torch.equal(rope[:, qsl[0] : qsl[1]], chain_rope[:, : qsl[1]])
-            assert rope[:, 0].tolist() == [103, 203, 303]
-            continue
-        rows = torch.arange(start, start + count)
-        for j in range(rope.shape[0]):
-            assert torch.equal(rope[j, rows], plan_pos[rows].cpu() + delta[slot])
-        for path in _paths(parent[b], count):
+    for b in (1, 2):
+        start = qsl[b + 1] - counts[b]
+        for path in _leaf_paths(parent[b], counts[b]):
             along = torch.tensor([start + r for r in path])
             assert torch.equal(
                 rope[:, along], chain_rope[:, start : start + len(path)]
             ), (b, path)
+    if last_parent == 1:
+        for j in range(3):
+            assert rope[j, 5:].tolist() == [25, 26, 26, 27, 48, 49, 50, 50]
+
+
+# --- Tree accept ------------------------------------------------------------
+
+
+def _reference_walk(parent, count, drafted, target):
+    """Root first: the child whose drafted token equals the current row's target
+    token, the lowest row on ties, until there is none."""
+    path, sampled = [0], [target[0]]
+    node = 0
+    while True:
+        children = [
+            r
+            for r in range(1, count)
+            if parent[r] == node and drafted[r] != -1 and drafted[r] == target[node]
+        ]
+        if not children:
+            return path, sampled
+        node = children[0]
+        path.append(node)
+        sampled.append(target[node])
+
+
+def _verify_output(drafted, row_start, logits=None, num_reqs=0):
+    return VerifyOutput(
+        logits=logits,
+        row_start=row_start,
+        idx_mapping=torch.arange(num_reqs, device=DEVICE),
+        idx_mapping_np=np.arange(num_reqs),
+        expanded_idx_mapping=None,
+        expanded_local_pos=None,
+        positions=None,
+        drafted=drafted,
+        draft_tokens=None,
+        seq_lens_upper_bound_np=None,
+    )
+
+
+def _tree_plan(parent, counts):
+    parent = torch.tensor(parent, dtype=torch.int32, device=DEVICE)
+    return VerifyPlan(
+        parent=parent,
+        count=torch.tensor(counts, dtype=torch.int32, device=DEVICE),
+        tokens=torch.zeros_like(parent),
+    )
 
 
 @requires_kernels
-def test_mrope_tree_positions_shift_every_section_by_the_plan_depth():
-    """Each section of a row's M-RoPE position moves by plan position - chain
-    position, as the 1-D positions do. Example: request 1 (30 computed, offset
-    -5) verifies parents [-1, 0, 0, 1]; request 2 (41 computed, offset 7)
-    verifies [-1, 0, 1, 1]."""
-    runner, batch, req_states, state, chain, _, _ = _mrope_tree_batch(1)
-    GPUModelRunner.prepare_attn(runner, batch)
-    rope = DefaultModelState.prepare_inputs(state, batch, req_states)["positions"]
-    assert rope is not None
-    rope = rope.clone().cpu()
-    batch.tree_pos_delta = None
-    shifted = DefaultModelState.prepare_inputs(state, batch, req_states)["positions"]
-    assert shifted is not None
-    shifted = shifted.clone().cpu()
-    shifted += (batch.positions - chain).cpu()
-
-    assert torch.equal(rope, shifted)
-    for j in range(3):
-        assert rope[j, 5:].tolist() == [25, 26, 26, 27, 48, 49, 50, 50]
-
-
-def _spec_round(max_branching=2, max_num_tokens=16, max_rows=4, max_num_reqs=8):
-    resources = SpecResources(
-        max_candidates=max_rows, capture_shapes=(), max_branching=max_branching
-    )
-    return SpecRound(
-        None,  # type: ignore[arg-type]
-        resources,
-        max_num_reqs,
-        max_num_tokens,
-        max_rows - 1,
-        torch.device(DEVICE),
+@pytest.mark.parametrize("seed", range(4))
+def test_walk_tree_matches_reference(seed):
+    """The walk follows the child holding the target token. Rows past a
+    request's count and masked drafts (-1) are never accepted."""
+    gen = np.random.default_rng(seed)
+    num_reqs, num_cols, vocab = 7, 6, 3
+    parent = _random_tree(gen, num_reqs, num_cols)
+    counts = gen.integers(1, num_cols + 1, num_reqs)
+    row_start = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+    drafted = [
+        -1 if r == 0 else int(gen.integers(0, vocab)) for c in counts for r in range(c)
+    ]
+    # Half the candidates match their parent's target, so paths grow.
+    target = [int(gen.integers(0, vocab)) for _ in drafted]
+    for b, count in enumerate(counts):
+        for r in range(1, count):
+            if gen.random() < 0.5:
+                target[row_start[b] + parent[b, r]] = drafted[row_start[b] + r]
+    output = _verify_output(
+        torch.tensor(drafted, dtype=torch.int64, device=DEVICE),
+        torch.tensor(row_start, device=DEVICE),
+        num_reqs=num_reqs,
     )
 
+    result = walk_tree(
+        _tree_plan(parent, counts),
+        output,
+        torch.tensor(target, dtype=torch.int64, device=DEVICE),
+        8,
+    )
 
-def test_runner_tree_buffers_back_every_batch_once_the_speculator_branches():
-    spec_round = _spec_round()
-    buffers = SimpleNamespace(tree_parents=None, tree_ancestors=None)
-    spec_round.init_tree_verify(buffers)
-    assert spec_round.layout is not None
-    assert buffers.tree_parents is spec_round.layout.tree_parents
-    assert buffers.tree_ancestors is spec_round.layout.tree_ancestors
-    chain = _spec_round(max_branching=1)
-    chain_buffers = SimpleNamespace(tree_parents=None, tree_ancestors=None)
-    chain.init_tree_verify(chain_buffers)
-    assert chain.layout is None and chain_buffers.tree_parents is None
+    assert result.sampled.shape == (num_reqs, 8)
+    for b, count in enumerate(counts):
+        rows = slice(row_start[b], row_start[b + 1])
+        path, sampled = _reference_walk(parent[b], count, drafted[rows], target[rows])
+        n = int(result.path_len[b])
+        assert result.path[b, :n].tolist() == path
+        assert result.sampled[b, :n].tolist() == sampled
+
+    # Row 1 matches but is masked (-1); row 2 matches but is past count.
+    output = _verify_output(
+        torch.tensor([-1, -1], dtype=torch.int64, device=DEVICE),
+        torch.tensor([0, 2], dtype=torch.int32, device=DEVICE),
+        num_reqs=1,
+    )
+    target = torch.tensor([5, 9], dtype=torch.int64, device=DEVICE)
+    result = walk_tree(_tree_plan([[-1, 0, 0]], [2]), output, target)
+    assert result.path_len.tolist() == [1]
+    assert result.sampled[0, 0].item() == 5
+
+
+def _greedy_sampler(temperature, processed=None):
+    """The two sampler members the default tree accept reads."""
+
+    def apply_sampling_params(logits, *args):
+        return logits if processed is None else processed
+
+    return SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(np=np.asarray(temperature, dtype=np.float32))
+        ),
+        apply_sampling_params=apply_sampling_params,
+    )
+
+
+@requires_kernels
+def test_default_tree_accept_walks_the_argmax():
+    """Greedy requests walk the argmax of the processed logits, the ones the
+    runner takes logprobs from."""
+    logits = torch.zeros(4, 8, device=DEVICE)
+    processed = torch.zeros(4, 8, device=DEVICE)
+    processed[0, 3] = processed[2, 6] = processed[3, 1] = processed[1, 0] = 1.0
+    output = _verify_output(
+        torch.tensor([-1, 2, 3, 6], dtype=torch.int64, device=DEVICE),
+        torch.tensor([0, 4], dtype=torch.int32, device=DEVICE),
+        logits=logits,
+        num_reqs=1,
+    )
+    plan = _tree_plan([[-1, 0, 0, 2]], [4])
+    result = accept_greedy_tree(plan, output, _greedy_sampler([0.0], processed), 4)
+    # Root's argmax 3 -> row 2 (token 3); its argmax 6 -> row 3; then token 1.
+    assert result.path[0, :3].tolist() == [0, 2, 3]
+    assert result.sampled[0, :3].tolist() == [3, 6, 1]
+    assert result.processed_logits is processed
+
+
+def test_default_tree_accept_refuses_sampled():
+    output = _verify_output(None, None, logits=torch.zeros(2, 4), num_reqs=1)
+    with pytest.raises(ValueError, match="greedy"):
+        accept_greedy_tree(
+            _tree_plan([[-1, 0]], [2]), output, _greedy_sampler([0.7]), 2
+        )
+
+
+# --- Commit: recurrent state ------------------------------------------------
 
 
 def _random_paths(
@@ -454,13 +595,14 @@ def _random_paths(
     path_len = np.zeros(num_reqs, dtype=np.int32)
     for b in range(num_reqs):
         node = counts[b] - 1 if to_last else int(gen.integers(0, counts[b]))
-        chain = path_to(parent[b], node)
+        chain = _path_to(parent[b], node)
         path[b, : len(chain)] = chain
         path_len[b] = 0 if gen.random() < 0.15 else len(chain)
     return path, path_len
 
 
 def _mamba_state(max_num_reqs: int) -> MambaHybridModelState:
+    """The members ``postprocess_state`` reads; ``__init__`` needs a model."""
     state = object.__new__(MambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.full(
         (max_num_reqs,), 99, dtype=torch.int32, device=DEVICE
@@ -473,9 +615,10 @@ def _mamba_state(max_num_reqs: int) -> MambaHybridModelState:
 
 @requires_kernels
 @pytest.mark.parametrize("seed", range(4))
-def test_mamba_resumes_from_the_last_row_of_the_accepted_path(seed):
+def test_mamba_resumes_from_the_last_accepted_row(seed):
     """The GDN kernels read state row num_accepted_tokens - 1, which must be the
-    last accepted row; for a chain that is today's max(num_sampled, 1) - 1."""
+    last accepted row; for a chain that is today's max(num_sampled, 1) - 1. A
+    state that cannot follow a tree path refuses it."""
     gen = np.random.default_rng(200 + seed)
     num_reqs, max_rows, num_slots = int(gen.integers(1, 8)), int(gen.integers(2, 9)), 12
     counts = gen.integers(1, max_rows + 1, num_reqs)
@@ -509,112 +652,17 @@ def test_mamba_resumes_from_the_last_row_of_the_accepted_path(seed):
     today.postprocess_state(idx_mapping, result.path_len)
     assert torch.equal(via_path.num_accepted_tokens_gpu, today.num_accepted_tokens_gpu)
 
-
-def test_mamba_rejects_a_tree_commit_it_cannot_follow():
-    state = _mamba_state(4)
-    state._align_mode = True
+    aligned = _mamba_state(4)
+    aligned._align_mode = True
     with pytest.raises(NotImplementedError, match="align"):
-        state.postprocess_state(
+        aligned.postprocess_state(
             torch.zeros(1, dtype=torch.int32),
             torch.ones(1, dtype=torch.int32),
             accepted_row=torch.zeros(1, dtype=torch.int32),
         )
 
 
-def test_chain_accept_result_is_a_view_of_the_constant_path():
-    chain = chain_path(8, 4, torch.device(DEVICE))
-    sampled = torch.arange(12, device=DEVICE).view(3, 4)
-    num_sampled = torch.tensor([4, 1, 0], dtype=torch.int32, device=DEVICE)
-    output = SamplerOutput(
-        sampled_token_ids=sampled,
-        logprobs_tensors=None,
-        num_nans=None,
-        num_sampled=num_sampled,
-        num_rejected=4 - num_sampled,
-    )
-    result = accept_result_of(output, chain)
-    assert result.path.data_ptr() == chain.data_ptr()
-    assert result.path.tolist() == [[0, 1, 2, 3]] * 3
-    assert result.path_len is num_sampled and result.sampled is sampled
-
-
-def _commit_runner(plan, model_state):
-    runner = SimpleNamespace(
-        spec_round=_spec_round(max_branching=1, max_rows=3, max_num_reqs=2),
-        model_state=model_state,
-        is_last_pp_rank=False,
-        req_states=SimpleNamespace(
-            num_computed_tokens=SimpleNamespace(gpu="num_computed"),
-            last_sampled_tokens=None,
-            all_token_ids=SimpleNamespace(gpu=None),
-            total_len=SimpleNamespace(gpu=None),
-            draft_tokens=None,
-        ),
-    )
-    batch = SimpleNamespace(
-        verify_plan=plan, num_reqs=2, seq_lens=torch.tensor([7, 9], dtype=torch.int32)
-    )
-    return runner, batch
-
-
-def test_chain_commit_moves_nothing(monkeypatch):
-    plan = VerifyPlan(
-        parent=chain_parents(2, 3, torch.device("cpu")), count=None, is_chain=True
-    )
-    model_state = SimpleNamespace(postprocess_state=Mock())
-    runner, batch = _commit_runner(plan, model_state)
-    runner.spec_round.kernels = SimpleNamespace(
-        commit=Mock(side_effect=AssertionError("no compaction"))
-    )
-    result = AcceptResult(
-        chain_path(2, 3, torch.device("cpu")),
-        torch.tensor([3, 1], dtype=torch.int32),
-        torch.zeros(2, 3, dtype=torch.int64),
-    )
-    assert runner.spec_round.commit(batch, result) is None
-    assert runner.spec_round.commit(batch, None) is None
-
-    monkeypatch.setattr(model_runner_module, "post_update", Mock())
-    GPUModelRunner.postprocess_sampled(runner, "idx", "sampled", "n", "r", None)
-    # A chain passes no accepted_row: model states without recurrent state
-    # keep main's postprocess_state signature.
-    model_state.postprocess_state.assert_called_once_with("idx", "n", "num_computed")
-
-
-def test_tree_commit_compacts_and_resumes_from_the_path(monkeypatch):
-    plan = VerifyPlan(
-        parent=torch.tensor([[-1, 0, 0], [-1, 0, 1]], dtype=torch.int32),
-        count=torch.tensor([3, 3], dtype=torch.int32),
-        tokens=torch.zeros(2, 3, dtype=torch.int32),
-    )
-    model_state = SimpleNamespace(postprocess_state=Mock())
-    runner, batch = _commit_runner(plan, model_state)
-    # The reference commit kernel as bound for a tree plan.
-    registry = KernelRegistry()
-    kv_commit = registry.get(("layout:paged_token", "commit"))
-    assert isinstance(kv_commit, KvCompactor)
-    compact = Mock()
-    monkeypatch.setattr(kv_commit, "commit", compact)
-    registry._commits = [kv_commit]
-    runner.spec_round.kernels = registry
-    runner.spec_round.kernel_context = object()
-    result = AcceptResult(
-        torch.tensor([[0, 2, 0], [0, 1, 2]], dtype=torch.int32),
-        torch.tensor([2, 3], dtype=torch.int32),
-        torch.zeros(2, 3, dtype=torch.int64),
-    )
-    row = runner.spec_round.commit(batch, result)
-    assert row is not None
-    assert row.tolist() == [2, 2]
-    compact.assert_called_once_with(
-        CommitStep(result, 2, count=plan.count, seq_lens=batch.seq_lens)
-    )
-
-    monkeypatch.setattr(model_runner_module, "post_update", Mock())
-    GPUModelRunner.postprocess_sampled(runner, "idx", "s", "n", "r", accepted_row=row)
-    model_state.postprocess_state.assert_called_once_with(
-        "idx", "n", "num_computed", accepted_row=row
-    )
+# --- Commit: KV compaction --------------------------------------------------
 
 
 def _caches(gen, kind, num_blocks, block_size, heads, dim, dtype):
@@ -639,7 +687,7 @@ def _caches(gen, kind, num_blocks, block_size, heads, dim, dtype):
     return torch.randn(shape).to(dtype).to(DEVICE)
 
 
-def _token_view(cache, kind, kernel_block_size):
+def _token_view(cache, kind):
     """``[planes, tokens, heads, dim]`` view of a cache by kernel-block token id."""
     if kind in ("packed", "packed_nhd"):
         return cache.transpose(1, 2).flatten(0, 1)[None]
@@ -654,8 +702,11 @@ def _token_view(cache, kind, kernel_block_size):
 @pytest.mark.parametrize(
     "kind", ["packed", "packed_nhd", "two_first", "blocks_first", "heads_major", "mla"]
 )
-@pytest.mark.parametrize("seed", range(3))
-def test_kv_compaction_moves_the_path_to_the_chain_slots(kind, seed):
+@pytest.mark.parametrize("path_kind", ["tree", "chain"])
+@pytest.mark.parametrize("seed", range(2))
+def test_kv_compaction_moves_the_path(kind, path_kind, seed):
+    """The KV of each accepted path row lands in the chain slot of its path
+    index, in every cache layout; a chain path moves nothing."""
     gen = np.random.default_rng(300 + seed)
     table_block_size, kernel_block_size = 8, 4
     num_table_blocks, max_rows = 24, int(gen.integers(4, 10))
@@ -669,10 +720,16 @@ def test_kv_compaction_moves_the_path_to_the_chain_slots(kind, seed):
     ).astype(np.int32)
     parent = _random_tree(gen, num_reqs, max_rows)
     path, path_len = _random_paths(gen, parent, counts, to_last=True)
-    moves = [
-        (b, j) for b in range(num_reqs) for j in range(path_len[b]) if path[b, j] != j
-    ]
-    assert moves, "the seed must exercise a copy"
+    if path_kind == "chain":
+        path = np.tile(np.arange(max_rows, dtype=np.int32), (num_reqs, 1))
+    else:
+        moves = [
+            (b, j)
+            for b in range(num_reqs)
+            for j in range(path_len[b])
+            if path[b, j] != j
+        ]
+        assert moves, "the seed must exercise a copy"
     seq_lens = gen.integers(counts, 4 * table_block_size).astype(np.int32)
     # Requests get disjoint random blocks; the tables are padded past num_reqs.
     blocks = gen.permutation(num_table_blocks).astype(np.int32)
@@ -704,74 +761,101 @@ def test_kv_compaction_moves_the_path_to_the_chain_slots(kind, seed):
         return block * table_block_size + position % table_block_size
 
     for layer, old in zip(layers, before):
-        expected = _token_view(old.clone(), kind, kernel_block_size)
-        source = _token_view(old, kind, kernel_block_size)
+        expected = _token_view(old.clone(), kind)
+        source = _token_view(old, kind)
         for b in range(num_reqs):
             context = seq_lens[b] - counts[b]
             for j in range(1, path_len[b]):
                 expected[:, token(b, context + j)] = source[
                     :, token(b, context + path[b, j])
                 ]
-        got = _token_view(layer, kind, kernel_block_size)
-        assert torch.equal(got.cpu(), expected.cpu())
+        assert torch.equal(_token_view(layer, kind).cpu(), expected.cpu())
+    if path_kind == "chain":
+        for layer, old in zip(layers, before):
+            assert torch.equal(layer, old)
 
 
-@requires_kernels
-def test_kv_compaction_of_a_chain_path_changes_nothing():
-    layers = [torch.randn(2, 8, 4, 2, 16).to(DEVICE)]
-    before = layers[0].clone()
-    table = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32, device=DEVICE)
-    compactor = _bound_compactor(layers, 8, table, 4)
-    result = AcceptResult(
-        path=chain_path(2, 4, torch.device(DEVICE)),
-        path_len=torch.tensor([4, 2], dtype=torch.int32, device=DEVICE),
-        sampled=torch.zeros(2, 4, dtype=torch.int64, device=DEVICE),
+def _attention_runner(specs, modules, kernel_block_size, num_blocks):
+    """The runner members ``spec_kernel_layers`` reads: one KV cache group per
+    layer of ``specs``; ``modules`` are the layers in the forward context."""
+    return SimpleNamespace(
+        device=torch.device("cpu"),
+        compilation_config=SimpleNamespace(static_forward_context=modules),
+        kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+        attn_groups=[
+            [
+                SimpleNamespace(
+                    layer_names=[name], kv_cache_spec=spec, kv_cache_group_id=g
+                )
+            ]
+            for g, (name, spec) in enumerate(specs.items())
+        ],
+        kernel_block_sizes=[kernel_block_size] * len(specs),
+        block_tables=SimpleNamespace(
+            input_block_tables=[torch.zeros(2, 4, dtype=torch.int32)] * len(specs)
+        ),
+        cache_config=CacheConfig(),
     )
-    compactor.commit(
-        CommitStep(
-            result,
-            2,
-            count=torch.tensor([4, 4], dtype=torch.int32, device=DEVICE),
-            seq_lens=torch.tensor([7, 5], dtype=torch.int32, device=DEVICE),
-        )
+
+
+def _attention_spec(cls, block_size=16, num_kv_heads=1, head_size=64):
+    return cls(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.bfloat16,
     )
-    assert torch.equal(layers[0], before)
 
 
-def test_kv_compactor_takes_block_sizes_from_the_kv_cache_group():
+@pytest.mark.parametrize("case", ["hybrid_group_blocks", "ring_shared_hidden"])
+def test_kv_compactor_binds_the_layers_it_moves(case):
     """A hybrid model's attention group blocks are larger than the layer's spec
-    says; the cache is allocated, and the block table kept, in the group's."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-    def attention(block_size):
-        return FullAttentionSpec(
-            block_size=block_size, num_kv_heads=4, head_size=256, dtype=torch.bfloat16
-        )
-
-    num_blocks, group_block, kernel_block = 3, 1280, 128
-    kernel_blocks = num_blocks * group_block // kernel_block
-    cache = torch.zeros(kernel_blocks, 4, kernel_block, 512, dtype=torch.bfloat16)
-    table = torch.zeros(2, 4, dtype=torch.int32)
-    runner = object.__new__(GPUModelRunner)
-    runner.device = torch.device("cpu")
-    runner.compilation_config = SimpleNamespace(
-        static_forward_context={"attn": SimpleNamespace(kv_cache=cache)}
-    )
-    runner.kv_cache_config = SimpleNamespace(num_blocks=num_blocks)
-    group: Any = SimpleNamespace(
-        layer_names=["attn"], kv_cache_spec=attention(group_block), kv_cache_group_id=0
-    )
-    runner.attn_groups = [[group]]
-    runner.kernel_block_sizes = [kernel_block]
-    runner.block_tables = SimpleNamespace(input_block_tables=[table])
-    runner.cache_config = CacheConfig()
-
-    compactor = KvCompactor()
-    compactor.bind(_kernel_context(runner.device), spec_kernel_layers(runner))
+    says: the cache is allocated, and the block table kept, in the group's. The
+    DSv4 ring (not paged by slot) keeps its own chain commit, a layer sharing
+    another's KV cache moves with it, and a hidden-state cache is not a decoder
+    layer: none of these is compacted on its own."""
+    if case == "hybrid_group_blocks":
+        num_blocks, group_block, kernel_block = 3, 1280, 128
+        kernel_blocks = num_blocks * group_block // kernel_block
+        cache = torch.zeros(kernel_blocks, 4, kernel_block, 512, dtype=torch.bfloat16)
+        specs = {
+            "attn": _attention_spec(
+                FullAttentionSpec, group_block, num_kv_heads=4, head_size=256
+            )
+        }
+        modules = {"attn": SimpleNamespace(kv_cache=cache)}
+        runner = _attention_runner(specs, modules, kernel_block, num_blocks)
+    else:
+        cache = torch.zeros(4, 2, 16, 1, 64, dtype=torch.bfloat16)
+        specs = {
+            "attn": _attention_spec(FullAttentionSpec),
+            "ring": _attention_spec(CircularBufferSpec),
+            "hidden": _attention_spec(HiddenStateCacheSpec),
+            "shared": _attention_spec(FullAttentionSpec),
+        }
+        # Only the paged layers have a cache the compactor can read.
+        modules = {
+            "attn": SimpleNamespace(kv_cache=cache),
+            "shared": SimpleNamespace(
+                kv_cache=cache, kv_sharing_target_layer_name="attn"
+            ),
+        }
+        runner = _attention_runner(specs, modules, 16, 4)
+    layers = spec_kernel_layers(runner)  # type: ignore[arg-type]
+    registry = KernelRegistry()
+    registry.bind(_kernel_context(runner.device), layers)
+    compactor = registry.get(("layout:paged_token", "commit"))
+    assert isinstance(compactor, KvCompactor)
 
     [(layout, *_, table_sizes)] = compactor.launches
-    assert layout.block_size == kernel_block
-    assert table_sizes.tolist() == [group_block]
+    if case == "hybrid_group_blocks":
+        assert layout.block_size == kernel_block
+        assert table_sizes.tolist() == [group_block]
+    else:
+        assert [(layer.name, layer.layout) for layer in layers] == [
+            ("attn", "paged_token"),
+            ("ring", ""),
+        ]
 
 
 def test_kv_cache_layout_refuses_what_it_cannot_read():
@@ -791,30 +875,26 @@ def _kernel_context(device) -> KernelContext:
     )
 
 
-def _bound_compactor(layers, blocks, table, block_size):
+def _bound_compactor(layers, num_blocks, block_table, block_size):
     compactor = KvCompactor()
     compactor.bind(
         _kernel_context(torch.device(DEVICE)),
         [
-            _layer(f"l{i}", SimpleNamespace(kv_cache=cache), table, block_size, blocks)
+            SpecLayerSpec(
+                f"l{i}",
+                kind=None,  # type: ignore[arg-type]
+                module=SimpleNamespace(kv_cache=cache),
+                block_table=block_table,
+                block_size=block_size,
+                num_blocks=num_blocks,
+            )
             for i, cache in enumerate(layers)
         ],
     )
     return compactor
 
 
-def _layer(name, module, block_table, block_size=0, num_blocks=0):
-    return SpecLayerSpec(
-        name,
-        kind=None,
-        module=module,
-        block_table=block_table,
-        block_size=block_size,
-        num_blocks=num_blocks,
-    )
-
-
-# --- SpecResources and the candidate budget on the speculator config --------
+# --- Built-in speculators keep today's resources and budget --------------
 
 
 class _StaticSpec:
@@ -857,39 +937,3 @@ def test_builtin_configs_keep_todays_resources_and_budget(qualname):
         assert (
             config.candidate_budget(BudgetView(num_reqs, num_reqs, 0, 0, 16, 16)) == 4
         )
-
-
-def test_speculator_config_with_its_budget_state_pickles():
-    """The scheduler process holds the config: it must cross process
-    boundaries with the VllmConfig."""
-    import pickle
-
-    config = SpeculatorConfig(_StaticSpec())
-    clone = pickle.loads(pickle.dumps(config))
-    assert clone.resources(4) == config.resources(4)
-
-
-@pytest.mark.parametrize(
-    "kwargs, match",
-    [
-        (dict(max_candidates=0, capture_shapes=()), "max_candidates"),
-        (dict(max_candidates=2, capture_shapes=(PlanShape(3),)), "outside"),
-        (dict(max_candidates=2, capture_shapes=(PlanShape(0),)), "outside"),
-        (
-            dict(max_candidates=2, capture_shapes=(), max_branching=0),
-            "max_branching",
-        ),
-    ],
-)
-def test_spec_resources_reject_shapes_they_cannot_hold(kwargs, match):
-    with pytest.raises(ValueError, match=match):
-        SpecResources(**kwargs)
-
-
-def test_spec_resources_list_uniform_counts_and_varlen():
-    resources = SpecResources(
-        max_candidates=4,
-        capture_shapes=(PlanShape(4), PlanShape(None), PlanShape(1)),
-    )
-    assert resources.uniform_counts == [1, 4]
-    assert resources.varlen
