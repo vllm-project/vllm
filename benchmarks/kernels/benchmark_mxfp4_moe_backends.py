@@ -350,18 +350,6 @@ def make_nvfp4_invoke(
     )
 
 
-def relative_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
-    return ((actual.float() - expected.float()).norm() / expected.float().norm()).item()
-
-
-def benchmark_us(invoke: Callable[[], object], rep: int) -> float:
-    """Median latency in microseconds (CUDA graph replay via Triton)."""
-    ms, _, _ = triton.testing.do_bench_cudagraph(
-        invoke, rep=rep, quantiles=[0.5, 0.2, 0.8]
-    )
-    return ms * 1_000
-
-
 def parse_int_list(value: str) -> tuple[int, ...]:
     try:
         values = tuple(int(v) for v in value.split(",") if v)
@@ -508,15 +496,23 @@ def main() -> None:
                         )
                     print(f"  {name:32s} n/a, own weights (shape and values ok)")
                     continue
-                print(f"  {name:32s} {relative_error(out, expected):.4f}")
+                error = (
+                    out.float() - expected.float()
+                ).norm() / expected.float().norm()
+                print(f"  {name:32s} {error.item():.4f}")
 
         names = list(invokes)
-        print("\nmedian latency (us), router logits to MoE output")
+        print("\nmedian latency (us, CUDA graph replay), router logits to MoE output")
         print(f"{'tokens':>8s}  " + "  ".join(f"{name:>30s}" for name in names))
         for num_tokens in args.num_tokens:
             hidden, logits = make_inputs(num_tokens)
             row = [
-                benchmark_us(partial(forward, hidden, logits), args.rep)
+                triton.testing.do_bench_cudagraph(
+                    partial(forward, hidden, logits),
+                    rep=args.rep,
+                    quantiles=[0.5, 0.2, 0.8],
+                )[0]
+                * 1_000
                 for forward in invokes.values()
             ]
             print(f"{num_tokens:>8d}  " + "  ".join(f"{us:>30.1f}" for us in row))
