@@ -94,6 +94,55 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     assert state._mamba_state_idx_gpu[1] == 121
 
 
+def test_add_request_skips_accepted_tokens_reset_when_non_speculative() -> None:
+    """In standard non-speculative serving without align mode or recoverssm,
+    num_accepted_tokens_gpu is never read by attention. add_request must not
+    dispatch redundant fill kernels on device buffers."""
+    state = object.__new__(MambaHybridModelState)
+    state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state._align_mode = False
+    state.recoverssm = None
+    state.rope_state = None
+    state.prompt_embeds_state = None
+    state.num_accepted_tokens_gpu = torch.full((2,), 5, dtype=torch.int32)
+
+    state.add_request(1, SimpleNamespace(num_computed_tokens=0))
+
+    # Remains untouched since speculative acceptance count is not active
+    assert state.num_accepted_tokens_gpu[1] == 5
+
+
+def test_add_request_resets_accepted_tokens_when_speculative_or_align() -> None:
+    """When speculative decoding or align mode is active, the slot must
+    be reset to 1."""
+    # 1. Speculative mode
+    state_spec = object.__new__(MambaHybridModelState)
+    state_spec.vllm_config = SimpleNamespace(num_speculative_tokens=3)
+    state_spec._align_mode = False
+    state_spec.recoverssm = None
+    state_spec.rope_state = None
+    state_spec.prompt_embeds_state = None
+    state_spec.num_accepted_tokens_gpu = torch.full((2,), 5, dtype=torch.int32)
+
+    state_spec.add_request(1, SimpleNamespace(num_computed_tokens=0))
+    assert state_spec.num_accepted_tokens_gpu[1] == 1
+
+    # 2. Align mode
+    state_align = object.__new__(MambaHybridModelState)
+    state_align.vllm_config = SimpleNamespace(num_speculative_tokens=0)
+    state_align._align_mode = True
+    state_align.cache_config = SimpleNamespace(mamba_block_size=16)
+    state_align.recoverssm = None
+    state_align.rope_state = None
+    state_align.prompt_embeds_state = None
+    state_align.num_accepted_tokens_gpu = torch.full((2,), 5, dtype=torch.int32)
+    state_align._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+
+    state_align.add_request(1, SimpleNamespace(num_computed_tokens=32))
+    assert state_align.num_accepted_tokens_gpu[1] == 1
+    assert state_align._mamba_state_idx_gpu[1] == 1
+
+
 def test_padded_prompt_tail_builds_as_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
