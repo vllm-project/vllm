@@ -17,13 +17,16 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
     WarmupIntRange,
     kernel_launcher,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
     LaunchSpec,
     TritonWarmupTensor,
     VllmTritonJitKernel,
+    triton_kernel_dispatcher_with_warmup,
     triton_scalar_specialization_rep,
 )
 from vllm.triton_utils import tl, triton
@@ -623,7 +626,7 @@ def _dcp_a2a_send_recv_buffers(
     # first request: the post-capture warmup runs an eager decode at
     # max_num_seqs (> the cap), so the graphs are already dangling before the
     # server is ready. torch.empty buffers instead live in the graph's private
-    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
+    # pool and stay valid for its lifetime (as the unpack output and the
     # AG+RS combine path already rely on).
     return (
         torch.empty(shape, device=device, dtype=dtype),
@@ -846,41 +849,95 @@ def _dcp_a2a_unpack_combine_kernel(
         tl.store(out_lse_ptr + out_lse_offset, global_lse)
 
 
+def _next_num_seqs_specialization(num_seqs: int) -> int:
+    """Advance to the next ``num_seqs`` with a new pack-kernel specialization.
+
+    The pack kernel specializes on ``num_seqs`` (Triton's ``== 1`` and
+    multiple-of-16 integer classes) and on ``NUM_SEQS_POW2``. Every value up to
+    16 is visited; above that, each power-of-two bucket ``(p / 2, p]`` holds only
+    a generic value (first: ``p / 2 + 1``) and multiples of 16 (first:
+    ``p / 2 + 16``), so any ``max_num_seqs`` cap keeps every reachable class.
+    """
+    if num_seqs < 16:
+        return num_seqs + 1
+    bucket = triton.next_power_of_2(num_seqs)
+    if num_seqs == bucket // 2 + 1:
+        return bucket // 2 + 16
+    return bucket + 1
+
+
+def _dcp_a2a_pack_send_warmup_inputs(
+    *,
+    output_dtype: torch.dtype,
+    num_heads: int,
+    head_dim: int,
+    world_size: int,
+    max_num_seqs: int,
+) -> dict[str, Any]:
+    # The send-buffer strides scale with the token count; 16 consecutive
+    # counts cover every residue modulo 16. LSEs arrive in fp32, or in the
+    # query dtype from Triton MLA decode.
+    num_tokens = WarmupIntRange(1, 17)
+    num_seqs = WarmupIntRange(
+        0, max_num_seqs + 1, advance=_next_num_seqs_specialization
+    )
+    lse_dtype = WarmupChoices(torch.float32, output_dtype)
+    heads_per_rank = num_heads // world_size
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(output_dtype)
+    return dict(
+        cp_attn_out=TritonWarmupTensor(
+            output_dtype, shape=(num_tokens, num_heads, head_dim)
+        ),
+        cp_attn_lse=TritonWarmupTensor(lse_dtype, shape=(num_tokens, num_heads)),
+        send_buffer=TritonWarmupTensor(
+            output_dtype,
+            shape=(world_size, num_tokens, heads_per_rank, head_dim + lse_pack_dim),
+        ),
+        seq_lens=TritonWarmupTensor(torch.int32, shape=(num_seqs,)),
+        query_start_loc=TritonWarmupTensor(torch.int32, shape=(num_seqs + 1,)),
+        has_mask=True,
+        world_size=world_size,
+        h_per_rank=heads_per_rank,
+        head_dim=head_dim,
+        lse_pack_dim=lse_pack_dim,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_dcp_a2a_pack_send_kernel,
+    warmup_inputs=_dcp_a2a_pack_send_warmup_inputs,
+)
 def _dcp_a2a_pack_send(
     cp_attn_out: torch.Tensor,
     cp_attn_lse: torch.Tensor,
     send_buffer: torch.Tensor,
+    seq_lens: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+    *,
+    has_mask: bool,
     world_size: int,
     h_per_rank: int,
     head_dim: int,
     lse_pack_dim: int,
-    seq_lens: torch.Tensor | None = None,
-    query_start_loc: torch.Tensor | None = None,
-) -> None:
-    # The empty-shard mask is fused into the pack kernel below rather than
-    # applied as a separate pass: the mask is a pure function of seq_lens and
-    # query_start_loc, which are identical for every MLA layer in a step, while
-    # the eager form costs eight launch-bound kernels per layer.
-    has_mask = _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
+) -> DispatchSpec:
     num_seqs = seq_lens.shape[0] if has_mask and seq_lens is not None else 0
-
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
-    _dcp_a2a_pack_send_kernel[grid](
-        cp_attn_out,
-        cp_attn_lse,
-        send_buffer,
-        seq_lens,
-        query_start_loc,
-        num_seqs,
-        cp_attn_out.stride(0),
-        cp_attn_out.stride(1),
-        cp_attn_out.stride(2),
-        cp_attn_lse.stride(0),
-        cp_attn_lse.stride(1),
-        send_buffer.stride(0),
-        send_buffer.stride(1),
-        send_buffer.stride(2),
-        send_buffer.stride(3),
+    return grid, dict(
+        out_ptr=cp_attn_out,
+        lse_ptr=cp_attn_lse,
+        send_ptr=send_buffer,
+        seq_lens_ptr=seq_lens,
+        query_start_loc_ptr=query_start_loc,
+        num_seqs=num_seqs,
+        out_stride_B=cp_attn_out.stride(0),
+        out_stride_H=cp_attn_out.stride(1),
+        out_stride_D=cp_attn_out.stride(2),
+        lse_stride_B=cp_attn_lse.stride(0),
+        lse_stride_H=cp_attn_lse.stride(1),
+        send_stride_N=send_buffer.stride(0),
+        send_stride_B=send_buffer.stride(1),
+        send_stride_H=send_buffer.stride(2),
+        send_stride_D=send_buffer.stride(3),
         N=world_size,
         HEAD_DIM=head_dim,
         H_PER_RANK=h_per_rank,
@@ -893,47 +950,72 @@ def _dcp_a2a_pack_send(
     )
 
 
+def _dcp_a2a_unpack_combine_warmup_inputs(
+    *,
+    dtype: torch.dtype,
+    num_heads: int,
+    head_dim: int,
+    world_size: int,
+    is_base_e: bool,
+    return_lse: bool,
+) -> dict[str, Any]:
+    # Buffers as dcp_a2a_lse_reduce allocates them; the receive-buffer strides
+    # scale with the token count.
+    num_tokens = WarmupIntRange(1, 17)
+    heads_per_rank = num_heads // world_size
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
+    return dict(
+        recv_buffer=TritonWarmupTensor(
+            dtype,
+            shape=(world_size, num_tokens, heads_per_rank, head_dim + lse_pack_dim),
+        ),
+        out=TritonWarmupTensor(dtype, shape=(num_tokens, heads_per_rank, head_dim)),
+        out_lse=TritonWarmupTensor(
+            torch.float32 if return_lse else dtype,
+            shape=(num_tokens, heads_per_rank) if return_lse else (1, 1),
+        ),
+        head_dim=head_dim,
+        lse_pack_dim=lse_pack_dim,
+        return_lse=return_lse,
+        is_lse_base_on_e=is_base_e,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_dcp_a2a_unpack_combine_kernel,
+    warmup_inputs=_dcp_a2a_unpack_combine_warmup_inputs,
+)
 def _dcp_a2a_unpack_combine(
     recv_buffer: torch.Tensor,
+    out: torch.Tensor,
+    out_lse: torch.Tensor,
+    *,
     head_dim: int,
     lse_pack_dim: int,
     return_lse: bool,
     is_lse_base_on_e: bool,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+) -> DispatchSpec:
     world_size, num_tokens, h_per_rank, _ = recv_buffer.shape
-    out = torch.empty(
-        (num_tokens, h_per_rank, head_dim),
-        device=recv_buffer.device,
-        dtype=recv_buffer.dtype,
-    )
-    out_lse = torch.empty(
-        (num_tokens, h_per_rank) if return_lse else (1, 1),
-        device=recv_buffer.device,
-        dtype=torch.float32 if return_lse else recv_buffer.dtype,
-    )
     grid = (num_tokens, h_per_rank, 1)
-    _dcp_a2a_unpack_combine_kernel[grid](
-        recv_buffer,
-        out,
-        out_lse,
-        recv_buffer.stride(0),
-        recv_buffer.stride(1),
-        recv_buffer.stride(2),
-        recv_buffer.stride(3),
-        out.stride(0),
-        out.stride(1),
-        out.stride(2),
-        out_lse.stride(0),
-        out_lse.stride(1),
+    return grid, dict(
+        recv_ptr=recv_buffer,
+        out_ptr=out,
+        out_lse_ptr=out_lse,
+        recv_stride_N=recv_buffer.stride(0),
+        recv_stride_B=recv_buffer.stride(1),
+        recv_stride_H=recv_buffer.stride(2),
+        recv_stride_D=recv_buffer.stride(3),
+        out_stride_B=out.stride(0),
+        out_stride_H=out.stride(1),
+        out_stride_D=out.stride(2),
+        out_lse_stride_B=out_lse.stride(0),
+        out_lse_stride_H=out_lse.stride(1),
         N=world_size,
         HEAD_DIM=head_dim,
         IS_BASE_E=is_lse_base_on_e,
         RETURN_LSE=return_lse,
         LSE_PACK_DIM=lse_pack_dim,
     )
-    if return_lse:
-        return out, out_lse
-    return out
 
 
 def dcp_a2a_lse_reduce(
@@ -985,16 +1067,22 @@ def dcp_a2a_lse_reduce(
         dtype=cp_attn_out.dtype,
     )
 
+    # The empty-shard mask is fused into the pack kernel below rather than
+    # applied as a separate pass: the mask is a pure function of seq_lens and
+    # query_start_loc, which are identical for every MLA layer in a step, while
+    # the eager form costs eight launch-bound kernels per layer.
+    has_mask = _validate_dcp_empty_shard_args(seq_lens, query_start_loc)
     _dcp_a2a_pack_send(
         cp_attn_out,
         cp_attn_lse,
         send_buffer,
-        world_size,
-        H_per_rank,
-        D,
-        lse_pack_dim,
-        seq_lens=seq_lens,
-        query_start_loc=query_start_loc,
+        seq_lens,
+        query_start_loc,
+        has_mask=has_mask,
+        world_size=world_size,
+        h_per_rank=H_per_rank,
+        head_dim=D,
+        lse_pack_dim=lse_pack_dim,
     )
 
     work = dist.all_to_all_single(
@@ -1005,9 +1093,28 @@ def dcp_a2a_lse_reduce(
     )
     work.wait()
 
-    return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+    out = torch.empty(
+        (B, H_per_rank, D),
+        device=recv_buffer.device,
+        dtype=recv_buffer.dtype,
     )
+    out_lse = torch.empty(
+        (B, H_per_rank) if return_lse else (1, 1),
+        device=recv_buffer.device,
+        dtype=torch.float32 if return_lse else recv_buffer.dtype,
+    )
+    _dcp_a2a_unpack_combine(
+        recv_buffer,
+        out,
+        out_lse,
+        head_dim=D,
+        lse_pack_dim=lse_pack_dim,
+        return_lse=return_lse,
+        is_lse_base_on_e=is_lse_base_on_e,
+    )
+    if return_lse:
+        return out, out_lse
+    return out
 
 
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
@@ -1486,6 +1593,32 @@ class MLADCPManager:
                 head_dim=output_head_dim,
                 is_base_e=is_lse_base_on_e,
             )
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.use_a2a
+            and (
+                not self._has_direct_a2a_workspace
+                or self.max_num_tokens
+                < vllm_config.scheduler_config.max_num_batched_tokens
+            )
+        ):
+            # dcp_a2a_lse_reduce is the combine without a direct workspace,
+            # and otherwise the fallback for batches larger than it.
+            _dcp_a2a_pack_send.register_warmup(
+                output_dtype=output_dtype,
+                num_heads=num_heads * self.group.world_size,
+                head_dim=output_head_dim,
+                world_size=self.group.world_size,
+                max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
+            )
+            _dcp_a2a_unpack_combine.register_warmup(
+                dtype=output_dtype,
+                num_heads=num_heads * self.group.world_size,
+                head_dim=output_head_dim,
+                world_size=self.group.world_size,
+                is_base_e=is_lse_base_on_e,
+                return_lse=False,
+            )
         self.query_gather = (
             None
             if use_pcp
@@ -1515,6 +1648,7 @@ class MLADCPManager:
                 dtype,
                 self.num_ubatches,
             )
+        self._has_direct_a2a_workspace = direct_workspace is not None
         if direct_workspace is not None:
             logger.info_once("Using direct symmetric-memory DCP A2A for MLA.")
             return functools.partial(

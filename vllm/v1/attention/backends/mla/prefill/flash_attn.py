@@ -3,7 +3,8 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-from collections.abc import Callable, Iterable, Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,11 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.warmup.jit_warmup import VllmJitKernel, zip_inputs
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+    zip_inputs,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     compile_flash_attn_varlen_func_from_specs,
@@ -59,9 +64,12 @@ FA4_MLA_PREFILL_LSE_OPTIONS = (False, True)
 
 @dataclass(frozen=True)
 class FA4MLALayerConfig:
+    """One distinct MLA prefill attention config a layer launches on FA4."""
+
     num_heads: int
     mla_dims: "MLADims"
     window_size: tuple[int, int] | None
+    requires_v_padding: bool = False
 
 
 class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
@@ -233,16 +241,21 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
                 return []
             layer_configs = [FA4MLALayerConfig(num_heads, mla_dims, None)]
 
-        requires_v_padding = False
         layer_rows = zip_inputs(
             *(
                 dict(
                     num_heads=config.num_heads,
                     mla_dims=config.mla_dims,
                     window_size=config.window_size,
+                    requires_v_padding=config.requires_v_padding,
                     qk_head_dim=config.mla_dims.qk_nope_head_dim
                     + config.mla_dims.qk_rope_head_dim,
-                    effective_v_head_dim=config.mla_dims.v_head_dim,
+                    effective_v_head_dim=(
+                        config.mla_dims.qk_nope_head_dim
+                        + config.mla_dims.qk_rope_head_dim
+                        if config.requires_v_padding
+                        else config.mla_dims.v_head_dim
+                    ),
                 )
                 for config in layer_configs
             )
@@ -278,7 +291,6 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             layer_rows,
             batch_size=FA4_MLA_PREFILL_COMPILE_BATCH_SIZE,
             dtype=dtype,
-            requires_v_padding=requires_v_padding,
             is_sm90=is_sm90,
             causal=FA4_MLA_PREFILL_CAUSAL_OPTIONS,
             return_lse=FA4_MLA_PREFILL_LSE_OPTIONS,
@@ -286,18 +298,6 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             fa_version=fa_version,
             _when=self._is_valid_warmup_shape_probe,
         )
-
-    def compile_many(self, compile_keys: Iterable[CompileKey]) -> None:
-        # The compile-only forward entry returns before FA4's transitive
-        # split-KV combine; compile it from the same key set, whether the
-        # keys come from the registry warmup or a per-layer sweep.
-        from vllm.model_executor.warmup.fa4_combine_warmup import (
-            warm_split_kv_combine,
-        )
-
-        keys = list(compile_keys)
-        warm_split_kv_combine(keys)
-        super().compile_many(keys)
 
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
@@ -340,6 +340,126 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             runtime_kernel=runtime_kernel,
             **kwargs,
         )
+
+
+class FA4SplitKVCombineKernel(VllmJitKernel["FA4SplitKVCombineKernel.CompileKey"]):
+    """FA4's split-KV combine, which FA4's compile-only forward never reaches.
+
+    Split-KV prefill ends with a combine of the per-split partials. FA4 keys
+    that kernel on ``ceil(log2(num_splits))`` and, when the LSE is returned, on
+    its leading dimension: a single query row and several rows compile
+    different variants. FA4 launches it from inside _flash_attn_fwd, so this
+    owner has no vLLM runtime entry; ``kernel`` is its compile-only entry.
+    """
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        dtype: torch.dtype
+        head_dim: int
+        num_heads: int
+        num_splits: int
+        return_lse: bool
+        total_q: int
+
+    @staticmethod
+    def kernel(compile_key: "FA4SplitKVCombineKernel.CompileKey") -> None:
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd_combine
+
+        key = compile_key
+        device = torch.device(current_platform.device_type)
+        # The varlen combine call at the end of FA4's _flash_attn_fwd on SM100,
+        # where its scheduler metadata supplies num_splits_dynamic_ptr and no
+        # virtual batch index. FakeTensorMode fills FA4's native cache without
+        # launching.
+        with FakeTensorMode():
+            _flash_attn_fwd_combine(
+                torch.empty(
+                    (key.num_splits, key.total_q, key.num_heads, key.head_dim),
+                    dtype=torch.float32,
+                    device=device,
+                ),
+                torch.empty(
+                    (key.num_splits, key.num_heads, key.total_q),
+                    dtype=torch.float32,
+                    device=device,
+                ).transpose(-1, -2),
+                torch.empty(
+                    (key.total_q, key.num_heads, key.head_dim),
+                    dtype=key.dtype,
+                    device=device,
+                ),
+                torch.empty(
+                    (key.num_heads, key.total_q), dtype=torch.float32, device=device
+                ).transpose(-1, -2)
+                if key.return_lse
+                else None,
+                cu_seqlens=torch.empty((2,), dtype=torch.int32, device=device),
+                num_splits_dynamic_ptr=torch.empty(
+                    (1,), dtype=torch.int32, device=device
+                ),
+            )
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        dtype: torch.dtype,
+        head_dim: int,
+        num_heads: int,
+        num_splits: int,
+        return_lse: bool,
+        total_q: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            dtype=dtype,
+            head_dim=head_dim,
+            num_heads=num_heads,
+            num_splits=2 ** math.ceil(math.log2(num_splits)),
+            return_lse=return_lse,
+            total_q=min(total_q, 2) if return_lse else 1,
+        )
+
+    def _is_reachable_split(self, *, num_splits: int, max_splits: int) -> bool:
+        return num_splits <= max_splits
+
+    def get_warmup_keys(
+        self,
+        vllm_config: "VllmConfig",
+        layer_configs: "Sequence[FA4MLALayerConfig]",
+    ) -> list[CompileKey]:
+        dtype = vllm_config.model_config.dtype
+        if dtype not in FA4_STANDARD_DTYPES:
+            dtype = torch.bfloat16
+        num_sms = current_platform.num_compute_units()
+        # FA4 caps auto splits at num_SMs // total_m_blocks (at least one
+        # m-block per head) and at 128.
+        layer_rows = zip_inputs(
+            *(
+                dict(
+                    num_heads=config.num_heads,
+                    head_dim=(
+                        config.mla_dims.qk_nope_head_dim
+                        + config.mla_dims.qk_rope_head_dim
+                        if config.requires_v_padding
+                        else config.mla_dims.v_head_dim
+                    ),
+                    max_splits=min(128, num_sms // config.num_heads),
+                )
+                for config in layer_configs
+            )
+        )
+        return self._trace_dispatch(self.dispatch)(
+            layer_rows,
+            dtype=dtype,
+            num_splits=WarmupIntRange(2, 129),
+            return_lse=FA4_MLA_PREFILL_LSE_OPTIONS,
+            total_q=(1, 2),
+            _when=self._is_reachable_split,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        self.kernel(compile_key)
 
 
 class FlashAttnPrefillBackend(MLAPrefillBackend):
@@ -416,12 +536,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
             )
 
-        if (
-            vllm_config.kernel_config.enable_jit_warmup
-            and self.vllm_flash_attn_version == 4
-        ):
-            _FA4_MLA_PREFILL_KERNEL.register_warmup()
-
         # Determine if we need to pad V
         # For MLA the v head dim is smaller than qk head dim so we pad out
         # v with 0s to match the qk head dim for attention backends that do
@@ -439,6 +553,43 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+
+        if (
+            vllm_config.kernel_config.enable_jit_warmup
+            and self.vllm_flash_attn_version == 4
+        ):
+            layer_configs = self.fa4_warmup_layer_configs()
+            _FA4_MLA_PREFILL_KERNEL.register_warmup(
+                vllm_config, layer_configs=layer_configs
+            )
+            # Auto split-KV ends in FA4's combine kernel. Only SM100's dynamic
+            # split scheduling is warmed; SM90 uses a fixed split count.
+            if (
+                not envs.VLLM_BATCH_INVARIANT
+                and current_platform.is_device_capability_family(100)
+            ):
+                _FA4_SPLIT_KV_COMBINE_KERNEL.register_warmup(
+                    vllm_config, layer_configs=layer_configs
+                )
+
+    def fa4_warmup_layer_configs(self) -> tuple[FA4MLALayerConfig, ...]:
+        """The distinct FA4 attention configs this backend's prefill launches."""
+        from vllm.model_executor.layers.attention.mla_attention import MLADims
+
+        return (
+            FA4MLALayerConfig(
+                num_heads=self.num_heads,
+                mla_dims=MLADims(
+                    q_lora_rank=None,
+                    kv_lora_rank=self.kv_lora_rank,
+                    qk_nope_head_dim=self.qk_nope_head_dim,
+                    qk_rope_head_dim=self.qk_rope_head_dim,
+                    v_head_dim=self.v_head_dim,
+                ),
+                window_size=None,
+                requires_v_padding=self.requires_v_padding,
+            ),
+        )
 
     def supports_quant_output(self, quant_key: "QuantKey") -> bool:
         device_capability = current_platform.get_device_capability()
@@ -557,3 +708,4 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
 
 _FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
+_FA4_SPLIT_KV_COMBINE_KERNEL = FA4SplitKVCombineKernel()

@@ -421,7 +421,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.pp_handler is not None:
                     self.pp_handler.configure_aux_hidden_state_relay(self.model)
             if isinstance(self.speculator, DraftModelSpeculator):
-                with use_workspace_lane(self._draft_workspace_lane):
+                with (
+                    use_workspace_lane(self._draft_workspace_lane),
+                    self.jit_warmup_registry.activate(),
+                ):
                     self.speculator.load_model(self.model)
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights

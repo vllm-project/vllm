@@ -89,7 +89,6 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
-from vllm.model_executor.warmup.grammar_bitmask_warmup import grammar_bitmask_warmup
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -4992,7 +4991,8 @@ class GPUModelRunner(
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
-                        self.drafter.load_model(self.model)
+                        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
+                            self.drafter.load_model(self.model)
                     drafter_moe_model = None
                     if self.parallel_config.enable_eplb and hasattr(
                         self.drafter, "model"
@@ -5917,8 +5917,6 @@ class GPUModelRunner(
                 ) from e
             else:
                 raise e
-        if self.vllm_config.kernel_config.enable_jit_warmup:
-            grammar_bitmask_warmup(logits, num_reqs * (1 + self.num_spec_tokens))
         if self.speculative_config:
             draft_token_ids = [[0] for _ in range(num_reqs)]
             dummy_spec_decode_metadata = SpecDecodeMetadata.make_dummy(

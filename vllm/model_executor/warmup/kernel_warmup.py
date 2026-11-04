@@ -20,11 +20,7 @@ from vllm.model_executor.warmup.attention_warmup import (
 )
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
-from vllm.model_executor.warmup.dcp_triton_warmup import dcp_triton_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.fa4_mla_prefill_warmup import (
-    fa4_mla_prefill_warmup,
-)
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_v2_root,
     resolve_rank_flashinfer_autotune_file,
@@ -46,9 +42,6 @@ from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.qwen_vl_triton_warmup import qwen_vl_triton_warmup
 from vllm.model_executor.warmup.replayssm_warmup import (
     replayssm_autotune_warmup,
-)
-from vllm.model_executor.warmup.triton_mla_decode_warmup import (
-    triton_mla_decode_warmup,
 )
 from vllm.model_executor.warmup.watermark_sample_warmup import (
     watermark_sample_warmup,
@@ -271,8 +264,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
-        fa4_mla_prefill_warmup(worker)
-        triton_mla_decode_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
@@ -301,10 +292,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         rocm_segmented_attn_autotune_warmup(worker)
-
-    if enable_jit_warmup:
-        # Collective: runs the DCP NCCL all-to-all on every rank.
-        dcp_triton_warmup(worker)
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)

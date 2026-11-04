@@ -29,10 +29,17 @@ It supports page size >= 1.
 """
 
 import logging
+from typing import Any
 
 import torch
 from packaging import version
 
+from vllm.model_executor.warmup.jit_warmup import WarmupChoices
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    DispatchSpec,
+    TritonWarmupTensor,
+    triton_kernel_dispatcher_with_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -466,6 +473,53 @@ def _fwd_grouped_kernel_stage1(
         )
 
 
+def _decode_grouped_att_m_fwd_warmup_inputs(
+    *,
+    q_dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    num_heads: int,
+    head_size: int,
+    kv_lora_rank: int,
+    page_size: int,
+    kv_block_stride: int,
+    kv_token_stride: int,
+    num_kv_splits: tuple[int, ...],
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: one latent KV head whose cache row holds the
+    # latent (Lv = kv_lora_rank) then the RoPE part (Lk = head_size). K and V
+    # view the same [num_blocks, page_size, 1, Lk] cache. The block-table row
+    # width depends on the runner's kernel block size split, which the layer
+    # cannot see, so warm both of its integer classes (generic, multiple of 16).
+    splits = WarmupChoices(*num_kv_splits)
+    block_table_width = WarmupChoices(2, 16)
+    kv_strides = (kv_block_stride, kv_token_stride, head_size, 1)
+    return dict(
+        q=TritonWarmupTensor(q_dtype, shape=(1, num_heads, head_size)),
+        k_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, head_size), strides=kv_strides
+        ),
+        v_buffer=TritonWarmupTensor(
+            kv_dtype, shape=(1, page_size, 1, kv_lora_rank), strides=kv_strides
+        ),
+        att_out=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        Req_to_tokens=TritonWarmupTensor(torch.int32, shape=(1, block_table_width)),
+        B_Seqlen=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+        sm_scale=1.0,
+        page_size=page_size,
+        logit_cap=0.0,
+        k_scale=TritonWarmupTensor(torch.float32),
+        v_scale=TritonWarmupTensor(torch.float32),
+        is_mla=True,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_grouped_kernel_stage1,
+    warmup_inputs=_decode_grouped_att_m_fwd_warmup_inputs,
+)
 def _decode_grouped_att_m_fwd(
     q,
     k_buffer,
@@ -480,7 +534,7 @@ def _decode_grouped_att_m_fwd(
     k_scale,
     v_scale,
     is_mla=False,
-):
+) -> DispatchSpec:
     # with is_mla there is only a single c_kv in smem.
     # could increase BLOCK or num_stages.
     Lk = k_buffer.shape[-1]
@@ -530,28 +584,29 @@ def _decode_grouped_att_m_fwd(
         # exceeds 101376 bytes limit
         num_stages = 1
 
-    _fwd_grouped_kernel_stage1[grid](
-        q,
-        k_buffer,
-        v_buffer,
-        sm_scale,
-        Req_to_tokens,
-        B_Seqlen,
-        att_out,
-        Req_to_tokens.stride(0),
-        q.stride(0),
-        q.stride(1),
-        _page_stride(k_buffer, page_size),
-        k_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        k_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        _page_stride(v_buffer, page_size),
-        v_buffer.stride(-3),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        v_buffer.stride(-2),  # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
-        att_out.stride(0),
-        att_out.stride(1),
-        att_out.stride(2),
-        k_scale,
-        v_scale,
+    return grid, dict(
+        Q=q,
+        K_Buffer=k_buffer,
+        V_Buffer=v_buffer,
+        sm_scale=sm_scale,
+        Req_to_tokens=Req_to_tokens,
+        B_Seqlen=B_Seqlen,
+        Att_Out=att_out,
+        stride_req_to_tokens_b=Req_to_tokens.stride(0),
+        stride_qbs=q.stride(0),
+        stride_qh=q.stride(1),
+        stride_buf_kpbs=_page_stride(k_buffer, page_size),
+        # Assume (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM)
+        stride_buf_kbs=k_buffer.stride(-3),
+        stride_buf_kh=k_buffer.stride(-2),
+        stride_buf_vpbs=_page_stride(v_buffer, page_size),
+        stride_buf_vbs=v_buffer.stride(-3),
+        stride_buf_vh=v_buffer.stride(-2),
+        stride_mid_ob=att_out.stride(0),
+        stride_mid_oh=att_out.stride(1),
+        stride_mid_os=att_out.stride(2),
+        k_scale=k_scale,
+        v_scale=v_scale,
         kv_group_num=kv_group_num,
         q_head_num=head_num,
         BLOCK_DMODEL=BLOCK_DMODEL,
@@ -638,6 +693,33 @@ def _fwd_kernel_stage2(
     )
 
 
+def _decode_softmax_reducev_fwd_warmup_inputs(
+    *,
+    dtype: torch.dtype,
+    num_heads: int,
+    kv_lora_rank: int,
+    num_kv_splits: tuple[int, ...],
+) -> dict[str, Any]:
+    # TritonMLAImpl.forward_mqa: [B, H, num_kv_splits, Lv + 1] scratch, and a
+    # [B, H, Lv] output and [B, H] LSE in the query dtype.
+    splits = WarmupChoices(*num_kv_splits)
+    return dict(
+        logits=TritonWarmupTensor(
+            torch.float32, shape=(1, num_heads, splits, kv_lora_rank + 1)
+        ),
+        q=TritonWarmupTensor(dtype, shape=(1, num_heads, 1)),
+        o=TritonWarmupTensor(dtype, shape=(1, num_heads, kv_lora_rank)),
+        lse=TritonWarmupTensor(dtype, shape=(1, num_heads)),
+        v_buffer=TritonWarmupTensor(dtype, shape=(1, 1, 1, kv_lora_rank)),
+        b_seq_len=TritonWarmupTensor(torch.int32),
+        num_kv_splits=splits,
+    )
+
+
+@triton_kernel_dispatcher_with_warmup(
+    kernel=_fwd_kernel_stage2,
+    warmup_inputs=_decode_softmax_reducev_fwd_warmup_inputs,
+)
 def _decode_softmax_reducev_fwd(
     logits,
     q,
@@ -646,7 +728,7 @@ def _decode_softmax_reducev_fwd(
     v_buffer,
     b_seq_len,
     num_kv_splits,
-):
+) -> DispatchSpec:
     batch, head_num = q.shape[0], q.shape[1]
     Lv = v_buffer.shape[-1]
     BLOCK_DV = triton.next_power_of_2(Lv)
@@ -660,17 +742,17 @@ def _decode_softmax_reducev_fwd(
         extra_kargs = {"waves_per_eu": 4, "matrix_instr_nonkdim": 16, "kpack": 2}
 
     grid = (batch, head_num)
-    _fwd_kernel_stage2[grid](
-        logits,
-        o,
-        lse,
-        b_seq_len,
-        logits.stride(0),
-        logits.stride(1),
-        logits.stride(2),
-        o.stride(0),
-        o.stride(1),
-        lse.stride(0),
+    return grid, dict(
+        Mid_O=logits,
+        o=o,
+        lse=lse,
+        B_Seqlen=b_seq_len,
+        stride_mid_ob=logits.stride(0),
+        stride_mid_oh=logits.stride(1),
+        stride_mid_os=logits.stride(2),
+        stride_obs=o.stride(0),
+        stride_oh=o.stride(1),
+        stride_lse_bs=lse.stride(0),
         NUM_KV_SPLITS=NUM_KV_SPLITS,
         BLOCK_DV=BLOCK_DV,
         Lv=Lv,
