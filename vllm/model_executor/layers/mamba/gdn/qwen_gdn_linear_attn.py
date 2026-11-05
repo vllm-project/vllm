@@ -784,6 +784,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # custom op or Dynamo stream tracing; not validated). Plain cuBLAS ba GEMM only:
         # FlashInfer GEMMs share a process-wide workspace. Off with ubatching and LoRA.
         self._ba_stream = None
+        # Lazily populated by _bi_decode_recurrence; cached rather than
+        # recreated per call since it is not allowed to allocate a tensor
+        # from CPU literals once CUDA graph capture has started.
+        self._bi_decode_cu: torch.Tensor | None = None
         ba_method = self.in_proj_ba.quant_method
         if (
             overlap_ba_proj
@@ -1350,7 +1354,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             if _pad_start < num_tokens:
                 _segments.append((_pad_start, num_tokens))
             mixed_qkvz = torch.cat(
-                [self.in_proj_qkvz(qkvz_in[_s:_e])[0] for _s, _e in _segments],
+                [
+                    self.in_proj_qkvz(qkvz_in[_s:_e])[0]  # type: ignore[index]
+                    for _s, _e in _segments
+                ],
                 dim=0,
             )
             ba = torch.cat(
@@ -1444,18 +1451,55 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and not self.gqa_interleaved_layout
         ):
             out2d = core_attn_out.view(num_tokens, -1)
-            out_proj_input = self._fused_gdn_gated_rms_norm(
-                x=out2d,
-                z=z,
-                weight=self.norm.weight,
-                out=out2d,
-                out_proj=self.out_proj,
-                eps=self.norm.eps,
-                num_v_heads=self.num_v_heads // self.tp_size,
-                head_v_dim=self.head_v_dim,
-                norm_before_gate=self.norm.norm_before_gate,
-                activation=self.norm.activation,
-            )
+            if _bi_cu is not None:
+                # The fused gated-norm kernel picks its internal tile size
+                # (ROWS_PER_BLOCK, via calc_rows_per_block) from the total
+                # non-spec token count M. Two different compiled kernel
+                # variants can round a single row'"'"'s own reduction
+                # (tl.sum over head_v_dim) to slightly different values, so a
+                # request'"'"'s normed output depends on how many other
+                # tokens share the call. Call it once per request instead, so
+                # each request'"'"'s own segment length always picks the same
+                # tile size regardless of neighbors.
+                _segments = [(_bi_cu[i], _bi_cu[i + 1]) for i in range(len(_bi_cu) - 1)]
+                _pad_start = _bi_cu[-1] if _bi_cu else 0
+                if _pad_start < num_tokens:
+                    _segments.append((_pad_start, num_tokens))
+                _seg_outputs = [
+                    self._fused_gdn_gated_rms_norm(
+                        x=out2d[_s:_e],
+                        z=z[_s:_e],
+                        weight=self.norm.weight,
+                        out=out2d[_s:_e],
+                        out_proj=self.out_proj,
+                        eps=self.norm.eps,
+                        num_v_heads=self.num_v_heads // self.tp_size,
+                        head_v_dim=self.head_v_dim,
+                        norm_before_gate=self.norm.norm_before_gate,
+                        activation=self.norm.activation,
+                    )
+                    for _s, _e in _segments
+                ]
+                if isinstance(_seg_outputs[0], QuantizedActivation):
+                    out_proj_input = replace(
+                        _seg_outputs[0],
+                        data=torch.cat([o.data for o in _seg_outputs], dim=0),
+                    )
+                else:
+                    out_proj_input = torch.cat(_seg_outputs, dim=0)
+            else:
+                out_proj_input = self._fused_gdn_gated_rms_norm(
+                    x=out2d,
+                    z=z,
+                    weight=self.norm.weight,
+                    out=out2d,
+                    out_proj=self.out_proj,
+                    eps=self.norm.eps,
+                    num_v_heads=self.num_v_heads // self.tp_size,
+                    head_v_dim=self.head_v_dim,
+                    norm_before_gate=self.norm.norm_before_gate,
+                    activation=self.norm.activation,
+                )
             output, _ = self.out_proj(out_proj_input)
             return output
 
@@ -1831,7 +1875,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         depend only on its own state, never on how many neighbours shared the
         step.
         """
-        cu = torch.tensor([0, 1], dtype=torch.int32, device=q.device)
+        if self._bi_decode_cu is None or self._bi_decode_cu.device != q.device:
+            self._bi_decode_cu = torch.tensor(
+                [0, 1], dtype=torch.int32, device=q.device
+            )
+        cu = self._bi_decode_cu
         outs = []
         last = None
         for i in range(num_decodes):
@@ -1885,7 +1933,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
+            and not envs.VLLM_BATCH_INVARIANT
         ):
+            # This fast path batches every decode request through a single
+            # fused_recurrent_gated_delta_rule_packed_decode call instead of
+            # the per-request fused_sigmoid_gating_delta_rule_update used
+            # below. The two kernels are not guaranteed bitwise identical, so
+            # a decode request's result would otherwise depend on whether any
+            # other request happened to be prefilling in the same step (which
+            # determines whether num_prefills == 0 here). Always use the
+            # per-request path under batch invariance so a decode's kernel
+            # choice never depends on its neighbors.
             return self._forward_core_decode_non_spec(
                 mixed_qkv=mixed_qkv,
                 b=b,
@@ -1992,8 +2050,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                         if has_initial_state is not None
                         else None
                     )
-                    _cache_idx = non_spec_state_indices_tensor[_pi : _pi + 1]
-                    if _seg_len == 1 and _has_init is not None and bool(_has_init[0]):
+                    _cache_idx = non_spec_state_indices_tensor[  # type: ignore[index]
+                        _pi : _pi + 1
+                    ]
+                    if (
+                        _seg_len == 1 and _has_init is not None and bool(_has_init[0])  # type: ignore[index]
+                    ):
                         # A single new token continuing existing state is a
                         # decode step, even when it shares this engine step
                         # with another request's fresh prefill. Route it

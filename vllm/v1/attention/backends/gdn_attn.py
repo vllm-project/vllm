@@ -633,6 +633,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if checkpoint is not None and self.plan_flashinfer_checkpoints:
             assert checkpoint.offsets is not None
             assert checkpoint.query_lens is not None
+            assert prefill_query_start_loc_cpu is not None
             # The prefill kernel runs the trailing checkpoint rows.
             num_prefill_rows = prefill_query_start_loc_cpu.shape[0] - 1
             every_n_tokens, cu_starts, rows = plan_flashinfer_checkpoints(
