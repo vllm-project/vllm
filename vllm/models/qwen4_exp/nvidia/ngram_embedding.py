@@ -10,9 +10,14 @@ import torch
 from torch import nn
 from transformers import Qwen4ExpTextConfig
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_etp_group, get_tp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mooncake_engram import (
+    MooncakeEngramStorage,
+    pack_mooncake_rows,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -41,6 +46,7 @@ __all__ = [
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEDiskOffloadEmbedding",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLEMooncakeEmbedding",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
@@ -261,6 +267,165 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         raise RuntimeError("PLE disk offload does not support prefetch")
 
 
+class Qwen4ExpPLEMooncakeEmbedding(Qwen4ExpPLEEmbedding):
+    """Qwen PLE rows fetched from storage independently of ETP ownership."""
+
+    supports_prefetch = True
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        params_dtype: torch.dtype,
+        padding_size: int,
+        prefix: str,
+        embedding_method: Qwen4ExpPLEEmbeddingMethod,
+        num_ngram_heads: int,
+        max_total_tokens: int,
+        data_parallel_rank: int,
+        reduce_results: bool,
+        config_path: str,
+        full_head_sizes: tuple[int, ...],
+    ) -> None:
+        if isinstance(embedding_method, Qwen4ExpPLENvFp4EmbeddingMethod):
+            raise ValueError("Mooncake Qwen PLE does not yet support NVFP4 rows")
+        self._row_dtype = (
+            torch.float8_e4m3fn
+            if isinstance(embedding_method, Qwen4ExpPLEFp8EmbeddingMethod)
+            else params_dtype
+        )
+        row_bytes = embedding_dim * self._row_dtype.itemsize
+        self.mooncake_storage = MooncakeEngramStorage(
+            config_path,
+            namespace=prefix,
+            head_sizes=full_head_sizes,
+            row_bytes=row_bytes,
+        )
+        self._num_ngram_heads = num_ngram_heads
+        self._prefetch_stream: torch.cuda.Stream | None = None
+        self._prefetch_rows: torch.Tensor | None = None
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            params_dtype=params_dtype,
+            padding_size=padding_size,
+            prefix=prefix,
+            embedding_method=embedding_method,
+            num_ngram_heads=num_ngram_heads,
+            max_total_tokens=max_total_tokens,
+            data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
+        )
+        self._max_total_tokens = max_total_tokens * self.etp_data_parallel_size
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        del num_embeddings
+        return torch.empty(
+            self.mooncake_storage.local_rows,
+            embedding_dim,
+            dtype=dtype,
+            device="cpu",
+        )
+
+    def weight_loader(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        checkpoint_start: int | None = None,
+        **_: object,
+    ) -> None:
+        """Load only the rows physically owned by this storage node."""
+        if checkpoint_start is None:
+            super().weight_loader(param, loaded_weight)
+            return
+        checkpoint_end = checkpoint_start + loaded_weight.shape[0]
+        start = max(checkpoint_start, self.mooncake_storage.row_begin)
+        end = min(checkpoint_end, self.mooncake_storage.row_end)
+        if start >= end:
+            return
+        param.data[
+            start - self.mooncake_storage.row_begin : end
+            - self.mooncake_storage.row_begin
+        ].copy_(loaded_weight[start - checkpoint_start : end - checkpoint_start])
+
+    def bind_file_shards(self) -> None:
+        rows = pack_mooncake_rows(self.weight)
+        self.mooncake_storage.initialize(rows)
+        self.weight.data = self.weight.new_empty((0, self.embedding_dim), device="cpu")
+
+    @eager_break_during_capture
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
+        slot_size, _ = self._get_dp_gather_slot(ngram_ids.shape[0])
+        gathered_ids = self._gather_dp_ids(ngram_ids, slot_size)
+        compute_owned = (gathered_ids >= self.shard_indices.org_vocab_start_index) & (
+            gathered_ids < self.shard_indices.org_vocab_end_index
+        )
+        lookup_ids = gathered_ids.masked_fill(~compute_owned, -1)
+        if self._prefetch_rows is None:
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "Mooncake PLE buffers must be allocated before graph capture"
+                )
+            self._prefetch_stream = torch.cuda.Stream(device=ngram_ids.device)
+            self._prefetch_rows = torch.empty(
+                self._max_total_tokens,
+                self._num_ngram_heads,
+                self.embedding_dim * self._row_dtype.itemsize,
+                dtype=torch.uint8,
+                device=ngram_ids.device,
+            )
+        if lookup_ids.shape[0] > self._prefetch_rows.shape[0]:
+            raise ValueError(
+                f"Mooncake PLE buffer holds {self._prefetch_rows.shape[0]} tokens, "
+                f"but the gathered batch needs {lookup_ids.shape[0]}"
+            )
+        stream = self._prefetch_stream
+        assert stream is not None
+        output = self._prefetch_rows[: lookup_ids.shape[0]]
+        stream.wait_stream(torch.cuda.current_stream())
+        lookup_ids.record_stream(stream)
+        with torch.cuda.stream(stream):
+            output.zero_()
+            self.mooncake_storage.lookup(lookup_ids, output)
+
+    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Combine the original computational vocabulary partitions."""
+        if self.tp_size == 1:
+            return embeddings
+        assert self.parallel_group is not None
+        if is_fp8(embeddings):
+            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
+            return reduced.view(embeddings.dtype)
+        return self.parallel_group.all_reduce(embeddings)
+
+    @eager_break_during_capture
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        if self._prefetch_rows is None or self._prefetch_stream is None:
+            raise RuntimeError("Mooncake PLE lookup requires a prior prefetch")
+        torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+        slot_size, slot_offset = self._get_dp_gather_slot(total_tokens)
+        active_tokens = slot_size * self.etp_data_parallel_size
+        rows = self._prefetch_rows[:active_tokens].view(self._row_dtype)
+        if self.reduce_results:
+            rows = self._reduce_etp_embeddings(rows)
+        else:
+            # The outer TP reduce-scatter covers the vocabulary owners.
+            assert self.etp_data_parallel_size == 1
+        rows = self._select_embeddings(rows, total_tokens, slot_offset)
+        return rows.flatten(-2)
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        raise RuntimeError(
+            "Mooncake PLE embedding requires start_prefetch() and finalize_prefetch()."
+        )
+
+
 class Qwen4ExpNGramEmbedding(nn.Module):
     _MASK64 = (1 << 64) - 1
     _SPLITMIX_GAMMA = 0x9E3779B97F4A7C15
@@ -431,23 +596,23 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
-            Qwen4ExpPLEDiskOffloadEmbedding
-            if engram_config is not None and engram_config.disk_offload
-            else Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
-            else Qwen4ExpPLEDeviceEmbedding
-        )
+        if engram_config is not None and engram_config.mooncake_config_path:
+            embedding_cls = Qwen4ExpPLEMooncakeEmbedding
+        elif engram_config is not None and engram_config.disk_offload:
+            embedding_cls = Qwen4ExpPLEDiskOffloadEmbedding
+        elif engram_config is not None and engram_config.cpu_offload:
+            embedding_cls = Qwen4ExpPLEPinnedHostEmbedding
+        else:
+            embedding_cls = Qwen4ExpPLEDeviceEmbedding
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
-        # Disk-offload ranks hold full rows, so they only shard tokens.
+        # Disk-offload ranks hold full rows, so they only shard tokens. Mooncake
+        # keeps the original ETP computation ownership and collective behavior.
         self.use_reduce_scatter = (
             self.use_sequence_parallel
             and get_etp_group().world_size == get_tp_group().world_size
             and embedding_cls is not Qwen4ExpPLEDiskOffloadEmbedding
         )
-        self.ngram_embedding = embedding_cls(
-            padded_vocab_size,
-            self.head_dim,
+        embedding_kwargs = dict(
             params_dtype=params_dtype,
             padding_size=divisor,
             prefix=embedding_prefix,
@@ -456,6 +621,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             max_total_tokens=max_total_tokens,
             data_parallel_rank=data_parallel_rank,
             reduce_results=not self.use_reduce_scatter,
+        )
+        if embedding_cls is Qwen4ExpPLEMooncakeEmbedding:
+            embedding_kwargs.update(
+                config_path=engram_config.mooncake_config_path,
+                full_head_sizes=tuple(sizes),
+            )
+        self.ngram_embedding = embedding_cls(
+            padded_vocab_size,
+            self.head_dim,
+            **embedding_kwargs,
         )
         if self.ngram_embedding.supports_prefetch:
             # The side-stream lookup outlives eager-break args, whose

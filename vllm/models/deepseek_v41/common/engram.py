@@ -66,6 +66,10 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ColumnParallelLinear
+from vllm.model_executor.layers.mooncake_engram import (
+    MooncakeEngramStorage,
+    pack_mooncake_rows,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.utils import set_weight_attrs
@@ -1018,6 +1022,49 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     return tensor
 
 
+@triton.jit(do_not_specialize=["num_rows"])
+def _dequant_mooncake_engram_rows(
+    packed,
+    output,
+    num_rows,
+    ROW_BYTES: tl.constexpr,
+    DIM: tl.constexpr,
+    QUANT_BLOCK: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
+    """Decode packed E4M3FN + ue8m0 rows on every CUDA architecture."""
+    cols = tl.arange(0, DIM)
+    rows = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
+    valid = rows < num_rows
+    row = rows.to(tl.int64)
+    raw = tl.load(
+        packed + row[:, None] * ROW_BYTES + cols[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    bits = raw.to(tl.int32)
+    magnitude = bits & 0x7F
+    exponent = magnitude >> 3
+    mantissa = magnitude & 0x7
+    exponent_bits = (exponent + 120) << 23
+    power = exponent_bits.to(tl.float32, bitcast=True)
+    normal = (1.0 + mantissa.to(tl.float32) * 0.125) * power
+    subnormal = mantissa.to(tl.float32) * 0.001953125
+    values = tl.where(exponent == 0, subnormal, normal)
+    values = tl.where((bits & 0x80) != 0, -values, values)
+    scale = tl.load(
+        packed + row[:, None] * ROW_BYTES + DIM + (cols // QUANT_BLOCK)[None, :],
+        mask=valid[:, None],
+        other=0,
+    )
+    scale = (scale.to(tl.int32) << 23).to(tl.float32, bitcast=True)
+    tl.store(
+        output + row[:, None] * DIM + cols[None, :],
+        (values * scale).to(tl.bfloat16),
+        mask=valid[:, None],
+    )
+
+
 class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 rows and per-block E8M0 scales.
 
@@ -1038,15 +1085,22 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        mooncake_config_path: str | None = None,
+        mooncake_namespace: str | None = None,
+        max_total_tokens: int = 0,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
-        self.cpu_offload = cpu_offload
+        self.cpu_offload = cpu_offload or mooncake_config_path is not None
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
         self.dp_size = get_engram_dp_size()
-        if dp_shared_memory:
+        if mooncake_config_path is not None:
+            # Mooncake shares one physical placement across DP replicas, while
+            # every replica keeps its existing TP computation partition.
+            self.dp_size = 1
+        elif dp_shared_memory:
             if not cpu_offload:
                 raise ValueError("dp_shared_memory requires cpu_offload=True")
             if self.dp_size <= 1:
@@ -1061,7 +1115,8 @@ class ParallelEngramEmbedding(nn.Module):
         # tokens' rows from the owning peer's HBM, so lookups need no collective.
         peer_group = None
         if (
-            not cpu_offload
+            mooncake_config_path is None
+            and not cpu_offload
             and self.dp_size > 1
             and get_tensor_model_parallel_world_size() == 1
         ):
@@ -1081,7 +1136,7 @@ class ParallelEngramEmbedding(nn.Module):
                 peer = current_platform.is_fully_connected(physical_ids)
             if peer:
                 peer_group, self.dp_size = group, 1
-        if cpu_offload and not is_uva_available():
+        if mooncake_config_path is None and cpu_offload and not is_uva_available():
             raise RuntimeError("Engram CPU offload requires UVA support")
         self._views: tuple[torch.Tensor, torch.Tensor] | None = None
         self._view_src: tuple[int, int] | None = None
@@ -1089,6 +1144,17 @@ class ParallelEngramEmbedding(nn.Module):
         self.dim = dim
         self.block_size = block_size
         self.n_hash_cols = len(head_sizes)
+        self.mooncake_storage = (
+            MooncakeEngramStorage(
+                mooncake_config_path,
+                namespace=mooncake_namespace or "",
+                head_sizes=head_sizes,
+                row_bytes=dim + dim // block_size,
+            )
+            if mooncake_config_path is not None
+            else None
+        )
+        self.peer_rows = 0
         self.tp_size = get_tensor_model_parallel_world_size()
         num_shards, head_rank = self._get_shard_info()
         self.part_n_hash_cols = triton.cdiv(self.n_hash_cols, num_shards)
@@ -1102,9 +1168,20 @@ class ParallelEngramEmbedding(nn.Module):
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
+        row_start = self.vocab_start_idx
+        if self.mooncake_storage is not None:
+            # Checkpoint loading follows physical node ownership. Runtime lookup
+            # still follows the TP head partition computed above.
+            self.part_num_embeddings = self.mooncake_storage.local_rows
+            row_start = self.mooncake_storage.row_begin
+            self._mooncake_rows = torch.empty(
+                max_total_tokens,
+                self.part_n_hash_cols,
+                dim + dim // block_size,
+                dtype=torch.uint8,
+            )
         # Peer tables keep the full lookup range but store one row slice.
-        self.peer_rows, row_start = 0, self.vocab_start_idx
-        if peer_group is not None:
+        if peer_group is not None and self.mooncake_storage is None:
             self.peer_rows = triton.cdiv(self.vocab_end_idx, peer_group.world_size)
             row_start = min(
                 peer_group.rank_in_group * self.peer_rows, self.vocab_end_idx
@@ -1126,22 +1203,33 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": row_start,
                 },
             )
-        if cpu_offload and not self.weight.is_meta:
+        if self.cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
             # The ue8m0 encoding of scale 1.0 is exponent byte 127.
             set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
-            logger.info(
-                "Engram table offloaded to pinned host memory: %d rows x %d, "
-                "%.2f GiB %s",
-                self.part_num_embeddings,
-                dim,
-                self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
-                "per rank"
-                if self._shared_memory is None
-                else "shared across DP replicas via "
-                + ("cuMem" if self._shared_memory.huge_pages else "/dev/shm"),
-            )
+            if self.mooncake_storage is not None:
+                logger.info(
+                    "Mooncake Engram node shard loads %d rows x %d (%.2f GiB); "
+                    "compute rank owns heads [%d,%d)",
+                    self.part_num_embeddings,
+                    dim,
+                    self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
+                    self.head_start,
+                    min(self.head_start + self.part_n_hash_cols, self.n_hash_cols),
+                )
+            else:
+                logger.info(
+                    "Engram table offloaded to pinned host memory: %d rows x %d, "
+                    "%.2f GiB %s",
+                    self.part_num_embeddings,
+                    dim,
+                    self.part_num_embeddings * (dim + dim // block_size) / 1024**3,
+                    "per rank"
+                    if self._shared_memory is None
+                    else "shared across DP replicas via "
+                    + ("cuMem" if self._shared_memory.huge_pages else "/dev/shm"),
+                )
 
     def _get_shard_info(self) -> tuple[int, int]:
         if self.dp_size == 1:
@@ -1150,9 +1238,26 @@ class ParallelEngramEmbedding(nn.Module):
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         scale_dim = self.dim // self.block_size
-        if torch.get_default_device().type == "meta" or not (
-            self.cpu_offload or self.peer_rows
-        ):
+        if torch.get_default_device().type == "meta":
+            return (
+                torch.empty(
+                    self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
+                ),
+                torch.empty(self.part_num_embeddings, scale_dim, dtype=torch.uint8),
+            )
+        if self.mooncake_storage is not None:
+            packed = torch.empty(
+                self.part_num_embeddings,
+                self.dim + scale_dim,
+                dtype=torch.uint8,
+                device="cpu",
+            )
+            self._mooncake_checkpoint_rows = packed
+            return (
+                packed[:, : self.dim].view(torch.float8_e4m3fn),
+                packed[:, self.dim :],
+            )
+        if not (self.cpu_offload or self.peer_rows):
             return (
                 torch.empty(
                     self.part_num_embeddings, self.dim, dtype=torch.float8_e4m3fn
@@ -1236,6 +1341,8 @@ class ParallelEngramEmbedding(nn.Module):
     @property
     def _uses_small_host_pages(self) -> bool:
         """Whether the GPU maps this host table with pages too small for its TLB."""
+        if self.mooncake_storage is not None:
+            return False
         if self._shared_memory is not None:
             return not self._shared_memory.huge_pages
         return self.cpu_offload and self._packed is None
@@ -1264,6 +1371,28 @@ class ParallelEngramEmbedding(nn.Module):
         """
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
+            return
+        if self.mooncake_storage is not None:
+            if out.dtype == torch.uint8:
+                packed = out
+            else:
+                packed = self._mooncake_rows[: indices.shape[0]]
+            packed.zero_()
+            self.mooncake_storage.lookup(
+                indices,
+                packed,
+                head_start=self.head_start,
+            )
+            if out.dtype != torch.uint8:
+                _dequant_mooncake_engram_rows[(triton.cdiv(rows, 16),)](
+                    packed,
+                    out,
+                    rows,
+                    ROW_BYTES=self.dim + self.dim // self.block_size,
+                    DIM=self.dim,
+                    QUANT_BLOCK=self.block_size,
+                    BLOCK_R=16,
+                )
             return
         weight, scales = self._storage()
         ids_stride_t, ids_stride_h = indices.stride()
@@ -1309,6 +1438,22 @@ class ParallelEngramEmbedding(nn.Module):
             PACKED=out.dtype == torch.uint8,
             OUT_STRIDE=out.stride(0),
             PEER_ROWS=self.peer_rows,
+        )
+
+    def initialize_mooncake(self) -> None:
+        """Publish loaded rows once, then release the checkpoint backing."""
+        if self.mooncake_storage is None:
+            return
+        rows = getattr(self, "_mooncake_checkpoint_rows", None)
+        if rows is None:
+            rows = pack_mooncake_rows(self.weight, self.weight_scale_inv)
+        self.mooncake_storage.initialize(rows)
+        self.weight.data = self.weight.new_empty((0, self.dim), device="cpu")
+        self.weight_scale_inv.data = self.weight_scale_inv.new_empty(
+            (0, self.dim // self.block_size), device="cpu"
+        )
+        self._mooncake_checkpoint_rows = rows.new_empty(
+            (0, self.dim + self.dim // self.block_size)
         )
 
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
@@ -1699,7 +1844,9 @@ class Engram(nn.Module):
         # Named ``embed_tokens`` so the checkpoint's ``engram.embed.weight``
         # survives the mapper's ``embed.weight`` -> ``embed_tokens.weight``
         # suffix rule.
-        self.embed_tokens = self._create_embedding(layout, layer_hash_index)
+        self.embed_tokens = self._create_embedding(
+            layout, layer_hash_index, f"{prefix}.embed_tokens"
+        )
         n_hash_cols = (layout.max_ngram_size - 1) * layout.n_heads
         self.wkv = self._create_wkv(
             n_hash_cols * layout.head_dim, quant_config, f"{prefix}.wkv"
@@ -1733,7 +1880,7 @@ class Engram(nn.Module):
         )
 
     def _create_embedding(
-        self, layout: EngramLayout, layer_hash_index: int
+        self, layout: EngramLayout, layer_hash_index: int, namespace: str
     ) -> ParallelEngramEmbedding:
         engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
@@ -1744,6 +1891,9 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            mooncake_config_path=engram_config.mooncake_config_path,
+            mooncake_namespace=namespace,
+            max_total_tokens=get_current_vllm_config().scheduler_config.max_num_batched_tokens,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

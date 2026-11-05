@@ -275,6 +275,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_MOONCAKE_CONNECTOR_TIMEOUT: float = 30.0
+    VLLM_ENGRAM_MOONCAKE_CONFIG: str = ""
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
@@ -1984,6 +1985,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
     ),
+    # JSON deployment config for node-sharded Mooncake Engram tables.
+    "VLLM_ENGRAM_MOONCAKE_CONFIG": lambda: os.getenv("VLLM_ENGRAM_MOONCAKE_CONFIG", ""),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(

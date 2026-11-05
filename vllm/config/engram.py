@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from typing import TYPE_CHECKING, Self
 
 from pydantic import model_validator
 
+import vllm.envs as envs
 from vllm.config.utils import config, get_hash_factors, hash_factors
 
 if TYPE_CHECKING:
@@ -28,6 +30,10 @@ def model_has_engram_layers(model_config: "ModelConfig | None") -> bool:
     if field is None:
         return False
     return bool(getattr(model_config.hf_text_config, field, None))
+
+
+def _default_mooncake_config_path() -> str | None:
+    return envs.VLLM_ENGRAM_MOONCAKE_CONFIG or None
 
 
 @config
@@ -61,15 +67,43 @@ class EngramConfig:
     startup takes longer. Requires cpu_offload without dp_shared_memory.
     Always on for private tables on ROCm."""
 
+    mooncake_config_path: str | None = None
+    """JSON deployment config for node-sharded Mooncake Engram storage.
+
+    The storage shard is independent of TP/DP ranks. Each node publishes only
+    its owned hash heads and every model worker looks up the complete logical
+    table through Mooncake. Defaults to ``VLLM_ENGRAM_MOONCAKE_CONFIG``."""
+
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
+        if self.mooncake_config_path is None:
+            self.mooncake_config_path = _default_mooncake_config_path()
         if self.dp_shared_memory and not self.cpu_offload:
             raise ValueError("dp_shared_memory requires cpu_offload=True")
         if self.use_thp and (not self.cpu_offload or self.dp_shared_memory):
             raise ValueError(
                 "use_thp requires cpu_offload=True and dp_shared_memory=False"
             )
+        if self.mooncake_config_path:
+            conflicts = {
+                "disk_offload": self.disk_offload,
+                "dp_shared_memory": bool(self.dp_shared_memory),
+                "use_thp": self.use_thp,
+                "embedding_across_dp": self.embedding_across_dp,
+            }
+            if enabled := [name for name, value in conflicts.items() if value]:
+                raise ValueError(
+                    "mooncake_config_path is an alternative to " + ", ".join(enabled)
+                )
+            if os.environ.get("NCCL_CUMEM_ENABLE") == "0":
+                raise ValueError("Mooncake Engram requires NCCL_CUMEM_ENABLE=1")
+            os.environ.setdefault("NCCL_CUMEM_ENABLE", "1")
         return self
+
+    @property
+    def table_shared_across_dp(self) -> bool:
+        """Whether DP replicas address one logical table placement."""
+        return bool(self.dp_shared_memory or self.mooncake_config_path)
 
     def verify_model_config(self, model_config: "ModelConfig | None") -> None:
         """Reject Engram configuration for models without n-gram embeddings."""
@@ -92,12 +126,18 @@ class EngramConfig:
 
             if field != "ple_layer_ids" or not current_platform.is_cuda():
                 raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+        if self.mooncake_config_path:
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError("Mooncake Engram requires CUDA")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
         if self.dp_shared_memory is None:
             self.dp_shared_memory = (
-                self.cpu_offload
+                not self.mooncake_config_path
+                and self.cpu_offload
                 and not self.use_thp
                 and parallel_config.data_parallel_size > 1
                 and not parallel_config.enable_elastic_ep
@@ -120,11 +160,21 @@ class EngramConfig:
             )
         if self.disk_offload and parallel_config.enable_elastic_ep:
             raise ValueError("disk_offload is not supported with elastic EP.")
+        if self.mooncake_config_path and parallel_config.enable_elastic_ep:
+            raise ValueError("Mooncake Engram is not supported with elastic EP.")
+        if self.mooncake_config_path and parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "Mooncake Engram does not yet support pipeline parallelism."
+            )
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
         size = parallel_config.tensor_parallel_size
-        if self.embedding_across_dp and parallel_config.data_parallel_size > 1:
+        if (
+            self.embedding_across_dp
+            and not self.table_shared_across_dp
+            and parallel_config.data_parallel_size > 1
+        ):
             size *= parallel_config.data_parallel_size
         return size
 

@@ -1905,7 +1905,20 @@ class Worker(WorkerBase):
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
-            model_runner.shutdown()
+            model = getattr(model_runner, "model", None)
+            if model is None:
+                model_runner.shutdown()
+            else:
+                from vllm.model_executor.layers.mooncake_engram import (
+                    close_mooncake_engram_storages,
+                    collect_mooncake_engram_storages,
+                )
+
+                mooncake_storages = collect_mooncake_engram_storages(model)
+                try:
+                    model_runner.shutdown()
+                finally:
+                    close_mooncake_engram_storages(mooncake_storages)
 
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to

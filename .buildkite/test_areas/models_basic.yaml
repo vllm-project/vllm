@@ -495,6 +495,8 @@ steps:
   - tests/models/transformers/fusers/
   - tests/models/transformers/test_dynamic_rope.py
   - tests/model_executor/layers/test_activation.py
+  - tests/model_executor/layers/test_mooncake_engram.py
+  - tests/models/test_deepseek_v41_engram_mooncake.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
   - tests/models/deepseek_v32/test_pp_topk.py
@@ -514,6 +516,8 @@ steps:
       models/transformers/fusers/
       models/transformers/test_dynamic_rope.py
       model_executor/layers/test_activation.py
+      model_executor/layers/test_mooncake_engram.py
+      models/test_deepseek_v41_engram_mooncake.py
       models/test_language_model_cache_is_weak.py
       models/deepseek_v32/test_sequence_parallel.py
       models/deepseek_v32/test_pp_topk.py

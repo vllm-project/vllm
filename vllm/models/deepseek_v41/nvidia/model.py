@@ -1770,6 +1770,12 @@ class DeepseekV41LLMForCausalLM(
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mhc_broadcast_weights()
         config = self.model.vllm_config
+        if config.engram_config and config.engram_config.mooncake_config_path:
+            for layer in islice(
+                self.model.layers, self.model.start_layer, self.model.end_layer
+            ):
+                if layer.engram is not None:
+                    layer.engram.embed_tokens.initialize_mooncake()
         if config.engram_config and config.engram_config.use_thp:
             # Loading weights refills the file cache; release it before MADV_COLLAPSE.
             model_config = config.model_config

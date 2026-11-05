@@ -57,6 +57,7 @@ from vllm.models.qwen4_exp.nvidia.ngram_embedding import (
     Qwen4ExpPLEDiskOffloadEmbedding,
     Qwen4ExpPLEEmbeddingMethod,
     Qwen4ExpPLEFp8EmbeddingMethod,
+    Qwen4ExpPLEMooncakeEmbedding,
     Qwen4ExpPLENvFp4EmbeddingMethod,
     Qwen4ExpPLEPinnedHostEmbedding,
     Qwen4ExpPLEUnquantizedEmbeddingMethod,
@@ -72,6 +73,78 @@ from vllm.v1.attention.backends.short_conv_attn import (
 )
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import MambaSpec
+
+
+def test_mooncake_weight_loader_keeps_only_storage_rows(monkeypatch):
+    embedding = Qwen4ExpPLEMooncakeEmbedding.__new__(Qwen4ExpPLEMooncakeEmbedding)
+    embedding.mooncake_storage = SimpleNamespace(row_begin=3, row_end=7)
+    param = nn.Parameter(torch.zeros(4, 2), requires_grad=False)
+    first = torch.arange(10, dtype=torch.float32).reshape(5, 2)
+    second = torch.arange(10, 20, dtype=torch.float32).reshape(5, 2)
+
+    embedding.weight_loader(param, first, checkpoint_start=0)
+    embedding.weight_loader(param, second, checkpoint_start=5)
+
+    torch.testing.assert_close(param, torch.cat((first[3:5], second[:2])))
+
+    loaded_regular = []
+
+    def regular_loader(self, target, source, checkpoint_start=None):
+        loaded_regular.append((target, source, checkpoint_start))
+
+    monkeypatch.setattr(PLEVocabParallelEmbedding, "weight_loader", regular_loader)
+    scale = nn.Parameter(torch.zeros(1), requires_grad=False)
+    source_scale = torch.ones(1)
+    embedding.weight_loader(scale, source_scale)
+    assert loaded_regular == [(scale, source_scale, None)]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_mooncake_prefetch_preserves_compute_ownership_and_raw_fp8():
+    values = torch.tensor(
+        [[[1.0, -2.0], [3.0, 4.0]], [[0.5, 6.0], [-7.0, 8.0]]],
+        dtype=torch.float8_e4m3fn,
+        device="cuda",
+    )
+    captured = {}
+
+    class FakeStorage:
+        @staticmethod
+        def lookup(ids, output):
+            captured["ids"] = ids.clone()
+            output.copy_(values.view(torch.uint8))
+
+    embedding = Qwen4ExpPLEMooncakeEmbedding.__new__(Qwen4ExpPLEMooncakeEmbedding)
+    nn.Module.__init__(embedding)
+    embedding._prefetch_rows = torch.empty_like(values.view(torch.uint8))
+    embedding._prefetch_stream = torch.cuda.current_stream()
+    embedding._row_dtype = torch.float8_e4m3fn
+    embedding.etp_data_parallel_size = 1
+    embedding.reduce_results = True
+    embedding.tp_size = 1
+    embedding.shard_indices = SimpleNamespace(
+        org_vocab_start_index=5,
+        org_vocab_end_index=15,
+    )
+    embedding.mooncake_storage = FakeStorage()
+    embedding._get_dp_gather_slot = lambda tokens: (tokens, 0)
+    embedding._gather_dp_ids = lambda ids, _slot: ids
+    embedding._select_embeddings = lambda rows, tokens, offset: rows.narrow(
+        0, offset, tokens
+    )
+    ids = torch.tensor([[5, 20], [10, 0]], dtype=torch.int64, device="cuda")
+
+    embedding.start_prefetch(ids)
+    output = embedding.finalize_prefetch(total_tokens=2)
+
+    torch.testing.assert_close(
+        captured["ids"],
+        torch.tensor([[5, -1], [10, -1]], dtype=torch.int64, device="cuda"),
+    )
+    assert output.dtype == torch.float8_e4m3fn
+    torch.testing.assert_close(
+        output.view(torch.uint8), values.flatten(-2).view(torch.uint8)
+    )
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

@@ -2019,6 +2019,36 @@ def test_engram_dp_shared_memory_requires_cpu_offload():
         EngramConfig(cpu_offload=False, dp_shared_memory=True)
 
 
+def test_engram_mooncake_sets_cumem_and_disables_default_dp_sharing(monkeypatch):
+    monkeypatch.delenv("NCCL_CUMEM_ENABLE", raising=False)
+    config = EngramConfig(mooncake_config_path="/tmp/mooncake-engram.json")
+    parallel = ParallelConfig(data_parallel_size=2)
+    config.resolve_dp_shared_memory(parallel)
+    assert os.environ["NCCL_CUMEM_ENABLE"] == "1"
+    assert config.dp_shared_memory is False
+    assert config.table_shared_across_dp
+
+
+def test_engram_mooncake_rejects_incompatible_placements(monkeypatch):
+    monkeypatch.delenv("NCCL_CUMEM_ENABLE", raising=False)
+    with pytest.raises(ValueError, match="alternative to disk_offload"):
+        EngramConfig(
+            mooncake_config_path="/tmp/mooncake-engram.json",
+            disk_offload=True,
+        )
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "0")
+    with pytest.raises(ValueError, match="requires NCCL_CUMEM_ENABLE=1"):
+        EngramConfig(mooncake_config_path="/tmp/mooncake-engram.json")
+
+
+def test_engram_mooncake_rejects_pipeline_parallelism(monkeypatch):
+    monkeypatch.delenv("NCCL_CUMEM_ENABLE", raising=False)
+    config = EngramConfig(mooncake_config_path="/tmp/mooncake-engram.json")
+    parallel = ParallelConfig(pipeline_parallel_size=2)
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        config.verify_parallel_config(parallel)
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     "cpu_offload,use_thp,dp_shared_memory,dp_size,elastic_ep,expected",
