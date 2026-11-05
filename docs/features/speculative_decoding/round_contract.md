@@ -183,21 +183,19 @@ on every section. Attention sees each row's ancestors. The forward replays the c
 ### 4. Accept: `BaseSpeculator.accept`
 
 ```python
-def accept(
-    self, plan: VerifyPlan, output: VerifyOutput, sampler: Sampler
-) -> AcceptResult | None
+def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None
 ```
 
-The runner calls this on the sampler's stream for every verified batch. A large
-batch is verified in request ranges, with one call per range, and `plan` and
-`output` cover that range. `VerifyOutput` carries the logits of the verified rows in
-plan order, with their positions and draft tokens. `sampler` applies the sampling
-parameters (`apply_sampling_params`) and holds the sampling states. It is an
-internal interface and may change.
+The runner calls this on the sampler's stream for every verified plan that is not
+a chain; vLLM checks chains with its rejection sampler. A large batch is verified
+in request ranges, with one call per range, and `plan` and `output` cover that
+range. `VerifyOutput` carries, in plan order, each row's logits after the sampling
+parameters, the target's token for each row (what vLLM's sampler draws from those
+logits at the row's plan position; the argmax for a greedy request), whether each
+request is greedy, and the drafted tokens.
 
-Return `None`, the default, to let vLLM verify. vLLM checks a chain with its
-rejection sampler. For a plan that is not a chain, it walks the tree on each row's
-argmax, which only greedy requests accept. A speculator verifies trees only when
+Return `None`, the default, to walk the tree on each row's target token, which only
+greedy requests accept. A speculator verifies trees only when
 it overrides `accept`; otherwise startup lowers it to chains.
 
 `AcceptResult` has these fields:
@@ -208,8 +206,6 @@ it overrides `accept`; otherwise startup lowers it to chains.
 - `sampled`: `sampled[r, :path_len[r]]` holds the committed tokens. They are the
   accepted candidates' tokens followed by the bonus token, sampled from the logits
   of the last accepted row.
-- `processed_logits`: optional.
-
 The runner takes each committed token's logprobs from its row on the path.
 
 ### 5. Commit
@@ -322,7 +318,7 @@ Register the config with `register_speculative_method` as shown in
 
 A tree speculator also declares branching resources, chooses its chain for models
 that cannot verify trees, and returns a plan each step. It must override
-`accept`; returning `None` for a batch walks the tree on each row's argmax, which
+`accept`; returning `None` for a batch walks the tree on each row's target, which
 only greedy requests accept.
 
 ```python

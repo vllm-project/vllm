@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.input_batch import (
     get_num_sampled_and_rejected,
 )
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_scores
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -291,6 +292,56 @@ class RejectionSampler:
             "watermark_key": self.watermark_key,
         }
 
+    def _verify_output(
+        self,
+        input_batch: InputBatch,
+        logits: torch.Tensor,
+        plan_pos: torch.Tensor,
+        draft_sampled: torch.Tensor,
+        start: int,
+        end: int,
+    ) -> VerifyOutput:
+        """The sampling parameters applied to the rows of requests
+        ``[start, end)`` and the target's token for each row, at the rows' plan
+        positions."""
+        lo = int(input_batch.cu_num_logits_np[start])
+        hi = int(input_batch.cu_num_logits_np[end])
+        idx_mapping_np = input_batch.idx_mapping_np[start:end]
+        expanded_idx_mapping = input_batch.expanded_idx_mapping[lo:hi]
+        positions = plan_pos[lo:hi]
+        processed = self.sampler.apply_sampling_params(
+            logits[lo:hi],
+            expanded_idx_mapping,
+            input_batch.idx_mapping[start:end],
+            idx_mapping_np,
+            positions,
+            draft_sampled[lo:hi],
+            input_batch.expanded_local_pos[lo:hi],
+            input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+        )
+        states = self.sampler.sampling_states
+        is_greedy = states.temperature.np[idx_mapping_np] == 0.0
+        if is_greedy.all():
+            target = processed.argmax(dim=-1)
+        else:
+            target = gumbel_sample(
+                processed,
+                expanded_idx_mapping,
+                states.temperature.gpu,
+                states.seeds.gpu,
+                positions,
+                apply_temperature=False,  # apply_sampling_params did
+                is_drafting=False,
+                use_fp64=self.sampler.use_fp64_gumbel,
+            )
+        return VerifyOutput(
+            logits=processed,
+            target=target,
+            is_greedy=is_greedy,
+            row_start=input_batch.cu_num_logits[start : end + 1] - lo,
+            drafted=draft_sampled[lo:hi],
+        )
+
     def _verify(
         self,
         logits: torch.Tensor,
@@ -397,27 +448,16 @@ class RejectionSampler:
             chunk_cu_num_logits = input_batch.cu_num_logits[start : end + 1] - lo
             result = None
             plan = input_batch.verify_plan
-            if plan is not None and (self.accept is not None or not plan.is_chain):
+            if plan is not None and not plan.is_chain:
                 plan = slice_plan(plan, start, end)
-                output = VerifyOutput(
-                    logits=logits[lo:hi],
-                    row_start=chunk_cu_num_logits,
-                    idx_mapping=input_batch.idx_mapping[start:end],
-                    idx_mapping_np=input_batch.idx_mapping_np[start:end],
-                    expanded_idx_mapping=input_batch.expanded_idx_mapping[lo:hi],
-                    expanded_local_pos=input_batch.expanded_local_pos[lo:hi],
-                    positions=plan_pos[lo:hi],
-                    drafted=draft_sampled[lo:hi],
-                    draft_tokens=draft_sampled[lo:hi],
-                    seq_lens_upper_bound_np=(
-                        input_batch.seq_lens_cpu_upper_bound.numpy()[start:end]
-                    ),
+                output = self._verify_output(
+                    input_batch, logits, plan_pos, draft_sampled, start, end
                 )
                 width = self.num_speculative_steps + 1
                 if self.accept is not None:
-                    result = self.accept(plan, output, self.sampler)
-                if result is None and not plan.is_chain:
-                    result = accept_greedy_tree(plan, output, self.sampler, width)
+                    result = self.accept(plan, output)
+                if result is None:
+                    result = accept_greedy_tree(plan, output, width)
                 if result is not None and result.sampled.shape[1] < width:
                     # Committed tokens are read at the chain's width.
                     result.sampled = torch.nn.functional.pad(
@@ -446,9 +486,7 @@ class RejectionSampler:
                     raise RuntimeError("accept returned a path for part of a batch")
                 sampled, num_sampled = result.sampled, result.path_len
                 path_chunks.append(result.path)
-                processed_logits = result.processed_logits
-                if processed_logits is None:
-                    processed_logits = chunk_logits
+                processed_logits = output.logits
                 if max_num_logprobs != NO_LOGPROBS or max_num_kept is not None:
                     # Lay the rows out as a chain: committed token k's logits
                     # first. Only paid for when logprobs or masks are returned.

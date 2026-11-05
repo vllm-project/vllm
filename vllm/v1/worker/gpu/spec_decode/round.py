@@ -92,27 +92,20 @@ class VerifyOutput:
     and the plan ``accept`` gets cover the same range, indexed from 0."""
 
     logits: torch.Tensor
-    """``[num_rows, vocab]`` raw logits after the LM head (and the grammar bitmask)."""
+    """``[num_rows, vocab]`` logits after the sampling parameters (penalties,
+    temperature, top-k/top-p, the grammar bitmask): what vLLM samples from and
+    takes processed logprobs from."""
+    target: torch.Tensor
+    """``[num_rows]`` int64 the target's token for each row: what vLLM's sampler
+    draws from ``logits`` at the row's plan position (the argmax for a greedy
+    request)."""
+    is_greedy: np.ndarray
+    """``[num_reqs]`` bool: whether each request samples greedily."""
     row_start: torch.Tensor
     """``[num_reqs + 1]`` int32 cumulative row offsets of each request."""
-    idx_mapping: torch.Tensor
-    """``[num_reqs]`` request state slot of each request."""
-    idx_mapping_np: np.ndarray
-    expanded_idx_mapping: torch.Tensor
-    """``[num_rows]`` request state slot of each row."""
-    expanded_local_pos: torch.Tensor
-    """``[num_rows]`` row index within its request (its plan row)."""
-    positions: torch.Tensor
-    """``[num_rows]`` int64 plan position of each row: the request's committed
-    tokens plus the row's depth. Sampling noise and position-dependent logits
-    processing use it."""
     drafted: torch.Tensor
     """``[num_rows]`` int64 token each row holds (row 0: the last committed token); -1
     for a row that must not be accepted (a placeholder or a grammar-rejected draft)."""
-    draft_tokens: torch.Tensor
-    """``[num_rows]`` the rows' real token ids, for logits processing."""
-    seq_lens_upper_bound_np: np.ndarray
-    """``[num_reqs]`` host upper bound of each request's sequence length."""
 
 
 @dataclass
@@ -134,7 +127,3 @@ class AcceptResult:
     sampled nothing, e.g. a prefill chunk that does not end its prompt)."""
     sampled: torch.Tensor
     """``[R, C]`` token ids."""
-    processed_logits: torch.Tensor | None = None
-    """``[num_rows, vocab]`` the logits after the sampling parameters, in row order,
-    when ``accept`` computed them: the runner takes processed logprobs and the
-    sampling mask of each committed token from its path row. None: the raw logits."""

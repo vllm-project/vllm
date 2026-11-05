@@ -977,9 +977,7 @@ class Scheduler(SchedulerInterface):
             )
             num_draft_tokens = None
             if self.dynamic_spec_blocks:
-                num_draft_tokens = min(
-                    len(request.spec_token_ids), max(num_scheduled_spec_tokens, 0)
-                )
+                num_draft_tokens = max(num_scheduled_spec_tokens, 0)
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):

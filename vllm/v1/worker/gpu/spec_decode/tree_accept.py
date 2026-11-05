@@ -12,8 +12,6 @@ target tokens to :func:`walk_tree`. When its ``accept`` returns None, vLLM takes
 the argmax, which is exact for greedy requests.
 """
 
-from typing import TYPE_CHECKING
-
 import numpy as np
 import torch
 
@@ -23,9 +21,6 @@ from vllm.v1.worker.gpu.spec_decode.round import (
     VerifyOutput,
     VerifyPlan,
 )
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.sample.sampler import Sampler
 
 
 @triton.jit
@@ -103,28 +98,14 @@ def walk_tree(
 
 
 def accept_greedy_tree(
-    plan: VerifyPlan, output: VerifyOutput, sampler: "Sampler", width: int
+    plan: VerifyPlan, output: VerifyOutput, width: int
 ) -> AcceptResult:
-    """The default ``accept`` of a plan that is not a chain: the walk on the
-    argmax of each row's processed logits. Only greedy requests; a speculator
-    that verifies sampled trees overrides ``accept``."""
-    temperature = sampler.sampling_states.temperature.np[output.idx_mapping_np]
-    if not bool(np.all(temperature == 0.0)):
+    """The default ``accept`` of a plan that is not a chain: the walk on each
+    row's target token. Only greedy requests; a speculator that verifies sampled
+    trees overrides ``accept``."""
+    if not bool(np.all(output.is_greedy)):
         raise ValueError(
             "a plan that is not a chain verifies sampled requests only through "
             "the speculator's accept; the default accepts greedy requests"
         )
-    processed = sampler.apply_sampling_params(
-        output.logits,
-        output.expanded_idx_mapping,
-        output.idx_mapping,
-        output.idx_mapping_np,
-        output.positions,
-        output.draft_tokens,
-        output.expanded_local_pos,
-        output.seq_lens_upper_bound_np,
-    )
-    result = walk_tree(plan, output, processed.argmax(dim=-1), width)
-    if processed is not output.logits:
-        result.processed_logits = processed
-    return result
+    return walk_tree(plan, output, output.target, width)

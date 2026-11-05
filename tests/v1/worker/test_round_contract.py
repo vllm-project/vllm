@@ -27,14 +27,11 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.spec_decode.resources import BudgetView, SpecResources
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
-from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.states import SamplingStates
 from vllm.v1.worker.gpu.spec_decode.commit import (
     KvCompactor,
     accepted_rows,
@@ -352,18 +349,13 @@ def test_mrope_tree_positions(last_parent):
 # --- Tree accept ------------------------------------------------------------
 
 
-def _verify_output(drafted, row_start, logits=None, num_reqs=1):
+def _verify_output(drafted, row_start, target=None, is_greedy=(True,)):
     return VerifyOutput(
-        logits=logits,
+        logits=None,
+        target=target,
+        is_greedy=np.array(is_greedy),
         row_start=row_start,
-        idx_mapping=torch.arange(num_reqs, device=DEVICE),
-        idx_mapping_np=np.arange(num_reqs),
-        expanded_idx_mapping=None,
-        expanded_local_pos=None,
-        positions=None,
         drafted=drafted,
-        draft_tokens=None,
-        seq_lens_upper_bound_np=None,
     )
 
 
@@ -403,7 +395,7 @@ def test_walk_tree_matches_reference(seed):
         for r in range(1, count):
             if drafted[row_start[b] + r] != -1 and gen.random() < 0.5:
                 target[row_start[b] + parent[b, r]] = drafted[row_start[b] + r]
-    output = _verify_output(_t(drafted, torch.int64), _t(row_start), num_reqs=num_reqs)
+    output = _verify_output(_t(drafted, torch.int64), _t(row_start))
 
     result = walk_tree(_plan(parent, counts), output, _t(target, torch.int64), 8)
 
@@ -416,36 +408,22 @@ def test_walk_tree_matches_reference(seed):
         assert result.sampled[b, :n].tolist() == sampled
 
 
-def _greedy_sampler(temperature, processed):
-    """A sampler whose sampling params turn logits into ``processed``, built
-    without ``__init__`` (it needs a vLLM config and pinned host memory)."""
-    sampler = object.__new__(Sampler)
-    sampler.sampling_states = object.__new__(SamplingStates)
-    sampler.sampling_states.temperature = object.__new__(UvaBackedTensor)
-    sampler.sampling_states.temperature.np = np.array([temperature], np.float32)
-    sampler.apply_sampling_params = lambda *args: processed  # type: ignore[method-assign]
-    return sampler
-
-
 @requires_kernels
-def test_default_tree_accept_walks_the_greedy_argmax():
-    """Greedy requests walk the argmax of the processed logits (the ones the
-    runner takes logprobs from); sampled requests are refused."""
-    processed = torch.zeros(4, 8, device=DEVICE)
-    processed[0, 3] = processed[2, 6] = processed[3, 1] = processed[1, 0] = 1.0
-    output = _verify_output(
-        _t([-1, 2, 3, 6], torch.int64), _t([0, 4]), logits=torch.zeros_like(processed)
-    )
+def test_default_tree_accept_walks_the_greedy_target():
+    """Greedy requests walk each row's target token; sampled requests are
+    refused. The output carries no sampler, only what the runner computed."""
+    drafted, row_start = _t([-1, 2, 3, 6], torch.int64), _t([0, 4])
+    target = _t([3, 0, 6, 1], torch.int64)
     plan = _plan([[-1, 0, 0, 2]], [4])
 
-    result = accept_greedy_tree(plan, output, _greedy_sampler(0.0, processed), 4)
+    result = accept_greedy_tree(plan, _verify_output(drafted, row_start, target), 4)
 
-    # Root's argmax 3 -> row 2 (token 3); its argmax 6 -> row 3; then token 1.
+    # Root's target 3 -> row 2 (token 3); its target 6 -> row 3; then token 1.
     assert result.path[0, :3].tolist() == [0, 2, 3]
     assert result.sampled[0, :3].tolist() == [3, 6, 1]
-    assert result.processed_logits is processed
+    sampled = _verify_output(drafted, row_start, target, is_greedy=(False,))
     with pytest.raises(ValueError, match="greedy"):
-        accept_greedy_tree(plan, output, _greedy_sampler(0.7, processed), 4)
+        accept_greedy_tree(plan, sampled, 4)
 
 
 # --- Commit -----------------------------------------------------------------

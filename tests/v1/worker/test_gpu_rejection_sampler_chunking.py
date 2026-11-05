@@ -336,7 +336,7 @@ def test_chunked_accept_sees_every_plan_field():
     )
     seen: list[VerifyPlan] = []
 
-    def accept(plan, output, sampler):
+    def accept(plan, output):
         seen.append(plan)
         num = plan.parent.shape[0]
         return AcceptResult(
@@ -345,8 +345,14 @@ def test_chunked_accept_sees_every_plan_field():
             sampled=torch.zeros(num, rows, dtype=torch.int64),
         )
 
+    greedy = SimpleNamespace(np=np.zeros(num_reqs, dtype=np.float32))
     rejection_sampler = _make_rejection_sampler(
-        SimpleNamespace(logprobs_mode="raw_logprobs", return_sampling_mask=False),
+        SimpleNamespace(
+            logprobs_mode="raw_logprobs",
+            return_sampling_mask=False,
+            apply_sampling_params=lambda logits, *args: logits,
+            sampling_states=SimpleNamespace(temperature=greedy),
+        ),
         num_speculative_steps=rows - 1,
     )
     rejection_sampler.accept = accept
