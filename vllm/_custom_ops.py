@@ -3509,7 +3509,10 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
             reading from [num_reqs]; None reads from the first token.
         kv_cache_dtype: "nvfp4_ds_mla", or "nvfp4" for the dense-MLA cache
             (same bytes per token, plain-order block scales).
-        scale: The "nvfp4" cache's k_scale [1]; unused for nvfp4_ds_mla.
+        scale: For "nvfp4", the per-tensor (global) KV scale [1], i.e. the
+            layer's k_scale: the cache stores x / scale, with a computed E4M3
+            scale per 16 values. It comes from the checkpoint, or is 1.0 when
+            the checkpoint has none. Unused for nvfp4_ds_mla.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(

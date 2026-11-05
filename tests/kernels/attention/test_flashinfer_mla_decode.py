@@ -394,9 +394,15 @@ def test_flashinfer_mla_decode_workspace_supports_autotune():
 @pytest.mark.parametrize("spec_decode", [False, True])
 @pytest.mark.parametrize("kv_magnitude", [1.0, 0.05])
 @pytest.mark.parametrize("dcp", [1, 2])
+@pytest.mark.parametrize("cuda_graph", [False, True])
 @requires_sm10x
 def test_flashinfer_mla_nvfp4_cake_decode(
-    bs: int, block_size: int, spec_decode: bool, kv_magnitude: float, dcp: int
+    bs: int,
+    block_size: int,
+    spec_decode: bool,
+    kv_magnitude: float,
+    dcp: int,
+    cuda_graph: bool,
 ):
     """The NVFP4 MLA cache feeds FlashInfer's Cake decode.
 
@@ -411,6 +417,9 @@ def test_flashinfer_mla_nvfp4_cake_decode(
     wide route (more than 48 rows per request, rejected by FlashInferMLAImpl)
     would zero. ``dcp`` 2 splits the cache over two decode context parallel
     ranks as vLLM lays it out and merges the ranks' outputs by their LSE.
+    ``cuda_graph`` plans the decode for a long ``max_seq_len`` and captures it,
+    as vLLM's FULL CUDA graphs do, then replays it with other query values and
+    lengths.
     """
     from vllm.v1.attention.backends.mla.flashinfer_mla import (
         _cake_nvfp4_mla_decode_unsupported_reason,
@@ -510,30 +519,46 @@ def test_flashinfer_mla_nvfp4_cake_decode(
         query = q.view(bs, 1, num_heads, QK_HEAD_DIM)
         packed = {}
     lead = (total_q, num_heads)
-    outs, lses = [], []
-    for rank, rank_cache in enumerate(caches):
-        dcp_args = {}
-        if dcp > 1:
-            dcp_args = {"cp_world": dcp, "cp_rank": rank, "kv_len_global": seq_lens}
-        out, lse = cake_nvfp4_mla_decode(
-            query,
-            rank_cache,
-            block_tables,
-            get_dcp_local_seq_lens(seq_lens, dcp, rank),
-            sm_scale=SCALE,
-            k_scale=k_scale,
-            max_seq_len=-(-max_seq_len // dcp),
-            return_lse=True,
-            **packed,
-            **dcp_args,
-        )
-        assert out.shape == (*query.shape[:-1], KV_LORA_RANK)
-        assert lse is not None
-        outs.append(out.reshape(total_q, num_heads, KV_LORA_RANK).float())
-        lses.append(lse.reshape(lead))
-    out, lse = _lse_weighted_combine(
-        torch.stack(outs), torch.stack(lses), return_lse=True
-    )
+
+    def decode(plan_seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        outs, lses = [], []
+        for rank, rank_cache in enumerate(caches):
+            dcp_args = {}
+            if dcp > 1:
+                dcp_args = {"cp_world": dcp, "cp_rank": rank, "kv_len_global": seq_lens}
+            out, lse = cake_nvfp4_mla_decode(
+                query,
+                rank_cache,
+                block_tables,
+                get_dcp_local_seq_lens(seq_lens, dcp, rank),
+                sm_scale=SCALE,
+                k_scale=k_scale,
+                max_seq_len=plan_seq_len,
+                return_lse=True,
+                **packed,
+                **dcp_args,
+            )
+            assert out.shape == (*query.shape[:-1], KV_LORA_RANK)
+            assert lse is not None
+            outs.append(out.reshape(total_q, num_heads, KV_LORA_RANK).float())
+            lses.append(lse.reshape(lead))
+        return torch.stack(outs), torch.stack(lses)
+
+    if cuda_graph:
+        q_real, seq_lens_real = q.clone(), seq_lens.clone()
+        q.normal_()
+        seq_lens.fill_(max_q_len)
+        max_model_len = 1 << 15
+        decode(max_model_len)  # JIT-builds the kernels before the capture
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            outs, lses = decode(max_model_len)
+        q.copy_(q_real)
+        seq_lens.copy_(seq_lens_real)
+        graph.replay()
+    else:
+        outs, lses = decode(-(-max_seq_len // dcp))
+    out, lse = _lse_weighted_combine(outs, lses, return_lse=True)
 
     q_nope, q_sf, q_rope, q_scale = quantize_mla_nvfp4_query(
         q,
