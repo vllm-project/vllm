@@ -3,6 +3,7 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
+import re
 from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1388,9 +1389,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                     ):  # noqa: E501
                         continue
                     # Remapping the name of FP8 kv-scale. The quant config's
-                    # cache-scale mapper names them `self_attn.attn.*`, but
-                    # the MLA layer is the attention module and owns them.
-                    own_name = name.replace(".self_attn.attn.", ".self_attn.")
+                    # cache-scale mapper names them `<prefix>.self_attn.attn.<scale>`,
+                    # but the MLA layer is the attention module and owns them.
+                    # Only the segment right before the parameter name is
+                    # rewritten. Any other name keeps the existing remap below,
+                    # which warns and skips a scale that has no parameter.
+                    own_name = re.sub(
+                        r"\.self_attn\.attn\.(?=[^.]+$)", ".self_attn.", name
+                    )
                     if own_name in params_dict:
                         name = own_name
                     remapped_name = maybe_remap_kv_scale_name(name, params_dict)

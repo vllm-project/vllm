@@ -97,6 +97,26 @@ def test_kv_cache_method_for_any_attention_layer(config_cls, fmt):
     assert isinstance(method, BaseKVCacheMethod)
 
 
+@pytest.mark.parametrize(
+    "config_cls,fmt",
+    [
+        (CompressedTensorsConfig, "compressed-tensors"),
+        (ModelOptFp8Config, "modelopt"),
+    ],
+)
+def test_kv_cache_method_creates_scales_on_any_attention_layer(config_cls, fmt):
+    # With a per-tensor KV-cache scheme, `create_weights` reads nothing from the
+    # layer, so it works on attention layers other than `Attention`.
+    config = config_cls.from_config(QUANT_CONFIGS[fmt])
+    layer = _SelfContainedAttention()
+    method = config.get_quant_method(layer, prefix="model.layers.0.self_attn")
+    method.create_weights(layer)
+    for name in ("q_scale", "k_scale", "v_scale"):
+        param = getattr(layer, name)
+        assert isinstance(param, torch.nn.Parameter)
+        assert param.numel() == 1
+
+
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
