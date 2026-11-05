@@ -186,9 +186,9 @@ def test_tree_speculator_verifies_trees(mode, capfd):
     got, drafted, acceptance = _run(DENSE, config, **kwargs)
     out, err = capfd.readouterr()
     assert LOWERED not in out + err
-    assert OFF_CHAIN in out + err
     assert drafted > 0 and acceptance > 1
     _check(DENSE, got, "tree_verifies_trees", **kwargs)
+    assert OFF_CHAIN in out + err
 
 
 def test_tree_speculator_samples_trees(capfd):
