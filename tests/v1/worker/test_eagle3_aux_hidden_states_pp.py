@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import Qwen3_5TextConfig
 
+from vllm.config import (
+    CompilationConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import parallel_state
+from vllm.model_executor.models import qwen3_5
 from vllm.model_executor.models.interfaces import EagleModelMixin
 from vllm.model_executor.models.mimo import MiMoModel
 from vllm.models.minimax_m3.nvidia import model as minimax_m3
@@ -260,3 +272,142 @@ def test_minimax_aux_taps_follow_deferred_tp_all_reduce(minimax_pp_stage, taps):
     for hidden, tap in zip(aux, taps, strict=True):
         torch.testing.assert_close(hidden, _pp_aux_state(_expected_aux_value(tap)))
     torch.testing.assert_close(output, _pp_aux_state(_expected_aux_value(6)))
+
+
+def _check_qwen3_5_aux_layout(rank, model_path, taps, implementation):
+    from vllm.models.qwen3_5.nvidia import model as nvidia_qwen3_5
+
+    model_cls = (
+        nvidia_qwen3_5.Qwen3_5ForCausalLM
+        if implementation == "nvidia"
+        else qwen3_5.Qwen3_5ForCausalLM
+    )
+
+    config = VllmConfig(
+        model_config=ModelConfig(
+            model=model_path,
+            skip_tokenizer_init=True,
+            dtype="float32",
+            max_model_len=32,
+            enforce_eager=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
+        ),
+        compilation_config=CompilationConfig(mode=0),
+    )
+    try:
+        with set_current_vllm_config(config):
+            parallel_state.init_distributed_environment(
+                world_size=2,
+                rank=rank,
+                local_rank=rank,
+                backend="gloo",
+                distributed_init_method=f"file://{model_path}/store",
+                timeout=timedelta(seconds=60),
+            )
+            parallel_state.initialize_model_parallel(1, 2, backend="gloo")
+            target = model_cls(vllm_config=config)
+            target.set_aux_hidden_state_layers(())
+            reserve_aux_intermediate_tensor_slots(target)
+            buffers = target.make_empty_intermediate_tensors(2, torch.float32, "cpu")
+            assert set(buffers.tensors) == {"hidden_states", "residual"}
+            assert target.model.pack_local_aux_hidden_states([]) == {}
+            assert target.model.collect_remote_aux_hidden_states(None) == []
+
+            target.set_aux_hidden_state_layers(taps)
+            model = target.model
+            assert model.aux_hidden_state_layers == (0, 2, 4)
+            assert (model.start_layer, model.end_layer) == (rank * 2, rank * 2 + 2)
+            verify_supports_aux_hidden_states_over_pp(target, "dflash")
+            local_taps = (0, 2) if rank == 0 else (4,)
+            local = [torch.full((2, 128), float(tap)) for tap in local_taps]
+            packed = model.pack_local_aux_hidden_states(local)
+            slots = (0, 1) if rank == 0 else (2,)
+            assert tuple(packed) == tuple(f"aux_hidden_states_{i}" for i in slots)
+            for tensor, tap in zip(packed.values(), local_taps, strict=True):
+                torch.testing.assert_close(
+                    tensor, torch.full((2, 128), float(tap)), rtol=0, atol=0
+                )
+            if rank == 1:
+                reserve_aux_intermediate_tensor_slots(target)
+                buffers = target.make_empty_intermediate_tensors(
+                    2, torch.float32, "cpu"
+                )
+                assert set(buffers.tensors) == {
+                    "hidden_states",
+                    "residual",
+                    "aux_hidden_states_0",
+                    "aux_hidden_states_1",
+                }
+                for key in ("aux_hidden_states_0", "aux_hidden_states_1"):
+                    assert buffers[key].shape == (2, 128)
+                incoming = IntermediateTensors(
+                    {
+                        f"aux_hidden_states_{i}": torch.full((2, 128), float(tap))
+                        for i, tap in enumerate((0, 2))
+                    }
+                )
+                received = model.collect_remote_aux_hidden_states(incoming)
+                assert len(received) == 2
+                for tensor, tap in zip(received, (0, 2), strict=True):
+                    torch.testing.assert_close(
+                        tensor, torch.full((2, 128), float(tap)), rtol=0, atol=0
+                    )
+                incomplete = IntermediateTensors(
+                    {"aux_hidden_states_0": incoming["aux_hidden_states_0"]}
+                )
+                with pytest.raises(RuntimeError, match="Missing aux_hidden_states_1"):
+                    model.collect_remote_aux_hidden_states(incomplete)
+    finally:
+        parallel_state.cleanup_dist_env_and_memory()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("implementation", ["legacy", "nvidia"])
+@pytest.mark.parametrize("taps", [(0, 2, 4), (4, 0, 2, 4)])
+def test_qwen3_5_declares_and_configures_aux_hidden_state_pp(
+    tmp_path, taps, implementation
+):
+    """The public setter must initialize global auxiliary slots on both stages."""
+    Qwen3_5TextConfig(
+        architectures=["Qwen3_5ForCausalLM"],
+        vocab_size=128,
+        hidden_size=128,
+        intermediate_size=256,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        linear_key_head_dim=64,
+        linear_value_head_dim=64,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        layer_types=["linear_attention", "full_attention"] * 2,
+        max_position_embeddings=128,
+    ).save_pretrained(tmp_path)
+    context = torch.multiprocessing.spawn(
+        _check_qwen3_5_aux_layout,
+        args=(str(tmp_path), taps, implementation),
+        nprocs=2,
+        join=False,
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while not context.join(timeout=1):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Qwen3.5 auxiliary-layout workers timed out")
+    finally:
+        for process in context.processes:
+            if process.is_alive():
+                process.terminate()
+        for process in context.processes:
+            process.join(timeout=5)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=5)
+            if process.is_alive():
+                raise RuntimeError(
+                    f"Failed to stop auxiliary-layout worker {process.pid}"
+                )

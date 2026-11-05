@@ -2,6 +2,23 @@ group: Spec Decode
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (B200) Qwen3.5 DFlash Pipeline Parallel"
+  key: qwen3-5-dflash-pipeline-parallel
+  device: b200-k8s
+  num_devices: 2
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/model_executor/models/qwen3_5.py
+    - vllm/model_executor/models/qwen3_next.py
+    - vllm/model_executor/models/interfaces.py
+    - vllm/models/qwen3_5/__init__.py
+    - vllm/models/qwen3_5/nvidia/model.py
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/worker/gpu/pp_utils.py
+    - vllm/v1/worker/gpu/model_runner.py
+    - tests/v1/e2e/spec_decode/test_qwen3_5_dflash_pp.py
+  commands:
+    - pytest -v -s v1/e2e/spec_decode/test_qwen3_5_dflash_pp.py
 - label: ":nvidia: (H200 MIG 35GB) V1 Spec Decode"
   device: h200_35gb
   key: v1-spec-decode
