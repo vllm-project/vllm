@@ -428,7 +428,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             backend=self.wna16_backend,
             layer=layer,
             quant_config=self.quant_config,
-            input_dtype=None,
             w13=layer.w13_qweight,
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
@@ -449,8 +448,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             w2_scales,
             w13_qzeros,
             w2_qzeros,
-            w13_input_global_scale,
-            w2_input_global_scale,
             _,  # w13_bias
             _,  # w2_bias
         ) = converted
@@ -467,20 +464,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_qzeros", w13_qzeros)
             replace_parameter(layer, "w2_qzeros", w2_qzeros)
-
-        # Marlin-specific parameters (not needed for Flashinfer)
-        if self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM:
-            # Register input global scales if present
-            if w13_input_global_scale is not None:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-                )
-            if w2_input_global_scale is not None:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-                )
 
         self._setup_kernel(layer)
 
