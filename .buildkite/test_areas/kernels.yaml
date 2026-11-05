@@ -506,6 +506,7 @@ steps:
       source_file_dependencies:
       - vllm/models/deepseek_v4/amd/rocm.py
       - vllm/models/deepseek_v41/amd/rocm.py
+      - vllm/models/deepseek_v41/amd/ops/topk_pack.py
       - vllm/models/deepseek_v41/sparse_mla.py
       - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
       - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py

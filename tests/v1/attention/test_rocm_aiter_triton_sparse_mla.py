@@ -572,6 +572,115 @@ def test_deepseek_v41_forward_mqa_mxfp8_matches_reference(
     assert _max_row_rel_err(blocks.view_as(q), expected) < 0.05
 
 
+@pytest.mark.parametrize("model", ["deepseek_v4", "deepseek_v41", "fused_topk"])
+@pytest.mark.parametrize("width", [8, 128, 1024, 2048])
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_sparse_mla_store_epilogue_topk_indices_are_compact(
+    model: str, width: int, use_graph: bool
+) -> None:
+    """Unmasked attention must see every valid key and no negative live slots."""
+    import importlib
+
+    if model == "fused_topk":
+        build = importlib.import_module(
+            "vllm.models.deepseek_v41.amd.ops.topk_pack"
+        ).launch
+    else:
+        build = importlib.import_module(
+            f"vllm.models.{model}.amd.rocm"
+        ).compute_global_topk_ragged_indices_and_indptr
+
+    source = (
+        torch.arange(4 * width, dtype=torch.int32, device="cpu").view(4, width) % 64
+    )
+    source[0, 1::3] = -1
+    source[1] = -1
+    source[2, [0, width // 2, width - 1]] = -1
+    valid = torch.tensor([True, True, True, False], device="cpu")
+    requests = torch.tensor([0, 1, 0, 1], dtype=torch.int32, device="cpu")
+    table = torch.arange(32, dtype=torch.int32, device="cpu").view(2, 16).flip(1)
+    # Keep a padded row stride on the inputs.
+    backing = torch.full((4, width + 3), -1, dtype=torch.int32, device="cuda")
+    indices = backing[:, :width]
+    indices.copy_(source)
+    valid_gpu = valid.to("cuda")
+    requests_gpu = requests.to("cuda")
+    table_gpu = table.to("cuda")
+
+    def run():
+        return build(indices, requests_gpu, table_gpu, 4, valid_gpu)
+
+    def check(result):
+        flat, indptr, lengths = result
+        expected = [
+            [int(table[r, x // 4]) * 4 + x % 4 for x in row if x >= 0] if keep else []
+            for row, r, keep in zip(source.tolist(), requests.tolist(), valid.tolist())
+        ]
+        live = flat[: int(indptr[-1])]
+        assert (live >= 0).all(), "negative top-k slot inside a live indptr range"
+        assert _rows_from_ragged(flat, indptr) == expected
+        assert lengths.tolist() == [len(row) for row in expected]
+
+    check(run())
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = run()
+        # Replay with different lengths and holes at the same input addresses.
+        source = source.roll(1, dims=1)
+        valid = torch.tensor([True, False, True, True], device="cpu")
+        indices.copy_(source)
+        valid_gpu.copy_(valid)
+        graph.replay()
+        check(captured)
+
+
+@pytest.mark.parametrize("use_graph", [False, True])
+@torch.inference_mode()
+def test_sparse_mla_store_epilogue_glm_live_indices_are_nonnegative(
+    use_graph: bool,
+) -> None:
+    """GLM's mapper bounds invalid local slots and does not touch the unused tail."""
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+        triton_convert_req_index_to_global_index,
+    )
+
+    indices = torch.full((3, 128), -1, dtype=torch.int32, device="cuda")
+    indices[0, :5] = torch.tensor([-1, 0, 4, 8, -1], device="cuda")
+    indices[2, :3] = torch.tensor([7, -1, 3], device="cuda")
+    requests = torch.tensor([0, 0, 1], dtype=torch.int32, device="cuda")
+    table = torch.tensor([[3, 1], [2, 0]], dtype=torch.int32, device="cuda")
+    indptr = torch.tensor([0, 5, 5, 8], dtype=torch.int32, device="cuda")
+    mapped = torch.full((384,), -777, dtype=torch.int32, device="cuda")
+
+    def run():
+        triton_convert_req_index_to_global_index(
+            requests,
+            table,
+            indices,
+            indptr,
+            mapped,
+            BLOCK_STRIDE_ROWS=4,
+            BLOCK_SIZE=4,
+            NUM_TOPK_TOKENS=128,
+        )
+
+    run()
+    assert mapped[:8].tolist() == [0, 12, 4, 0, 0, 3, 0, 11]
+    assert (mapped[8:] == -777).all()
+    if use_graph:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        indices[0, 0] = 7
+        indptr.copy_(torch.tensor([0, 1, 1, 1], dtype=torch.int32, device="cuda"))
+        mapped.fill_(-777)
+        graph.replay()
+        assert mapped[0].item() == 7
+        assert (mapped[1:] == -777).all()
+
+
 @pytest.mark.parametrize("output", ["bf16", "mxfp8"])
 @pytest.mark.parametrize(
     "cache_dtype, q_dtype",
@@ -641,6 +750,30 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(
                 for _ in range(num_tokens)
             ]
         )
+        if cache_dtype == "fp8_e4m3":
+            from vllm.models.deepseek_v4.amd.rocm import (
+                compute_global_topk_ragged_indices_and_indptr,
+            )
+
+            # Use the production packer with holes before unmasked attention.
+            dense = torch.full(
+                (num_tokens, 2 * keys_per_row), -1, dtype=torch.int32, device=device
+            )
+            dense[:, ::2] = indices.view(num_tokens, keys_per_row).int()
+            if num_tokens > 1:
+                dense[0] = -1
+            flat, indptr, _ = compute_global_topk_ragged_indices_and_indptr(
+                dense,
+                torch.zeros(num_tokens, dtype=torch.int32, device=device),
+                torch.arange(
+                    num_rows // block_size, dtype=torch.int32, device=device
+                ).view(1, -1),
+                block_size,
+                torch.ones(num_tokens, dtype=torch.bool, device=device),
+            )
+            assert (flat[: int(indptr[-1])] >= 0).all()
+            flat[int(indptr[-1]) :].fill_(-1)
+            return indptr, flat
         indptr = torch.arange(0, (num_tokens + 1) * keys_per_row, keys_per_row)
         return indptr.to(device, torch.int32), indices.int()
 
@@ -687,6 +820,8 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(
 
     unrotated = torch.empty(q.shape, dtype=torch.bfloat16, device=device)
     sparse_mla(unrotated, rotate=False)
+    if cache_dtype == "fp8_e4m3" and num_tokens > 1:
+        assert (unrotated[0] == 0).all()
     expected = unrotated.clone()
     rocm_inverse_rope_rows_(expected, positions, cos_sin_cache, rope_dim)
 
@@ -722,5 +857,8 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(
     )
     # MXFP8 rounding alone puts both about 0.03 rel-L2 off the bf16 rows
     for data, scale in (fused_mxfp8, standalone_mxfp8):
-        err = (dequantize(data, scale) - expected.float()).norm()
+        actual = dequantize(data, scale)
+        if cache_dtype == "fp8_e4m3" and num_tokens > 1:
+            assert (actual[0] == 0).all()
+        err = (actual - expected.float()).norm()
         assert err / expected.float().norm() < 0.05

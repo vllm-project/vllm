@@ -458,32 +458,33 @@ def _pack_global_topk_ragged_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    block_idx = tl.program_id(1)
-    offset = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-
     out_start = tl.load(topk_indptr_ptr + token_idx)
     out_end = tl.load(topk_indptr_ptr + token_idx + 1)
     out_len = out_end - out_start
-    if block_idx * BLOCK_SIZE >= out_len:
+    if out_len == 0:
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-    mask = (offset < out_len) & (offset < topk)
-    local_idx = tl.load(
-        topk_indices_ptr + token_idx * topk_indices_stride + offset,
-        mask=mask,
-        other=-1,
-    )
-    valid = mask & (local_idx >= 0)
-    block_indices = local_idx // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=valid,
-        other=0,
-    )
-    block_offsets = local_idx % block_size
-    slot_ids = tl.where(valid, block_numbers * block_size + block_offsets, -1)
-    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+    written = 0
+    for start in range(0, topk, BLOCK_SIZE):
+        offset = start + tl.arange(0, BLOCK_SIZE)
+        local_idx = tl.load(
+            topk_indices_ptr + token_idx * topk_indices_stride + offset,
+            mask=offset < topk,
+            other=-1,
+        )
+        valid = (offset < topk) & (local_idx >= 0)
+        block_numbers = tl.load(
+            block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+            mask=valid,
+            other=0,
+        )
+        slot_ids = block_numbers * block_size + local_idx % block_size
+        rank = tl.cumsum(valid.to(tl.int32), axis=0) - 1
+        tl.store(
+            global_topk_ragged_ptr + out_start + written + rank, slot_ids, mask=valid
+        )
+        written += tl.sum(valid.to(tl.int32), axis=0)
 
 
 # The strides and the state block size depend on the KV cache layout; keeping
@@ -645,8 +646,8 @@ def compute_global_topk_ragged_indices_and_indptr(
         device=topk_indices.device,
     )
     if global_topk_ragged.numel() > 0:
-        block = 128
-        _pack_global_topk_ragged_kernel[(num_tokens, triton.cdiv(topk, block))](
+        block = min(triton.next_power_of_2(topk), 1024)
+        _pack_global_topk_ragged_kernel[(num_tokens,)](
             global_topk_ragged,
             topk_indptr,
             topk_indices,
