@@ -588,7 +588,11 @@ def max_decode_query_len(vllm_config: "VllmConfig") -> int:
         return 1
     num_speculative_tokens = speculative_config.num_speculative_tokens
     max_query_len = 1 + num_speculative_tokens
-    if speculative_config.parallel_drafting and not vllm_config.use_v2_model_runner:
+    if vllm_config.use_v2_model_runner:
+        # Account for additional drafting slots that some speculators append
+        # to the query.
+        max_query_len += speculative_config.max_num_new_slots_for_drafting
+    elif speculative_config.parallel_drafting:
         # Model runner V1 only; remove with it. Its parallel drafter appends up
         # to num_speculative_tokens mask slots to each verified request.
         max_query_len += num_speculative_tokens
