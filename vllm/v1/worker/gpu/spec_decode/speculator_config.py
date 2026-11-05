@@ -58,6 +58,8 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
+    # See `SpeculativeConfig.prefill_context_kv_only`.
+    supports_prefill_context_kv_only: ClassVar[bool] = False
 
     # --- SpeculativeConfig setup ---
 
@@ -101,6 +103,15 @@ class SpeculatorConfig:
     @final
     def num_speculative_tokens(self) -> int:
         return self.spec_config.num_speculative_tokens
+
+    @property
+    @final
+    def num_scheduled_spec_tokens(self) -> int:
+        """Spec tokens scheduled per step: `num_speculative_tokens`, or 0 with
+        `prefill_context_kv_only`."""
+        if self.spec_config.prefill_context_kv_only:
+            return 0
+        return self.num_speculative_tokens
 
     @property
     def uses_aux_hidden_states(self) -> bool:

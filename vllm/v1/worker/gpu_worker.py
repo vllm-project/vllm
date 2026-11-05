@@ -1297,6 +1297,7 @@ class Worker(WorkerBase):
             and self.model_runner.get_draft_model() is not None
             and speculative_config is not None
             and speculative_config.draft_model_config is not None
+            and not speculative_config.prefill_context_kv_only
         )
 
     def _set_draft_weight_update_target(self) -> None:
@@ -1690,6 +1691,15 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"{type(self.weight_transfer_engine).__name__} does not support "
                 "draft model weight updates."
+            )
+        if (
+            is_draft
+            and self.speculative_config is not None
+            and self.speculative_config.prefill_context_kv_only
+        ):
+            raise RuntimeError(
+                "Draft model weight updates are not supported with "
+                "prefill_context_kv_only, which frees draft weights."
             )
 
         if self._weight_update_active:
