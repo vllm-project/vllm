@@ -1654,6 +1654,27 @@ def _rocm_aiter_group_fp8_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_clamp_act_mul_impl(
+    x: torch.Tensor,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+
+    return fused_clamp_act_mul(
+        x,
+        swiglu_limit=swiglu_limit,
+        activation="silu",
+        dtype_quant=None,
+    )
+
+
+def _rocm_aiter_clamp_act_mul_fake(
+    x: torch.Tensor,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    return torch.empty((x.shape[0], x.shape[-1] // 2), dtype=x.dtype, device=x.device)
+
+
 def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -3244,6 +3265,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_clamp_act_mul",
+                op_func=_rocm_aiter_clamp_act_mul_impl,
+                fake_impl=_rocm_aiter_clamp_act_mul_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
@@ -4428,6 +4455,20 @@ class rocm_aiter_ops:
             transpose_bm=transpose_bm,
             config=config,
         )
+
+    @staticmethod
+    def clamp_act_mul_supported(n_half: int) -> bool:
+        """Whether fused_clamp_act_mul handles a half (output) width of n_half:
+        it tiles whole 128-column rows and asserts this."""
+        return n_half >= 128 and n_half % 128 == 0
+
+    @staticmethod
+    def clamp_act_mul(
+        x: torch.Tensor,
+        swiglu_limit: float,
+    ) -> torch.Tensor:
+        """Clamped SwiGLU: silu(clamp(gate)) * clamp(up), fused."""
+        return torch.ops.vllm.rocm_aiter_clamp_act_mul(x, swiglu_limit)
 
     @staticmethod
     def group_fp8_quant(
