@@ -5,7 +5,7 @@ them:
 
 - ``initialize_specialized_decode``: the fused MoE decode executors, built after
   quantization and before graph capture (``process_weights_after_loading``).
-- ``SpecializedDecodeMixin``: the mono decode (``--monokernel``):
+- ``SpecializedDecodeMixin``: the mono decode (``runtime.requested``):
   ``init_specialized_decode`` in the causal LM's ``__init__`` (the config check,
   before any module allocates weights) and ``get_model_state_cls``; the model
   state builds the executor after load (``model_state.Qwen3_5XpuModelState``).
@@ -42,8 +42,10 @@ _drafters: list[nn.Module] = []
 def register_drafter(predictor: nn.Module, vllm_config) -> None:
     """Called by the MTP predictor's ``__init__``. The target's config check
     already refused unsupported speculative settings."""
+    from .runtime import requested
+
     predictor.specialized_decode = None
-    if vllm_config.kernel_config.monokernel:
+    if requested(vllm_config):
         _drafters.append(predictor)
 
 
@@ -72,8 +74,9 @@ class SpecializedDecodeMixin:
 
 
 def model_state_cls(language_model: nn.Module) -> "type[ModelState]":
-    """The model runner state: the mono decode's when ``--monokernel`` selects
-    it, else the hybrid model state vLLM picks for Qwen3.5."""
+    """The model runner state: the mono decode's when it is requested
+    (``runtime.requested``), else the hybrid model state vLLM picks for
+    Qwen3.5."""
     if getattr(language_model, "specialized_decode_config", None) is None:
         from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
             MambaHybridModelState,

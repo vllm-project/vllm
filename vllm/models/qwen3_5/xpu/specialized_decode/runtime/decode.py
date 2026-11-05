@@ -23,7 +23,14 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 
-from . import DECODE_ROWS, MTP_LAYER_ID, MTP_PROLOGUE_ID, MTP_ROWS, DecodeConfig
+from . import (
+    DECODE_ROWS,
+    MTP_LAYER_ID,
+    MTP_PROLOGUE_ID,
+    MTP_ROWS,
+    SWITCH,
+    DecodeConfig,
+)
 from .guards import FailStop, bind_reasons, weight_reasons
 from .layers import MonoLayer, MtpPrologue
 from .peer import PeerRegion, tp_agree
@@ -56,8 +63,8 @@ def agree(reasons: list[str], what: str) -> None:
     if not tp_agree(not reasons, get_tp_group().cpu_group):
         why = "; ".join(reasons) if reasons else "another TP rank refused"
         raise ValueError(
-            f"Qwen3.5 XPU mono decode (--monokernel) does not support {what}: "
-            f"{why} (without --monokernel vLLM's decode runs)"
+            f"Qwen3.5 XPU mono decode ({SWITCH}) does not support {what}: "
+            f"{why} (without the switch vLLM's decode runs)"
         )
 
 

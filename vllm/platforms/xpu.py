@@ -458,7 +458,8 @@ class XPUPlatform(Platform):
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
-        # Mono decode (--monokernel, vllm/models/qwen3_5/xpu/specialized_decode):
+        # Mono decode (vllm/models/qwen3_5/xpu/specialized_decode, requested by
+        # --monokernel or decode_backend "latency_specialized"):
         # the small H2D input copies of the next step are issued while the
         # decode graph still runs. Level Zero performs such copies on the CPU
         # through a locked pointer and first waits for the in-order queue to
@@ -468,7 +469,9 @@ class XPUPlatform(Platform):
         # intel/compute-runtime eb81cf6 (NEO-19860, "gate cpu copy on in-order
         # counter completion"), which is not in a release yet; drop these debug
         # keys once the installed driver contains that commit.
-        if vllm_config.kernel_config.monokernel:
+        from vllm.models.qwen3_5.xpu.specialized_decode.runtime import requested
+
+        if requested(vllm_config):
             os.environ.setdefault("NEOReadDebugKeys", "1")
             os.environ.setdefault("ExperimentalCopyThroughLock", "0")
 

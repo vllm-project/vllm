@@ -113,6 +113,7 @@ from .specialized_decode.hooks import (
     model_state_cls,
 )
 from .specialized_decode.moe import MoEStep
+from .specialized_decode.runtime import requested
 
 if TYPE_CHECKING:
     from vllm_xpu_kernels.moe_shared_fused_interface import XpuFusedMoeWithSharedExpert
@@ -127,9 +128,9 @@ class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
         self, vllm_config: VllmConfig, prefix: str = "", reduce_results: bool = True
     ):
         super().__init__(vllm_config, prefix=prefix, reduce_results=reduce_results)
-        # --monokernel: the mono layers read the shared expert's weights in
-        # place, so the fused MoE leaves them alone (``MoEStep``)
-        self.monokernel = vllm_config.kernel_config.monokernel
+        # mono decode requested: the mono layers read the shared expert's
+        # weights in place, so the fused MoE leaves them alone (``MoEStep``)
+        self.monokernel = requested(vllm_config)
 
     @property
     def _xpu_moe_shared_fused_plan(self) -> "XpuFusedMoeWithSharedExpert | None":

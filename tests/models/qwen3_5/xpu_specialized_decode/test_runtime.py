@@ -68,6 +68,7 @@ def _vllm_config(**over) -> SimpleNamespace:
     ``over`` sets dotted paths, e.g. ``{"parallel_config.data_parallel_size": 2}``."""
     c = SimpleNamespace(
         kernel_config=SimpleNamespace(monokernel=True),
+        additional_config={},
         model_config=SimpleNamespace(
             architectures=["Qwen3_5MoeForConditionalGeneration"],
             dtype=torch.float16,
@@ -147,6 +148,35 @@ def test_switch_off_checks_nothing():
     """Without --monokernel the config is not even looked at."""
     cfg = SimpleNamespace(kernel_config=SimpleNamespace(monokernel=False))
     assert specialized_decode_config(cfg) is None
+    other = SimpleNamespace(
+        kernel_config=SimpleNamespace(monokernel=False),
+        additional_config={"decode_backend": "stock"},
+    )
+    assert specialized_decode_config(other) is None
+
+
+def test_decode_backend_switch(monkeypatch):
+    """additional_config={"decode_backend": "latency_specialized"} requests the
+    mono decode as --monokernel does (RFC #60904); refusals are the same."""
+    monkeypatch.setattr(runtime, "_ops", lambda ops: _Ops())
+    switch = {"decode_backend": "latency_specialized"}
+    cfg = _vllm_config(
+        **{"kernel_config.monokernel": False, "additional_config": switch}
+    )
+    assert runtime.requested(cfg)
+    assert specialized_decode_config(cfg) == DecodeConfig(q=1)
+    bad = _vllm_config(
+        **{
+            "kernel_config.monokernel": False,
+            "additional_config": switch,
+            "parallel_config.tensor_parallel_size": 4,
+        }
+    )
+    with pytest.raises(ValueError, match="TP 4"):
+        specialized_decode_config(bad)
+    off = _vllm_config(**{"kernel_config.monokernel": False})
+    assert not runtime.requested(off)
+    assert specialized_decode_config(off) is None
 
 
 @pytest.mark.parametrize(
@@ -277,6 +307,15 @@ def test_drafter_registered_only_with_monokernel(monkeypatch):
         p, SimpleNamespace(kernel_config=SimpleNamespace(monokernel=True))
     )
     assert hooks._drafters == [p]
+    q = torch.nn.Module()
+    hooks.register_drafter(
+        q,
+        SimpleNamespace(
+            kernel_config=SimpleNamespace(monokernel=False),
+            additional_config={"decode_backend": "latency_specialized"},
+        ),
+    )
+    assert hooks._drafters == [p, q]
 
 
 def _gdn(prefills=0, decodes=0, spec=0, q=1):

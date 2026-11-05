@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen3.5 / Qwen3.6 MoE mono decode on two Xe2 GPUs (TP2), enabled by
-``--monokernel``.
+``--monokernel`` or ``--additional-config '{"decode_backend":
+"latency_specialized"}'`` (the switches of the specialized decode RFC,
+vllm-project/vllm#60904; ``requested``).
 
 ``specialized_decode_config`` runs in the model's ``__init__``, before the
 weights load. It returns None for vLLM's decode, and raises with every reason
@@ -65,18 +67,34 @@ class DecodeConfig:
         return frozenset(r for r in VERIFY if r[1] == self.q)
 
 
+# the switch in the error messages
+SWITCH = '--monokernel / decode_backend "latency_specialized"'
+
+
+def requested(vllm_config) -> bool:
+    """Whether the mono decode is requested: ``--monokernel`` (off by default,
+    ``--no-monokernel``; ``KernelConfig.monokernel``) or ``additional_config``
+    ``{"decode_backend": "latency_specialized"}``. Either one is enough."""
+    if vllm_config.kernel_config.monokernel:
+        return True
+    extra = getattr(vllm_config, "additional_config", None)
+    return isinstance(extra, dict) and (
+        extra.get("decode_backend") == "latency_specialized"
+    )
+
+
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     """The deployment's mono decode settings, None for vLLM's decode. Raises
-    when ``--monokernel`` is set for an unsupported deployment, listing every
-    reason."""
-    if not vllm_config.kernel_config.monokernel:
+    when the mono decode is requested (``requested``) for an unsupported
+    deployment, listing every reason."""
+    if not requested(vllm_config):
         return None
     reasons = unsupported(vllm_config)
     if reasons:
         raise ValueError(
-            "Qwen3.5 XPU mono decode (--monokernel) does not support: "
+            f"Qwen3.5 XPU mono decode ({SWITCH}) does not support: "
             + "; ".join(reasons)
-            + " (without --monokernel vLLM's decode runs)"
+            + " (without the switch vLLM's decode runs)"
         )
     spec = vllm_config.speculative_config
     return DecodeConfig(q=spec.num_speculative_tokens + 1 if spec is not None else 1)

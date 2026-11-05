@@ -6,12 +6,13 @@ Two decode specializations of the eager XPU Qwen3.5 model (`../model.py`,
 - **Fused MoE** (on by default): the routed and the gated shared experts of a
   decode step of 1-8 rows in one fused kernel (`hooks.py`, `moe.py`,
   `weights.py`). Steps or weights it does not serve run the stock MoE.
-- **Mono decode** (`--monokernel`, opt-in): on two Xe2 GPUs at TP2, each
-  decoder layer of a decode or MTP verify step runs as one persistent kernel
-  from vllm-xpu-kernels (GatedDeltaNet or full attention, then the MoE with the
-  shared expert); both TP all-reduces run inside the kernel through mailboxes
-  in the peer GPU's memory. Every other step runs the stock layers (with the
-  stock MoE: see below). The rest of this README is about the mono decode.
+- **Mono decode** (opt-in: `--monokernel` or `decode_backend`, below): on two
+  Xe2 GPUs at TP2, each decoder layer of a decode or MTP verify step runs as
+  one persistent kernel from vllm-xpu-kernels (GatedDeltaNet or full attention,
+  then the MoE with the shared expert); both TP all-reduces run inside the
+  kernel through mailboxes in the peer GPU's memory. Every other step runs the
+  stock layers (with the stock MoE: see below). The rest of this README is
+  about the mono decode.
 
 The kernels read vLLM's loaded weights and caches in place; nothing is copied
 or re-quantized. The fused MoE would make the shared expert's two fp8
@@ -30,8 +31,11 @@ VLLM_USE_V2_MODEL_RUNNER=1 \
   [--speculative-config '{"method": "mtp", "num_speculative_tokens": 1..7}']
 ```
 
-There are no other options. Without `--monokernel` nothing of the mono decode
-is built or run.
+`--additional-config '{"decode_backend": "latency_specialized"}'` requests it
+the same way (the generic switch of the specialized decode RFC,
+[#60904](https://github.com/vllm-project/vllm/issues/60904)); either switch is
+enough (`runtime.requested`). There are no other options. Without a switch
+(`--no-monokernel`, the default) nothing of the mono decode is built or run.
 
 ## Supported deployments
 

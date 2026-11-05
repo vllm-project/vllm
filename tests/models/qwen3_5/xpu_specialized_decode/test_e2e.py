@@ -108,6 +108,8 @@ CASES: dict[str, dict] = {
     # bfloat16 activations, KV cache and conv state
     "decode_unaligned_bf16": dict(lengths=PROMPT_LENGTHS, dtype="bfloat16"),
     "mtp_k3_b2_bf16": dict(lengths=[63, 1000], spec=3, dtype="bfloat16"),
+    # requested by additional_config={"decode_backend": "latency_specialized"}
+    "mtp_k1_decode_backend": dict(lengths=[65], spec=1, decode_backend=True),
 }
 
 
@@ -228,8 +230,10 @@ def _main(case: dict, out: str) -> None:
         enable_prefix_caching=False,
         gpu_memory_utilization=0.9,
         compilation_config={"cudagraph_mode": "FULL_AND_PIECEWISE"},
-        monokernel=case["mono"],
+        monokernel=case["mono"] and not case.get("decode_backend"),
     )
+    if case["mono"] and case.get("decode_backend"):  # the RFC #60904 switch
+        kw["additional_config"] = {"decode_backend": "latency_specialized"}
     if case.get("spec"):
         kw["speculative_config"] = {
             "method": "mtp",
