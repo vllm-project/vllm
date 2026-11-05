@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from transformers import CONFIG_MAPPING, PretrainedConfig
+from transformers import CONFIG_MAPPING, PreTrainedConfig
 
 # NOTE: Temporary shim for FunAudioChat checkpoints.
 # These checkpoints use `model_type="funaudiochat"`, which is not currently
@@ -13,7 +13,7 @@ from transformers import CONFIG_MAPPING, PretrainedConfig
 # provides an `auto_map`) and vLLM can rely on `AutoConfig.from_pretrained()`.
 
 
-class FunAudioChatAudioEncoderConfig(PretrainedConfig):
+class FunAudioChatAudioEncoderConfig(PreTrainedConfig):
     model_type = "funaudiochat_audio_encoder"
 
     def __init__(
@@ -74,7 +74,7 @@ class FunAudioChatAudioEncoderConfig(PretrainedConfig):
         self.pad_token_id = pad_token_id
 
 
-class FunAudioChatConfig(PretrainedConfig):
+class FunAudioChatConfig(PreTrainedConfig):
     model_type = "funaudiochat"
     attribute_map = {
         "audio_token_id": "audio_token_index",
@@ -82,8 +82,8 @@ class FunAudioChatConfig(PretrainedConfig):
 
     def __init__(
         self,
-        audio_config: PretrainedConfig | dict | None = None,
-        text_config: PretrainedConfig | dict | None = None,
+        audio_config: PreTrainedConfig | dict | None = None,
+        text_config: PreTrainedConfig | dict | None = None,
         audio_token_index: int = 151646,
         ignore_index: int = -100,
         hidden_size: int | None = None,

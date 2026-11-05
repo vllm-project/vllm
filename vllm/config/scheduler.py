@@ -3,10 +3,9 @@
 
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self, cast
 
 from pydantic import Field, field_validator
-from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -53,7 +52,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = Field(default=None, ge=0)
+    max_num_scheduled_tokens: int | None = Field(default=None, ge=1)
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -77,12 +76,31 @@ class SchedulerConfig:
     be ``<= max_num_seqs``. ``None`` (default) keeps current behavior.
     """
 
+    max_num_inflight_kv_loads: int | None = Field(default=None, ge=1)
+    """Maximum number of requests holding KV blocks for an async KV connector
+    load (e.g. a P/D NIXL pull) before they run: loads in progress, or finished
+    and waiting for a running slot.
+
+    Setting it also lets requests the connector may load asynchronously
+    (``KVConnectorBase_V1.may_load_async``, by default P/D remote-prefill
+    requests) start their loads while the running batch is full, so they are
+    ready when a slot frees. ``None`` (default) keeps current behavior: no cap,
+    and loads start only when a running slot is free.
+    """
+
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default).
+    Ignored when chunked prefill is disabled.
 
     The cap is not applied when the request is the only one in the batch,
     since there is no other request for it to starve."""
+
+    long_prefill_token_threshold_adaptive: bool = Field(default=False)
+    """Floor the effective long prefill token threshold at a fair share of
+    the token budget: max_num_batched_tokens divided by the number of
+    queued and running requests. Only applies when
+    long_prefill_token_threshold is nonzero."""
 
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
@@ -196,9 +214,35 @@ class SchedulerConfig:
     (the default) disables the watermark."""
 
     prefill_schedule_interval: int = Field(default=1, ge=1)
-    """For data-parallel deployments, only admit new prefill requests
-    once every N engine steps, aligned across DP ranks, to better balance
-    per-step forward-pass times."""
+    """Only admit prefill once every N engine steps, leaving the steps in
+    between to decode alone. 1 (the default) admits prefill on every step.
+
+    A deferred step carries no prefill at all, including chunks of an
+    already-admitted prompt, so a long prompt can take up to N times as many
+    steps to finish prefilling."""
+
+    cache_aware_admission_window: int = Field(default=0, ge=0)
+    """Look-ahead window for cache-aware admission. Within the first N waiting
+    requests, those whose prefix is already in the KV cache are admitted ahead
+    of requests that would have to compute theirs, so a cold request does not
+    evict blocks a resident one still needs. 0 (the default) admits strictly in
+    arrival order.
+
+    Reordering is confined to the window and to requests that are merely
+    waiting, so a request that is blocked or already partially computed keeps
+    its position and nothing is moved past it. Requires prefix caching and the
+    "fcfs" policy; it is ignored otherwise. Costs one prefix-cache lookup per
+    request in the window per step, so prefer the smallest window that spans
+    the usual queue depth."""
+
+    cache_aware_admission_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """KV cache usage below which `cache_aware_admission_window` is not applied.
+
+    Defaults to 0.5, so the window engages only once the cache is at least half
+    used. Below that there is room for both prompts and reordering would change
+    admission order without an eviction to avoid, which is a fairness cost for
+    no benefit. It also means the per-request cache probe is skipped entirely
+    while the cache is roomy. Set to 0.0 to reorder on every step."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to

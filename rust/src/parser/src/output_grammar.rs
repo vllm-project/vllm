@@ -5,22 +5,29 @@
 
 use std::{fmt, str::FromStr};
 
+use serde::Serialize;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use thiserror::Error;
 use xgrammar_structural_tag::builders::{StructuralTagBuilder, StructuralTagOptions};
 use xgrammar_structural_tag::format::Format;
 use xgrammar_structural_tag::tool::ToolChoiceValue;
 use xgrammar_structural_tag::{
-    FunctionDefinition, FunctionToolParam, ToolChoice, ToolParam, build_structural_tag,
+    FunctionDefinition, FunctionToolParam, NormalizedToolChoice, ToolChoice, ToolParam,
+    build_structural_tag,
 };
 
 use crate::tool::Tool;
+
+pub mod arguments;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_utils;
 
 /// Result alias for output grammar construction.
 pub type Result<T> = std::result::Result<T, OutputGrammarError>;
 
 /// How much of the generated stream an output grammar covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GrammarCoverage {
     /// The grammar covers reasoning and advances from the first generated token.
     FromTokenZero,
@@ -29,7 +36,7 @@ pub enum GrammarCoverage {
 }
 
 /// One parser-built output grammar and its generated-stream coverage.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BuiltOutputGrammar {
     /// Typed XGrammar structural-tag format.
     pub format: Format,
@@ -125,6 +132,10 @@ pub struct OutputGrammarContext<'a> {
     pub tool_strict_level: ToolStrictLevel,
     /// Whether the request permits more than one tool call.
     pub parallel_tool_calls: bool,
+    /// The user's constraint on the answer text, such as a `response_format`
+    /// JSON schema, normalized to a format. A builder that composes it inserts
+    /// it where the model writes its answer; `None` leaves the answer free.
+    pub answer: Option<&'a Format>,
 }
 
 /// Errors produced while building an output grammar.
@@ -196,7 +207,8 @@ pub(crate) fn full_format_from_builder_for_test(
     )
 }
 
-fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
+/// Tools as builder inputs, strict when the tool or the server floor asks for it.
+pub(crate) fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> {
     tools
         .iter()
         .map(|tool| {
@@ -212,17 +224,36 @@ fn tool_params(tools: &[Tool], strict_level: ToolStrictLevel) -> Vec<ToolParam> 
         .collect()
 }
 
+/// Normalize the request tools the way `build_structural_tag` does before
+/// calling a crate builder, for model-owned grammar builders. Returns `None`
+/// when the request asks for no tool grammar.
+pub(crate) fn normalize_tool_choice(
+    ctx: &OutputGrammarContext<'_>,
+) -> Result<Option<NormalizedToolChoice>> {
+    if !tool_grammar_applies(ctx) {
+        return Ok(None);
+    }
+
+    let tools = tool_params(ctx.tools, ctx.tool_strict_level);
+    let normalized =
+        xgrammar_structural_tag::normalize_tool_choice(&tools, ctx.tool_choice.clone())?;
+    Ok(Some(normalized))
+}
+
 /// Whether the request asks for a tool grammar at all.
-fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
+pub(crate) fn tool_grammar_applies(ctx: &OutputGrammarContext<'_>) -> bool {
     if ctx.tools.is_empty() {
         return false;
     }
 
     match ctx.tool_choice {
         ToolChoice::Value(ToolChoiceValue::None) => false,
+        // With an answer constraint, the grammar must hold the calls `auto`
+        // allows, or the answer would exclude them.
         ToolChoice::Value(ToolChoiceValue::Auto) => {
             ctx.tool_strict_level >= ToolStrictLevel::Function
                 || ctx.tools.iter().any(|tool| tool.strict == Some(true))
+                || ctx.answer.is_some()
         }
         ToolChoice::Value(ToolChoiceValue::Required)
         | ToolChoice::NamedFunction(_)
@@ -249,6 +280,7 @@ mod tests {
                 "required": ["query"]
             }),
             strict,
+            defer_loading: None,
         }
     }
 
@@ -260,6 +292,7 @@ mod tests {
                 tool_choice,
                 tool_strict_level: ToolStrictLevel::Auto,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()
@@ -286,6 +319,7 @@ mod tests {
                 tool_choice: &tool_choice,
                 tool_strict_level: level,
                 parallel_tool_calls: true,
+                answer: None,
             },
         )
         .unwrap()

@@ -26,7 +26,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     canonicalize_singleton_dim_strides,
     get_dtype_size,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -39,7 +38,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    KVCacheSpec,
+    is_quantized_kv_cache,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -183,7 +187,7 @@ class B12xPagedAttentionBackend(AttentionBackend):
         return B12xPagedMetadataBuilder
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return list(_B12X_SUPPORTED_PAGE_SIZES)
 
     @classmethod
@@ -198,7 +202,8 @@ class B12xPagedAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [64, 128, 192, 256]
+        # head_dim 64 is excluded until flashinfer-ai/flashinfer#6977 is fixed.
+        return [128, 192, 256]
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -393,15 +398,11 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
         model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         spec_config = vllm_config.speculative_config
-        default_block_size = int(cache_config.block_size)
-        if default_block_size not in _B12X_SUPPORTED_PAGE_SIZES:
-            raise ValueError(
-                "b12x requires --block-size in "
-                f"{_B12X_SUPPORTED_PAGE_SIZES}, got "
-                f"{cache_config.block_size}."
-            )
+        # cache_config.block_size is not final here: the platform applies
+        # get_preferred_block_size() after the model is constructed. Unsupported
+        # user-specified sizes are rejected at backend selection, and the runtime
+        # page size comes from the cache tensors (_kv_page_size).
 
         self.device = torch.device("cuda", torch.accelerator.current_device_index())
         self.dtype = model_config.dtype

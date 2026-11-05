@@ -38,6 +38,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.utils import extract_json_member_object
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -167,11 +168,12 @@ def inkling_config() -> ParserEngineConfig:
             (EventType.REASONING_END, EventType.TOOL_CALL_START),
         ),
     }
-    # Block-end terminals behave identically regardless of label. A
-    # closed tool block returns to CONTENT (Inkling has no section wrapper;
+    # A closed tool block returns to CONTENT (Inkling has no section wrapper;
     # blocks of any kind may follow), which also keeps the block-kind
     # and role tokens out of the engine's tool-terminal set so the
     # skip_tool_parsing reasoning pass still classifies reasoning.
+    # In a reasoning block, THINK_END defers REASONING_END to the next block
+    # opener so the function-name header is not emitted as content.
     for end in ("THINK_END", "END_SAMPLING"):
         transitions[(ParserState.CONTENT, end)] = Transition(
             ParserState.CONTENT,
@@ -179,7 +181,7 @@ def inkling_config() -> ParserEngineConfig:
         )
         transitions[(ParserState.REASONING, end)] = Transition(
             ParserState.CONTENT,
-            (EventType.REASONING_END,),
+            () if end == "THINK_END" else (EventType.REASONING_END,),
         )
         transitions[(ParserState.TOOL_ARGS, end)] = Transition(
             ParserState.CONTENT,
@@ -256,18 +258,12 @@ class InklingParser(ParserEngine):
             if token_id in special_ids:
                 break
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         vocab = self.vocab
-        thinking_id = vocab.get(CONTENT_THINKING)
-        text_id = vocab.get(CONTENT_TEXT)
-        model_id = vocab.get(MESSAGE_MODEL)
-        end_sampling_id = vocab.get(CONTENT_MODEL_END_SAMPLING)
-        for token_id in reversed(input_ids):
-            if token_id in (thinking_id, model_id):
-                return False
-            if token_id in (text_id, end_sampling_id):
-                return True
-        return False
+        reasoning_ids = {vocab.get(CONTENT_THINKING), vocab.get(MESSAGE_MODEL)}
+        ended_ids = {vocab.get(CONTENT_TEXT), vocab.get(CONTENT_MODEL_END_SAMPLING)}
+        i = rfind_tokens(input_ids, reasoning_ids | ended_ids)
+        return i >= 0 and input_ids[i] in ended_ids
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         vocab = self.vocab

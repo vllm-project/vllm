@@ -24,6 +24,9 @@ pub enum ChatRole {
     User,
     Assistant,
     ToolResponse,
+    /// Role outside the standard set, passed to chat templates unchanged.
+    #[serde(untagged)]
+    Custom(String),
 }
 
 /// One text-only chat content part in OpenAI-style block format.
@@ -154,6 +157,47 @@ impl ChatContent {
         })
     }
 
+    /// Append the content of a following message, as when two messages are
+    /// merged into one. Text on either side of the boundary is joined with a
+    /// blank line, as Python vLLM merges system messages; parts keep their
+    /// order. Empty content adds nothing.
+    pub(crate) fn append(&mut self, other: ChatContent) {
+        const SEPARATOR: &str = "\n\n";
+        if other.is_empty() && !other.has_multimodal() {
+            return;
+        }
+        if self.is_empty() && !self.has_multimodal() {
+            *self = other;
+            return;
+        }
+        match (&mut *self, other) {
+            (Self::Text(text), Self::Text(other)) => {
+                text.push_str(SEPARATOR);
+                text.push_str(&other);
+            }
+            (_, other) => {
+                let mut parts = std::mem::replace(self, Self::Text(String::new())).into_parts();
+                let mut other = other.into_parts().into_iter();
+                if let Some(ChatContentPart::Text { text }) = parts.last_mut()
+                    && let Some(ChatContentPart::Text { text: next }) = other.as_slice().first()
+                {
+                    text.push_str(SEPARATOR);
+                    text.push_str(next);
+                    other.next();
+                }
+                parts.extend(other);
+                *self = Self::Parts(parts);
+            }
+        }
+    }
+
+    fn into_parts(self) -> Vec<ChatContentPart> {
+        match self {
+            Self::Text(text) => vec![ChatContentPart::Text { text }],
+            Self::Parts(parts) => parts,
+        }
+    }
+
     /// Return whether there's no text content or only empty text blocks.
     pub fn is_empty(&self) -> bool {
         match self {
@@ -212,6 +256,10 @@ pub enum ChatMessage {
         content: ChatContent,
         tool_call_id: String,
     },
+    /// Message content under a role outside the standard set, passed to chat
+    /// templates unchanged.
+    #[serde(untagged)]
+    Custom { role: String, content: ChatContent },
 }
 
 impl ChatMessage {
@@ -230,6 +278,7 @@ impl ChatMessage {
                      use ChatMessage::tool_response() instead"
                 )
             }
+            ChatRole::Custom(role) => Self::custom(role, content),
         }
     }
 
@@ -286,6 +335,14 @@ impl ChatMessage {
         }
     }
 
+    /// Construct one chat message with a role outside the standard set.
+    pub fn custom(role: impl Into<String>, content: impl Into<ChatContent>) -> Self {
+        Self::Custom {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+
     /// Return the chat role of this message.
     pub fn role(&self) -> ChatRole {
         match self {
@@ -294,6 +351,7 @@ impl ChatMessage {
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
             Self::ToolResponse { .. } => ChatRole::ToolResponse,
+            Self::Custom { role, .. } => ChatRole::Custom(role.clone()),
         }
     }
 
@@ -303,7 +361,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
         }
     }
@@ -315,7 +374,8 @@ impl ChatMessage {
             Self::System { .. }
             | Self::Developer { .. }
             | Self::User { .. }
-            | Self::ToolResponse { .. } => None,
+            | Self::ToolResponse { .. }
+            | Self::Custom { .. } => None,
         }
     }
 
@@ -325,7 +385,8 @@ impl ChatMessage {
             Self::System { content }
             | Self::Developer { content, .. }
             | Self::User { content }
-            | Self::ToolResponse { content, .. } => content.has_multimodal(),
+            | Self::ToolResponse { content, .. }
+            | Self::Custom { content, .. } => content.has_multimodal(),
             Self::Assistant { .. } => false,
         }
     }
@@ -374,7 +435,9 @@ pub struct ChatOptions {
     pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is
-    /// used instead of the model's default chat template.
+    /// used instead of the model's default chat template. Only the HF renderer
+    /// honors it, and only with `--trust-request-chat-template`; native
+    /// renderers ignore it.
     pub chat_template: Option<String>,
 
     /// Model-specific reasoning effort, typically `none`, `minimal`, `low`,
@@ -520,6 +583,17 @@ impl ResolvedToolContext {
     pub fn parsing_enabled(&self) -> bool {
         !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
     }
+
+    /// Drop request-level tools when `tool_choice` is `none`, so they are not
+    /// rendered into the prompt. Message-scoped tools stay, as they are part of
+    /// the chat history.
+    pub(crate) fn exclude_initial_tools_if_none(&mut self) {
+        if matches!(self.tool_choice, ChatToolChoice::None) {
+            // `new` places request-level tools first in `effective_tools`.
+            self.effective_tools.drain(..self.initial_tools.len());
+            self.initial_tools.clear();
+        }
+    }
 }
 
 impl Default for ResolvedToolContext {
@@ -576,6 +650,11 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Whether to report the rendered prompt text through
+    /// [`ChatEventStream::prompt_text`](crate::ChatEventStream::prompt_text)
+    /// and [`CollectedAssistantMessage::prompt_text`](crate::CollectedAssistantMessage::prompt_text).
+    #[serde(default)]
+    pub return_prompt_text: bool,
 }
 
 impl ChatRequest {
@@ -597,6 +676,7 @@ impl ChatRequest {
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,
+            return_prompt_text: false,
         }
     }
 
@@ -659,6 +739,22 @@ impl ChatRequest {
         self.tool_context.parsing_enabled()
     }
 
+    /// Return how many parsed tool calls may be surfaced, or `None` for no
+    /// limit.
+    ///
+    /// With tool parsing off (e.g. `tool_choice=none`), calls a parser still
+    /// recognizes are dropped rather than surfaced, matching Python's parser
+    /// engine.
+    pub(crate) fn max_tool_calls(&self) -> Option<usize> {
+        if !self.tool_parsing_enabled() {
+            Some(0)
+        } else if !self.parallel_tool_calls() {
+            Some(1)
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn parse_template_bool(&self, key: &str) -> Result<Option<bool>> {
         match self.chat_options.template_kwargs.get(key) {
             None => Ok(None),
@@ -673,19 +769,21 @@ impl ChatRequest {
 impl ChatRole {
     /// Return the chat-template role string used by the current text-only chat
     /// backend.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::System => "system",
             Self::Developer => "developer",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolResponse => "tool_response",
+            Self::Custom(role) => role,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::{json, to_value};
 
     use super::{
@@ -744,6 +842,38 @@ mod tests {
     }
 
     #[test]
+    fn chat_content_append_joins_text_at_the_boundary() {
+        let image = || ChatContentPart::image_url("data:image/png;base64,a");
+        let append = |mut content: ChatContent, other: ChatContent| {
+            content.append(other);
+            match content {
+                ChatContent::Text(text) => format!("{text:?}"),
+                ChatContent::Parts(parts) => {
+                    let parts = parts.iter().map(|part| match part {
+                        ChatContentPart::Text { text } => format!("{text:?}"),
+                        _ => "<image>".to_string(),
+                    });
+                    format!("[{}]", parts.collect::<Vec<_>>().join(", "))
+                }
+            }
+        };
+        let appended = [
+            append("a".into(), "b".into()),
+            append("a".into(), vec![ChatContentPart::text("b"), image()].into()),
+            append(vec![ChatContentPart::text("a"), image()].into(), "b".into()),
+            append("".into(), vec![image()].into()),
+            append("a".into(), "".into()),
+        ];
+        expect![[r#"
+            "a\n\nb"
+            ["a\n\nb", <image>]
+            ["a", <image>, "b"]
+            [<image>]
+            "a""#]]
+        .assert_eq(&appended.join("\n"));
+    }
+
+    #[test]
     fn chat_content_try_flattens_text_parts_without_separators() {
         let content = ChatContent::Parts(vec![
             ChatContentPart::text("hello"),
@@ -780,6 +910,7 @@ mod tests {
                     "properties": {"city": {"type": "string"}},
                 }),
                 strict: Some(true),
+                defer_loading: None,
             }]),
         );
 
@@ -794,6 +925,7 @@ mod tests {
             description: None,
             parameters: json!({"type": "object"}),
             strict: None,
+            defer_loading: None,
         }
     }
 

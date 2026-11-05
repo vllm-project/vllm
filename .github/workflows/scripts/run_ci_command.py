@@ -23,6 +23,9 @@ COMMAND_RUN_AMD_CI_ALL = "/amd-ci run all"
 COMMAND_RUN_AMD_CI_NIGHTLY = "/amd-ci run nightly"
 COMMAND_RETRY_AMD_FAILED = "/amd-ci retry"
 COMMAND_CANCEL_AMD_CI = "/amd-ci cancel"
+COMMAND_ROCM_CACHE = "/ci rocm cache"
+COMMAND_ROCM_NOCACHE = "/ci rocm nocache"
+ROCM_CACHE_COMMANDS = frozenset({COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE})
 ALLOW_STALE_SUFFIX = " --allow-stale"
 RUN_CI_COMMAND_ENV = {
     COMMAND_RUN_CI: {},
@@ -53,14 +56,18 @@ AMD_CI_COMMANDS = frozenset(
         *(command for command in RUN_CI_COMMAND_ENV if command.startswith("/amd-ci ")),
         COMMAND_RETRY_AMD_FAILED,
         COMMAND_CANCEL_AMD_CI,
+        *ROCM_CACHE_COMMANDS,  # they start AMD CI builds
     }
 )
 RETRY_COMMANDS = frozenset({COMMAND_RETRY_FAILED, COMMAND_RETRY_AMD_FAILED})
 CANCEL_COMMANDS = frozenset({COMMAND_CANCEL_CI, COMMAND_CANCEL_AMD_CI})
 ALL_CI_COMMANDS = UPSTREAM_CI_COMMANDS | AMD_CI_COMMANDS
+CI_COMMAND_PREFIXES = frozenset({"/ci", "/amd-ci"})
 CI_AUTHORIZED_COMMENT_MARKER = "<!-- vllm-ci-authorized -->"
 READY_LABELS = {"ready", "ready-run-all-tests"}
 TRUSTED_PERMISSIONS = {"admin", "maintain", "write"}
+BRANCH_UPDATE_POLL_SECONDS = 3
+BRANCH_UPDATE_POLL_ATTEMPTS = 40
 ACTIVE_BUILD_STATES = {
     "blocked",
     "creating",
@@ -73,11 +80,20 @@ ACTIVE_BUILD_STATES = {
 }
 RETRY_STATES = "failed,timed_out,expired"
 CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
-SETUP_STEP_KEYS = {
-    "ensure-ci-base-amd",
-    "pre-commit",
-    "refresh-rocm-base-amd",
-}
+# ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
+# for branches that predate .buildkite/scripts/rocm/build.sh.
+SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
+# pre-commit.yml fails a PR that changes these until a reply of the bot to
+# /ci rocm cache or /ci rocm nocache carries this marker.
+ROCM_STACK_INPUTS = ("docker/Dockerfile.rocm_base", "tools/vllm-rocm/therock_wheels.py")
+ROCM_CACHE_MARKER = "<!-- vllm-ci-rocm-base-image -->"
+ROCM_CACHE_DONE = (
+    f"Re-run the failed `pre-commit` check to unblock this PR.\n\n{ROCM_CACHE_MARKER}"
+)
+# build.sh promote copies only images built with main's versions of these.
+ROCM_RECIPE = (".buildkite/scripts/rocm/build.sh", "docker/docker-bake-rocm.hcl")
+# build.sh base mode records the stack images it built under these keys.
+ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack-wheels", "rocm-rocm-stack")
 
 
 class ApiError(RuntimeError):
@@ -258,6 +274,13 @@ class GitHubClient:
             raise ApiError(None, "GitHub returned an invalid commits-behind count.")
         return behind
 
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self._request(
+            self._repo_path(f"/pulls/{number}/update-branch"),
+            body={"expected_head_sha": expected_head_sha},
+            method="PUT",
+        )
+
     def list_pulls_for_commit(self, commit: str) -> list[dict[str, Any]]:
         commit = urllib.parse.quote(commit, safe="")
         response = self._request(self._repo_path(f"/commits/{commit}/pulls"))
@@ -325,6 +348,24 @@ class GitHubClient:
             body={"body": body},
             method="POST",
         )
+
+    def list_pr_files(self, number: int) -> list[str]:
+        files = self._paginate(self._repo_path(f"/pulls/{number}/files"))
+        return [
+            str(path)
+            for file in files
+            for path in (file["filename"], file.get("previous_filename"))
+            if path
+        ]
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        path, ref = urllib.parse.quote(path), urllib.parse.quote(ref, safe="")
+        try:
+            return self._request(self._repo_path(f"/contents/{path}?ref={ref}"))["sha"]
+        except ApiError as error:
+            if error.status == 404:
+                return "none"
+            raise
 
 
 class BuildkiteClient:
@@ -461,9 +502,15 @@ class BuildkiteClient:
 
 
 def parse_command(body: str) -> str | None:
+    body = body.strip()
     if body in ALL_CI_COMMANDS:
         return body
     return None
+
+
+def is_ci_command_attempt(body: str) -> bool:
+    words = body.split(maxsplit=1)
+    return bool(words) and words[0].casefold() in CI_COMMAND_PREFIXES
 
 
 def pipeline_for_command(
@@ -603,6 +650,16 @@ def blocks_new_run(command: str, build: Mapping[str, Any]) -> bool:
             and build.get("state") != "blocked"
         )
     return is_active_build(build)
+
+
+def list_commit_builds(
+    buildkite: BuildkiteClient, command: str, commit: str
+) -> list[dict[str, Any]]:
+    builds = buildkite.list_builds(commit)
+    if command not in AMD_CI_COMMANDS:
+        return builds
+    # bootstrap-amd.sh exits before uploading any test steps for PR webhook builds.
+    return [build for build in builds if build.get("source") != "webhook"]
 
 
 def select_latest_build(
@@ -771,10 +828,11 @@ def notify_authorized(
         (
             f"✅ @{author}, CI is now available for this PR.\n\n"
             "- `/ci run` starts upstream CI; `/amd-ci run` starts AMD CI only.\n"
-            "- Your branch must contain every commit currently on its upstream "
-            "target branch. Merge or rebase onto the latest target branch, then "
-            "rerun the command. Append `--allow-stale` to a run command to test "
-            "an outdated branch at your own risk.\n"
+            "- Run commands test your branch with every commit currently on its "
+            "upstream target branch. If it is behind, the bot merges the target "
+            "branch into it first (pull before pushing again). Append "
+            "`--allow-stale` to a run command to test an outdated branch as is, "
+            "at your own risk.\n"
             "- `/ci retry` retries failed jobs in the CI build for the current "
             "PR head. If the current head has no CI build, it starts a new CI "
             "build for the current head containing only jobs that failed in "
@@ -822,10 +880,65 @@ def resolve_workflow_run_pr(
     return find_matching_pr(github.list_pulls_for_commit(head_sha))
 
 
+def merge_base_into_pr(
+    github: GitHubClient,
+    branch_updater: GitHubClient,
+    pr: Mapping[str, Any],
+    command: str,
+    lag: str,
+) -> tuple[dict[str, Any], str]:
+    base_ref = pr["base"]["ref"]
+
+    def merge_failed(reason: str) -> CiPreparationError:
+        return CiPreparationError(
+            f"{lag} The bot could not merge upstream `{base_ref}` into this "
+            f"branch ({reason}). No new CI build was started. Either merge or "
+            f"rebase onto the latest `{base_ref}` yourself and rerun `{command}`, "
+            f"or use `{command}{ALLOW_STALE_SUFFIX}` to test this branch as is."
+        )
+
+    try:
+        branch_updater.update_branch(pr["number"], pr["head"]["sha"])
+        for _ in range(BRANCH_UPDATE_POLL_ATTEMPTS):
+            time.sleep(BRANCH_UPDATE_POLL_SECONDS)
+            current_pr = github.get_pr(pr["number"])
+            if current_pr["head"]["sha"] == pr["head"]["sha"]:
+                continue
+            try:
+                behind = github.get_commits_behind_base(
+                    base_ref, current_pr["head"]["sha"]
+                )
+            except ApiError as error:
+                # A fork's new head is briefly unknown to the base repository.
+                if error.status == 404:
+                    continue
+                raise
+            break
+        else:
+            raise merge_failed("the merge commit did not appear in time")
+        if (
+            current_pr["state"] != "open"
+            or current_pr["base"]["ref"] != base_ref
+            or behind
+        ):
+            raise merge_failed("the PR changed during the merge")
+    except ApiError as error:
+        raise merge_failed(str(error)) from error
+
+    note = (
+        f"ℹ️ {lag} Merged upstream `{base_ref}` into this branch as "
+        f"`{current_pr['head']['sha'][:12]}` before starting CI. "
+        "Pull the branch before pushing more changes."
+    )
+    print(note)
+    return current_pr, note
+
+
 def prepare_pr_for_ci(
     github: GitHubClient,
     pr: Mapping[str, Any],
     command: str,
+    branch_updater: GitHubClient | None = None,
 ) -> tuple[dict[str, Any], str]:
     base_ref = pr["base"]["ref"]
     no_action = "No new CI build was started."
@@ -861,6 +974,8 @@ def prepare_pr_for_ci(
             print(warning)
         return current_pr, warning
 
+    if behind and branch_updater is not None:
+        return merge_base_into_pr(github, branch_updater, current_pr, command, lag)
     if behind:
         raise CiPreparationError(
             f"{lag} Your branch must contain every commit currently on upstream "
@@ -880,6 +995,8 @@ def handle_run_ci(
     command: str,
     github: GitHubClient,
     pr: Mapping[str, Any],
+    branch_updater: GitHubClient | None = None,
+    allow_repeat_run: bool = False,
 ) -> str:
     ci_name = ci_name_for_command(command)
     duplicate_builds = buildkite.list_builds(
@@ -892,7 +1009,7 @@ def handle_run_ci(
             f"{ci_name} was already requested by this comment: {duplicate['web_url']}"
         )
 
-    current_builds = buildkite.list_builds(pr["head"]["sha"])
+    current_builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     active_build = next(
         (
             build
@@ -906,7 +1023,19 @@ def handle_run_ci(
             f"{ci_name} is already running for this commit: {active_build['web_url']}"
         )
 
-    current_pr, warning = prepare_pr_for_ci(github, pr, command)
+    tested_build = select_latest_build(
+        [build for build in current_builds if build.get("state") != "canceled"],
+        pr["number"],
+    )
+    if tested_build and not allow_repeat_run:
+        raise CiPreparationError(
+            f"{ci_name} already ran on this commit: {tested_build['web_url']}. "
+            "No new CI build was started. Push new changes to run CI again, use "
+            f"`{retry_command_for_command(command)}` to rerun failed jobs, or ask "
+            "a reviewer with write access to rerun it."
+        )
+
+    current_pr, warning = prepare_pr_for_ci(github, pr, command, branch_updater)
 
     build = buildkite.create_build(
         create_build_payload(
@@ -935,7 +1064,7 @@ def handle_retry_failed(
     ci_name = ci_name_for_command(command)
     run_command = run_command_for_command(command)
     retry_command = retry_command_for_command(command)
-    builds = buildkite.list_builds(pr["head"]["sha"])
+    builds = list_commit_builds(buildkite, command, pr["head"]["sha"])
     build = select_latest_build(builds, pr["number"])
     if build:
         metadata = build.get("meta_data") or {}
@@ -1086,11 +1215,98 @@ def handle_cancel_ci(
     )
 
 
+def handle_rocm_cache(
+    *,
+    actor: str,
+    buildkite: BuildkiteClient,
+    ci_buildkite: BuildkiteClient,
+    command: str,
+    github: GitHubClient,
+    pr: Mapping[str, Any],
+) -> str:
+    """Cache this PR's ROCm base image for main, or knowingly not."""
+    if not set(ROCM_STACK_INPUTS) & set(github.list_pr_files(pr["number"])):
+        return "This PR does not change the ROCm base image, so there is nothing to do."
+    if command == COMMAND_ROCM_NOCACHE:
+        return (
+            f"@{actor} chose not to cache the ROCm base image. Main will build it "
+            f"after the merge. {ROCM_CACHE_DONE}"
+        )
+    sha = pr["head"]["sha"]
+    if any(
+        github.get_file_sha(p, "main") != github.get_file_sha(p, sha)
+        for p in ROCM_RECIPE
+    ):
+        raise CiPreparationError(
+            "Can't cache: this PR's `build.sh` or `docker-bake-rocm.hcl` differs "
+            f"from main's. If main changed them, run `{COMMAND_RUN_CI}` to merge "
+            f"main, then retry. If this PR changes them, use `{COMMAND_ROCM_NOCACHE}`."
+        )
+    # The images this PR's own CI built, by the digests it recorded: copied as
+    # built, whatever happens to their tags afterwards.
+    sources = [
+        build
+        for client in (buildkite, ci_buildkite)
+        for build in client.list_builds(sha)
+        if is_build_for_pr(build, pr["number"])
+        and all((build.get("meta_data") or {}).get(k) for k in ROCM_STACK_IMAGE_KEYS)
+    ]
+    source = max(sources, key=lambda build: build.get("created_at", ""), default=None)
+    if source is None:
+        raise CiPreparationError(
+            f"Can't cache yet: CI hasn't built the ROCm base image for `{sha[:12]}`. "
+            f"Run `{COMMAND_RUN_CI}`, then `{COMMAND_ROCM_CACHE}` once it passes."
+        )
+    build = buildkite.create_build(
+        {
+            "commit": "HEAD",
+            "branch": "main",
+            "message": f"Cache the ROCm base image of PR #{pr['number']} by @{actor}",
+            "env": {
+                "ROCM_PROMOTE_PR": str(pr["number"]),
+                "ROCM_PROMOTE_SHA": sha,
+                "ROCM_PROMOTE_IMAGES": " ".join(
+                    source["meta_data"][key] for key in ROCM_STACK_IMAGE_KEYS
+                ),
+            },
+        }
+    )
+    return (
+        f"Caching the ROCm base image for main: [AMD CI #{build['number']}]"
+        f"({build['web_url']}) copies the image [this PR's CI]({source['web_url']}) "
+        f"built. {ROCM_CACHE_DONE}"
+    )
+
+
+def reply_unrecognized_command(
+    event: Mapping[str, Any],
+    github: GitHubClient,
+) -> None:
+    if "pull_request" not in event["issue"]:
+        return
+    issue_number = event["issue"]["number"]
+    comment_id = event["comment"]["id"]
+    actor = event["comment"]["user"]["login"]
+    if is_already_handled(github, issue_number, comment_id):
+        print(f"Comment {comment_id} was already handled.")
+        return
+    add_reaction_safely(github, comment_id, "-1")
+    commands = ", ".join(f"`{command}`" for command in sorted(ALL_CI_COMMANDS))
+    github.add_comment(
+        issue_number,
+        f"❌ @{actor}, that is not a recognized CI command, so no CI was "
+        "started. Post a new comment containing only one of: "
+        f"{commands}.\n\n{command_comment_marker(comment_id)}",
+    )
+
+
 def run(
     event: Mapping[str, Any],
     github: GitHubClient,
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
+    branch_updater: GitHubClient | None = None,
+    ci_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1153,12 +1369,27 @@ def run(
                 command=command,
                 github=github,
                 pr=pr,
+                branch_updater=branch_updater,
+                allow_repeat_run=is_trusted_permission(permission),
             )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
                 actor=actor,
                 buildkite=buildkite,
                 comment_id=comment_id,
+                command=command,
+                github=github,
+                pr=pr,
+            )
+        elif command in ROCM_CACHE_COMMANDS:
+            if not is_trusted_permission(permission):
+                raise CiPreparationError(
+                    f"Only maintainers with write access can use `{command}`."
+                )
+            message = handle_rocm_cache(
+                actor=actor,
+                buildkite=buildkite,
+                ci_buildkite=ci_buildkite or buildkite,
                 command=command,
                 github=github,
                 pr=pr,
@@ -1217,8 +1448,11 @@ def main() -> None:
         )
         return
 
-    command = parse_command(event["comment"]["body"])
+    body = event["comment"]["body"]
+    command = parse_command(body)
     if not command:
+        if is_ci_command_attempt(body):
+            reply_unrecognized_command(event, github)
         return
 
     pipeline = pipeline_for_command(
@@ -1226,16 +1460,21 @@ def main() -> None:
         amd_ci_pipeline=os.environ.get("BUILDKITE_AMD_PIPELINE", "amd-ci"),
         upstream_ci_pipeline=os.environ.get("BUILDKITE_PIPELINE", "ci"),
     )
-    buildkite = BuildkiteClient(
-        os.environ.get("BUILDKITE_API_TOKEN", ""),
-        os.environ.get("BUILDKITE_ORGANIZATION", "vllm"),
-        pipeline,
-    )
+    buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
+    organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
+    buildkite = BuildkiteClient(buildkite_token, organization, pipeline)
+    branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
     run(
         event,
         github,
         buildkite,
         os.environ.get("CI_TRUSTED_USERS", ""),
+        GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
+        if branch_update_token
+        else None,
+        BuildkiteClient(
+            buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
+        ),
     )
 
 

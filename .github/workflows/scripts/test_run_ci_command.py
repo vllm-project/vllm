@@ -15,6 +15,8 @@ from run_ci_command import (
     COMMAND_CANCEL_CI,
     COMMAND_RETRY_AMD_FAILED,
     COMMAND_RETRY_FAILED,
+    COMMAND_ROCM_CACHE,
+    COMMAND_ROCM_NOCACHE,
     COMMAND_RUN_AMD_CI,
     COMMAND_RUN_AMD_CI_ALL,
     COMMAND_RUN_AMD_CI_NIGHTLY,
@@ -22,6 +24,7 @@ from run_ci_command import (
     COMMAND_RUN_CI_ALL,
     COMMAND_RUN_CI_NIGHTLY,
     RETRY_STATES,
+    ROCM_CACHE_MARKER,
     RUN_CI_COMMAND_ENV,
     ApiError,
     BuildkiteClient,
@@ -32,10 +35,12 @@ from run_ci_command import (
     has_trusted_approval,
     is_active_build,
     is_build_for_pr,
+    is_ci_command_attempt,
     notify_authorized,
     parse_command,
     parse_trusted_users,
     pipeline_for_command,
+    reply_unrecognized_command,
     resolve_workflow_run_pr,
     run,
     select_latest_build,
@@ -88,8 +93,12 @@ class FakeGitHub:
         pulls_for_commit: list[dict[str, Any]] | None = None,
         prs: dict[int, dict[str, Any]] | None = None,
         behind: int = 0,
+        files: list[str] | None = None,
     ) -> None:
         self.comments = comments or []
+        self.files = files or []
+        # (path, ref) -> blob; main and the PR head share every blob by default.
+        self.file_shas: dict[tuple[str, str], str] = {}
         self.permission = permission
         self.permissions = permissions or {}
         self.pr = pr or make_pr()
@@ -140,6 +149,29 @@ class FakeGitHub:
 
     def add_comment(self, issue_number: int, body: str) -> None:
         self.comments.append(body)
+
+    def list_pr_files(self, number: int) -> list[str]:
+        return self.files
+
+    def get_file_sha(self, path: str, ref: str) -> str:
+        return self.file_shas.get((path, ref), "blob")
+
+
+class FakeBranchUpdater:
+    def __init__(self, github: FakeGitHub, error: ApiError | None = None) -> None:
+        self.calls: list[tuple[int, str]] = []
+        self.error = error
+        self.github = github
+
+    def update_branch(self, number: int, expected_head_sha: str) -> None:
+        self.calls.append((number, expected_head_sha))
+        if self.error:
+            raise self.error
+        self.github.prs[number] = {
+            **self.github.prs[number],
+            "head": {**self.github.prs[number]["head"], "sha": "merge-commit-sha"},
+        }
+        self.github.behind = 0
 
 
 class FakeBuildkite:
@@ -340,13 +372,45 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIsNone(parse_command("/ci run please"))
         self.assertIsNone(parse_command("/ci run all please"))
         self.assertIsNone(parse_command("/ci cancel please"))
-        self.assertIsNone(parse_command(" /ci run"))
         self.assertIsNone(parse_command("/amd-ci run please"))
-        self.assertIsNone(parse_command("/amd-ci retry "))
         self.assertIsNone(parse_command("/AMD-CI run"))
         self.assertIsNone(parse_command("/amdci run"))
         self.assertIsNone(parse_command("/ci run --allow-stale all"))
         self.assertIsNone(parse_command("/amd-ci run --allow-stale please"))
+
+    def test_surrounding_whitespace_is_ignored(self) -> None:
+        self.assertEqual(parse_command("/ci run\r\n"), COMMAND_RUN_CI)
+        self.assertEqual(parse_command(" /ci run "), COMMAND_RUN_CI)
+        self.assertEqual(parse_command("/amd-ci retry\n"), COMMAND_RETRY_AMD_FAILED)
+
+    def test_ci_command_attempts_are_detected(self) -> None:
+        for body in ("/ci", "/ci rn", "/CI run", "/amd-ci run please", " /ci\nrun"):
+            with self.subTest(body=body):
+                self.assertTrue(is_ci_command_attempt(body))
+        for body in ("", "LGTM", "/cifoo", "/amdci run", "please /ci run"):
+            with self.subTest(body=body):
+                self.assertFalse(is_ci_command_attempt(body))
+
+    def test_unrecognized_command_gets_feedback(self) -> None:
+        github = FakeGitHub()
+
+        reply_unrecognized_command(make_event("/ci rn", actor="author"), github)
+
+        self.assertEqual(github.reactions, ["-1"])
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn(
+            "@author, that is not a recognized CI command", github.comments[0]
+        )
+        self.assertIn(f"`{COMMAND_RUN_CI}`", github.comments[0])
+        self.assertIn("<!-- vllm-ci-command:99 -->", github.comments[0])
+
+    def test_unrecognized_command_feedback_is_not_repeated(self) -> None:
+        github = FakeGitHub(comments=["❌ earlier\n\n<!-- vllm-ci-command:99 -->"])
+
+        reply_unrecognized_command(make_event("/ci rn"), github)
+
+        self.assertEqual(len(github.comments), 1)
+        self.assertEqual(github.reactions, [])
 
     def test_commands_select_only_their_configured_pipeline(self) -> None:
         cases = (
@@ -582,6 +646,82 @@ class RunCiCommandTest(unittest.TestCase):
                         )
                         self.assertIn(command, github.comments[0])
 
+    def test_run_merges_base_into_outdated_branch_before_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with patch("run_ci_command.time.sleep"):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(updater.calls, [(42, "0123456789abcdef")])
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+        self.assertIn("5 commits behind", github.comments[0])
+        self.assertIn("Merged upstream `main`", github.comments[0])
+
+    def test_only_committers_can_rerun_a_commit_that_already_ran_ci(self) -> None:
+        finished_build = {
+            "created_at": "2026-07-28T01:00:00Z",
+            "pull_request": {"id": 42},
+            "state": "failed",
+            "web_url": "https://buildkite.example/builds/122",
+        }
+        for actor, permission, command, allowed in (
+            ("author", "read", COMMAND_RUN_CI, False),
+            ("author", "read", f"{COMMAND_RUN_CI} --allow-stale", False),
+            ("reviewer", "write", COMMAND_RUN_CI, True),
+        ):
+            with self.subTest(actor=actor, command=command):
+                github = FakeGitHub(
+                    behind=5,
+                    permission=permission,
+                    pr=make_pr(labels=[{"name": "ready"}]),
+                )
+                updater = FakeBranchUpdater(github)
+                buildkite = FakeBuildkite([[], [finished_build]])
+
+                with patch("run_ci_command.time.sleep"):
+                    run(make_event(command, actor), github, buildkite, "", updater)
+
+                self.assertEqual(bool(buildkite.created_builds), allowed)
+                if not allowed:
+                    self.assertEqual(updater.calls, [])
+                    self.assertIn("CI already ran on this commit", github.comments[0])
+                    self.assertIn("`/ci retry`", github.comments[0])
+
+    def test_run_waits_for_fork_merge_commit_to_reach_base_repo(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github)
+        buildkite = FakeBuildkite([[], []])
+
+        with (
+            patch("run_ci_command.time.sleep"),
+            patch.object(
+                github,
+                "get_commits_behind_base",
+                side_effect=[5, ApiError(404, "Not Found"), 0],
+            ),
+        ):
+            run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds[0]["commit"], "merge-commit-sha")
+        self.assertTrue(github.comments[0].startswith("✅ "))
+
+    def test_run_reports_failed_merge_without_building(self) -> None:
+        github = FakeGitHub(behind=5)
+        updater = FakeBranchUpdater(github, error=ApiError(422, "merge conflict"))
+        buildkite = FakeBuildkite([[], []])
+
+        run(make_event(COMMAND_RUN_CI), github, buildkite, "", updater)
+
+        self.assertEqual(buildkite.created_builds, [])
+        self.assertTrue(github.comments[0].startswith("❌ "))
+        self.assertIn("could not merge upstream `main`", github.comments[0])
+        self.assertIn("merge conflict", github.comments[0])
+        self.assertIn("No new CI build was started.", github.comments[0])
+        self.assertIn("`/ci run --allow-stale`", github.comments[0])
+
     def test_allow_stale_preserves_author_permissions_and_run_configuration(
         self,
     ) -> None:
@@ -755,6 +895,42 @@ class RunCiCommandTest(unittest.TestCase):
 
         self.assertEqual(buildkite.created_builds, [])
         self.assertIn("AMD CI is already running", github.comments[0])
+
+    def test_amd_run_ignores_finished_webhook_build_for_author(self) -> None:
+        webhook_build = {
+            "created_at": "2026-08-18T01:00:00Z",
+            "meta_data": {},
+            "number": 122,
+            "pull_request": {"id": 42},
+            "source": "webhook",
+            "state": "passed",
+            "web_url": "https://buildkite.example/amd-ci/builds/122",
+        }
+        ui_build = {**webhook_build, "source": "ui"}
+        command_build = {
+            **webhook_build,
+            "meta_data": {"github-comment-id": "98"},
+            "source": "api",
+        }
+        for build, allowed in (
+            (webhook_build, True),
+            (ui_build, False),
+            (command_build, False),
+        ):
+            with self.subTest(source=build["source"]):
+                github = FakeGitHub(
+                    permission="read",
+                    pr=make_pr(labels=[{"name": "ready"}]),
+                )
+                buildkite = FakeBuildkite([[], [build]])
+
+                run(make_event(COMMAND_RUN_AMD_CI, "author"), github, buildkite)
+
+                self.assertEqual(bool(buildkite.created_builds), allowed)
+                if not allowed:
+                    self.assertIn(
+                        "AMD CI already ran on this commit", github.comments[0]
+                    )
 
     def test_run_all_sets_buildkite_environment(self) -> None:
         github = FakeGitHub()
@@ -1102,6 +1278,29 @@ class RunCiCommandTest(unittest.TestCase):
         )
         self.assertIn("Use `/amd-ci run`", github.comments[0])
 
+    def test_amd_ci_retry_ignores_webhook_build_for_the_current_head(self) -> None:
+        github = FakeGitHub(
+            permission="read",
+            pr=make_pr(labels=[{"name": "ready"}]),
+        )
+        webhook_build = {
+            "created_at": "2026-08-18T01:00:00Z",
+            "meta_data": {},
+            "number": 122,
+            "pull_request": {"id": 42},
+            "source": "webhook",
+            "state": "passed",
+            "web_url": "https://buildkite.example/amd-ci/builds/122",
+        }
+        buildkite = FakeBuildkite([[webhook_build]])
+
+        run(make_event(COMMAND_RETRY_AMD_FAILED, "author"), github, buildkite)
+
+        self.assertEqual(buildkite.retry_calls, [])
+        self.assertIn(
+            "No AMD CI build exists for the current PR head", github.comments[0]
+        )
+
     def test_ci_retry_creates_filtered_build_for_new_head(self) -> None:
         github = FakeGitHub(
             behind=100,
@@ -1432,6 +1631,104 @@ class RunCiCommandTest(unittest.TestCase):
         self.assertIn("state%5B%5D=failed", transport.calls[0]["url"])
         self.assertIn("include_retried_jobs=false", transport.calls[0]["url"])
         self.assertEqual(transport.calls[1]["url"], next_url)
+
+
+STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
+STACK_IMAGES = {"rocm-rocm-stack": "s@d1", "rocm-rocm-stack-wheels": "w@d2"}
+
+
+def ci_build(**overrides: Any) -> dict[str, Any]:
+    return {
+        "created_at": "1",
+        "meta_data": STACK_IMAGES,
+        "pull_request": {"id": 42},
+        "web_url": "https://buildkite.example/ci/builds/2",
+        **overrides,
+    }
+
+
+class RocmCacheTest(unittest.TestCase):
+    def comment(
+        self,
+        github: FakeGitHub,
+        command: str = COMMAND_ROCM_CACHE,
+        ci_builds: list[dict[str, Any]] | None = None,
+        actor: str = "reviewer",
+    ) -> FakeBuildkite:
+        amd = FakeBuildkite([[]])
+        ci = FakeBuildkite([ci_builds or []])
+        run(make_event(command, actor), github, amd, ci_buildkite=ci)
+        return amd
+
+    def test_commands_are_rocm_ci_commands_on_amd_ci(self) -> None:
+        for command in (COMMAND_ROCM_CACHE, COMMAND_ROCM_NOCACHE):
+            self.assertEqual(parse_command(command), command)
+            self.assertEqual(pipeline_for_command(command), "amd-ci")
+
+    def test_cache_copies_the_images_this_prs_ci_recorded(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+        builds = [
+            ci_build(meta_data={key: "old" for key in STACK_IMAGES}, created_at="0"),
+            ci_build(),
+            ci_build(created_at="2", pull_request={"id": 7}),  # another PR
+            ci_build(created_at="3", meta_data={"rocm-rocm-stack": "s"}),  # partial
+        ]
+
+        amd = self.comment(github, ci_builds=builds)
+
+        (build,) = amd.created_builds
+        self.assertEqual((build["branch"], build["commit"]), ("main", "HEAD"))
+        self.assertEqual(
+            build["env"],
+            {
+                "ROCM_PROMOTE_PR": "42",
+                "ROCM_PROMOTE_SHA": "0123456789abcdef",
+                "ROCM_PROMOTE_IMAGES": "w@d2 s@d1",
+            },
+        )
+        self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
+        self.assertIn("ci/builds/2", github.comments[0])
+
+    def test_nocache_records_the_decision_without_a_build(self) -> None:
+        github = FakeGitHub(files=STACK_PR_FILES)
+
+        amd = self.comment(github, COMMAND_ROCM_NOCACHE)
+
+        self.assertEqual(amd.created_builds, [])
+        self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
+        self.assertIn("@reviewer chose not to cache", github.comments[0])
+
+    def test_refusals_leave_the_gate_failing(self) -> None:
+        other_recipe = FakeGitHub(files=STACK_PR_FILES)
+        other_recipe.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
+        # The author, with CI delegated to them by an approval.
+        author = FakeGitHub(
+            files=STACK_PR_FILES,
+            permissions={"author": "read"},
+            review_decision="APPROVED",
+            reviews=[{"user": {"login": "reviewer"}, "state": "APPROVED"}],
+        )
+        cases = [
+            (other_recipe, [ci_build()], "reviewer", "differs from main's"),
+            (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "hasn't built"),
+            (author, [ci_build()], "author", "Only maintainers with write access"),
+        ]
+        for github, builds, actor, text in cases:
+            with self.subTest(text=text):
+                amd = self.comment(github, ci_builds=builds, actor=actor)
+
+                self.assertEqual(amd.created_builds, [])
+                self.assertIn(text, github.comments[0])
+                self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
+
+    def test_prs_that_keep_the_base_image_have_nothing_to_do(self) -> None:
+        github = FakeGitHub(files=["vllm/foo.py"])
+
+        amd = self.comment(github)
+
+        self.assertEqual(amd.created_builds, [])
+        self.assertIn("nothing to do", github.comments[0])
+        self.assertNotIn(ROCM_CACHE_MARKER, github.comments[0])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Device-side request mapping and sparse indexer metadata."""
 
+import torch
+
 from vllm.triton_utils import tl, triton
 
 
@@ -25,6 +27,28 @@ def _token_request_mapping_kernel(
     token = tl.program_id(0) * 256 + tl.arange(0, 256)
     req = _token_request(query_start_loc, token, num_reqs)
     tl.store(output + token, tl.where(token < num_mapped, req, 0), token < num_tokens)
+
+
+def compute_token_to_req_indices(
+    query_start_loc: torch.Tensor,
+    out: torch.Tensor,
+    num_mapped_tokens: int,
+    num_tokens: int,
+) -> torch.Tensor:
+    """Map each of the first ``num_tokens`` tokens to its request index.
+
+    Reads only the device ``query_start_loc``, so it is safe to record in a
+    CUDA graph. Tokens at or past ``num_mapped_tokens`` are mapped to 0.
+    """
+    _token_request_mapping_kernel[((num_tokens + 255) // 256,)](
+        query_start_loc,
+        out,
+        query_start_loc.shape[0] - 1,
+        num_mapped_tokens,
+        num_tokens,
+        num_warps=4,
+    )
+    return out[:num_tokens]
 
 
 @triton.jit(

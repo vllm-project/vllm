@@ -8,7 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import pytest
 import torch
@@ -75,7 +75,7 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     class FakeKernel:
         def __getitem__(self, grid):
             def launch(*args, **kwargs) -> None:
-                captured["a_scale"] = args[4]
+                captured["a_scale"] = args[5]
 
             return launch
 
@@ -107,6 +107,34 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert a_scale.ndim == 0
     assert captured_scale.shape == (1,)
     assert captured_scale.data_ptr() == a_scale.data_ptr()
+
+
+def test_triton_moe_launcher_rejects_noncontiguous_topk_weights() -> None:
+    wide_topk_weights = torch.ones((2, 4))
+    topk_weights = wide_topk_weights[:, :2]
+    assert not topk_weights.is_contiguous()
+
+    with pytest.raises(ValueError, match="topk_weights must be contiguous"):
+        fused_moe_module.invoke_fused_moe_triton_kernel(
+            A=torch.ones((2, 1)),
+            B=torch.ones((1, 1, 1)),
+            C=torch.empty((2, 2, 1)),
+            A_scale=None,
+            B_scale=None,
+            topk_weights=topk_weights,
+            sorted_token_ids=None,
+            expert_ids=torch.zeros(1, dtype=torch.int32),
+            num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+            mul_routed_weight=True,
+            top_k=2,
+            config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+            compute_type=tl.float32,
+            use_fp8_w8a8=False,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            per_channel_quant=False,
+        )
 
 
 def iterative_moe(
@@ -172,7 +200,15 @@ EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 TOP_KS_SMALL = [1, 2]
 
-MOE_MARLIN_QUANT_TEST_CONFIGS = [
+
+class MarlinMoEQuantTestConfig(TypedDict):
+    a_type: NotRequired[list[ScalarType]]
+    b_type: ScalarType
+    c_type: NotRequired[list[ScalarType]]
+    group_blocks: list[int]
+
+
+MOE_MARLIN_QUANT_TEST_CONFIGS: list[MarlinMoEQuantTestConfig] = [
     # AWQ-INT4
     {"b_type": scalar_types.uint4, "group_blocks": [-1, 2, 4, 8]},
     # GPTQ-INT4
@@ -200,37 +236,6 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float8_e4m3fn,
-        "c_type": [scalar_types.bfloat16],
-        "group_blocks": [2],
-    },
-    # AWQ-INT4 with INT8 activation
-    {
-        "a_type": [scalar_types.int8],
-        "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # GPTQ-INT4 with INT8 activation
-    {
-        "a_type": [scalar_types.int8],
-        "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # GPTQ-INT4 with FP8 activation
-    {
-        "a_type": [scalar_types.float8_e4m3fn],
-        "b_type": scalar_types.uint4b8,
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # AWQ-INT4 with FP8 activation
-    {
-        "a_type": [scalar_types.float8_e4m3fn],
-        "b_type": scalar_types.uint4,
-        "group_blocks": [-1, 2, 4, 8],
-    },
-    # MXFP4 with FP8 activation
-    {
-        "a_type": [scalar_types.float8_e4m3fn],
-        "b_type": scalar_types.float4_e2m1f,
         "c_type": [scalar_types.bfloat16],
         "group_blocks": [2],
     },
@@ -547,6 +552,68 @@ def test_fused_moe_int64_overflow(workspace_init):
         )
 
 
+@pytest.mark.parametrize("m", [1, 2, 4])
+@pytest.mark.parametrize("host_resident", [False, True])
+@pytest.mark.parametrize("modular", [True, False])
+def test_host_resident_weights_take_sorted_path(
+    m: int, host_resident: bool, modular: bool, monkeypatch, workspace_init
+):
+    """At small batch the naive path reads an expert once per (token, expert)
+    pair. Weights read from host memory in place (UVA offloading) must take
+    the sorted path instead, with the same output."""
+    from vllm.utils.platform_utils import is_uva_available
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    if host_resident and not is_uva_available():
+        pytest.skip("needs UVA")
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    # Inputs scaled so that outputs sit well above the tolerance below.
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    if host_resident:
+        w1_dev = get_accelerator_view_from_cpu_tensor(w1.pin_memory())
+        w2_dev = get_accelerator_view_from_cpu_tensor(w2.pin_memory())
+        w1_dev._vllm_is_uva_offloaded = True
+        w2_dev._vllm_is_uva_offloaded = True
+    else:
+        w1_dev, w2_dev = w1.cuda(), w2.cuda()
+
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+    with set_current_vllm_config(vllm_config):
+        if modular:
+            fused_moe_fn = modular_triton_fused_moe(
+                make_dummy_moe_config(), FUSED_MOE_UNQUANTIZED_CONFIG
+            )
+            topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+            out = fused_moe_fn.apply(
+                a,
+                w1_dev,
+                w2_dev,
+                topk_weights,
+                topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+        else:
+            out = fused_moe(a, w1_dev, w2_dev, score, topk, renormalize=False)
+        ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
+    assert ref.abs().mean() > 0.1
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    assert bool(aligned) == host_resident
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
 @pytest.mark.parametrize("e", NUM_EXPERTS_LARGE)
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)
@@ -833,7 +900,7 @@ def marlin_moe_generate_valid_test_cases():
             return False
         if b_type == scalar_types.float8_e4m3fn and group_size == 32:
             return False
-        return a_type.size_bits < 16 or a_type is c_type
+        return a_type is c_type
 
     cases = []
     for quant_test_config in MOE_MARLIN_QUANT_TEST_CONFIGS:
@@ -848,13 +915,6 @@ def marlin_moe_generate_valid_test_cases():
         )
 
         for sub_case in inner_combinations:
-            if (
-                sub_case[0] == scalar_types.float8_e4m3fn
-                and not current_platform.is_device_capability(89)
-                and not current_platform.is_device_capability_family(120)
-            ):
-                continue
-
             for scenario in MARLIN_MOE_SCENARIOS:
                 m, n, k, e, topk, ep_size = scenario
                 args = sub_case + (m, n, k, e, topk, ep_size)
@@ -869,7 +929,6 @@ class MarlinMoEWeightData:
     qweight: torch.Tensor
     scales: torch.Tensor
     global_scale: torch.Tensor | None
-    a_scales_factor: torch.Tensor | None
     zeros: torch.Tensor | None
     marlin_bias: torch.Tensor | None
 
@@ -879,17 +938,10 @@ class MarlinMoEWeightData:
         quant_type: ScalarType,
         group_size: int,
         bias: torch.Tensor | None = None,
-        input_type: ScalarType = None,
     ) -> "MarlinMoEWeightData":
         assert w.ndim == 3
 
         has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
-        if input_type == scalar_types.int8:
-            input_dtype = torch.int8
-        elif input_type == scalar_types.float8_e4m3fn:
-            input_dtype = torch.float8_e4m3fn
-        else:
-            input_dtype = w.dtype
 
         w_ref_l: list[torch.Tensor] = []
         qweight_l: list[torch.Tensor] = []
@@ -902,13 +954,11 @@ class MarlinMoEWeightData:
             if quant_type == scalar_types.float4_e2m1f:
                 if group_size == 16:
                     w_ref, qweight, scales, global_scale = (
-                        rand_marlin_weight_nvfp4_like(
-                            w[i], group_size, input_dtype=input_dtype
-                        )
+                        rand_marlin_weight_nvfp4_like(w[i], group_size)
                     )
                 else:
                     w_ref, qweight, scales = rand_marlin_weight_mxfp4_like(
-                        w[i], group_size, input_dtype=input_dtype
+                        w[i], group_size
                     )
                     global_scale = None
 
@@ -918,9 +968,7 @@ class MarlinMoEWeightData:
                 if global_scale is not None:
                     global_scale_l.append(global_scale)
             elif quant_type == scalar_types.float8_e4m3fn:
-                w_ref, qweight, scales = marlin_quant_fp8_torch(
-                    w[i], group_size, input_dtype=input_dtype
-                )
+                w_ref, qweight, scales = marlin_quant_fp8_torch(w[i], group_size)
                 w_ref_l.append(w_ref.T)
                 qweight_l.append(qweight)
                 scales_l.append(scales)
@@ -929,7 +977,6 @@ class MarlinMoEWeightData:
                     w[i].transpose(1, 0),
                     quant_type,
                     group_size,
-                    input_dtype=input_dtype,
                 )
 
                 w_ref_l.append(w_ref.T)
@@ -941,7 +988,6 @@ class MarlinMoEWeightData:
                     w[i].transpose(1, 0),
                     quant_type,
                     group_size,
-                    input_dtype=input_dtype,
                 )
 
                 w_ref_l.append(w_ref.T)
@@ -958,18 +1004,11 @@ class MarlinMoEWeightData:
         zeros = stack_and_dev(zeros_l) if zeros_l else None
         marlin_bias = stack_and_dev(bias_l) if bias_l else None
 
-        a_scales_factor = None
-        if input_type == scalar_types.int8 and group_size != -1:
-            a_scales_factor = 1 / 4096 * scales.max().float()
-            scales = scales / scales.max() * 4096
-            scales = scales.round().to(torch.int16).view(w.dtype)
-
         return MarlinMoEWeightData(
             w_ref=w_ref,
             qweight=qweight,
             scales=scales,
             global_scale=global_scale,
-            a_scales_factor=a_scales_factor,
             zeros=zeros,
             marlin_bias=marlin_bias,
         )
@@ -1004,13 +1043,6 @@ def test_fused_marlin_moe(
     else:
         raise RuntimeError("unsupported c_type")
 
-    if a_type == scalar_types.int8:
-        a_dtype = torch.int8
-    elif a_type == scalar_types.float8_e4m3fn:
-        a_dtype = torch.float8_e4m3fn
-    else:
-        a_dtype = dtype
-
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
@@ -1029,14 +1061,12 @@ def test_fused_marlin_moe(
         w=w1,
         quant_type=b_type,
         group_size=group_size,
-        input_type=a_type,
     )
 
     w2_data = MarlinMoEWeightData.make(
         w=w2,
         quant_type=b_type,
         group_size=group_size,
-        input_type=a_type,
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -1054,8 +1084,6 @@ def test_fused_marlin_moe(
             topk_ids=topk_ids,
             global_num_experts=e,
             expert_map=e_map,
-            quant_dtype=a_dtype,
-            per_act_token_quant=True,
         )
 
     def instance_activation(
@@ -1089,11 +1117,8 @@ def test_fused_marlin_moe(
         expert_map=e_map,
         global_scale1=w1_data.global_scale,
         global_scale2=w2_data.global_scale,
-        input_global_scale1=w1_data.a_scales_factor,
-        input_global_scale2=w2_data.a_scales_factor,
         w1_zeros=w1_data.zeros,
         w2_zeros=w2_data.zeros,
-        input_dtype=a_dtype,
         quant_type_id=b_type.id,
         activation_func=instance_activation,
     )
@@ -1437,6 +1462,7 @@ def test_humming_global_valid_shape_m(
 def test_humming_permute_scratch_is_shared_by_config(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Layers share one scratch whose key is independent of batch shape."""
     from types import SimpleNamespace
     from unittest.mock import Mock
 
@@ -1447,34 +1473,19 @@ def test_humming_permute_scratch_is_shared_by_config(
     manager = workspace.WorkspaceManager(torch.device("cpu"))
     monkeypatch.setattr(workspace, "_manager", manager)
 
-    scratch_topk6 = Mock()
-    scratch_topk1 = Mock()
-    scratch_type = Mock(side_effect=[scratch_topk6, scratch_topk1])
+    scratch = Mock()
+    scratch_type = Mock(side_effect=[scratch])
     monkeypatch.setattr(humming, "moe_permute_unpermute_supported", lambda: True)
     monkeypatch.setattr(permute, "MoEPermuteScratch", scratch_type)
     moe_config = make_dummy_moe_config(max_num_tokens=512, experts_per_token=6)
-    moe_config.moe_parallel_config.dp_size = 2
     experts = SimpleNamespace(moe_config=moe_config)
     other_layer = SimpleNamespace(moe_config=moe_config)
 
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-    assert (
-        humming.HummingExpertsBase._get_permute_scratch(other_layer, 6) is scratch_topk6
-    )
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 1) is scratch_topk1
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-
-    assert scratch_type.call_count == 2
-    first_call, second_call = scratch_type.call_args_list
-    assert first_call.kwargs["max_num_tokens"] == 1024
-    assert first_call.kwargs["topk"] == 6
-    assert second_call.kwargs["max_num_tokens"] == 6144
-    assert second_call.kwargs["topk"] == 1
-
+    assert humming.HummingExpertsBase._get_permute_scratch(experts) is scratch
+    assert humming.HummingExpertsBase._get_permute_scratch(other_layer) is scratch
     manager.lock()
-    assert humming.HummingExpertsBase._get_permute_scratch(experts, 6) is scratch_topk6
-    with pytest.raises(AssertionError, match="was not allocated during warmup"):
-        humming.HummingExpertsBase._get_permute_scratch(experts, 2)
+    assert humming.HummingExpertsBase._get_permute_scratch(experts) is scratch
+    assert scratch_type.call_count == 1
 
 
 def test_humming_delegates_to_instance_activation():
@@ -1531,7 +1542,7 @@ def test_humming_grouped_apply_forwards_valid_prefix(
         num_experts=2,
         estimate_local_valid_shape_m=lambda _: 6,
         prepare_buffers=lambda *_: buffers,
-        _get_permute_scratch=lambda _, *, indices_only=False: object(),
+        _get_permute_scratch=lambda: object(),
         process_input=Mock(
             side_effect=lambda _, **kwargs: (
                 kwargs["inputs"],
@@ -1605,11 +1616,8 @@ def test_batched_marlin_activation_uses_expert_token_counts(
         w1_scale=None,
         w2_scale=None,
         quant_type_id=0,
-        a1_gscale=None,
-        a2_gscale=None,
         w1_zp=None,
         w2_zp=None,
-        input_dtype=None,
         activation_config=ApplyMoEActivationConfig(
             clamp_limit=3.0, alpha=1.3, beta=0.5
         ),
@@ -1910,7 +1918,6 @@ def _batched_fused_marlin_moe_cases() -> list[Any]:
             max_tokens_per_batch,
             torch.bfloat16,
             scalar_types.float4_e2m1f,
-            None,
             1e-3,
             id=(
                 f"m{m}-n128-k128-e{e}-topk{topk}-max_tokens{max_tokens_per_batch}-mxfp4"
@@ -1921,26 +1928,11 @@ def _batched_fused_marlin_moe_cases() -> list[Any]:
         for topk in [2, 4]
         for max_tokens_per_batch in [16, 32, 64]
     ]
-    cases.append(
-        pytest.param(
-            32,
-            128,
-            128,
-            8,
-            2,
-            64,
-            torch.float16,
-            scalar_types.uint4,
-            scalar_types.int8,
-            4e-2,
-            id="awq-int8-activation-metadata",
-        )
-    )
     return cases
 
 
 @pytest.mark.parametrize(
-    ("m,n,k,e,topk,max_tokens_per_batch,dtype,quant_dtype,input_type,atol"),
+    ("m,n,k,e,topk,max_tokens_per_batch,dtype,quant_dtype,atol"),
     _batched_fused_marlin_moe_cases(),
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
@@ -1953,24 +1945,17 @@ def test_batched_fused_marlin_moe(
     max_tokens_per_batch: int,
     dtype: torch.dtype,
     quant_dtype: ScalarType,
-    input_type: ScalarType | None,
     atol: float,
 ):
     print(
         f"testing m={m}, n={n}, k={k}, e={e}, "
         f"topk={topk}, "
         f"max_tokens_per_batch={max_tokens_per_batch}, "
-        f"dtype={dtype}, quant_dtype={quant_dtype}, input_type={input_type}"
+        f"dtype={dtype}, quant_dtype={quant_dtype}"
     )
     set_random_seed(0)
 
     group_size = 32
-    if input_type == scalar_types.int8:
-        input_dtype = torch.int8
-    elif input_type == scalar_types.float8_e4m3fn:
-        input_dtype = torch.float8_e4m3fn
-    else:
-        input_dtype = None
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 20
@@ -1980,13 +1965,11 @@ def test_batched_fused_marlin_moe(
         w=w1,
         quant_type=quant_dtype,
         group_size=group_size,
-        input_type=input_type,
     )
     w2_data = MarlinMoEWeightData.make(
         w=w2,
         quant_type=quant_dtype,
         group_size=group_size,
-        input_type=input_type,
     )
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -2100,12 +2083,6 @@ def test_batched_fused_marlin_moe(
         "w2_zeros": w2_data.zeros,
         "quant_type_id": quant_dtype.id,
     }
-    if input_dtype is not None:
-        kwargs["input_dtype"] = input_dtype
-        if w1_data.a_scales_factor is not None:
-            kwargs["input_global_scale1"] = w1_data.a_scales_factor
-        if w2_data.a_scales_factor is not None:
-            kwargs["input_global_scale2"] = w2_data.a_scales_factor
 
     # Reference
     fused_marlin_moe_kwargs = kwargs | {
