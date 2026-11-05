@@ -212,3 +212,101 @@ def test_silu_block_quant_int32_offset_overflow(default_vllm_config):
     )
     assert torch.equal(scales[-1:], expected_scales)
     assert torch.equal(out[-1:], expected_out)
+
+
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("clamp_limit", [None, 7.0])
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_ue8m0_clamp(
+    default_vllm_config,
+    use_ue8m0: bool,
+    clamp_limit: float | None,
+    group_size: int,
+    is_scale_transposed: bool,
+) -> None:
+    """UE8M0 scales and the SwiGLU clamp must match the unfused fp32 reference,
+    as consumed by MoE backends running with DeepGEMM E8M0 or swiglu_limit."""
+    torch.set_default_device("cuda")
+    torch.random.manual_seed(0)
+    num_tokens, hidden_size = 37, 1024
+    quant_dtype = current_platform.fp8_dtype()
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=torch.bfloat16) * 4
+
+    gate, up = x.float().split(hidden_size, dim=-1)
+    if clamp_limit is not None:
+        gate = gate.clamp(max=clamp_limit)
+        up = up.clamp(-clamp_limit, clamp_limit)
+    ref_out, ref_scales = per_token_group_quant_fp8(
+        F.silu(gate) * up, group_size=group_size, use_ue8m0=use_ue8m0
+    )
+
+    out, scales = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size,
+        quant_dtype,
+        is_scale_transposed=is_scale_transposed,
+        use_ue8m0=use_ue8m0,
+        clamp_limit=clamp_limit,
+    )
+
+    if use_ue8m0:
+        assert torch.equal(scales, torch.exp2(torch.log2(scales).round()))
+    torch.testing.assert_close(scales, ref_scales, rtol=1e-5, atol=0)
+    deq = out.float() * scales.repeat_interleave(group_size, dim=1)
+    ref_deq = ref_out.float() * ref_scales.repeat_interleave(group_size, dim=1)
+    # Allow rare one-ulp fp8 rounding flips from expf vs torch.exp.
+    mismatch = ~torch.isclose(deq, ref_deq, atol=5e-2, rtol=5e-2)
+    assert mismatch.float().mean() < 1e-3
+    torch.testing.assert_close(deq, ref_deq, atol=5e-2, rtol=0.13)
+
+    opcheck(
+        torch.ops._C.silu_and_mul_per_block_quant,
+        (
+            torch.empty_like(out),
+            x,
+            torch.empty_like(scales.t() if is_scale_transposed else scales),
+            group_size,
+            None,
+            is_scale_transposed,
+            use_ue8m0,
+            clamp_limit,
+        ),
+    )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_vec_matches_scalar(
+    default_vllm_config,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+    group_size: int,
+    use_ue8m0: bool,
+    is_scale_transposed: bool,
+) -> None:
+    """The vectorized kernel (large, 16B-aligned inputs) must match the
+    one-block-per-group kernel bitwise; a 2-byte-misaligned view of the same
+    values forces the latter."""
+    if quant_dtype == torch.int8 and use_ue8m0:
+        pytest.skip("UE8M0 scales are FP8-only")
+    num_tokens, hidden_size = 1024, 1536
+    x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype, device="cuda") * 4
+    buf = torch.empty(x.numel() + 1, dtype=dtype, device="cuda")
+    x_misaligned = buf[1:].view_as(x)
+    x_misaligned.copy_(x)
+    kwargs = dict(
+        group_size=group_size,
+        quant_dtype=quant_dtype,
+        is_scale_transposed=is_scale_transposed,
+        use_ue8m0=use_ue8m0,
+    )
+    out, scales = ops.silu_and_mul_per_block_quant(x, **kwargs)
+    ref_out, ref_scales = ops.silu_and_mul_per_block_quant(x_misaligned, **kwargs)
+    assert torch.equal(out.view(torch.uint8), ref_out.view(torch.uint8))
+    assert torch.equal(scales, ref_scales)

@@ -239,7 +239,8 @@ void silu_and_mul_per_block_quant(torch::stable::Tensor& out,
                                   torch::stable::Tensor& scales,
                                   int64_t group_size,
                                   std::optional<torch::stable::Tensor> scale_ub,
-                                  bool is_scale_transposed);
+                                  bool is_scale_transposed, bool use_ue8m0,
+                                  std::optional<double> clamp_limit);
 
 // Positional encoding kernels (shared CUDA/ROCm)
 void rotary_embedding(torch::stable::Tensor& positions,

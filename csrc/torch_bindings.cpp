@@ -400,7 +400,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! scales, "
       "int group_size, "
       "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
+      "bool is_scale_transposed=False, "
+      "bool use_ue8m0=False, "
+      "float? clamp_limit=None) -> ()");
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.

@@ -33,6 +33,7 @@ def _quantize_input(
         is_scale_swizzled=quant_config.is_scale_swizzled,
         is_scale_transposed=quant_config.is_scale_transposed,
         mx_alignment=quant_config.mx_alignment,
+        use_ue8m0=quant_config.use_ue8m0_act_scales,
     )
 
     return a1q, a1q_scale

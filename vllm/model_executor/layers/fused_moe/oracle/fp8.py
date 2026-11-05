@@ -9,7 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -46,7 +46,10 @@ from vllm.model_executor.utils import (
     set_kernel_parameter,
 )
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+from vllm.utils.deep_gemm import (
+    is_deep_gemm_e8m0_used,
+    should_auto_disable_deep_gemm,
+)
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -722,6 +725,29 @@ def convert_to_fp8_moe_kernel_format(
     return w13, w2, w13_scale, w2_scale
 
 
+def _use_ue8m0_act_scales(fp8_backend: Fp8MoeBackend) -> bool | None:
+    """Power-of-two activation scales are only needed by DeepGEMM E8M0 or by
+    checkpoints calibrated with them (``scale_fmt: ue8m0``); other kernels
+    take float32 scales, so rounding only adds error there."""
+    if not is_deep_gemm_e8m0_used():
+        return False
+    if fp8_backend in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM):
+        return True
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    model_config = vllm_config.model_config
+    hf_quant_config = (
+        getattr(model_config.hf_config, "quantization_config", None)
+        if model_config is not None
+        else None
+    )
+    return (
+        isinstance(hf_quant_config, dict)
+        and hf_quant_config.get("scale_fmt") == "ue8m0"
+    )
+
+
 def make_fp8_moe_quant_config(
     fp8_backend: Fp8MoeBackend,
     w1_scale: torch.Tensor,
@@ -849,6 +875,7 @@ def make_fp8_moe_quant_config(
         is_scale_transposed=(
             fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and block_shape == [128, 128]
         ),
+        use_ue8m0_act_scales=_use_ue8m0_act_scales(fp8_backend),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,

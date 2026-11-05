@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_masked_supported,
@@ -13,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+    persistent_masked_m_silu_mul_quant,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     has_configured_moe_config,
@@ -25,6 +29,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     normalize_batched_scales_shape,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    is_deep_gemm_e8m0_used,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -39,6 +46,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton, use_tensor_descriptor
 from vllm.triton_utils.allocation import set_triton_allocator
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
+
+logger = init_logger(__name__)
 
 
 def _is_capturing_or_compiling() -> bool:
@@ -957,6 +967,29 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
+    def _use_fused_silu_block_quant(self, activation: MoEActivation) -> bool:
+        """Whether SiLU+Mul and the FP8 block quant of the GEMM2 input can
+        run as one kernel. Warns once with the reason when they cannot."""
+        if not self.quant_config.use_fp8_w8a8 or self.block_shape is None:
+            return False
+        if activation != MoEActivation.SILU:
+            reason = f"activation {activation.value} is not silu"
+        elif self.activation_config.clamp_limit is not None:
+            reason = "the batched fused kernel has no SwiGLU clamp"
+        elif self.block_shape[1] != 128:
+            reason = f"group size {self.block_shape[1]} is not 128"
+        elif current_platform.is_xpu():
+            reason = "XPU"
+        else:
+            return True
+        logger.warning_once(
+            "%s: FP8 block-quant MoE is not using the fused SiLU+Mul+quant "
+            "kernel because %s; running separate activation and quant kernels.",
+            type(self).__name__,
+            reason,
+        )
+        return False
+
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -1143,34 +1176,46 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             block_shape=self.block_shape,
         )
 
-        intermediate_cache2.fill_(0)
-
-        # TODO (bnell): use triton utility from batched deep gemm.
-        if current_platform.is_xpu():
-            self.activation(
-                activation,
-                intermediate_cache2.view(-1, activation_out_dim),
-                intermediate_cache1.view(-1, N),
+        if self._use_fused_silu_block_quant(activation):
+            use_ue8m0 = self.quant_config.use_ue8m0_act_scales
+            if use_ue8m0 is None:
+                use_ue8m0 = is_deep_gemm_e8m0_used()
+            qintermediate_cache2, a2q_scale = persistent_masked_m_silu_mul_quant(
+                intermediate_cache1,
+                expert_num_tokens,
+                quant_scale_fmt=DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+                if use_ue8m0
+                else DeepGemmQuantScaleFMT.FLOAT32,
             )
         else:
-            self.activation(
-                activation,
-                intermediate_cache2,
-                intermediate_cache1,
-                valid_token_counts=expert_num_tokens,
-            )
+            intermediate_cache2.fill_(0)
 
-        qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            max_num_tokens,
-            E,
-            N,
-            expert_num_tokens,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
-        )
+            # TODO (bnell): use triton utility from batched deep gemm.
+            if current_platform.is_xpu():
+                self.activation(
+                    activation,
+                    intermediate_cache2.view(-1, activation_out_dim),
+                    intermediate_cache1.view(-1, N),
+                )
+            else:
+                self.activation(
+                    activation,
+                    intermediate_cache2,
+                    intermediate_cache1,
+                    valid_token_counts=expert_num_tokens,
+                )
+
+            qintermediate_cache2, a2q_scale = batched_moe_kernel_quantize_input(
+                intermediate_cache2,
+                a2_scale,
+                max_num_tokens,
+                E,
+                N,
+                expert_num_tokens,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+            )
 
         invoke_moe_batched_triton_kernel(
             A=qintermediate_cache2,

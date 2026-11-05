@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -182,8 +183,10 @@ def setup_cuda():
     "H200" not in torch.cuda.get_device_name(),
     reason="The sorted-A TMA path is tuned for H200",
 )
-def test_sorted_a_tma_moe_matches_route_major(workspace_init):
-    """The H200 sorted path preserves routed FP8 block outputs exactly."""
+@pytest.mark.parametrize("use_ue8m0_act_scales", [None, False])
+def test_sorted_a_tma_moe_matches_route_major(workspace_init, use_ue8m0_act_scales):
+    """The H200 sorted path preserves routed FP8 block outputs exactly, with
+    both UE8M0 (DeepGEMM E8M0) and float32 activation scales."""
     torch.manual_seed(123)
     m, experts, hidden, intermediate, topk = 1024, 256, 4096, 256, 8
     x = (torch.randn((m, hidden)) / 10).to(torch.bfloat16)
@@ -195,6 +198,7 @@ def test_sorted_a_tma_moe_matches_route_major(workspace_init):
         torch.float8_e4m3fn,
         block_shape=[128, 128],
     )
+    quant_config = replace(quant_config, use_ue8m0_act_scales=use_ue8m0_act_scales)
     moe_config = make_dummy_moe_config(
         num_experts=experts,
         experts_per_token=topk,
@@ -295,7 +299,7 @@ def test_w8a8_block_fp8_fused_moe(
     # while fused_experts/the reference round SiLU to bf16 first. On large K/N this
     # ~1-ULP gap pushes m_out past the base tol, so validate m_out against an
     # fp32-SiLU reference — keeping the tight base tolerance, no widened override.
-    if current_platform.is_rocm() and K >= 4096 and N >= 1024:
+    if K >= 4096 and N >= 1024:
         with set_current_vllm_config(vllm_config):
             ref_out_m = torch_w8a8_block_fp8_moe(
                 a,
@@ -367,11 +371,19 @@ def test_h200_block_fp8_up_and_down_tma_matches_pointer(M, modular, workspace_in
 
 
 @pytest.mark.parametrize("clamp_limit", [None, 10.0])
+@pytest.mark.parametrize("use_e8m0", [False, True])
 @torch.inference_mode()
-def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
-    clamp_limit, monkeypatch, workspace_init, disable_deepgemm_ue8m0
+def test_w8a8_block_fp8_fused_silu_quant(
+    clamp_limit, use_e8m0, monkeypatch, request, workspace_init
 ):
-    """A SwiGLU clamp must bypass the fused SiLU+quant kernel, which cannot clamp."""
+    """TritonExperts must take the fused SiLU+Mul+quant kernel with and without
+    a SwiGLU clamp and DeepGEMM E8M0, and match the unfused path."""
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_E8M0", "1" if use_e8m0 else "0")
+    is_deep_gemm_e8m0_used.cache_clear()
+    request.addfinalizer(is_deep_gemm_e8m0_used.cache_clear)
+    if is_deep_gemm_e8m0_used() != use_e8m0:
+        pytest.skip("DeepGEMM E8M0 unavailable")
+
     torch.manual_seed(0)
     M, N, K, E, topk = 16, 256, 512, 8, 2
     block_size = [128, 128]
@@ -390,20 +402,19 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
     m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
-    fused_calls = 0
+    fused_calls = []
     fused_op = triton_moe.ops.silu_and_mul_per_block_quant
 
     def counting_fused_op(*args, **kwargs):
-        nonlocal fused_calls
-        fused_calls += 1
+        fused_calls.append(kwargs)
         return fused_op(*args, **kwargs)
 
     monkeypatch.setattr(
         triton_moe.ops, "silu_and_mul_per_block_quant", counting_fused_op
     )
 
-    with set_current_vllm_config(vllm_config):
-        m_fused_moe.apply(
+    def run():
+        return m_fused_moe.apply(
             a,
             w1,
             w2,
@@ -415,9 +426,21 @@ def test_w8a8_block_fp8_clamp_skips_fused_silu_quant(
             global_num_experts=E,
         )
 
-    assert (fused_calls > 0) == (clamp_limit is None), (
-        f"fused fast path ran {fused_calls} times with clamp_limit={clamp_limit}"
-    )
+    with set_current_vllm_config(vllm_config):
+        out = run()
+        assert len(fused_calls) == 1
+        assert fused_calls[0]["use_ue8m0"] == use_e8m0
+        assert fused_calls[0]["clamp_limit"] == clamp_limit
+
+        monkeypatch.setattr(
+            triton_moe.TritonExperts,
+            "_use_fused_silu_block_quant",
+            lambda *args: False,
+        )
+        ref_out = run()
+
+    assert len(fused_calls) == 1
+    torch.testing.assert_close(out, ref_out, atol=0.035, rtol=0.035)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), [(83, 512, 512), (2048, 4608, 512)])

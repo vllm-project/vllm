@@ -254,6 +254,9 @@ class FusedMoEQuantConfig:
     is_scale_swizzled: bool = True
     # Emit block-quant activation scales column-major (physical [G, M] layout).
     is_scale_transposed: bool = False
+    # Round dynamic FP8 block activation scales up to powers of two (UE8M0).
+    # None defers to is_deep_gemm_e8m0_used().
+    use_ue8m0_act_scales: bool | None = None
 
     # MXFP4-specific TRTLLM parameters for SwiGLU activation clamping.
     # These correspond to gemm1_alpha, gemm1_beta, gemm1_clamp_limit
@@ -509,6 +512,7 @@ class FusedMoEQuantConfig:
         weight_dtype: torch.dtype | str | None = None,
         is_scale_swizzled: bool = True,
         is_scale_transposed: bool = False,
+        use_ue8m0_act_scales: bool | None = None,
         gemm1_alpha: float | None = None,
         gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
@@ -546,6 +550,9 @@ class FusedMoEQuantConfig:
         - is_scale_transposed: Whether block-quantized activation scales are
           emitted column-major (physical [num_groups, num_tokens] layout) by
           the quantize step. Defaults to False.
+        - use_ue8m0_act_scales: Whether dynamic FP8 block activation scales
+          are rounded up to powers of two. None defers to
+          is_deep_gemm_e8m0_used().
         - gemm1_alpha: Optional MXFP4 TRTLLM SwiGLU alpha parameter.
         - gemm1_beta: Optional MXFP4 TRTLLM SwiGLU beta parameter.
         - gemm1_clamp_limit: Optional MXFP4 TRTLLM SwiGLU clamp limit.
@@ -583,6 +590,7 @@ class FusedMoEQuantConfig:
             ),
             is_scale_swizzled=is_scale_swizzled,
             is_scale_transposed=is_scale_transposed,
+            use_ue8m0_act_scales=use_ue8m0_act_scales,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
@@ -608,6 +616,7 @@ def fp8_w8a8_moe_quant_config(
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    use_ue8m0_act_scales: bool | None = None,
     gemm1_alpha: float | None = None,
     gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
@@ -629,6 +638,7 @@ def fp8_w8a8_moe_quant_config(
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
         is_scale_transposed=is_scale_transposed,
+        use_ue8m0_act_scales=use_ue8m0_act_scales,
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
