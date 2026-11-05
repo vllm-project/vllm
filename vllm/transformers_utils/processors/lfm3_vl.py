@@ -3,7 +3,7 @@
 from transformers import AutoTokenizer
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen3_vl import Qwen3VLProcessor, Qwen3VLVideoProcessor
-from transformers.processing_utils import ProcessingKwargs
+from transformers.processing_utils import ProcessingKwargs, ProcessorMixin
 
 
 class Lfm3VlProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
@@ -39,15 +39,8 @@ class Lfm3VlProcessor(Qwen3VLProcessor):
             ),
         )
 
-    @property
-    def model_input_names(self):
-        return list(
-            dict.fromkeys(
-                self.tokenizer.model_input_names
-                + self.image_processor.model_input_names
-                + self.video_processor.model_input_names
-            )
-        )
+    # Qwen3-VL's adds `mm_token_type_ids`, which LFM3-VL does not return
+    model_input_names = ProcessorMixin.model_input_names
 
     def _process_videos(self, videos, **kwargs):
         # The checkpoints set `return_metadata: false`, but the frame timestamps

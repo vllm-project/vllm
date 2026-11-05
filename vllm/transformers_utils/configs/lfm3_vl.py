@@ -67,7 +67,6 @@ class Lfm3VlConfig(PreTrainedConfig):
         projector_hidden_act: str = "gelu",
         projector_hidden_size: int = 4096,
         projector_bias: bool = True,
-        projector_layer_norm_eps: float = 1e-6,
         tie_word_embeddings: bool = True,
         **kwargs: Any,
     ) -> None:
@@ -90,5 +89,4 @@ class Lfm3VlConfig(PreTrainedConfig):
         self.projector_hidden_act = projector_hidden_act
         self.projector_hidden_size = projector_hidden_size
         self.projector_bias = projector_bias
-        self.projector_layer_norm_eps = projector_layer_norm_eps
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)

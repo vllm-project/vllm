@@ -11,7 +11,7 @@ from torch import nn
 
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
+from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -41,7 +41,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .lfm3 import _short_conv_state_dtype, _short_conv_state_shape
+from .lfm3 import Lfm3MLP, _short_conv_state_dtype, _short_conv_state_shape
 from .qwen3_vl import (
     Qwen3VLDummyInputsBuilder,
     Qwen3VLMultiModalProcessor,
@@ -54,36 +54,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import get_fp8_padded_hidden_size, get_vit_attn_backend
-
-
-class Lfm3VlVisionMLP(nn.Module):
-    def __init__(
-        self,
-        config: Lfm3VlVisionConfig,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.w13 = MergedColumnParallelLinear(
-            config.hidden_size,
-            [config.intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.w13",
-        )
-        self.w2 = RowParallelLinear(
-            config.intermediate_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.w2",
-        )
-        self.act_fn = SiluAndMul()
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.w13(hidden_states)
-        hidden_states, _ = self.w2(self.act_fn(gate_up))
-        return hidden_states
 
 
 class Lfm3VlVisionAttention(nn.Module):
@@ -260,7 +230,7 @@ class Lfm3VlVisionLayer(nn.Module):
             self.conv = Lfm3VlVisionConv2d(
                 config, quant_config=quant_config, prefix=f"{prefix}.conv"
             )
-        self.feed_forward = Lfm3VlVisionMLP(
+        self.feed_forward = Lfm3MLP(
             config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
         )
         self.operator_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
@@ -377,7 +347,9 @@ class Lfm3VlVisionModel(nn.Module):
                 torch.stack([rows.flatten(), cols.flatten()], -1).repeat(t, 1)
             )
         positions = torch.cat(positions)
-        cos, sin = self.rotary_pos_emb.get_cos_sin(int(positions.max()) + 1)
+        cos, sin = self.rotary_pos_emb.get_cos_sin(
+            max(max(h, w) for _, h, w in grid_thw)
+        )
         return cos[positions].flatten(1), sin[positions].flatten(1)
 
     def forward(
@@ -433,9 +405,7 @@ class Lfm3VlMultiModalProjector(nn.Module):
     ) -> None:
         super().__init__()
         vision_config = config.vision_config
-        self.layer_norm = nn.LayerNorm(
-            vision_config.hidden_size, eps=config.projector_layer_norm_eps
-        )
+        self.layer_norm = nn.LayerNorm(vision_config.hidden_size, eps=1e-6)
         self.linear_1 = ColumnParallelLinear(
             vision_config.hidden_size * vision_config.spatial_merge_size**2,
             config.projector_hidden_size,
@@ -544,7 +514,7 @@ class Lfm3VlForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         merge = self.vision_tower.spatial_merge_size**2
         embeddings: list[torch.Tensor] = []
         for pixels_key, grid_key, embeds_key in (
@@ -566,7 +536,7 @@ class Lfm3VlForConditionalGeneration(
                 assert isinstance(embeds, torch.Tensor)
                 assert isinstance(grid, torch.Tensor)
                 embeddings += embeds.split((grid.prod(-1) // merge).tolist())
-        return embeddings or None
+        return embeddings
 
     def forward(
         self,
