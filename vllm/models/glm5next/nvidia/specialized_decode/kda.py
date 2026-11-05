@@ -62,9 +62,7 @@ class KdaStage:
         self.fold_tokens: frozenset[int] = frozenset()
         if a.g_b_proj.weight.dtype == torch.bfloat16:
             self.fold_tokens = frozenset(fold_tokens)
-        conv = torch.cat(
-            [m.weight.detach() for m in (a.q_conv1d, a.k_conv1d, a.v_conv1d)]
-        )
+        conv = a.conv1d.weight.detach()
         norm = a.o_norm.weight.detach().float()
         dt = a.dt_bias
         self.weights = (

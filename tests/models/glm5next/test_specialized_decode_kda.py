@@ -65,9 +65,7 @@ class _Case:
         conv = lambda w: SimpleNamespace(weight=w)
         attention = SimpleNamespace(
             local_num_heads=HEADS,
-            q_conv1d=conv(self.conv_weight[0]),
-            k_conv1d=conv(self.conv_weight[1]),
-            v_conv1d=conv(self.conv_weight[2]),
+            conv1d=conv(torch.cat(self.conv_weight)),
             o_norm=SimpleNamespace(weight=self.norm, eps=EPS),
             dt_bias=self.dt_bias,
             A_log=self.a_log.view(1, 1, HEADS, 1),
