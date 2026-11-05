@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
         NixlBaseConnectorWorker,
     )
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -212,6 +213,11 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        assert self.connector_scheduler is not None
+        if isinstance(self.connector_scheduler, NixlPushConnectorScheduler):
+            self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
@@ -441,6 +447,12 @@ class NixlPushConnector(NixlBaseConnector):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
+
+    def wait_for_save(self) -> None:
+        """Publish chunk jobs after this step's model execution is enqueued."""
+        super().wait_for_save()
+        assert self.connector_worker is not None
+        self.connector_worker.finish_chunk_step()
 
 
 # Backward compatibility: NixlConnector is the pull-based connector.

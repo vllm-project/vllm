@@ -17,6 +17,45 @@ Explicit `NixlPullConnector` and `NixlPushConnector` names ignore this option.
 Under `MultiConnector`, set `transfer_mode` in the NIXL child's
 `kv_connector_extra_config`.
 
+## Chunked prefill push
+
+`NixlPushConnector` can send completed prompt blocks after each prefill chunk
+instead of waiting for the request to finish. Enable it on the producer with:
+
+```json
+{
+  "kv_connector": "NixlPushConnector",
+  "kv_role": "kv_producer",
+  "kv_buffer_device": "cuda",
+  "kv_connector_extra_config": {
+    "enable_chunked_push": true
+  }
+}
+```
+
+The option is off by default. It currently requires a device KV buffer, PP1,
+PCP1, DCP1, and one transferable full-attention cache group. P and D must use
+the same TP and block size for early chunks. An incompatible peer, a late D
+registration, or a single-chunk prompt falls back to the existing monolithic
+WRITE on the final chunk.
+
+The scheduler pins every source block referenced by an asynchronous chunk job.
+Those references are released through the existing `finished_sending`
+aggregation only after every producer worker completes the request. A
+preempted request drains its earlier WRITEs, then uses the existing monolithic
+path for the final hand-off. This prevents old WRITEs from racing the resumed
+request or publishing its completion notification.
+
+Intermediate chunk WRITEs carry no notification. After the final chunk and all
+earlier jobs complete, each producer rank sends the normal request-level
+completion notification once. The D-side scheduler and decode admission path
+are unchanged.
+
+`chunked_push_defer_timeout` in `kv_connector_extra_config` bounds how long a
+chunk job may retain its source blocks while waiting for D's registration. The
+default is 60 seconds. A timed-out attempt releases its pins without notifying
+D; the existing D-side registration watchdog handles the missing hand-off.
+
 This document describes the threading, queues, and scheduling
 interactions specific to the push design. The pull-mode design is
 unchanged; the push connector reuses the same handshake, NIXL agent

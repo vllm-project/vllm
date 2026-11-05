@@ -272,6 +272,26 @@ class ReqMeta:
     covered_sub_blocks: list[range] | None = None
 
 
+@dataclass(frozen=True)
+class NixlPushChunkJob:
+    """One producer-side chunk hand-off.
+
+    The scheduler pins ``local_block_ids`` until the request transfer finishes.
+    ``start_block`` and ``end_block`` address the single
+    transferable full-attention block table supported by the initial chunked
+    push implementation. The final job includes the complete table so the
+    worker can fall back to the existing monolithic WRITE when chunking is not
+    compatible with the peer.
+    """
+
+    request_id: ReqId
+    local_block_ids: BlockIds
+    start_block: int
+    end_block: int
+    total_blocks: int
+    is_final: bool
+
+
 class NixlConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
@@ -293,6 +313,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Push mode (P side): immutable prompt-block ranges that can be sent
+        # before the request finishes. Preempted requests fall back to the
+        # existing whole-request transfer after earlier writes have drained.
+        self.push_chunk_jobs: list[NixlPushChunkJob] = []
+        self.push_chunk_fallbacks: set[ReqId] = set()
+        self.push_chunk_cancellations: set[ReqId] = set()
 
     def _add_new_req(
         self,
