@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
@@ -14,6 +15,9 @@ from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 def compute_fp8_einsum_recipe(
@@ -112,7 +116,9 @@ _ROPE_QUANT_HEAD_DIM = 512
 _ROPE_QUANT_BLOCK = 128
 
 
-def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
+def rope_quant_unsupported_reason(
+    layer: torch.nn.Module, vllm_config: "VllmConfig"
+) -> str | None:
     """Why ``layer`` cannot take FlashInfer's fused inverse RoPE + FP8 output.
 
     DSv4 always has 8 heads per ``wo_a`` group at any TP size, and the rest of
@@ -120,6 +126,9 @@ def rope_quant_unsupported_reason(layer: torch.nn.Module) -> str | None:
     cache) is what the SM100 layer uses anyway. What varies is the local head
     count and the configs the layer also serves unquantized.
     """
+    if vllm_config.lora_config is not None:
+        # wo_a's adapter needs the BF16 output, which RopeQuant never writes.
+        return "RopeQuant is incompatible with LoRA"
     if layer.n_local_heads != _ROPE_QUANT_NUM_HEADS:
         # Padding fewer heads up to the kernel's fixed 128 costs more
         # attention than the fused epilogue saves.
