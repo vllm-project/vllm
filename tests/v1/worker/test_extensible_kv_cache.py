@@ -228,7 +228,7 @@ def test_measured_sizing_caps_torch_memory(monkeypatch):
 
 
 def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch):
-    """On UMA parts the page cache (e.g. prefetched weights) is reclaimable
+    """On native UMA parts the page cache (e.g. prefetched weights) is reclaimable
     but cudaMemGetInfo reports it as used; sizing from the raw figure left
     a 120 GiB DGX Spark with zero KV cache blocks (vllm-project/vllm#65378)."""
     gib = 1 << 30
@@ -250,6 +250,7 @@ def test_measured_sizing_counts_reclaimable_memory_on_integrated_gpu(monkeypatch
     )
     from vllm.utils import mem_utils
 
+    monkeypatch.setattr(mem_utils, "in_wsl", lambda: False)
     monkeypatch.setattr(
         mem_utils.current_platform, "is_integrated_gpu", lambda *args: True
     )
