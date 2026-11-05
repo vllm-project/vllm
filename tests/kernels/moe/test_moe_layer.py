@@ -2344,12 +2344,17 @@ def _biased_moe_tp_worker(rank: int, tp_size: int, port: int, result_path: str):
         for e in range(num_experts):
             gate, up = w13[e].chunk(2)
             gate_bias, up_bias = b13[e].chunk(2)
-            experts.weight_loader(experts.w13_weight, gate, "w13_weight", "w1", e)
-            experts.weight_loader(experts.w13_weight, up, "w13_weight", "w3", e)
-            experts.weight_loader(experts.w2_weight, w2[e], "w2_weight", "w2", e)
-            experts.weight_loader(experts.w13_bias, gate_bias, "w13_bias", "w1", e)
-            experts.weight_loader(experts.w13_bias, up_bias, "w13_bias", "w3", e)
-            experts.weight_loader(experts.w2_bias, b2[e], "w2_bias", "w2", e)
+            for param, weight, name, shard_id in [
+                (experts.w13_weight, gate, "w13_weight", "w1"),
+                (experts.w13_weight, up, "w13_weight", "w3"),
+                (experts.w2_weight, w2[e], "w2_weight", "w2"),
+                (experts.w13_bias, gate_bias, "w13_bias", "w1"),
+                (experts.w13_bias, up_bias, "w13_bias", "w3"),
+                (experts.w2_bias, b2[e], "w2_bias", "w2"),
+            ]:
+                assert experts.weight_loader(
+                    param, weight, name, shard_id, e, return_success=True
+                )
         layer._quant_method.process_weights_after_loading(experts)
 
         with set_forward_context(None, vllm_config, num_tokens=num_tokens):
