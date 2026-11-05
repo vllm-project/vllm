@@ -402,7 +402,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise ValueError("Qwen4Exp QSA requires a paged KV cache")
         if model_config.dtype != torch.bfloat16:
             raise NotImplementedError("Qwen4Exp QSA currently requires BF16")
-        self.act_dtype = model_config.dtype
         if cache_config.cache_dtype not in (
             "auto",
             "bfloat16",
@@ -583,7 +582,6 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         static_context[self.layer_name] = self
 
     def process_weights_after_loading(self) -> None:
-        self.impl.process_weights_after_loading(self.act_dtype)
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
 
