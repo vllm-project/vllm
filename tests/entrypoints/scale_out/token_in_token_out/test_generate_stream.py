@@ -1599,7 +1599,7 @@ def _derender_serving(engine, parser_cls=_StubParser, **kwargs):
     derenderer.enable_auto_tools = False
     derenderer.renderer = MagicMock()
     derenderer.model_config = engine.model_config
-    derenderer._include_reasoning_tokens_details = False
+    derenderer.include_reasoning_tokens_details = False
     for method in ("make_stream_processor", "stream_completion_tokens_details"):
         setattr(
             derenderer,
@@ -1752,6 +1752,53 @@ async def test_stream_derender_without_parser_streams_text_as_content():
         {"content": "b"},
     ]
     assert [c["finish_reason"] for c in choices] == [None, "stop"]
+
+
+_THINK_END = 99
+
+
+class _ThinkingStubParser(_StubParser):
+    """Counts the tokens before `_THINK_END` as reasoning."""
+
+    def count_reasoning_tokens(self, token_ids):
+        token_ids = list(token_ids)
+        if _THINK_END in token_ids:
+            return token_ids.index(_THINK_END)
+        return len(token_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("include_details", [True, False])
+async def test_stream_derender_usage_sums_reasoning_tokens(include_details):
+    """Choice 0 closes its reasoning block mid-stream and choice 1 never does;
+    usage sums both, and omits the details without a reasoning parser."""
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output("req-1", token_ids=[10, 11], text="a", index=0)
+        yield _make_request_output("req-1", token_ids=[20, 21], text="x", index=1)
+        yield _make_request_output(
+            "req-1",
+            token_ids=[_THINK_END, 12],
+            text="b",
+            index=0,
+            finish_reason="stop",
+        )
+        yield _make_request_output(
+            "req-1", token_ids=[22], text="y", index=1, finish_reason="length"
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _derender_serving(engine, parser_cls=_ThinkingStubParser)
+    serving.online_derenderer.include_reasoning_tokens_details = include_details
+    request = _derender_request(n=2, stream_options=StreamOptions(include_usage=True))
+
+    parsed = await _collect_sse(await serving.serve_tokens(request))
+    usage = parsed[-2]["usage"]
+
+    assert usage["completion_tokens"] == 7
+    expected = {"reasoning_tokens": 2 + 3} if include_details else None
+    assert usage.get("completion_tokens_details") == expected
 
 
 def test_make_stream_processor_seeds_history_tool_call_count():

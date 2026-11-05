@@ -723,7 +723,12 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
-        output_token_ids: list[list[int]] = [[] for _ in range(sampling_params.n)]
+        output_token_ids: list[list[int]] | None = (
+            [[] for _ in range(sampling_params.n)]
+            if processors is not None
+            and self.online_derenderer.include_reasoning_tokens_details
+            else None
+        )
         last_res: RequestOutput | None = None
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
@@ -779,7 +784,8 @@ class ServingTokens(GenerateBaseServing):
                         if finish_reason_sent[i]:
                             continue
                         processor = processors[i]
-                        output_token_ids[i].extend(delta_token_ids)
+                        if output_token_ids is not None:
+                            output_token_ids[i].extend(delta_token_ids)
                         delta, finish_reason = processor.step(
                             output.text,
                             as_list(delta_token_ids),
@@ -885,7 +891,7 @@ class ServingTokens(GenerateBaseServing):
                     self.online_derenderer.stream_completion_tokens_details(
                         processors, output_token_ids
                     )
-                    if processors is not None
+                    if processors is not None and output_token_ids is not None
                     else None
                 ),
             )
