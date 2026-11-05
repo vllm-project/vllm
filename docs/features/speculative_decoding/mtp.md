@@ -67,6 +67,22 @@ vllm serve XiaomiMiMo/MiMo-7B-Base \
     --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
 ```
 
+## Local argmax for Qwen4Exp on NVIDIA
+
+The NVIDIA Qwen4Exp MTP implementation supports greedy draft selection with
+`"use_local_argmax_reduction": true` in `--speculative-config`:
+
+```json
+{"method": "mtp", "num_speculative_tokens": 2, "use_local_argmax_reduction": true}
+```
+
+Each tensor-parallel rank selects its local best draft token, then exchanges
+the score and token ID instead of the full vocabulary logits. Target-model
+verification is unchanged. This option requires greedy draft sampling and
+cannot be combined with probabilistic draft sampling or heterogeneous draft
+vocabularies. Benchmark the intended workload before enabling it for serving;
+reducing communication volume does not guarantee lower request latency.
+
 ## Notes
 
 - MTP only works for model families that support MTP in vLLM.
