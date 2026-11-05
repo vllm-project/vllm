@@ -207,12 +207,6 @@ class SpeculatorConfig:
             return k + 1
         return self._dynamic_sd_schedule(view.max_num_seqs)[view.num_scheduled_reqs] + 1
 
-    @property
-    def pads_new_decode_rows(self) -> bool:
-        """Whether the scheduler pads a request that starts decoding to the
-        full K + 1 rows, so that its batch stays a uniform decode."""
-        return not self.spec_config.uses_dynamic_speculative_decoding()
-
     def _dynamic_sd_schedule(self, max_num_seqs: int) -> list[int]:
         if (
             self._dynamic_sd_lookup is None

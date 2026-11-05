@@ -383,7 +383,6 @@ def test_adaptive_verification_reserves_the_full_candidate_budget():
     resources = config.resources(max_num_seqs=8)
     assert resources.max_candidates == 5
     assert resources.capture_shapes == (PlanShape(5), PlanShape(None))
-    assert config.pads_new_decode_rows
     for num_reqs in (1, 8):
         view = BudgetView(num_reqs, num_reqs, 0, 100, 8, 16)
         assert config.candidate_budget(view) == 5

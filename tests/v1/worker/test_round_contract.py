@@ -702,14 +702,13 @@ class _StaticSpec:
 )
 def test_builtin_configs_keep_todays_resources_and_budget(qualname):
     """Built-in methods draft K per step through the default declaration: K + 1
-    candidates, the uniform K + 1 decode graph, chains, and padded new decodes,
-    at every batch size."""
+    candidates, the uniform K + 1 decode graph and chains, at every batch
+    size."""
     config_cls = resolve_obj_by_qualname(f"vllm.v1.worker.gpu.spec_decode.{qualname}")
     config = config_cls(_StaticSpec())
     assert config.resources(16) == SpecResources(
         max_candidates=4, capture_shapes=(PlanShape(4),)
     )
-    assert config.pads_new_decode_rows
     for num_reqs in (1, 7, 16):
         view = BudgetView(num_reqs, num_reqs, 0, 0, 16, 16)
         assert config.candidate_budget(view) == 4

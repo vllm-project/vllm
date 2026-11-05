@@ -3058,18 +3058,22 @@ def _model_output(scheduler, output, sampled):
     )
 
 
-def test_spec_decode_padding_first_decode_step():
+@pytest.mark.parametrize("budget", [None, 2])
+def test_spec_decode_padding_first_decode_step(budget):
     """A request taking its first decode step (whole prompt already computed via
     a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
-    the worker with the same 1 + num_spec_tokens shape as the other speculative
-    decodes, keeping the batch uniform.
+    the worker with the same shape as the other speculative decodes, keeping the
+    batch uniform: the drafts they verify, which a candidate budget can cap.
     """
-    num_spec = 3
     scheduler = create_scheduler(
-        num_speculative_tokens=num_spec,
+        num_speculative_tokens=3,
         enable_prefix_caching=True,
         block_size=16,
     )
+    num_spec = 3
+    if budget is not None:
+        scheduler.speculator_config.candidate_budget = lambda view: budget
+        num_spec = budget - 1
     # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
     # second identical request hits num_computed == num_prompt_tokens - 1.
     r1, r2 = create_requests(
@@ -3082,14 +3086,15 @@ def test_spec_decode_padding_first_decode_step():
     out = scheduler.schedule()
     assert out.num_scheduled_tokens[r1.request_id] == 33
     _model_output(scheduler, out, [[100]])
-    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+    drafts = [1, 2, 3][:num_spec]
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [drafts]))
 
     # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
     scheduler.add_request(r2)
     out = scheduler.schedule()
 
     # r1 verifies its real drafts.
-    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == drafts
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec

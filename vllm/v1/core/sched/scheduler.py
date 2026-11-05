@@ -327,6 +327,9 @@ class Scheduler(SchedulerInterface):
         # per-step candidate budget here; see SpeculatorConfig.candidate_budget.
         self.speculator_config: SpeculatorConfig | None = None
         self.pads_new_decode_rows = False
+        # The drafts each running request verifies this step: the previous
+        # step's num_spec_tokens_to_schedule. A padded new decode matches them.
+        self._num_carried_drafts = self.num_spec_tokens
         if speculative_config is not None:
             self.speculator_config = speculative_config.speculator_config
             resources = self.speculator_config.resources(
@@ -342,7 +345,10 @@ class Scheduler(SchedulerInterface):
             # Declared; the engine core lowers it to what the model's layers
             # verify (EngineCore._set_spec_resources). KV slots stay declared.
             self.spec_resources = resources
-            self.pads_new_decode_rows = self.speculator_config.pads_new_decode_rows
+            # As on main, not under a Dynamic SD schedule.
+            self.pads_new_decode_rows = (
+                not speculative_config.uses_dynamic_speculative_decoding()
+            )
             self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
@@ -1367,13 +1373,13 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     # Not for diffusion where draft tokens can't be padded.
                     if (
-                        (self.num_spec_tokens > 0 and self.pads_new_decode_rows)
+                        (self._num_carried_drafts > 0 and self.pads_new_decode_rows)
                         and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                     ):
-                        padded_num_tokens = 1 + self.num_spec_tokens
+                        padded_num_tokens = 1 + self._num_carried_drafts
                         # Pad only when there is room for the sampled token(s).
                         if (
                             num_computed_tokens
@@ -1416,7 +1422,7 @@ class Scheduler(SchedulerInterface):
                             break
                         if (
                             pad_spec_decode
-                            and num_new_tokens != 1 + self.num_spec_tokens
+                            and num_new_tokens != 1 + self._num_carried_drafts
                         ):
                             # Alignment clipped the placeholder rows. The split
                             # aligns prefill chunks, but the padded tail rows are
@@ -1497,7 +1503,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     num_draft_tokens=(
-                        (self.num_spec_tokens if pad_spec_decode else 0)
+                        (self._num_carried_drafts if pad_spec_decode else 0)
                         if self.dynamic_spec_blocks
                         else None
                     ),
@@ -1639,10 +1645,10 @@ class Scheduler(SchedulerInterface):
                     request, num_computed_tokens, num_new_tokens
                 )
                 if pad_spec_decode:
-                    assert num_new_tokens == 1 + self.num_spec_tokens
+                    assert num_new_tokens == 1 + self._num_carried_drafts
                     scheduled_spec_decode_tokens[request_id] = [
                         -1
-                    ] * self.num_spec_tokens
+                    ] * self._num_carried_drafts
                 # Must use the SAME predicate as the deferral gate in the
                 # waiting loop (`num_computed_tokens < num_tokens - 1`).
                 # Stamping on `< num_prompt_tokens` instead let a request with
@@ -1780,6 +1786,7 @@ class Scheduler(SchedulerInterface):
             # Budget 1 is a plain decode next step: no drafts to propose.
             if budget == 1 and self.can_skip_drafts:
                 drafts_needed = False
+        self._num_carried_drafts = num_spec_tokens_to_schedule
 
         scheduled_encoder_input_stats = None
         if (
