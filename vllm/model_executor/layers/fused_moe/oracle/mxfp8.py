@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -14,8 +13,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-
-logger = init_logger(__name__)
 
 # Ordered by priority.
 _SUPPORTED_BACKENDS = (
@@ -84,9 +81,8 @@ class Mxfp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 
     name = "Mxfp8"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: Fp8MoeBackend,
+        self, backend: Fp8MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return _mxfp8_backend_to_kernel_cls(backend)
 
@@ -132,8 +128,7 @@ def select_mxfp8_moe_backend(
     for backend in backends:
         try:
             experts_cls = _select_kernel_cls(backend, config)
-        except ValueError as error:
-            logger.debug_once(str(error))
+        except ValueError:
             continue
         return backend, experts_cls
 

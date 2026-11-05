@@ -205,9 +205,8 @@ class NvFp4MoEKernelOracle(MoEKernelOracle[NvFp4MoeBackend]):
 
     name = "NvFp4"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: NvFp4MoeBackend,
+        self, backend: NvFp4MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 

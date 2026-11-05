@@ -582,9 +582,8 @@ class Mxfp4MoEKernelOracle(MoEKernelOracle[Mxfp4MoeBackend]):
 
     name = "Mxfp4"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: Mxfp4MoeBackend,
+        self, backend: Mxfp4MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
@@ -595,7 +594,7 @@ def _requested_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Kernel classes for an explicitly requested backend. The LoRA-aware
     TRT-LLM experts are opt-in: "auto" keeps its current LoRA selection."""
-    candidates = Mxfp4MoEKernelOracle.backend_to_kernel_cls(backend)
+    candidates = backend_to_kernel_cls(backend)
     if not config.is_lora_enabled or backend not in TRTLLM_BACKENDS:
         return candidates
     if backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:

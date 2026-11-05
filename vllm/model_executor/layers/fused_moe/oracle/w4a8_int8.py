@@ -75,9 +75,8 @@ class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
 
     name = "W4A8 Int8"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: W4A8Int8MoeBackend,
+        self, backend: W4A8Int8MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 

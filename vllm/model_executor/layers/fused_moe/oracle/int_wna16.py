@@ -286,9 +286,8 @@ class WNA16MoEKernelOracle(MoEKernelOracle[WNA16MoEBackend]):
 
     name = "WNA16"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: WNA16MoEBackend,
+        self, backend: WNA16MoEBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 

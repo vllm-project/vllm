@@ -406,9 +406,8 @@ class Fp8MoEKernelOracle(MoEKernelOracle[Fp8MoeBackend]):
 
     name = "Fp8"
 
-    @staticmethod
     def backend_to_kernel_cls(
-        backend: Fp8MoeBackend,
+        self, backend: Fp8MoeBackend
     ) -> list[type[mk.FusedMoEExperts]]:
         return backend_to_kernel_cls(backend)
 
