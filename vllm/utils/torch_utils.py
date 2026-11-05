@@ -6,7 +6,7 @@ import os
 import random
 import sys
 import threading
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -71,8 +71,14 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float32: np.float32,
     torch.float64: np.float64,
     torch.uint8: np.uint8,
+    torch.uint16: np.uint16,
+    torch.uint32: np.uint32,
+    torch.uint64: np.uint64,
+    torch.int8: np.int8,
+    torch.int16: np.int16,
     torch.int32: np.int32,
     torch.int64: np.int64,
+    torch.bool: np.bool_,
 }
 
 # array.array typecodes with the same item layout as the torch dtype.
@@ -87,6 +93,14 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def token_ids_to_tensor(
+    token_ids: Sequence[int], dtype: torch.dtype = torch.int64
+) -> torch.Tensor:
+    """CPU tensor of token ids. A TokenBuffer is copied as one block rather than
+    read token by token; the copy keeps the buffer resizable."""
+    return torch.tensor(np.asarray(token_ids), dtype=dtype)
 
 
 def is_meta_module(module: torch.nn.Module) -> bool:
@@ -1046,6 +1060,25 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def eager_bypass_custom_op(
+    op_name: str,
+    op_func: Callable,
+    target_lib: Library | None = None,
+) -> Callable:
+    """Wrap a registered custom op so that only Dynamo tracing goes through
+    the dispatcher, where the op is needed as a graph boundary; eager calls
+    go straight to `op_func`. Use it on host-bound hot paths such as
+    per-linear GEMM calls, where dispatch costs several µs per call."""
+    op = getattr(getattr(torch.ops, (target_lib or vllm_lib).ns), op_name)
+
+    def wrapper(*args, **kwargs):
+        if torch.compiler.is_compiling():
+            return op(*args, **kwargs)
+        return op_func(*args, **kwargs)
+
+    return wrapper
 
 
 # Keep this at the end of the module: it resolves current_platform, which can

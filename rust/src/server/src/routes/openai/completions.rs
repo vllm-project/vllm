@@ -15,16 +15,16 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
-use vllm_text::tokenizer::Tokenizer;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    TextOutputStreamExt as _, TextRequest, TextRequestProcessor,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -42,9 +42,12 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -52,9 +55,9 @@ pub(crate) fn lower_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
-    tokenizer: &dyn Tokenizer,
+    processor: &TextRequestProcessor,
 ) -> Result<TextRequest, ApiError> {
-    prepare_completion_request(request, lora_resolution, ctx, tokenizer)
+    prepare_completion_request(request, lora_resolution, ctx, processor)
         .map(|prepared| prepared.text_request)
 }
 
@@ -70,16 +73,41 @@ pub async fn completions(
     let requested_model = body.model.as_deref().filter(|model| !model.is_empty());
     let lora_resolution = state.resolve_model_with_loras(requested_model).await;
 
-    let tokenizer = state.chat.text().tokenizer();
     let prepared = match prepare_completion_request(
         body,
         &lora_resolution,
         request_context,
-        tokenizer.as_ref(),
+        state.chat.text().request_processor(),
     ) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
+    if let Err(error) = validate_max_output_tokens(
+        "max_tokens",
+        prepared.text_request.sampling_params.max_tokens,
+        state.llm().info().max_model_len,
+    ) {
+        return error.into_response();
+    }
+    // Without a tokenizer, string-form logprobs would key every candidate by
+    // the same empty token string. The token-ID form needs no tokenizer.
+    if !state.chat.text().has_tokenizer()
+        && prepared.options.requested_logprobs.is_some()
+        && !prepared
+            .options
+            .return_tokens_as_token_ids
+            .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
+    {
+        return text_submit_error(
+            "invalid completion request",
+            vllm_text::Error::TokenizerUnavailable,
+        )
+        .into_response();
+    }
     let request_span = tracing::info_span!(
         "completions",
         request_id = %prepared.request_id,
@@ -88,48 +116,97 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
+    let text_streams = match state
         .chat
         .text()
-        .generate(prepared.text_request)
+        .generate_n(prepared.text_request, prepared.n)
         .instrument(request_span.clone())
         .await
     {
-        Ok(stream) => stream,
+        Ok(streams) => streams,
         Err(error) => {
             return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
-        let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                completion_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    state.system_fingerprint.clone(),
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream = completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
+            .instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = future::try_join_all(text_streams.into_iter().map(|text_stream| {
+            collect_completion(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                state.system_fingerprint.clone(),
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for CompletionSseChunk {
+    fn set_choice_index(&mut self, index: u32) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        for choice in &mut chunk.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        match self {
+            Self::Chunk(_) => None,
+            Self::Usage(chunk) => chunk.usage.as_mut(),
+        }
+    }
+
+    fn clear_metrics(&mut self) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        chunk.metrics = None;
     }
 }
 
@@ -138,8 +215,10 @@ async fn collect_completion(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -156,6 +235,7 @@ async fn collect_completion(
         include_prompt_logprobs,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
@@ -173,7 +253,7 @@ async fn collect_completion(
         let prompt = echo.as_deref().ok_or_else(|| {
             server_error!("prompt-only completion response missing echoed prompt")
         })?;
-        Some(prompt_only_logprobs_to_openai(
+        Some(echoed_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
@@ -197,15 +277,33 @@ async fn collect_completion(
     } else {
         None
     };
+    if log_outputs.logs_complete() {
+        // A prompt-only response generates nothing visible, like Python's
+        // `max_tokens=0`.
+        let (output, token_ids) = if prompt_only {
+            ("", [].as_slice())
+        } else {
+            (collected.text.as_str(), collected.token_ids.as_slice())
+        };
+        log_outputs.log(
+            LoggedOutput::Response,
+            output,
+            Some(token_ids),
+            Some(&finish_reason),
+        );
+    }
     let text = match &echo {
         None => collected.text,
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let metrics = enable_per_request_metrics.then(|| {
-        PerRequestMetrics::from_timestamps(collected.timestamps, collected.usage.output_token_count)
-    });
-    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
+    let metrics = PerRequestMetrics::from_request(
+        enable_per_request_metrics,
+        collected.timestamps,
+        collected.usage.output_token_count,
+        collected.spec_decode_metrics,
+    );
+    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None);
 
     if enable_log_requests {
         info!(
@@ -232,12 +330,12 @@ async fn collect_completion(
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
             routed_experts: None,
-            weight_versions: None,
+            weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
         metrics,
-        system_fingerprint: None,
+        system_fingerprint,
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
@@ -250,8 +348,10 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    system_fingerprint: Option<String>,
     ApiServerOptions {
         enable_log_requests,
+        log_outputs,
         enable_prompt_tokens_details,
         default_return_tokens_as_token_ids,
         enable_per_request_metrics,
@@ -267,6 +367,7 @@ async fn completion_chunk_stream(
         include_prompt_logprobs: _,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
@@ -285,6 +386,9 @@ async fn completion_chunk_stream(
     let mut next_text_offset = 0_u32;
     let mut first_chunk = true;
     let mut continuous_usage = ContinuousUsage::default();
+    // The generated text so far, for the complete line of
+    // `--enable-log-outputs`.
+    let mut output_log = log_outputs.logs_complete().then(String::new);
 
     /// Yield a chunk with optional continuous usage attached.
     macro_rules! yield_chunk {
@@ -313,9 +417,10 @@ async fn completion_chunk_stream(
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
-                    next_text_offset = text_len(prompt);
-                    let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                    // Like Python, the echoed prompt carries its own logprobs, and
+                    // generated tokens continue from the offsets they report.
+                    let logprobs = if requested_logprobs.is_some() {
+                        Some(echoed_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
@@ -324,6 +429,10 @@ async fn completion_chunk_stream(
                     } else {
                         None
                     };
+                    next_text_offset = logprobs
+                        .as_ref()
+                        .and_then(text_end_offset)
+                        .unwrap_or_else(|| text_len(prompt));
                     let mut chunk = delta_chunk(&envelope, prompt.clone(), logprobs);
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
@@ -371,23 +480,41 @@ async fn completion_chunk_stream(
                             finished.usage.prompt_token_count,
                             finished.usage.output_token_count,
                         );
-                        let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                        let mut final_chunk = final_chunk(
+                            &envelope,
+                            finished.finish_reason,
+                            finished.kv_transfer_params.map(|value| *value),
+                            finished.weight_versions.filter(|_| return_weight_versions),
+                        )?;
+                        if !include_usage {
+                            final_chunk.system_fingerprint = system_fingerprint.clone();
+                        }
+                        if let Some(output_log) = output_log.take() {
+                            log_outputs.log(
+                                LoggedOutput::StreamComplete,
+                                &output_log,
+                                None,
+                                final_chunk.choices[0].finish_reason.as_deref(),
+                            );
+                        }
                         yield_chunk!(final_chunk);
 
                         if include_usage {
-                            let metrics = enable_per_request_metrics.then(|| {
-                                PerRequestMetrics::from_timestamps(
-                                    finished.timestamps,
-                                    finished.usage.output_token_count,
-                                )
-                            });
+                            let metrics = PerRequestMetrics::from_request(
+                                enable_per_request_metrics,
+                                finished.timestamps,
+                                finished.usage.output_token_count,
+                                finished.spec_decode_metrics,
+                            );
                             y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                                 &envelope,
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
+                                    None,
                                 ),
                                 metrics,
+                                system_fingerprint.clone(),
                             )))
                             .await;
                         }
@@ -412,6 +539,19 @@ async fn completion_chunk_stream(
                 } else {
                     None
                 };
+                if let Some(output_log) = output_log.as_mut() {
+                    output_log.push_str(&delta);
+                    if log_outputs.logs_deltas() && !delta.is_empty() {
+                        log_outputs.log(
+                            LoggedOutput::StreamDelta,
+                            &delta,
+                            Some(&token_ids),
+                            finished.as_ref().and_then(|finished| {
+                                completion_finish_reason_to_openai(&finished.finish_reason).ok()
+                            }),
+                        );
+                    }
+                }
                 let mut chunk = delta_chunk(&envelope, delta, logprobs);
                 let delta_token_count = token_ids.len();
                 continuous_usage.add_output_tokens(delta_token_count);
@@ -435,20 +575,43 @@ async fn completion_chunk_stream(
                         finished.usage.prompt_token_count,
                         finished.usage.output_token_count,
                     );
-                    let final_chunk = final_chunk(&envelope, finished.finish_reason)?;
+                    let mut final_chunk = final_chunk(
+                        &envelope,
+                        finished.finish_reason,
+                        finished.kv_transfer_params.map(|value| *value),
+                        finished.weight_versions.filter(|_| return_weight_versions),
+                    )?;
+                    // Like Python, the last chunk carries the fingerprint:
+                    // this one, or the usage chunk that follows.
+                    if !include_usage {
+                        final_chunk.system_fingerprint = system_fingerprint.clone();
+                    }
+                    if let Some(output_log) = output_log.take() {
+                        log_outputs.log(
+                            LoggedOutput::StreamComplete,
+                            &output_log,
+                            None,
+                            final_chunk.choices[0].finish_reason.as_deref(),
+                        );
+                    }
                     yield_chunk!(final_chunk);
 
                     if include_usage {
-                        let metrics = enable_per_request_metrics.then(|| {
-                            PerRequestMetrics::from_timestamps(
-                                finished.timestamps,
-                                finished.usage.output_token_count,
-                            )
-                        });
+                        let metrics = PerRequestMetrics::from_request(
+                            enable_per_request_metrics,
+                            finished.timestamps,
+                            finished.usage.output_token_count,
+                            finished.spec_decode_metrics,
+                        );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
-                            Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
+                            Usage::from_token_usage(
+                                finished.usage,
+                                enable_prompt_tokens_details,
+                                None,
+                            ),
                             metrics,
+                            system_fingerprint.clone(),
                         )))
                         .await;
                     }
@@ -480,9 +643,13 @@ fn delta_chunk(
     chunk
 }
 
+/// Build the terminal chunk carrying the finish reason and, like Python, the
+/// request's KV transfer params.
 fn final_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
+    kv_transfer_params: Option<Value>,
+    weight_versions: Option<Vec<WeightVersionSpan>>,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
@@ -491,8 +658,10 @@ fn final_chunk(
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
+        weight_versions,
         ..Default::default()
     });
+    chunk.kv_transfer_params = kv_transfer_params;
     Ok(chunk)
 }
 
@@ -512,7 +681,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
-fn prompt_only_logprobs_to_openai(
+fn echoed_prompt_logprobs_to_openai(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt: &str,
     prompt_token_ids: &[u32],
@@ -538,7 +707,7 @@ fn prompt_only_logprobs_to_openai(
     }
 
     Err(server_error!(
-        "prompt-only completion requested logprobs but generation returned none"
+        "echoed completion prompt requested logprobs but generation returned none"
     ))
 }
 
@@ -546,10 +715,12 @@ fn usage_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     usage: Usage,
     metrics: Option<PerRequestMetrics>,
+    system_fingerprint: Option<String>,
 ) -> CompletionStreamResponse {
     let mut chunk = CompletionStreamResponse::new(envelope);
     chunk.usage = Some(usage);
     chunk.metrics = metrics.map(Into::into);
+    chunk.system_fingerprint = system_fingerprint;
     chunk
 }
 
@@ -608,7 +779,7 @@ mod tests {
 
     use futures::{StreamExt as _, stream};
     use itertools::Itertools as _;
-    use vllm_engine_core_client::protocol::output::StopReason;
+    use vllm_engine_core_client::protocol::output::{RequestSpecDecodeMetrics, StopReason};
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedText,
         DecodedTextEvent, DecodedTokenLogprob, FinishReason, Finished, SampledDelta,
@@ -652,34 +823,34 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::stop_eos()).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None, None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
     }
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::Length).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None, None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk =
-            final_chunk(&stream_envelope(), FinishReason::Abort).expect("finish reason valid");
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None, None)
+            .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None)).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None, None).is_err());
     }
 
     #[tokio::test]
-    async fn collected_completion_includes_metrics_only_when_enabled() {
-        let make_stream = || {
+    async fn collected_completion_combines_timing_and_spec_decode_metrics() {
+        let make_stream = |spec_decode_metrics| {
             stream::iter(vec![
                 Ok(DecodedTextEvent::Start {
                     prompt_token_ids: vec![1].into(),
@@ -693,18 +864,20 @@ mod tests {
                         usage: vllm_llm::TokenUsage {
                             prompt_token_count: 1,
                             output_token_count: 1,
-                            cached_token_count: 0,
+                            prompt_cache_usage: Default::default(),
                         },
                         finish_reason: FinishReason::stop_eos(),
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask: None,
+                        spec_decode_metrics,
                         timestamps: vllm_llm::RequestTimestamps {
                             queued_ts: 10.0,
                             scheduled_ts: 10.2,
                             first_token_ts: 10.5,
                             last_token_ts: 10.5,
                         },
+                        weight_versions: None,
                     }),
                 )),
             ])
@@ -712,10 +885,11 @@ mod tests {
 
         for enabled in [false, true] {
             let response = collect_completion(
-                make_stream(),
+                make_stream(None),
                 "cmpl-1".into(),
                 "model".into(),
                 1,
+                None,
                 ApiServerOptions {
                     enable_per_request_metrics: enabled,
                     ..Default::default()
@@ -735,6 +909,32 @@ mod tests {
                 assert_eq!(json["metrics"], serde_json::Value::Null);
             }
         }
+
+        let response = collect_completion(
+            make_stream(Some(RequestSpecDecodeMetrics {
+                num_spec_tokens: 3,
+                histogram: vec![0, 1, 1, 0],
+                num_draft_tokens: 6,
+                ..Default::default()
+            })),
+            "cmpl-1".into(),
+            "model".into(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            ResponseOptions::default(),
+        )
+        .await
+        .expect("completion response");
+        let json = serde_json::to_value(response).expect("serializable response");
+        assert_eq!(
+            json["metrics"]["time_to_first_token_ms"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            json["metrics"]["speculative_decoding"]["num_draft_tokens"],
+            6
+        );
     }
 
     #[tokio::test]
@@ -792,7 +992,10 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 5,
                         output_token_count: 2,
-                        cached_token_count: 3,
+                        prompt_cache_usage: vllm_llm::PromptCacheUsage {
+                            cached_token_count: 3,
+                            cache_creation_token_count: 0,
+                        },
                     },
                     finish_reason: FinishReason::Repetition(Some(StopReason::Text(
                         "repetition_detected".to_string(),
@@ -800,12 +1003,19 @@ mod tests {
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: Some(RequestSpecDecodeMetrics {
+                        num_spec_tokens: 3,
+                        histogram: vec![0, 1, 1, 0],
+                        num_draft_tokens: 6,
+                        ..Default::default()
+                    }),
                     timestamps: vllm_llm::RequestTimestamps {
                         queued_ts: 10.0,
                         scheduled_ts: 10.2,
                         first_token_ts: 10.5,
                         last_token_ts: 11.0,
                     },
+                    weight_versions: None,
                 }),
             )),
         ]);
@@ -815,6 +1025,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions {
                 enable_prompt_tokens_details: true,
                 enable_per_request_metrics: true,
@@ -889,6 +1100,14 @@ mod tests {
                 assert!((metrics.queue_time_ms.unwrap() - 200.0).abs() < 1e-9);
                 assert!((metrics.tokens_per_second.unwrap() - 2.5).abs() < 1e-9);
                 assert_eq!(
+                    metrics
+                        .speculative_decoding
+                        .as_ref()
+                        .expect("speculative decoding metrics")
+                        .num_draft_tokens,
+                    6
+                );
+                assert_eq!(
                     chunk
                         .usage
                         .as_ref()
@@ -951,6 +1170,8 @@ mod tests {
                         kv_transfer_params: None,
                         ec_transfer_params: None,
                         sampling_mask: None,
+                        spec_decode_metrics: None,
+                        weight_versions: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -962,6 +1183,7 @@ mod tests {
                 "cmpl-1".to_string(),
                 "model".to_string(),
                 1,
+                None,
                 ApiServerOptions::default(),
                 ResponseOptions {
                     requested_logprobs: Some(0),
@@ -982,6 +1204,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completion_stream_puts_kv_transfer_params_on_finish_chunk_only() {
+        let stream = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1, 2].into(),
+                prompt_logprobs: None,
+            }),
+            Ok(decoded_delta("a", vec![7], None, None)),
+            Ok(decoded_delta(
+                "b",
+                vec![8],
+                None,
+                Some(Finished {
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 2,
+                        output_token_count: 2,
+                        prompt_cache_usage: Default::default(),
+                    },
+                    finish_reason: FinishReason::Length,
+                    kv_transfer_params: Some(Box::new(
+                        serde_json::json!({"remote_block_ids": [1, 2]}),
+                    )),
+                    ec_transfer_params: None,
+                    sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
+                    timestamps: Default::default(),
+                }),
+            )),
+        ]);
+
+        let chunks = completion_chunk_stream(
+            stream,
+            "cmpl-1".to_string(),
+            "model".to_string(),
+            1,
+            None,
+            ApiServerOptions::default(),
+            ResponseOptions {
+                include_usage: true,
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>()
+        .await;
+
+        let chunks: Vec<_> = chunks.into_iter().try_collect().expect("stream should succeed");
+        let payloads: Vec<_> = chunks
+            .iter()
+            .map(|chunk| serde_json::to_value(chunk).expect("chunk should serialize"))
+            .collect();
+
+        // Two text deltas, finish, usage.
+        assert_eq!(payloads.len(), 4);
+        assert_eq!(
+            payloads[2]["choices"][0]["finish_reason"],
+            serde_json::json!("length")
+        );
+        assert_eq!(
+            payloads[2]["kv_transfer_params"],
+            serde_json::json!({"remote_block_ids": [1, 2]})
+        );
+        for index in [0, 1, 3] {
+            assert!(payloads[index].get("kv_transfer_params").is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn completion_stream_serializes_requested_token_ids_on_every_choice() {
         let stream = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
@@ -996,12 +1285,14 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 2,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1012,6 +1303,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 return_token_ids: true,
@@ -1061,12 +1353,14 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1077,6 +1371,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1115,12 +1410,14 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1131,6 +1428,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1172,12 +1470,16 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
-                    kv_transfer_params: None,
+                    kv_transfer_params: Some(Box::new(
+                        serde_json::json!({"remote_block_ids": [1, 2]}),
+                    )),
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1188,6 +1490,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 include_usage: true,
@@ -1217,6 +1520,10 @@ mod tests {
             CompletionSseChunk::Chunk(chunk) => {
                 assert_eq!(chunk.choices[0].text, "");
                 assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
+                assert_eq!(
+                    chunk.kv_transfer_params,
+                    Some(serde_json::json!({"remote_block_ids": [1, 2]}))
+                );
             }
             CompletionSseChunk::Usage(_) => panic!("expected final chunk"),
         }
@@ -1246,12 +1553,14 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 1,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1262,6 +1571,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
@@ -1322,12 +1632,14 @@ mod tests {
                     usage: vllm_llm::TokenUsage {
                         prompt_token_count: 2,
                         output_token_count: 1,
-                        cached_token_count: 0,
+                        prompt_cache_usage: Default::default(),
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
                     sampling_mask: None,
+                    spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1338,6 +1650,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            None,
             ApiServerOptions::default(),
             ResponseOptions {
                 prompt_only: true,
