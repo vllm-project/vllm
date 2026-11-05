@@ -5,8 +5,8 @@
 With host-offloaded tables, ``Engram`` looks up its rows on a prefetch stream
 before the decoder layers. The rest of the WKV chain (head all-gather, MXFP8
 quantize, column-parallel GEMM, output all-gather) reads only those rows, so
-for small decode steps ``EngramPrefetch`` runs it on a side stream right after
-each layer's lookup, and the layer only waits for it before the fused post
+for decode steps ``EngramPrefetch`` runs it on a side stream right after each
+layer's lookup, and the layer only waits for it before the fused post
 kernel. The kernels, inputs and collectives are those of ``Engram.forward``.
 
 The chain issues TP collectives on the side stream, so whether a step starts it

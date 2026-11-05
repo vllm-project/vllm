@@ -16,6 +16,8 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import autotune as flashinfer_autotune
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.extensible_kv_cache import ensure_kv_cache_blocks
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
 
 if TYPE_CHECKING:
@@ -75,6 +77,11 @@ def autotune_hisparse_flashinfer_attention(runner: "GPUModelRunner") -> None:
         )
         if key in tuned:
             continue
+        hot_block_size = layer.hisparse_cache.runtime.hot.block_size
+        topk_tokens = impl.topk_indices_buffer.shape[1]
+        ensure_kv_cache_blocks(
+            cast("V2GPUModelRunner", runner), cdiv(topk_tokens, hot_block_size)
+        )
         impl.autotune_hisparse_decode(layer)
         tuned.add(key)
 

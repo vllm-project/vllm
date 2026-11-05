@@ -122,6 +122,7 @@ steps:
 
 - label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
+  automatic_shard: true
   timeout_in_minutes: 30
   device: h100
   source_file_dependencies:
@@ -130,12 +131,13 @@ steps:
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
   - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
-    - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
     - pytest -v -s kernels/test_top_k_per_row.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) DeepSeek V4 Fused Kernels"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       num_devices: 1
       timeout_in_minutes: 60
@@ -414,14 +416,26 @@ steps:
       source_file_dependencies:
       - csrc/attention/
       - csrc/core/vec_dtypes/
+      - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
       - tests/kernels/attention
+      - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+      - vllm/models/minimax_m3/common/indexer.py
+      - vllm/models/minimax_m3/amd/ops/sparse_pa.py
       - vllm/_aiter_ops.py
       - vllm/envs.py
       - vllm/platforms/rocm.py
       commands:
-      - pytest -v -s kernels/attention --ignore=kernels/attention/test_triton_unified_attention_diffkv.py --ignore=kernels/attention/test_rocm_aiter_mla_decode.py --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+      - >-
+        pytest -v -s
+        kernels/attention
+        --ignore=kernels/attention/test_triton_unified_attention_diffkv.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
+        --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+        kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
 
 - label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
@@ -560,6 +574,8 @@ steps:
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
+  - vllm/models/muse_spark/common/
+  - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -578,6 +594,8 @@ steps:
       - csrc/moe/
       - tests/kernels/moe
       - vllm/model_executor/layers/fused_moe/
+      - vllm/models/muse_spark/common/
+      - vllm/models/muse_spark/nvidia/
       - vllm/distributed/device_communicators/
       - vllm/envs.py
       - vllm/config
@@ -620,6 +638,7 @@ steps:
 
 - label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
+  automatic_shard: true
   timeout_in_minutes: 35
   device: h100
   num_devices: 1
@@ -672,6 +691,10 @@ steps:
       source_file_dependencies:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+      commands:
+      - pytest -v -s tests/kernels/attention/test_minimax_m3.py
+          tests/kernels/attention/test_minimax_m3_nvfp4_index.py
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
   key: kernels-minimax-m3-sparse-prefill-h100
@@ -737,9 +760,13 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
+  - csrc/fused_mqa_topk/
+  - tests/kernels/attention/test_fused_mqa_topk.py
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
+  - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/model_executor/layers/quantization/compressed_tensors/transform/
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -748,6 +775,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
     - pytest -v -s tests/kernels/test_top_k_per_row.py
+    - pytest -v -s tests/kernels/attention/test_fused_mqa_topk.py
     - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
@@ -756,7 +784,6 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3_msa_cutlass_sparse_decode.py
     - pytest -v -s tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
@@ -767,7 +794,6 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_block_fp8.py::test_w8a8_block_fp8_cutlass_matmul
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
@@ -1194,6 +1220,7 @@ steps:
 
 - label: ":amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Kernels"
   key: dsv41-mono-decode-gfx942-amd
+  automatic_shard: true
   dind: false
   device: mi300_1
   num_devices: 1
