@@ -143,7 +143,8 @@ steps:
       --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
-      pytest -v -s lora/test_llama_tp.py::test_llama_lora'
+      pytest -v -s lora/test_llama_tp.py::test_llama_lora &&
+      pytest -v -s lora/test_olmoe_tp.py'
 
 - label: ":intel: (BMG) LoRA Multimodal"
   key: lora-multimodal
