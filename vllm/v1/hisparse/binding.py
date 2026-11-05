@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.mamba.abstract import fit_mamba_blocks_to_attention
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.layout import (
     HISPARSE_HOT_SUFFIX,
@@ -48,7 +49,8 @@ def resolve_hisparse_specs(
     attn_layers: Mapping[str, "AttentionLayerBase"],
 ) -> dict[str, KVCacheSpec]:
     """Resolve a common kernel block size for HiSparse MLA specs, and add the
-    resident/hot specs HiSparse derives from them."""
+    resident/hot specs HiSparse derives from them, then fit align-mode Mamba
+    blocks to the resized attention blocks."""
     mla_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
@@ -86,7 +88,8 @@ def resolve_hisparse_specs(
     }
     groups = get_hisparse_kv_cache_groups(vllm_config, resized_specs)
     assert groups is not None
-    return (
+    return fit_mamba_blocks_to_attention(
+        vllm_config,
         kv_cache_spec
         | resized_specs
         | {
@@ -94,7 +97,8 @@ def resolve_hisparse_specs(
             for group in groups
             if isinstance(group.kv_cache_spec, (HiSparseResidentSpec, HiSparseHotSpec))
             for layer_name in group.layer_names
-        }
+        },
+        attn_layers,
     )
 
 

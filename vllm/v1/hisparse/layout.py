@@ -236,10 +236,12 @@ def _lay_out_hisparse_groups(
 
 
 def _fill_indexer_block(spec: MLAAttentionSpec, pages: int) -> MLAAttentionSpec:
-    filled = spec.copy_with_new_block_size(spec.block_size * pages)
-    if spec.kernel_block_alignment is None:
-        return filled
-    return replace(filled, block_stride_alignment=spec.kernel_block_alignment)
+    if spec.kernel_block_byte_alignment is None:
+        return spec
+    return replace(
+        spec.copy_with_new_block_size(spec.block_size * pages),
+        block_stride_alignment=spec.kernel_block_byte_alignment,
+    )
 
 
 def _group_page_bytes(group: KVCacheGroupSpec) -> int:

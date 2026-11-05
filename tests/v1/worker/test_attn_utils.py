@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
+    KVCacheSpec,
     KVCacheTensor,
     MLAAttentionSpec,
     SparseCacheRole,
@@ -58,8 +59,8 @@ from vllm.v1.worker.utils import (
 
 @pytest.mark.parametrize(("family", "alignment"), [(90, 16), (100, 16), (120, None)])
 def test_glm5next_indexer_declares_its_kernel_alignment(monkeypatch, family, alignment):
-    """The indexer backend, not HiSparse, states where its paged-MQA kernel
-    accepts sub-block kernel ids; padding stays at whole kernel blocks."""
+    """The indexer declares the byte alignment its paged-MQA kernels accept
+    sub-block kernel ids at; padding stays at whole kernel blocks."""
     from vllm.platforms import current_platform
     from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
 
@@ -77,7 +78,7 @@ def test_glm5next_indexer_declares_its_kernel_alignment(monkeypatch, family, ali
 
     spec = customize_attention_spec(Glm5NextIndexerBackend, spec)  # type: ignore[type-abstract]
 
-    assert spec.kernel_block_alignment == alignment
+    assert spec.kernel_block_byte_alignment == alignment
     assert spec.block_stride_alignment == MultipleOf(256)
 
 
@@ -127,6 +128,15 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     monkeypatch.setattr(
         attn_utils_module, "get_hisparse_kv_cache_groups", lambda *_: []
     )
+    mamba_fit_inputs: list[dict[str, KVCacheSpec]] = []
+
+    def fit_mamba_blocks(_, kv_cache_spec, __):
+        mamba_fit_inputs.append(kv_cache_spec)
+        return kv_cache_spec
+
+    monkeypatch.setattr(
+        attn_utils_module, "fit_mamba_blocks_to_attention", fit_mamba_blocks
+    )
     config = SimpleNamespace(
         attention_config=SimpleNamespace(hisparse_config=object() if enabled else None)
     )
@@ -138,6 +148,9 @@ def test_get_kv_cache_spec_resolves_hisparse_block_size(
     resolved = attn_utils.get_kv_cache_spec(config)
     assert resolved["main"].block_size == expected
     assert resolved["indexer"].block_size == indexer
+    assert [specs["indexer"].block_size for specs in mamba_fit_inputs] == (
+        [indexer] if enabled else []
+    )
     dense_backend = layers["dense"].get_attn_backend()
     assert resolved["dense"] == customize_attention_spec(dense_backend, specs["dense"])
     assert all(spec.block_size == block_size for spec in specs.values())
@@ -936,7 +949,7 @@ def test_packed_group_kernel_blocks_with_unaligned_block_stride():
     whole kernel blocks apart: kernel block ids count units dividing both the
     block stride and the kernel block, also in groups copied after binding."""
     row, stride_rows = 132, 5 * 64 + 16
-    group = _packed_group(4, row, [128, 256], kernel_block_alignment=16)
+    group = _packed_group(4, row, [128, 256], kernel_block_byte_alignment=16)
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
 
     backing = torch.arange(3 * stride_rows).repeat_interleave(row)
@@ -955,7 +968,7 @@ def test_packed_group_kernel_blocks_with_unaligned_block_stride():
 
 @pytest.mark.parametrize(
     "alignments",
-    [{}, {"block_stride_alignment": 16}, {"kernel_block_alignment": 256}],
+    [{}, {"block_stride_alignment": 16}, {"kernel_block_byte_alignment": 256}],
 )
 def test_packed_group_rejects_unaligned_block_stride(alignments):
     """Blocks not whole kernel blocks apart are rejected unless the spec declares
@@ -971,7 +984,7 @@ def test_packed_group_rejects_unaligned_block_stride(alignments):
 def test_packed_group_rejects_kernel_block_ids_past_int32():
     """Kernel block ids of a large packed cache must fit the int32 table."""
     row, stride_rows = 132, 5 * 64 + 16
-    group = _packed_group(4, row, [128, 256], kernel_block_alignment=16)
+    group = _packed_group(4, row, [128, 256], kernel_block_byte_alignment=16)
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
     num_blocks = 2**31 // 21 + 2
     manager = torch.empty_strided(

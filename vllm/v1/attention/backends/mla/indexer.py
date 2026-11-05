@@ -316,7 +316,7 @@ class Glm5NextIndexerBackend(DeepseekV32IndexerBackend):
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         return replace(
             super().customize_spec(spec),
-            kernel_block_alignment=get_paged_mqa_kv_alignment(),
+            kernel_block_byte_alignment=get_paged_mqa_kv_alignment(),
         )
 
 

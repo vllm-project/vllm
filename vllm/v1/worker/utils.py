@@ -416,7 +416,7 @@ class AttentionGroup:
         # kernel block need a spec whose kernels accept that alignment.
         kernel_block_elems = kernel_rows * kv_cache.stride(-2)
         id_stride = math.gcd(kv_cache.stride(0), kernel_block_elems)
-        alignment = spec.kernel_block_alignment
+        alignment = spec.kernel_block_byte_alignment
         if (
             spec.tokens_per_state <= 1
             or kv_cache.shape[1] != 1
