@@ -271,11 +271,16 @@ def test_phase_split_compiled_region_serves_several_layers(vllm_config) -> None:
 
 
 @torch.inference_mode()
-def test_phase_split_keeps_layer_name_after_reload(vllm_config) -> None:
+def test_phase_split_keeps_layer_name_after_reload(
+    vllm_config, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A layer keeps its name across reloads even once the layer that held the
     base name is gone, so the registry does not grow."""
     import gc
+    import weakref
 
+    # Layers other tests left alive would take the names this test expects.
+    monkeypatch.setattr(phase_split_mod, "_LAYERS", weakref.WeakValueDictionary())
     kernel = maybe_phase_split(_DualKernel(), _phase(), weight="nvfp4")
     first, second = _layer(prefix="proj"), _layer(prefix="proj")
     kernel.process_weights_after_loading(first)
