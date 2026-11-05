@@ -658,6 +658,14 @@ class VllmConfig:
         return 0
 
     @property
+    def num_draft_tokens_per_step(self) -> int:
+        """See `SpeculatorConfig.num_draft_tokens_per_step`."""
+        speculative_config = self.speculative_config
+        if speculative_config is None:
+            return self.num_speculative_tokens
+        return speculative_config.speculator_config.num_draft_tokens_per_step
+
+    @property
     def num_lookahead_tokens(self) -> int:
         """KV slots to reserve past the tokens the target model is scheduled for.
 
@@ -3547,6 +3555,8 @@ class VllmConfig:
                 unsupported.append("adaptive draft verification")
             if self.speculative_config.draft_lm_head_quantization is not None:
                 unsupported.append("draft lm_head quantization")
+            if self.speculative_config.prefill_context_kv_only:
+                unsupported.append("prefill_context_kv_only")
 
         # The attention-free Parse MTP draft requires the V2 speculator.
         if self.speculative_config:

@@ -427,6 +427,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     eplb_models_added = self.eplb.maybe_register_speculator(
                         self.speculator, self.speculative_config, load_dummy_weights
                     )
+                    self.speculator.free_unused_weights(self.model)
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory

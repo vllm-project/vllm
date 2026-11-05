@@ -298,6 +298,7 @@ class Scheduler(SchedulerInterface):
         self.use_eagle = False
         self.use_eagle_block_drop = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.num_draft_tokens_per_step = vllm_config.num_draft_tokens_per_step
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
         # DSV41 SWA bounded replay: groups that declare a replay window are rebuilt
         # after a prefix hit by recomputing its trailing tokens. One window
@@ -1775,7 +1776,7 @@ class Scheduler(SchedulerInterface):
         pending_kv_cache_block_copies = kv_cache_block_copies or None
 
         # Dynamic speculative decoding: compute optimal K
-        num_spec_tokens_to_schedule = self.num_spec_tokens
+        num_spec_tokens_to_schedule = self.num_draft_tokens_per_step
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)

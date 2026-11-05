@@ -420,7 +420,7 @@ def _warmup_kernels(
     if model_runner.vllm_config.is_mm_encoder_only:
         return
 
-    num_spec_steps = model_runner.num_speculative_steps
+    num_spec_steps = model_runner.vllm_config.num_draft_tokens_per_step
     decode_query_len = model_runner.decode_query_len
     # Use decode_query_len + 1 tokens so the prefill batch's per-request query
     # length exceeds decode_query_len, preventing it from being misclassified as

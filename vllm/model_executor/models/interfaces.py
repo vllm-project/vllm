@@ -1553,6 +1553,27 @@ class SpeculativeDraftModel(Protocol):
 
 
 @runtime_checkable
+class SupportsContextKVOnly(Protocol):
+    """The interface of a speculative decoding draft model that names the
+    modules its context K/V path reads, so that a prefill instance with
+    `SpeculativeConfig.prefill_context_kv_only` can free its other weights.
+
+    A model opts in by defining `context_kv_modules` on its own class: a
+    subclass doesn't inherit the opt-in, since its context K/V path may read
+    other weights (see `supports_context_kv_only`).
+    """
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        """The modules whose weights `combine_hidden_states` and
+        `precompute_and_store_context_kv` read once the weights are loaded."""
+        ...
+
+
+def supports_context_kv_only(model: object) -> bool:
+    return "context_kv_modules" in type(model).__dict__
+
+
+@runtime_checkable
 class SupportsEagleBase(Protocol):
     """Base interface for models that support EAGLE-based speculative decoding."""
 

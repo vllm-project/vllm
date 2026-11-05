@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.v1.core.utils import create_requests
@@ -32,24 +33,27 @@ NUM_BLOCKS = 8
 NUM_SPECULATIVE_TOKENS = 3
 
 
-def _dflash_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig:
+def _dflash_speculative_config(
+    num_speculative_tokens: int, **kwargs
+) -> SpeculativeConfig:
     model_config = ModelConfig(
         model=DFLASH_TARGET_DIR,
         runner="generate",
         max_model_len=100,
         trust_remote_code=True,
     )
+    kwargs.setdefault("model", DFLASH_DRAFT_DIR)
+    kwargs.setdefault("method", "dflash")
     return SpeculativeConfig(
         target_model_config=model_config,
         target_parallel_config=ParallelConfig(),
-        model=DFLASH_DRAFT_DIR,
-        method="dflash",
         num_speculative_tokens=num_speculative_tokens,
+        **kwargs,
     )
 
 
-def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
-    speculative_config = _dflash_speculative_config(num_speculative_tokens)
+def _create_dflash_scheduler(num_speculative_tokens: int, **kwargs) -> Scheduler:
+    speculative_config = _dflash_speculative_config(num_speculative_tokens, **kwargs)
     model_config = speculative_config.target_model_config
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
@@ -112,6 +116,53 @@ def test_dflash_prefill_reserves_lookahead_blocks():
     assert output.num_scheduled_tokens[request.request_id] == BLOCK_SIZE
     # prefill block + one lookahead block
     assert len(output.scheduled_new_reqs[0].block_ids[0]) == 2
+
+
+@pytest.mark.parametrize(
+    ("prefill_context_kv_only", "num_spec_tokens", "num_blocks"),
+    [(True, 0, 1), (False, NUM_SPECULATIVE_TOKENS, 2)],
+)
+def test_dflash_prefill_context_kv_only_schedules_no_drafts(
+    monkeypatch, prefill_context_kv_only, num_spec_tokens, num_blocks
+):
+    # The drafter only stores its context K/V (MRV2): no drafts, and no
+    # lookahead block past the prompt's.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    scheduler = _create_dflash_scheduler(
+        NUM_SPECULATIVE_TOKENS, prefill_context_kv_only=prefill_context_kv_only
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=BLOCK_SIZE,
+        block_size=BLOCK_SIZE,
+    )
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_spec_tokens_to_schedule == num_spec_tokens
+    assert len(output.scheduled_new_reqs[0].block_ids[0]) == num_blocks
+
+
+def test_prefill_context_kv_only_config():
+    config = _dflash_speculative_config(
+        NUM_SPECULATIVE_TOKENS,
+        prefill_context_kv_only=True,
+        enable_adaptive_verification=True,
+        num_speculative_tokens_per_batch_size=[(1, 16, 1)],
+    )
+    # Nothing is drafted, so the options for verifying drafts are turned off.
+    assert not config.enable_adaptive_verification
+    assert config.num_speculative_tokens_per_batch_size is None
+    assert config.num_speculative_tokens == NUM_SPECULATIVE_TOKENS
+
+    with pytest.raises(ValueError, match="prefill_context_kv_only is not supported"):
+        _dflash_speculative_config(
+            NUM_SPECULATIVE_TOKENS,
+            model=None,
+            method="ngram",
+            prefill_context_kv_only=True,
+        )
 
 
 def test_dflash_first_prefill_query_window_fits_allocated_blocks():

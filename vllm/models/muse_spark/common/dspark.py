@@ -309,6 +309,11 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
             ):
                 raise ValueError("Muse Spark DSpark layers must share KV geometry")
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        if self.specialized_draft is not None:
+            return [self]  # its fused context K/V chain may read any weight
+        return [self.fc, self.hidden_norm, *self._context_pre_norms, *self._attn_layers]
+
     def _project_muse_context_kv(self, context_states: torch.Tensor) -> torch.Tensor:
         """Apply the two trained Muse input norms, then each layer's K/V map."""
         fc_output = self.hidden_norm(context_states)
@@ -545,6 +550,10 @@ class MuseSparkDSparkForCausalLM(Qwen3DSparkForCausalLM):
             # Each rank holds its block of output columns for every token.
             out = gather_columns(out.view(-1, out.shape[-1])).view(*out.shape[:-1], -1)
         return out
+
+    def context_kv_modules(self) -> list[nn.Module]:
+        """See `SupportsContextKVOnly`."""
+        return self.model.context_kv_modules()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         model_weights = {}

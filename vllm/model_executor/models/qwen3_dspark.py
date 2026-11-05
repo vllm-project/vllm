@@ -278,6 +278,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.attn.layer_name for layer in self.model.layers]
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """See `SupportsContextKVOnly`."""
+        return self.model.context_kv_modules()
+
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Draft-vocab logits without the d2t scatter: the speculator adds the
         # Markov bias in draft space, then remaps via map_draft_to_target.

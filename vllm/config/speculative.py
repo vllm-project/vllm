@@ -646,6 +646,15 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    prefill_context_kv_only: bool = False
+    """Set on a P/D prefill instance (Model Runner V2, DFlash-based speculators)
+    to only store the drafter's context K/V, which the decode instance reads:
+    no drafts, no lookahead KV slots, and, for draft models that support it,
+    the draft weights only drafting reads are freed. Requests that decode there
+    run without speculation. Keep the rest of the speculative config as on the
+    decode instance; adaptive verification and dynamic speculative decoding are
+    turned off."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -1389,6 +1398,24 @@ class SpeculativeConfig:
                     f"{self.custom_method or self.method!r}."
                 )
         config_cls.apply_options(self)
+
+        if self.prefill_context_kv_only:
+            if not config_cls.supports_prefill_context_kv_only:
+                raise ValueError(
+                    "prefill_context_kv_only is not supported with speculative "
+                    f"method {self.custom_method or self.method!r}."
+                )
+            if (
+                self.enable_adaptive_verification
+                or self.uses_dynamic_speculative_decoding()
+            ):
+                logger.warning_once(
+                    "prefill_context_kv_only schedules no drafts to verify. "
+                    "Disabling adaptive verification and dynamic speculative "
+                    "decoding."
+                )
+                self.enable_adaptive_verification = False
+                self.num_speculative_tokens_per_batch_size = None
 
         if (
             config_cls.adaptive_verification_uses_draft_logits

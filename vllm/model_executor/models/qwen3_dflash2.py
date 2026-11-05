@@ -566,5 +566,9 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
             self.lm_head, hidden_states, self.model.candidate_selector.top_k
         )
 
+    def context_kv_modules(self) -> list[nn.Module]:
+        """See `SupportsContextKVOnly`."""
+        return self.model.context_kv_modules()
+
 
 EntryClass = DFlash2Qwen3ForCausalLM
