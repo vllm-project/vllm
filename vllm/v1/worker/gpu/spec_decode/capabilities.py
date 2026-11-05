@@ -61,7 +61,7 @@ class SpecLayerKind:
     ``"mamba_state"``."""
     state_mode: str = ""
     """mamba and layout ``mamba_state`` only: how drafts keep recurrent state,
-    ``"slots"``, ``"replay"`` or ``"recover"``."""
+    ``"slots"``, ``"replay"``, ``"recover"`` or ``"align"``."""
 
     def key(self) -> str:
         suffix = f"@{self.state_mode}" if self.state_mode else ""
@@ -135,7 +135,10 @@ def spec_layers(
 
 
 def mamba_state_mode(cache_config: Any) -> str:
-    """How recurrent layers keep the drafts' states."""
+    """How recurrent layers keep the drafts' states. Align-mode prefix caching
+    keeps them only at block boundaries."""
+    if cache_config.mamba_cache_mode == "align":
+        return "align"
     if cache_config.use_replayssm:
         return "replay"
     if cache_config.use_kda_recoverssm:

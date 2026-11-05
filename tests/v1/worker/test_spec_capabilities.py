@@ -288,6 +288,11 @@ _LOWERED = ": keeps verify rows in chain order"
             "micro-batching" + _LOWERED,
         ),
         ("cache_config", CacheConfig(use_replayssm=True), _gdn_reason("replay")),
+        (
+            "cache_config",
+            CacheConfig(mamba_cache_mode="align"),
+            _gdn_reason("align"),
+        ),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
