@@ -158,6 +158,7 @@ class FlashFfnRuntime:
         max_pools: int = 0,
         dsa_fp8: tuple[bool, bool, bool] = (True, True, True),
         kv_fp8: bool = False,
+        fault_hook: bool = True,
     ) -> None:
         self.width, self.rank, self.npes = width, rank, npes
         self.kv_fp8 = kv_fp8
@@ -177,6 +178,7 @@ class FlashFfnRuntime:
             max_pools=max_pools,
             dsa_fp8=dsa_fp8,
             kv_fp8=kv_fp8,
+            fault_hook=fault_hook,
         )
         dev = torch.device("cuda", torch.accelerator.current_device_index())
         self.peer = PeerBuffers(self.sy["_bytes"], rank, npes, group)
