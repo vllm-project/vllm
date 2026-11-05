@@ -16,12 +16,10 @@ from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import (
     MANAGER_BLOCK_BYTES,
     PAGE_DATA_BYTES,
     PAGE_SCALE_BYTES,
-    decode_block_scores_gfx942,
     expand_block_table_page64,
     expand_block_table_page64_into,
     gfx942_mxfp4_cache_strides,
     gfx942_mxfp4_cache_views,
-    quantize_q_gfx942,
     store_k_gfx942,
 )
 from vllm.models.minimax_m3.amd.ops.mxfp4_pages import (
@@ -148,25 +146,6 @@ requires_gpu_aiter = pytest.mark.skipif(
 
 
 @requires_gpu_aiter
-def test_gfx942_q_quant_matches_dynamic_mxfp4_quant():
-    """Slot 0 of the tile is the row's MXFP4, scales in the preshuffled order."""
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-    torch.manual_seed(0)
-    iq = (torch.randn(9, 2, 128, device="cuda") * 3).to(torch.bfloat16)
-    iq[0, 0, :32] = 0
-    for head in range(2):
-        q, s, w = quantize_q_gfx942(iq, head)
-        ref_q, ref_s = dynamic_mxfp4_quant(iq[:, head].contiguous())
-        ref_s = ref_s.view(torch.uint8).view(9, 4)
-        assert torch.equal(q[:, 0], ref_q) and not q[:, 1:].any()
-        assert torch.equal(s[:, 0, :, 0, 0], ref_s)
-        s[:, 0, :, 0, 0] = 0
-        assert not s.any()
-        assert torch.equal(w[:, 0], torch.ones_like(w[:, 0])) and not w[:, 1:].any()
-
-
-@requires_gpu_aiter
 def test_gfx942_store_k_round_trips_through_dense_pages():
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
@@ -183,32 +162,6 @@ def test_gfx942_store_k_round_trips_through_dense_pages():
         assert torch.equal(data[page, 0, :, off].flatten(), ref_q[t])
         scale = scales[page, 0].view(4, 16, 4)[:, off % 16, off // 16]
         assert torch.equal(scale, ref_s[t])
-
-
-@requires_gpu_aiter
-def test_gfx942_decode_block_scores_reduce_and_pin():
-    """Two MTP rows of one request see 256 and 257 tokens: the local block is
-    block 1 for the first and block 2 for the second."""
-    torch.manual_seed(0)
-    logits = torch.randn(2, 400, device="cuda")
-    seq_lens = torch.tensor([257], dtype=torch.int32, device="cuda")
-    out = torch.empty((2, 4), device="cuda")
-    decode_block_scores_gfx942(
-        logits,
-        seq_lens,
-        out,
-        query_len=2,
-        init_blocks=1,
-        local_blocks=1,
-        sentinel_init=1e30,
-        sentinel_local=1e29,
-    )
-    padded = torch.nn.functional.pad(logits.cpu(), (0, 112), value=float("-inf"))
-    expect = padded.view(2, 4, 128).amax(-1)
-    expect[:, 0] = 1e30
-    expect[0, 1] = 1e29
-    expect[1, 2] = 1e29
-    assert torch.equal(out.cpu(), expect)
 
 
 @requires_gpu_aiter
@@ -253,8 +206,216 @@ def test_gfx942_index_norm_rope_matches_eager(default_vllm_config, tokens):
     assert torch.equal(k, ref_k.reshape(tokens, 128))
 
 
-def test_gfx942_requires_signed_in_place_scorers(monkeypatch):
-    """A ReLU-only or dense-only AITER is rejected at selection, not mid-step."""
+@requires_gpu_aiter
+@pytest.mark.parametrize("heads,query_len", [(1, 4), (2, 4), (4, 4), (1, 1)])
+def test_gfx942_pack_decode_rows(heads, query_len):
+    """Slot h*query_len + r of request b's group is head h of row r: its MXFP4,
+    its e8m0 bytes, output row h*rows + row and causal end; dead slots are
+    never stored."""
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import pack_decode_rows_gfx942
+
+    torch.manual_seed(0)
+    batch = 3
+    rows = batch * query_len
+    iq = (torch.randn(rows, heads, 128, device="cuda") * 3).to(torch.bfloat16)
+    seq_lens = torch.tensor([7, 300, 4097], dtype=torch.int32, device="cuda")
+    q = torch.full((batch + 1, 16, 64), 0xAB, dtype=torch.uint8, device="cuda")
+    qs = torch.zeros((batch + 1, 1, 4, 16, 4), dtype=torch.uint8, device="cuda")
+    meta = torch.zeros(3 * 16 * (batch + 1), dtype=torch.int32, device="cuda")
+    m = pack_decode_rows_gfx942(iq, seq_lens, q, qs, meta, query_len=query_len)
+    assert m.shape == (3, 16 * batch)
+    for b in range(batch):
+        for s in range(16):
+            slot = 16 * b + s
+            if s >= heads * query_len:
+                assert m[0, slot] == -1 and m[2, slot] == 0
+                continue
+            h, r = divmod(s, query_len)
+            row = b * query_len + r
+            ref_q, ref_s = dynamic_mxfp4_quant(iq[row, h][None].contiguous())
+            assert torch.equal(q[b, s], ref_q[0])
+            assert torch.equal(qs[b, 0, :, s, 0], ref_s.view(torch.uint8)[0])
+            assert m[0, slot] == h * rows + row
+            assert m[1, slot] == 0
+            assert m[2, slot] == int(seq_lens[b]) - query_len + r + 1
+
+
+@requires_gpu_aiter
+@pytest.mark.parametrize("heads,query_len", [(1, 4), (2, 4), (1, 1)])
+def test_gfx942_pack_decode_rows_fp8(heads, query_len):
+    """FP8-Q decode packing: slot h*query_len + r holds e4m3fnuz
+    q * 224 / max|q| and the fp32 scale max|q| / 224 (correctly rounded), with
+    the same slot metadata as the MXFP4 packing."""
+    from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import (
+        FP8Q_ROW_MAX,
+        pack_decode_rows_fp8_gfx942,
+        pack_decode_rows_gfx942,
+    )
+
+    torch.manual_seed(0)
+    batch = 3
+    rows = batch * query_len
+    iq = (torch.randn(rows, heads, 128, device="cuda") * 3).to(torch.bfloat16)
+    iq[0, 0] = 0  # an all-zero row packs to zeros with scale 0
+    seq_lens = torch.tensor([7, 300, 4097], dtype=torch.int32, device="cuda")
+    q = torch.full((batch + 1, 16, 128), 0xAB, dtype=torch.uint8, device="cuda")
+    qs = torch.zeros((batch + 1, 16), dtype=torch.float32, device="cuda")
+    meta = torch.zeros(3 * 16 * (batch + 1), dtype=torch.int32, device="cuda")
+    m = pack_decode_rows_fp8_gfx942(iq, seq_lens, q, qs, meta, query_len=query_len)
+    meta4 = torch.zeros_like(meta)
+    m4 = pack_decode_rows_gfx942(
+        iq,
+        seq_lens,
+        torch.zeros((batch, 16, 64), dtype=torch.uint8, device="cuda"),
+        torch.zeros((batch, 1, 4, 16, 4), dtype=torch.uint8, device="cuda"),
+        meta4,
+        query_len=query_len,
+    )
+    assert torch.equal(m, m4)
+    for b in range(batch):
+        for s in range(heads * query_len):
+            h, r = divmod(s, query_len)
+            x = iq[b * query_len + r, h].float()
+            amax = x.abs().max()
+            if amax == 0:
+                assert (q[b, s] == 0).all() and qs[b, s] == 0
+                continue
+            inv = (FP8Q_ROW_MAX / amax.double()).float()
+            ref = (x * inv).to(torch.float8_e4m3fnuz).view(torch.uint8)
+            assert torch.equal(q[b, s], ref)
+            assert qs[b, s] == (amax.double() / FP8Q_ROW_MAX).float()
+
+
+@requires_gpu_aiter
+@pytest.mark.parametrize("q_fp8", [False, True])
+def test_gfx942_decode_scores_match_reference(monkeypatch, q_fp8):
+    """The row-packed decode scorer (FP8 Q against the MXFP4 K cache, or the
+    MXFP4-Q fallback of an aiter without ``q_fp8``) reproduces an fp32
+    reference on the dequantized operands."""
+    import types
+
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    from vllm.models.minimax_m3.amd import indexer_mxfp4 as M
+    from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import FP8Q_ROW_MAX
+
+    if q_fp8 and not M._aiter_rowpack_has_fp8q():
+        pytest.skip("aiter row-packed scorer lacks q_fp8")
+    if not q_fp8:
+        monkeypatch.setattr(M, "_aiter_rowpack_has_fp8q", lambda: False)
+    fp4 = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, 0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device="cuda",
+    )
+
+    def deq(x):
+        p, s = dynamic_mxfp4_quant(x.contiguous())
+        p = p.view(torch.uint8)
+        v = torch.stack([fp4[(p & 15).long()], fp4[(p >> 4).long()]], -1)
+        sc = torch.exp2(s.view(torch.uint8).float() - 127)
+        return (v.flatten(-2).view(x.shape[0], -1, 32) * sc[..., None]).flatten(1)
+
+    torch.manual_seed(0)
+    batch, ql, heads, ctx, msl = 2, 4, 2, 1000, 2048
+    blocks = msl // 128
+    bt = torch.randperm(batch * blocks, device="cuda").view(batch, blocks)
+    bt = bt.to(torch.int32)
+    cache = torch.zeros(
+        (batch * blocks, MANAGER_BLOCK_BYTES), dtype=torch.uint8, device="cuda"
+    )
+    k = torch.randn(batch, ctx, 128, device="cuda").to(torch.bfloat16)
+    for b in range(batch):
+        slots = bt[b].long()[:, None] * 128 + torch.arange(128, device="cuda")
+        store_k_gfx942(k[b], cache, slots.flatten()[:ctx])
+    seq_lens = torch.tensor([ctx, 517], dtype=torch.int32, device="cuda")
+    iq = torch.randn(batch * ql, heads, 128, device="cuda").to(torch.bfloat16)
+    fake = types.SimpleNamespace(
+        max_model_len=msl,
+        sparse_block_size=128,
+        _page64_table=None,
+        _max_decode_reqs=batch,
+        device=torch.device("cuda"),
+        _gfx942_buffers=None,
+        _gfx942_index_heads=heads,
+        max_decode_query_len=ql,
+    )
+    d = types.SimpleNamespace(
+        seq_lens=seq_lens, block_table=bt, max_seq_len=msl, decode_query_len=ql
+    )
+    plan = M.MiniMaxM3IndexerMxfp4MetadataBuilder._gfx942_decode_plan(fake, d)
+    score = M.mxfp4_gfx942_index_scores_decode(
+        iq,
+        cache.view(-1, PAGE_BYTES),
+        seq_lens,
+        plan,
+        max_seq_len=msl,
+        query_len=ql,
+        scale=128**-0.5,
+        init_blocks=0,
+        local_blocks=0,
+    )
+    for b in range(batch):
+        kd = deq(k[b]).double()
+        for r in range(ql):
+            kv_len = int(seq_lens[b]) - ql + r + 1
+            nb = (kv_len + 127) // 128
+            for h in range(heads):
+                x = iq[b * ql + r, h].float()
+                if q_fp8:
+                    amax = x.abs().max()
+                    inv = (FP8Q_ROW_MAX / amax.double()).float()
+                    qd = (x * inv).to(torch.float8_e4m3fnuz).double() * (
+                        (amax.double() / FP8Q_ROW_MAX).float().double()
+                    )
+                else:
+                    qd = deq(x[None].to(torch.bfloat16))[0].double()
+                s = (kd[:kv_len] @ qd).float() * 128**-0.5
+                s = torch.nn.functional.pad(s, (0, nb * 128 - kv_len), value=-1e30)
+                ref = s.view(nb, 128).amax(-1)
+                got = score[h, b * ql + r, :nb]
+                torch.testing.assert_close(got, ref, rtol=1e-5, atol=1e-5)
+
+
+@requires_gpu_aiter
+def test_gfx942_decode_page_max_reduce_and_pin():
+    """64-token page maxima fold into 128-token block scores over each row's
+    causal blocks only; a half-filled last block ignores its unwritten page."""
+    from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import (
+        decode_page_max_to_block_scores_gfx942,
+    )
+
+    torch.manual_seed(0)
+    pages = torch.randn(1, 2, 8, device="cuda")
+    # Row 1 (kv_len 257) owns pages 0..4; page 5 is unwritten garbage.
+    pages[0, 1, 5] = 1e9
+    seq_lens = torch.tensor([257], dtype=torch.int32, device="cuda")
+    out = torch.full((1, 2, 4), -7.0, device="cuda")
+    decode_page_max_to_block_scores_gfx942(
+        pages,
+        seq_lens,
+        out,
+        query_len=2,
+        init_blocks=1,
+        local_blocks=1,
+        sentinel_init=1e30,
+        sentinel_local=1e29,
+    )
+    p = pages.cpu()[0]
+    # row 0: kv_len 256 -> blocks 0, 1
+    assert out[0, 0, 0] == 1e30 and out[0, 0, 1] == 1e29
+    assert (out[0, 0, 2:] == -7.0).all()
+    # row 1: kv_len 257 -> blocks 0, 1, 2; block 2 is page 4 only
+    assert out[0, 1, 0] == 1e30
+    assert out[0, 1, 1] == torch.maximum(p[1, 2], p[1, 3]).item()
+    assert out[0, 1, 2] == 1e29
+    assert out[0, 1, 3] == -7.0
+
+
+def test_gfx942_requires_scheduled_in_place_rowpack_scorer(monkeypatch):
+    """An AITER whose row-packed scorer cannot read the paged cache in place or
+    take a caller schedule is rejected at selection, not mid-step."""
     import sys
     import types
 
@@ -263,15 +424,16 @@ def test_gfx942_requires_signed_in_place_scorers(monkeypatch):
     def full(
         q,
         *a,
-        relu=True,
         kv_page_stride=None,
         kv_scale_page_stride=None,
         kv_scale_offset=0,
+        cta_info=None,
+        total_ctas=None,
         **k,
     ):
         pass
 
-    def relu_only(
+    def unscheduled(
         q,
         *a,
         kv_page_stride=None,
@@ -281,19 +443,17 @@ def test_gfx942_requires_signed_in_place_scorers(monkeypatch):
     ):
         pass
 
-    def dense_only(q, *a, relu=True, **k):
+    def dense_only(q, *a, **k):
         pass
 
     def helper(*a, **k):
         pass
 
     fake = types.ModuleType("aiter.ops.flydsl")
-    fake.recommended_gfx942_fp4_longctx_config = helper
-    for name in indexer.GFX942_SCORERS:
-        setattr(fake, name, full)
     kernels = types.ModuleType("aiter.ops.flydsl.kernels.mqa_logits")
     kernels.pa_mqa_logits_fp4_prefill_gfx942 = types.ModuleType("prefill")
     kernels.pa_mqa_logits_fp4_prefill_gfx942.compute_varqlen_windows = helper
+    kernels.pa_mqa_logits_fp4_prefill_gfx942.compute_prefill_schedule = helper
     rowpack = types.ModuleType("rowpack")
     rowpack.flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942 = full
     rowpack.rowpack_prefill_inputs_gfx942 = helper
@@ -313,13 +473,11 @@ def test_gfx942_requires_signed_in_place_scorers(monkeypatch):
         return indexer.rocm_mxfp4_aiter_unavailable_reason("gfx942")
 
     assert reason() is None
-    for scorer in (relu_only, dense_only):
-        monkeypatch.setattr(fake, indexer.GFX942_SCORERS[1], scorer)
+    for scorer in (unscheduled, dense_only):
+        rowpack.flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942 = scorer
         assert reason() == indexer.AITER_GFX942_REQUIREMENT
-    monkeypatch.setattr(fake, indexer.GFX942_SCORERS[1], full)
-    rowpack.flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942 = dense_only
-    assert reason() == indexer.AITER_GFX942_REQUIREMENT
-    del kernels.pa_mqa_page_max_fp4_rowpack_prefill_gfx942
+    rowpack.flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942 = full
+    del kernels.pa_mqa_logits_fp4_prefill_gfx942.compute_prefill_schedule
     assert reason() == indexer.AITER_GFX942_REQUIREMENT
 
 
@@ -450,3 +608,268 @@ def test_mxfp4_decode_work_map_is_graph_stable(monkeypatch):
     assert calls[0][0] is calls[1][0] is builder._work_map_buf
     assert calls[0][1] == calls[1][1] == 4096 // 128
     assert first.decode.max_seq_len == second.decode.max_seq_len == 4096
+
+
+def _decode_scores(M, iq, cache, seq_lens, plan, msl, query_len):
+    return M.mxfp4_gfx942_index_scores_decode(
+        iq,
+        cache.view(-1, PAGE_BYTES),
+        seq_lens,
+        plan,
+        max_seq_len=msl,
+        query_len=query_len,
+        scale=128**-0.5,
+        init_blocks=1,
+        local_blocks=2,
+    ).clone()
+
+
+@requires_gpu_aiter
+@pytest.mark.parametrize("heads,query_len", [(2, 4), (1, 1), (2, 3)])
+def test_gfx942_fused_decode_matches_unfused(monkeypatch, heads, query_len):
+    """The one-launch decode (block scores from the scorer's epilogue, Q pack
+    in its prologue) and its separate-pack variant (a Q the prologue cannot
+    read) reproduce the 3-launch FP8-Q chain of an aiter without the
+    block-score scorer bit for bit on every causal block, init/local pins
+    included."""
+    import types
+
+    from vllm.models.minimax_m3.amd import indexer_mxfp4 as M
+
+    if not (M._aiter_rowpack_has_fp8q() and M._aiter_rowpack_has_block_out()):
+        pytest.skip("aiter row-packed scorer lacks the fused decode variant")
+    torch.manual_seed(0)
+    batch, msl = 3, 4096
+    blocks = msl // 128
+    bt = torch.randperm(batch * blocks, device="cuda").view(batch, blocks)
+    bt = bt.to(torch.int32)
+    cache = torch.zeros(
+        (batch * blocks, MANAGER_BLOCK_BYTES), dtype=torch.uint8, device="cuda"
+    )
+    for b in range(batch):
+        k = torch.randn(msl, 128, device="cuda").to(torch.bfloat16)
+        slots = bt[b].long()[:, None] * 128 + torch.arange(128, device="cuda")
+        store_k_gfx942(k, cache, slots.flatten())
+    seq_lens = torch.tensor([4000, 517, 129], dtype=torch.int32, device="cuda")
+    iq = torch.randn(batch * query_len, heads, 128, device="cuda").to(torch.bfloat16)
+    # Odd head stride: the scorer's prologue cannot read it, so Q is packed by
+    # a separate launch.
+    iq_odd = torch.zeros(batch * query_len, heads, 129, device="cuda")
+    iq_odd = iq_odd.to(torch.bfloat16)[..., :128]
+    iq_odd.copy_(iq)
+    fake = types.SimpleNamespace(
+        max_model_len=msl,
+        sparse_block_size=128,
+        _page64_table=None,
+        _max_decode_reqs=batch,
+        device=torch.device("cuda"),
+        _gfx942_buffers=None,
+        _gfx942_index_heads=heads,
+        max_decode_query_len=query_len,
+    )
+    d = types.SimpleNamespace(
+        seq_lens=seq_lens, block_table=bt, max_seq_len=msl, decode_query_len=query_len
+    )
+    plan = M.MiniMaxM3IndexerMxfp4MetadataBuilder._gfx942_decode_plan(fake, d)
+    out = {}
+    for mode, q in ((0, iq), (1, iq_odd), (2, iq)):
+        with monkeypatch.context() as mp:
+            if mode == 0:
+                mp.setattr(M, "_aiter_rowpack_has_block_out", lambda: False)
+            out[mode] = _decode_scores(M, q, cache, seq_lens, plan, msl, query_len)
+    for b in range(batch):
+        for r in range(query_len):
+            nb = (int(seq_lens[b]) - query_len + r + 1 + 127) // 128
+            row = b * query_len + r
+            for fuse in (1, 2):
+                assert torch.equal(
+                    out[fuse][:, row, :nb].view(torch.int32),
+                    out[0][:, row, :nb].view(torch.int32),
+                ), (fuse, b, r)
+
+
+@requires_gpu_aiter
+def test_gfx942_rowpack_call_cache_does_not_grow_or_pin_tensors(monkeypatch):
+    """The resolved-launch cache is keyed on the specialization, not on data
+    pointers: decode steps with fresh activations / outputs at the same shapes
+    reuse one entry and leave no tensor alive (keying on data_ptr and holding
+    the bound args leaked device memory per step until launches failed with
+    hipErrorLaunchOutOfResources mid-serve)."""
+    import gc
+    import types
+    import weakref
+
+    from vllm.models.minimax_m3.amd import indexer_mxfp4 as M
+
+    if not (M._aiter_rowpack_has_fp8q() and M._aiter_rowpack_has_block_out()):
+        pytest.skip("aiter row-packed scorer lacks the fused decode variant")
+    torch.manual_seed(0)
+    batch, ql, heads, msl = 2, 4, 2, 2048
+    blocks = msl // 128
+    bt = torch.arange(batch * blocks, dtype=torch.int32, device="cuda").view(batch, -1)
+    cache = torch.zeros(
+        (batch * blocks, MANAGER_BLOCK_BYTES), dtype=torch.uint8, device="cuda"
+    )
+    seq_lens = torch.tensor([2000, 700], dtype=torch.int32, device="cuda")
+    fake = types.SimpleNamespace(
+        max_model_len=msl,
+        sparse_block_size=128,
+        _page64_table=None,
+        _max_decode_reqs=batch,
+        device=torch.device("cuda"),
+        _gfx942_buffers=None,
+        _gfx942_index_heads=heads,
+        max_decode_query_len=ql,
+    )
+    d = types.SimpleNamespace(
+        seq_lens=seq_lens, block_table=bt, max_seq_len=msl, decode_query_len=ql
+    )
+    plan = M.MiniMaxM3IndexerMxfp4MetadataBuilder._gfx942_decode_plan(fake, d)
+    for fuse in (0, 2):
+        if fuse == 0:
+            # The 3-launch chain of an aiter without the block-score scorer.
+            monkeypatch.setattr(M, "_aiter_rowpack_has_block_out", lambda: False)
+        else:
+            monkeypatch.undo()
+        refs = []
+        for step in range(6):
+            iq = torch.randn(batch * ql, heads, 128, device="cuda").to(torch.bfloat16)
+            score = M.mxfp4_gfx942_index_scores_decode(
+                iq,
+                cache.view(-1, PAGE_BYTES),
+                seq_lens,
+                plan,
+                max_seq_len=msl,
+                query_len=ql,
+                scale=128**-0.5,
+                init_blocks=0,
+                local_blocks=1,
+            )
+            refs += [weakref.ref(iq), weakref.ref(score)]
+            if step == 1:
+                entries = len(M._ROWPACK_CALLS)
+            del iq, score
+        torch.cuda.synchronize()
+        gc.collect()
+        assert len(M._ROWPACK_CALLS) == entries, fuse
+        assert all(r() is None for r in refs), fuse
+
+
+def _random_decode_topk_case(gen, heads, kv_heads, query_len, batch, msl):
+    """Score rows with ties, NaN, +-0, -inf, AITER's init/local sentinels and
+    garbage past each row's causal end; ragged and zero-length requests."""
+    from vllm.models.minimax_m3.amd.indexer_msa import _score_width
+
+    max_blk = -(-msl // 128)
+    lens = torch.randint(0, msl + 1, (batch,), generator=gen)
+    lens[0] = msl
+    if batch > 1:
+        lens[1] = int(torch.randint(0, 16 * 128, (1,), generator=gen))  # < 16 blocks
+    if batch > 2:
+        lens[2] = 0 if query_len == 1 else query_len - 1  # causal_len 0 rows
+    rows = batch * query_len
+    width = _score_width(msl, 128)
+    if bool(torch.randint(0, 2, (1,), generator=gen)):
+        score = torch.randint(-3, 4, (heads, rows, width), generator=gen).float()
+    else:
+        score = torch.randn(heads, rows, width, generator=gen)
+    flat = score.view(-1)
+    idx = torch.randint(0, flat.numel(), (64,), generator=gen)
+    specials = torch.tensor(
+        [float("nan"), -0.0, 0.0, float("-inf"), float("inf"), 1e30, 1e29]
+    )
+    flat[idx] = specials[torch.randint(0, len(specials), (64,), generator=gen)]
+    for r in range(rows):
+        b, t = divmod(r, query_len)
+        nb = -(-max(int(lens[b]) - query_len + t + 1, 0) // 128)
+        if nb:
+            score[:, r, 0] = 1e30  # init block
+            score[:, r, nb - 1] = 1e29  # local block
+    bt = torch.randint(0, 1 << 20, (batch, max_blk + 3), generator=gen)
+    return (
+        score.cuda(),
+        bt.to(torch.int32).cuda(),
+        lens.to(torch.int32).cuda(),
+        rows,
+    )
+
+
+@requires_gpu_aiter
+@pytest.mark.parametrize(
+    "heads,kv_heads,query_len,batch,msl",
+    [
+        (1, 1, 1, 1, 32768),
+        (1, 1, 4, 3, 16384),
+        (2, 2, 1, 5, 524288),
+        (2, 2, 4, 4, 131072),
+        (1, 2, 2, 7, 2048),
+        (2, 4, 3, 2, 65536),
+        (1, 1, 1, 32, 524288),
+        (2, 2, 4, 16, 32768),
+    ],
+)
+def test_gfx942_triton_decode_topk_matches_aiter(
+    heads, kv_heads, query_len, batch, msl
+):
+    """The Triton decode selector selects exactly what AITER's
+    pa_sparse_block_topk selects -- same blocks in the same rank order (ties
+    to the larger block, NaN as -inf, -0 below +0), -1 padding on short rows --
+    and emits an identical sparse block table and context lengths, at every
+    launch geometry the selector can take."""
+    from aiter.ops.msa_attention import pa_sparse_block_topk
+
+    from vllm.models.minimax_m3.amd.ops.mxfp4_decode_topk import mxfp4_decode_topk
+
+    gen = torch.Generator().manual_seed(heads * 1000 + query_len * 100 + batch + msl)
+    for case in range(4):
+        score, bt, lens, rows = _random_decode_topk_case(
+            gen, heads, kv_heads, query_len, batch, msl
+        )
+        args = dict(
+            max_seq_len=msl,
+            block_size=128,
+            query_len=query_len,
+            num_kv_heads=kv_heads,
+            pages_per_block=8,
+        )
+
+        def bufs(rows=rows):
+            return (
+                torch.full((heads, rows, 16), -7, dtype=torch.int32, device="cuda"),
+                torch.full(
+                    (rows * kv_heads, 128), -7, dtype=torch.int32, device="cuda"
+                ),
+                torch.full((rows * kv_heads,), -7, dtype=torch.int32, device="cuda"),
+            )
+
+        ref = bufs()
+        pa_sparse_block_topk(
+            score, ref[0], bt, lens, sparse_bt=ref[1], sparse_ctx=ref[2], **args
+        )
+        counter = torch.zeros(heads, rows, dtype=torch.int32, device="cuda")
+        # default geometry, a forced multi-chunk split and a single chunk
+        for kw in ({}, {"block_k": 128, "max_chunks": 4}, {"max_chunks": 1}):
+            got = bufs()
+            mxfp4_decode_topk(
+                score,
+                got[0],
+                bt,
+                lens,
+                sparse_bt=got[1],
+                sparse_ctx=got[2],
+                counter=counter,
+                **args,
+                **kw,
+            )
+            for name, a, b in zip(("topk_idx", "sparse_bt", "sparse_ctx"), ref, got):
+                assert torch.equal(a, b), (case, kw, name)
+            assert not counter.any(), (case, kw)
+
+
+def test_gfx942_decode_topk_backend_auto():
+    """The decode selector is picked from launch-time shapes only."""
+    from vllm.models.minimax_m3.amd import indexer_mxfp4 as M
+
+    assert M.gfx942_decode_topk_backend(1, 1, 524288, 128) == "triton"
+    assert M.gfx942_decode_topk_backend(32, 2, 524288, 128) == "triton"
+    assert M.gfx942_decode_topk_backend(128, 1, 524288, 128) == "aiter"

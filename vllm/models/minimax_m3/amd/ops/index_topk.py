@@ -193,8 +193,21 @@ def _bitonic_merge(
 # since prefill metadata is sliced from mixed batch metadata, seq_lens and prefix_lens
 # might lose pointer alignment, which trigger Triton recompiles. we don't actually
 # need pointer alignment for those tensors anyway because we do scalar load.
+# Computed as:
+#  * split-K over the key range: each CTA owns BLOCK_M (row, head) pairs x
+#    KB_PER 128-key blocks, so a 16k-row chunk launches thousands of CTAs
+#    instead of 256 serial-K CTAs (fewer than the 304 CUs of an MI300X);
+#  * index heads are packed into the M dimension (m = row * H + head), so K is
+#    loaded once per block for all heads;
+#  * the 128-key block is reduced in SUB-key MFMA sub-tiles with a running
+#    register max, which keeps the 4 warps tiling M (warpsPerCTA = [4, 1]) so
+#    the block max is warp-local: no LDS round trip for the reduction, no
+#    spills, and K is streamed straight from global memory into the MFMA
+#    operand layout;
+#  * CTAs are grouped GROUP split columns at a time so CTAs sharing K pages
+#    run together (L2 reuse).
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
-def _index_block_score_kernel(
+def _index_block_score_split_kernel(
     q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
     ik_cache_ptr,  # index-K cache: [num_blocks, 128, head_dim]
     score_ptr,  # [num_idx_heads, total_q, max_block]
@@ -202,81 +215,91 @@ def _index_block_score_kernel(
     cu_seqlens,  # [batch+1] query start offsets
     seq_lens,  # [batch] total K length
     prefix_lens,  # [batch] context length before this chunk's queries
-    num_idx_heads,
-    head_dim: tl.constexpr,
     stride_q_n,
     stride_q_h,
-    stride_q_d,
     stride_ik_blk,
     stride_ik_pos,
-    stride_ik_d,
     stride_s_h,
     stride_s_n,
     stride_s_k,
     stride_bt_b,
-    BLOCK_SIZE_Q: tl.constexpr,
+    num_m_tiles,
+    num_k_splits,
+    H: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    KB_PER: tl.constexpr,
+    SUB: tl.constexpr,
+    GROUP: tl.constexpr,
 ):
-    pid_q = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-    pid_b = pid_bh // num_idx_heads
-    pid_h = pid_bh % num_idx_heads
-
+    pid = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    width = GROUP * num_m_tiles
+    first_s = (pid // width) * GROUP
+    gs = tl.minimum(num_k_splits - first_s, GROUP)
+    pid_s = first_s + (pid % width) % gs
+    pid_m = (pid % width) // gs
+    if pid_s >= num_k_splits:
+        return
     seq_start = tl.load(cu_seqlens + pid_b)
     q_len = tl.load(cu_seqlens + pid_b + 1) - seq_start
+    m0 = pid_m * BLOCK_M
+    if m0 >= q_len * H:
+        return
     seq_len = tl.load(seq_lens + pid_b)
     prefix_len = tl.load(prefix_lens + pid_b)
-    if BLOCK_SIZE_Q * pid_q >= q_len:
+    # Causal window of this M tile: keys up to its last query row.
+    row_last = tl.minimum((m0 + BLOCK_M - 1) // H, q_len - 1)
+    hi = tl.minimum(seq_len, prefix_len + row_last + 1)
+    lo = pid_s * (KB_PER * BLOCK_SIZE_K)
+    if lo >= hi:
         return
+    hi = tl.minimum(hi, lo + KB_PER * BLOCK_SIZE_K)
 
-    q_desc = tl.make_tensor_descriptor(
-        base=q_ptr + seq_start * stride_q_n + pid_h * stride_q_h,
-        shape=[q_len, head_dim],
-        strides=[stride_q_n, stride_q_d],
-        block_shape=[BLOCK_SIZE_Q, head_dim],
-        padding_option="zero",
+    offs_m = m0 + tl.arange(0, BLOCK_M)
+    row = offs_m // H
+    head = offs_m % H
+    m_mask = row < q_len
+    offs_d = tl.arange(0, HEAD_DIM)
+    offs_k = tl.arange(0, SUB)
+    q = tl.load(
+        q_ptr
+        + (seq_start + row)[:, None].to(tl.int64) * stride_q_n
+        + head[:, None] * stride_q_h
+        + offs_d[None, :],
+        mask=m_mask[:, None],
+        other=0.0,
     )
-
-    # 2. Perform the load by providing the multi-dimensional offset directly
-    q = q_desc.load([pid_q * BLOCK_SIZE_Q, 0])
-    q_start = prefix_len + pid_q * BLOCK_SIZE_Q
-
-    off_q = tl.arange(0, BLOCK_SIZE_Q) + pid_q * BLOCK_SIZE_Q + prefix_len
-    off_k = tl.arange(0, BLOCK_SIZE_K)
-    off_d = tl.arange(0, head_dim)
-    # Block table row for this request.
+    pos_q = prefix_len + row
+    q_start = prefix_len + m0 // H
     bt_row = block_table_ptr + pid_b * stride_bt_b
-    # Causal window: only blocks up to the last query token's position.
-    hi = min(seq_len, prefix_len + (pid_q + 1) * BLOCK_SIZE_Q)
-    for i in tl.range(0, hi, BLOCK_SIZE_K):
+    s_base = (
+        score_ptr
+        + head.to(tl.int64) * stride_s_h
+        + (seq_start + row).to(tl.int64) * stride_s_n
+    )
+    for i in tl.range(lo, hi, BLOCK_SIZE_K):
         blk = i // BLOCK_SIZE_K
         page = tl.load(bt_row + blk).to(tl.int64)
-        pos = i + off_k
-        # index-K for this page: [BLOCK_SIZE_D, BLOCK_SIZE_K] (transposed)
-        # we don't need masked load for K, because KV cache ensures
-        # allocation is multiple of BLOCK_SIZE_K.
-        # for tokens beyond seqlen, they will be masked in qk later.
-        k = tl.load(
+        # K^T sub-tile [HEAD_DIM, SUB]; the cache allocation is a multiple of
+        # 128 tokens, so tokens past seq_len are only masked (causally) below.
+        k_base = (
             ik_cache_ptr
             + page * stride_ik_blk
-            + off_k[None, :] * stride_ik_pos
-            + off_d[:, None] * stride_ik_d,
+            + offs_k[None, :] * stride_ik_pos
+            + offs_d[:, None]
         )
-        qk = tl.dot(q, k)
-        # apply causal mask as needed
-        if q_start < i + BLOCK_SIZE_K:
-            qk = tl.where(off_q[:, None] >= pos[None, :], qk, float("-inf"))
-        # one sparse block per K-tile -> max over the 128 positions
-        score = tl.max(qk, axis=1)  # [BLOCK_SIZE_Q]
-        s_ptrs = (
-            score_ptr
-            + pid_h * stride_s_h
-            + (seq_start + pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q))
-            * stride_s_n
-            + blk * stride_s_k
-        )
-        q_store_mask = (pid_q * BLOCK_SIZE_Q + tl.arange(0, BLOCK_SIZE_Q)) < q_len
-        tl.store(s_ptrs, score, mask=q_store_mask)
+        diag = q_start < i + BLOCK_SIZE_K
+        score = tl.full([BLOCK_M], float("-inf"), tl.float32)
+        for j in tl.static_range(0, BLOCK_SIZE_K, SUB):
+            k = tl.load(k_base + j * stride_ik_pos)
+            qk = tl.dot(q, k)  # [BLOCK_M, SUB]
+            if diag:
+                pos = i + j + offs_k
+                qk = tl.where(pos_q[:, None] >= pos[None, :], qk, float("-inf"))
+            score = tl.maximum(score, tl.max(qk, axis=1))
+        tl.store(s_base + blk * stride_s_k, score, mask=m_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -1203,7 +1226,6 @@ def minimax_m3_index_score(
     assert num_idx_heads == num_kv_heads, (
         "M3 expects num_idx_heads == num_kv_heads (no topk index reduce)"
     )
-    batch = cu_seqlens_q.shape[0] - 1
     max_block = triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE)
 
     # Keep score strides 16-divisible to avoid Triton recompiles.
@@ -1213,9 +1235,7 @@ def minimax_m3_index_score(
         dtype=torch.float32,
         device=idx_q.device,
     )
-    BLOCK_SIZE_Q = 64
-    grid_score = (triton.cdiv(max_query_len, BLOCK_SIZE_Q), batch * num_idx_heads)
-    _index_block_score_kernel[grid_score](
+    _launch_index_block_score_split(
         idx_q,
         index_kv_cache,
         score,
@@ -1223,22 +1243,71 @@ def minimax_m3_index_score(
         cu_seqlens_q,
         seq_lens,
         prefix_lens,
-        num_idx_heads,
-        head_dim,
+        max_query_len,
+        max_seq_len,
+    )
+    return score
+
+
+# Split-K config (MI300X, 16k-row chunk): BLOCK_M 256 / SUB 64 / 4 warps /
+# 3 stages.
+INDEX_SCORE_SPLIT_CONFIG = dict(
+    BLOCK_M=256, KB_PER=16, SUB=64, GROUP=4, num_warps=4, num_stages=3
+)
+
+
+def _launch_index_block_score_split(
+    idx_q: torch.Tensor,
+    index_kv_cache: torch.Tensor,
+    score: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefix_lens: torch.Tensor,
+    max_query_len: int,
+    max_seq_len: int,
+    **overrides,
+) -> None:
+    cfg = {**INDEX_SCORE_SPLIT_CONFIG, **overrides}
+    total_q, num_idx_heads, head_dim = idx_q.shape
+    assert idx_q.stride(2) == 1 and index_kv_cache.stride(2) == 1
+    batch = cu_seqlens_q.shape[0] - 1
+    block_m, kb_per, group = cfg["BLOCK_M"], cfg["KB_PER"], cfg["GROUP"]
+    num_m_tiles = triton.cdiv(max_query_len * num_idx_heads, block_m)
+    num_k_splits = triton.cdiv(triton.cdiv(max_seq_len, SPARSE_BLOCK_SIZE), kb_per)
+    grid = (triton.cdiv(num_k_splits, group) * group * num_m_tiles, batch)
+    extra = {}
+    if current_platform.is_rocm():
+        extra = dict(matrix_instr_nonkdim=16, kpack=1)
+    _index_block_score_split_kernel[grid](
+        idx_q,
+        index_kv_cache,
+        score,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        prefix_lens,
         idx_q.stride(0),
         idx_q.stride(1),
-        idx_q.stride(2),
         index_kv_cache.stride(0),
         index_kv_cache.stride(1),
-        index_kv_cache.stride(2),
         score.stride(0),
         score.stride(1),
         score.stride(2),
         block_table.stride(0),
-        BLOCK_SIZE_Q=BLOCK_SIZE_Q,
+        num_m_tiles,
+        num_k_splits,
+        H=num_idx_heads,
+        HEAD_DIM=head_dim,
+        BLOCK_M=block_m,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+        KB_PER=kb_per,
+        SUB=cfg["SUB"],
+        GROUP=group,
+        num_warps=cfg["num_warps"],
+        num_stages=cfg["num_stages"],
+        **extra,
     )
-    return score
 
 
 @torch.no_grad()

@@ -50,17 +50,74 @@ AITER_REQUIREMENT = (
     "needs an aiter with the MXFP4 FlyDSL ops (ROCm/aiter#7056, #7057, #7060 and #7061)"
 )
 AITER_GFX942_REQUIREMENT = (
-    "needs an aiter containing ROCm/aiter#7017 with signed (relu=False), "
-    "paged in-place (kv_page_stride) scorers and the row-packed prefill scorer"
+    "needs an aiter containing ROCm/aiter#7017 with the paged in-place "
+    "(kv_page_stride) row-packed page-max scorer taking a caller schedule "
+    "(cta_info)"
 )
-GFX942_SCORERS = (
-    "flydsl_pa_mqa_logits_fp4_gfx942",
-    "flydsl_pa_mqa_logits_fp4_gfx942_longctx",
+GFX942_ROWPACK_ARGS = (
+    "kv_page_stride",
+    "kv_scale_page_stride",
+    "kv_scale_offset",
+    "cta_info",
+    "total_ctas",
 )
-GFX942_ROWPACK_ARGS = ("kv_page_stride", "kv_scale_page_stride", "kv_scale_offset")
-GFX942_DECODE_ARGS = ("relu", *GFX942_ROWPACK_ARGS)
-# Decode bounds above this use AITER's split-context scorer.
-GFX942_LONGCTX_THRESHOLD = 65536
+# Tokens per CTA chunk of the row-packed scorer (64 per wave, 4 waves).
+GFX942_DECODE_BLOCK_K = 256
+
+
+def gfx942_decode_topk_backend(
+    rows: int, heads: int, max_seq_len: int, block_size: int
+) -> str:
+    """The decode block selector, ``triton`` or ``aiter``. Both produce the
+    same top-k (same blocks in the same order, -1 padding) and the same sparse
+    block table and context lengths; ``triton`` splits each row across
+    programs and wins at small batch, ``aiter``'s one-workgroup-per-row radix
+    select wins once many long rows fill the GPU. Decided from launch-time
+    shapes only, so a captured graph keeps its choice."""
+    from .ops.mxfp4_decode_topk import triton_topk_preferred
+
+    return (
+        "triton"
+        if triton_topk_preferred(rows, heads, max_seq_len, block_size)
+        else "aiter"
+    )
+
+
+_BLOCK_OUT_SUPPORT: list[bool] = []
+
+
+def _aiter_rowpack_has_block_out() -> bool:
+    if not _BLOCK_OUT_SUPPORT:
+        try:
+            from aiter.ops.flydsl.kernels.mqa_logits import (
+                pa_mqa_page_max_fp4_rowpack_prefill_gfx942 as rowpack,
+            )
+
+            ok = hasattr(
+                rowpack, "compile_pa_mqa_block_score_fp4_rowpack_decode_gfx942"
+            )
+        except ImportError:
+            ok = False
+        _BLOCK_OUT_SUPPORT.append(ok)
+    return _BLOCK_OUT_SUPPORT[0]
+
+
+_FP8Q_SUPPORT: list[bool] = []
+
+
+def _aiter_rowpack_has_fp8q() -> bool:
+    if not _FP8Q_SUPPORT:
+        try:
+            from aiter.ops.flydsl.kernels.mqa_logits import (
+                pa_mqa_page_max_fp4_rowpack_prefill_gfx942 as rowpack,
+            )
+
+            fn = rowpack.compile_pa_mqa_page_max_fp4_rowpack_prefill_gfx942
+            ok = "q_fp8" in inspect.signature(fn.__wrapped__).parameters
+        except (ImportError, AttributeError):
+            ok = False
+        _FP8Q_SUPPORT.append(ok)
+    return _FP8Q_SUPPORT[0]
 
 
 def _mxfp4_arch() -> str | None:
@@ -91,17 +148,14 @@ def rocm_mxfp4_aiter_unavailable_reason(arch: str | None = None) -> str | None:
             from aiter.ops.msa_attention import pa_sparse_block_topk  # noqa: F401
 
             required = [
-                (getattr(flydsl, name), GFX942_DECODE_ARGS) for name in GFX942_SCORERS
-            ]
-            required.append(
                 (
                     rowpack.flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942,
                     GFX942_ROWPACK_ARGS,
                 )
-            )
+            ]
             for fn in (
-                flydsl.recommended_gfx942_fp4_longctx_config,
                 prefill.compute_varqlen_windows,
+                prefill.compute_prefill_schedule,
                 rowpack.rowpack_prefill_inputs_gfx942,
             ):
                 required.append((fn, ()))
@@ -244,10 +298,32 @@ def _pin_forced_blocks(
 @dataclass
 class Gfx942DecodePlan:
     """Per-step inputs shared by every gfx942 index layer, in persistent
-    buffers so a captured decode replays from stable addresses."""
+    buffers so a captured decode replays from stable addresses.
+
+    Decode runs AITER's row-packed page-max scorer: each request's
+    ``H * query_len`` (index head, MTP row) pairs fill one 16-slot MFMA group,
+    so a K tile is loaded and e2m1-decoded once per request rather than once
+    per row and head, and 64-token page maxima are reduced in-kernel instead of
+    round-tripping ``[rows, max_seq_len]`` fp32 logits through HBM.
+    """
 
     page64_table: torch.Tensor
-    scorer_kwargs: dict
+    # Row-packed scorer operands, refilled per layer by the Q pack kernel.
+    q_fp4: torch.Tensor  # [max_reqs, 16, 64] uint8
+    q_scale: torch.Tensor  # [max_reqs, 1, 4, 16, 4] uint8
+    slot_meta: torch.Tensor  # [3 * 16 * max_reqs] int32
+    group_to_batch: torch.Tensor  # [max_reqs] int32, arange
+    group_starts: torch.Tensor  # [max_reqs] int32, zeros
+    page_max: torch.Tensor  # [H * max_rows, 2 * width] fp32
+    # The schedule is built once per step (it depends only on seq_lens), not
+    # once per layer.
+    cta_info: torch.Tensor
+    num_ctas: int
+    block_k: int
+    # FP8-Q decode (aiter scorer with ``q_fp8``): e4m3fnuz Q and per-slot fp32
+    # scales replace q_fp4 / q_scale.
+    q_fp8: torch.Tensor | None = None  # [max_reqs, 16, 128] uint8
+    q_scale_f32: torch.Tensor | None = None  # [max_reqs, 16] fp32
 
 
 @dataclass
@@ -280,11 +356,20 @@ class MiniMaxM3IndexerMxfp4MetadataBuilder(MiniMaxM3IndexerMSAMetadataBuilder):
         self._work_map_buf: torch.Tensor | None = None
         self.is_gfx942 = _mxfp4_arch() == "gfx942"
         self._page64_table: torch.Tensor | None = None
-        self._cta_info: dict[tuple[int, int], tuple[dict, torch.Tensor]] = {}
+        self._gfx942_buffers: dict[str, torch.Tensor] | None = None
+        hf = vllm_config.model_config.hf_text_config
+        sparse_cfg = getattr(hf, "sparse_attention_config", None) or {}
+        tp = vllm_config.parallel_config.tensor_parallel_size
+        self._gfx942_index_heads = max(
+            1, sparse_cfg.get("sparse_num_index_heads", 1) // tp
+        )
 
     def _gfx942_decode_plan(
         self, d: MiniMaxM3IndexerDecodeMetadata
     ) -> Gfx942DecodePlan:
+        from .ops.mxfp4_gfx942 import (
+            KERNEL_HEADS as KERNEL_GROUP_ROWS,
+        )
         from .ops.mxfp4_gfx942 import (
             KERNEL_PAGES_PER_BLOCK,
             expand_block_table_page64_into,
@@ -301,34 +386,79 @@ class MiniMaxM3IndexerMxfp4MetadataBuilder(MiniMaxM3IndexerMSAMetadataBuilder):
         table = expand_block_table_page64_into(
             d.block_table[:, :width], self._page64_table
         )
-        if d.max_seq_len <= GFX942_LONGCTX_THRESHOLD:
-            return Gfx942DecodePlan(table, {})
-        from aiter.ops.flydsl import recommended_gfx942_fp4_longctx_config
-        from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_common import (
-            compute_varctx_schedule,
+        from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill_gfx942 import (  # noqa: E501
+            CTA_INFO_WIDTH,
+            compute_prefill_schedule,
         )
 
-        key = (batch, d.decode_query_len)
-        if key not in self._cta_info:
-            cfg = recommended_gfx942_fp4_longctx_config(
-                d.max_seq_len, batch_size=batch, next_n=d.decode_query_len
-            )
-            self._cta_info[key] = (
-                cfg,
-                torch.empty(
-                    (cfg["parallel_unit_num"], 4), dtype=torch.int32, device=self.device
+        if self._gfx942_buffers is None:
+            reqs = self._max_decode_reqs
+            rows = reqs * self.max_decode_query_len
+            cus = torch.cuda.get_device_properties(self.device).multi_processor_count
+            # The scorer's default occupancy: four CTAs per CU.
+            num_ctas = max(4 * cus, reqs)
+            self._gfx942_buffers = dict(
+                q_fp4=torch.zeros(
+                    (reqs, KERNEL_GROUP_ROWS, 64), dtype=torch.uint8, device=self.device
+                ),
+                q_scale=torch.zeros(
+                    (reqs, 1, 4, KERNEL_GROUP_ROWS, 4),
+                    dtype=torch.uint8,
+                    device=self.device,
+                ),
+                # FP8-Q decode operands (2 KiB + 64 B per request).
+                q_fp8=torch.zeros(
+                    (reqs, KERNEL_GROUP_ROWS, 128),
+                    dtype=torch.uint8,
+                    device=self.device,
+                ),
+                q_scale_f32=torch.zeros(
+                    (reqs, KERNEL_GROUP_ROWS), dtype=torch.float32, device=self.device
+                ),
+                slot_meta=torch.zeros(
+                    3 * KERNEL_GROUP_ROWS * reqs, dtype=torch.int32, device=self.device
+                ),
+                group_to_batch=torch.arange(
+                    reqs, dtype=torch.int32, device=self.device
+                ),
+                group_starts=torch.zeros(reqs, dtype=torch.int32, device=self.device),
+                # Never filled: every page of a row's causal blocks is written by
+                # the scorer, and nothing downstream reads past them.
+                page_max=torch.empty(
+                    (self._gfx942_index_heads * rows, KERNEL_PAGES_PER_BLOCK * width),
+                    dtype=torch.float32,
+                    device=self.device,
+                ),
+                cta_info=torch.empty(
+                    (num_ctas, CTA_INFO_WIDTH), dtype=torch.int32, device=self.device
                 ),
             )
-        cfg, cta_info = self._cta_info[key]
-        _, _, total = compute_varctx_schedule(
+        buf = self._gfx942_buffers
+        # One schedule per step, shared by every index layer. The grid is fixed
+        # at the buffer's CTA count, so a captured decode replays any batch.
+        _, cta_info, num_ctas = compute_prefill_schedule(
+            buf["group_to_batch"][:batch],
+            buf["group_starts"][:batch],
             d.seq_lens,
-            cfg["block_k"],
-            cfg["parallel_unit_num"],
+            GFX942_DECODE_BLOCK_K,
+            buf["cta_info"].shape[0],
             d.max_seq_len,
-            next_n=d.decode_query_len,
-            cta_info_out=cta_info,
+            cta_info_out=buf["cta_info"],
         )
-        return Gfx942DecodePlan(table, dict(cfg, cta_info=cta_info, total_ctas=total))
+        return Gfx942DecodePlan(
+            page64_table=table,
+            q_fp4=buf["q_fp4"],
+            q_scale=buf["q_scale"],
+            slot_meta=buf["slot_meta"],
+            group_to_batch=buf["group_to_batch"],
+            group_starts=buf["group_starts"],
+            page_max=buf["page_max"],
+            cta_info=cta_info,
+            num_ctas=num_ctas,
+            block_k=GFX942_DECODE_BLOCK_K,
+            q_fp8=buf["q_fp8"],
+            q_scale_f32=buf["q_scale_f32"],
+        )
 
     def _work_map_buffer(self) -> torch.Tensor:
         if self._work_map_buf is None:
@@ -445,6 +575,54 @@ def mxfp4_index_topk_decode(
     )
 
 
+# launcher + the specialization-relevant args -> FlyDSL CallState. The decode
+# indexer runs in the attention layer's eager break, so each of the 60 layers
+# pays the launcher's host-side signature binding and cache-key build per
+# step, which costs more than the kernel itself; a resolved CallState skips it.
+#
+# The key holds no tensor and no data pointer: a CallState re-reads every
+# pointer from the args it is called with (FlyDSL's own fast path does the
+# same), so it is keyed on what the compiled specialization depends on only.
+# Keying on data_ptr and keeping the bound args alive leaked one entry, and the
+# tensors it references, per call once an operand is a per-step activation or
+# a fresh output (the fused decode scorer's index Q and score buffer): device
+# memory then runs out mid-serve (hipErrorLaunchOutOfResources).
+_ROWPACK_CALLS: dict[tuple, object] = {}
+
+
+def _rowpack_call_key(launcher, args: tuple) -> tuple:
+    return (id(launcher),) + tuple(
+        (a.dtype, tuple(a.shape), tuple(a.stride()))
+        if isinstance(a, torch.Tensor)
+        else ("stream" if isinstance(a, torch.cuda.Stream) else a)
+        for a in args
+    )
+
+
+def _launch_rowpack_cached(launcher, args: tuple) -> None:
+    key = _rowpack_call_key(launcher, args)
+    state = _ROWPACK_CALLS.get(key)
+    if state is not None:
+        state(args)
+        return
+    launcher(*args)  # compiles on first use and populates the CallState cache
+    try:
+        bound = launcher._sig.bind(*args)
+        bound.apply_defaults()
+        if len(bound.arguments) != len(args):
+            raise TypeError("launcher has defaulted parameters")
+        cache_key = launcher._build_full_cache_key(
+            bound.arguments,
+            owner_cls=None,
+            bound_self=None,
+            effective_hints=launcher._effective_compile_hints(),
+        )
+        _ROWPACK_CALLS[key] = launcher._call_state_cache[cache_key]
+    except (AttributeError, KeyError, TypeError):
+        # A FlyDSL without these internals: stay on the public launcher.
+        _ROWPACK_CALLS[key] = lambda a: launcher(*a)
+
+
 def mxfp4_gfx942_index_scores_decode(
     index_query: torch.Tensor,
     index_pages: torch.Tensor,
@@ -457,133 +635,263 @@ def mxfp4_gfx942_index_scores_decode(
     init_blocks: int,
     local_blocks: int,
 ) -> torch.Tensor:
-    """Pinned signed block scores of the decode rows."""
-    from aiter.ops.flydsl import (
-        flydsl_pa_mqa_logits_fp4_gfx942,
-        flydsl_pa_mqa_logits_fp4_gfx942_longctx,
+    """Pinned signed block scores of the decode rows.
+
+    The index Q is scored as e4m3fnuz (one fp32 scale per row) against the
+    MXFP4 K cache, as gfx950's indexer does: same MFMA, no Q e2m1 decode, and
+    no MXFP4 Q rounding (the dominant top-k recall loss). One row-packed
+    scorer launch covers every index head and MTP row of the batch (see
+    :class:`Gfx942DecodePlan`); it packs Q and the slot metadata in its
+    prologue and writes pinned 128-token block scores from its epilogue.
+
+    Capability fallbacks (same results): an aiter whose scorer lacks the
+    block-score variant runs pack / page-max scorer / fold as three launches,
+    and one whose scorer lacks ``q_fp8`` scores an MXFP4 Q that way.
+    """
+    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_page_max_fp4_rowpack_prefill_gfx942 import (  # noqa: E501
+        compile_pa_mqa_page_max_fp4_rowpack_prefill_gfx942,
     )
 
     from .ops.mxfp4_gfx942 import (
-        decode_block_scores_gfx942,
+        KERNEL_HEADS,
+        decode_page_max_to_block_scores_gfx942,
         gfx942_mxfp4_cache_strides,
-        quantize_q_gfx942,
+        pack_decode_rows_fp8_gfx942,
+        pack_decode_rows_gfx942,
     )
 
-    long_ctx = bool(plan.scorer_kwargs)
-    scorer = (
-        flydsl_pa_mqa_logits_fp4_gfx942_longctx
-        if long_ctx
-        else flydsl_pa_mqa_logits_fp4_gfx942
-    )
+    q_fp8 = _aiter_rowpack_has_fp8q() and plan.q_fp8 is not None
     batch, (rows, heads) = seq_lens.shape[0], index_query.shape[:2]
     k, k_scale, cache_kw = gfx942_mxfp4_cache_strides(index_pages)
-    score = _new_score(heads, rows, max_seq_len, index_query.device)
-    for head in range(heads):
-        q, q_scale, weights = quantize_q_gfx942(index_query, head)
-        long_kwargs = {}
-        if long_ctx:
-            # A caller-built schedule leaves the -inf fill to the caller; the
-            # host-side Q-scale check cannot run inside a captured decode.
-            long_kwargs = dict(
-                plan.scorer_kwargs,
-                validate_q_scale=False,
-                out=torch.full(
-                    (rows, max_seq_len),
-                    float("-inf"),
-                    dtype=torch.float32,
-                    device=index_query.device,
-                ),
-            )
-        logits = scorer(
-            q.view(batch, query_len, *q.shape[1:]),
-            q_scale.view(batch, query_len, *q_scale.shape[1:]),
+    if q_fp8 and batch and _aiter_rowpack_has_block_out():
+        return _mxfp4_gfx942_index_scores_decode_fused(
+            index_query,
+            seq_lens,
+            plan,
+            k,
+            k_scale,
+            cache_kw,
+            max_seq_len=max_seq_len,
+            query_len=query_len,
+            scale=scale,
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+        )
+    if q_fp8:
+        assert plan.q_scale_f32 is not None
+        q_buf, qs_buf = plan.q_fp8, plan.q_scale_f32
+        slot_meta = pack_decode_rows_fp8_gfx942(
+            index_query, seq_lens, q_buf, qs_buf, plan.slot_meta, query_len=query_len
+        )
+        cache_kw = dict(cache_kw, q_fp8=True)
+    else:
+        q_buf, qs_buf = plan.q_fp4, plan.q_scale
+        slot_meta = pack_decode_rows_gfx942(
+            index_query, seq_lens, q_buf, qs_buf, plan.slot_meta, query_len=query_len
+        )
+    page_max = plan.page_max[: heads * rows]
+    # Every page of each row's causal window is written by the scheduled
+    # CTAs and the fold below reads no further, so no -inf fill is needed.
+    launcher, _ = compile_pa_mqa_page_max_fp4_rowpack_prefill_gfx942(
+        block_k=plan.block_k,
+        kv_block_size=64,
+        max_blocks_per_seq=plan.page64_table.shape[1],
+        num_warps=plan.block_k // 64,
+        head_dim=index_query.shape[-1],
+        **cache_kw,
+    )
+    _launch_rowpack_cached(
+        launcher,
+        (
+            page_max,
+            q_buf[:batch],
+            qs_buf[:batch],
             k,
             k_scale,
             plan.page64_table,
-            weights,
-            seq_lens,
-            max_seq_len,
-            weight_scale=scale,
-            next_n=query_len,
-            kv_block_size=64,
-            relu=False,
-            **cache_kw,
-            **long_kwargs,
-        )
-        decode_block_scores_gfx942(
-            logits,
-            seq_lens,
-            score[head],
-            query_len=query_len,
-            init_blocks=init_blocks,
-            local_blocks=local_blocks,
-            sentinel_init=SENTINEL_INIT,
-            sentinel_local=SENTINEL_LOCAL,
-        )
+            slot_meta,
+            plan.cta_info,
+            page_max.stride(0),
+            page_max.shape[1],
+            batch * KERNEL_HEADS,
+            page_max.numel(),
+            float(scale),
+            plan.num_ctas,
+            torch.cuda.current_stream(),
+        ),
+    )
+    score = _new_score(heads, rows, max_seq_len, index_query.device)
+    decode_page_max_to_block_scores_gfx942(
+        page_max.view(heads, rows, -1),
+        seq_lens,
+        score,
+        query_len=query_len,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        sentinel_init=SENTINEL_INIT,
+        sentinel_local=SENTINEL_LOCAL,
+    )
     return score
 
 
-def mxfp4_gfx942_index_scores_prefill(
-    index_query,
-    index_pages,
-    block_table,
-    cu_seqlens_q,
-    seq_lens,
-    num_valid_pages,
+def _mxfp4_gfx942_index_scores_decode_fused(
+    index_query: torch.Tensor,
+    seq_lens: torch.Tensor,
+    plan: Gfx942DecodePlan,
+    k: torch.Tensor,
+    k_scale: torch.Tensor,
+    cache_kw: dict,
     *,
-    max_seq_len,
-    scale,
-    init_blocks,
-    local_blocks,
+    max_seq_len: int,
+    query_len: int,
+    scale: float,
+    init_blocks: int,
+    local_blocks: int,
 ) -> torch.Tensor:
-    """Signed 128-token block maxima of every prefill row.
-
-    AITER packs 16 rows of a sequence into one MFMA tile and reduces to 64-token
-    page maxima in-kernel, so no ``[rows, max_seq_len]`` logits are formed.
-    """
-    from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_logits_fp4_prefill_gfx942 import (
-        compute_varqlen_windows,
-    )
+    """FP8-Q decode scores in one launch: the scorer packs the bf16 Q in its
+    prologue and writes pinned 128-token block scores directly (see
+    ``compile_pa_mqa_block_score_fp4_rowpack_decode_gfx942``). A Q the
+    prologue cannot read (not bf16, or odd strides) is packed by a separate
+    launch first."""
     from aiter.ops.flydsl.kernels.mqa_logits.pa_mqa_page_max_fp4_rowpack_prefill_gfx942 import (  # noqa: E501
-        flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942,
-        rowpack_prefill_inputs_gfx942,
-    )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-    from .ops.mxfp4_gfx942 import (
-        expand_block_table_page64,
-        gfx942_mxfp4_cache_strides,
+        compile_pa_mqa_block_score_fp4_rowpack_decode_gfx942,
     )
 
-    rows, heads = index_query.shape[:2]
-    k, k_scale, cache_kw = gfx942_mxfp4_cache_strides(index_pages)
-    table = expand_block_table_page64(block_table)
-    windows = compute_varqlen_windows(cu_seqlens_q, seq_lens, rows)
-    width = _score_width(max_seq_len, MSA_SPARSE_BLOCK_SIZE)
-    score = torch.empty(
-        (heads, rows, width), dtype=torch.float32, device=index_query.device
-    )
-    page_max = torch.empty(
-        (rows, 2 * width), dtype=torch.float32, device=index_query.device
-    )
-    for head in range(heads):
-        packed, scales = dynamic_mxfp4_quant(index_query[:, head].contiguous())
-        inputs = rowpack_prefill_inputs_gfx942(
-            packed, scales.view(torch.uint8).view(rows, -1), cu_seqlens_q, *windows
+    from .ops.mxfp4_gfx942 import KERNEL_HEADS, pack_decode_rows_fp8_gfx942
+
+    batch, (rows, heads) = seq_lens.shape[0], index_query.shape[:2]
+    assert plan.q_fp8 is not None and plan.q_scale_f32 is not None
+    if heads * query_len > KERNEL_HEADS:
+        raise ValueError(
+            f"{heads} index heads x {query_len} decode rows exceed the "
+            f"{KERNEL_HEADS}-slot MFMA group"
         )
-        page_max.fill_(float("-inf"))
-        flydsl_pa_mqa_page_max_fp4_rowpack_prefill_gfx942(
-            *inputs[:2],
+    fuse_q = (
+        index_query.dtype == torch.bfloat16
+        and index_query.stride(2) == 1
+        and index_query.stride(0) % 2 == 0
+        and index_query.stride(1) % 2 == 0
+    )
+    if fuse_q:
+        q_arg, qs_arg, meta = index_query, plan.q_scale_f32[:batch], plan.slot_meta
+        q_strides = (index_query.stride(0), index_query.stride(1))
+    else:
+        q_arg, qs_arg = plan.q_fp8[:batch], plan.q_scale_f32[:batch]
+        meta = pack_decode_rows_fp8_gfx942(
+            index_query,
+            seq_lens,
+            plan.q_fp8,
+            plan.q_scale_f32,
+            plan.slot_meta,
+            query_len=query_len,
+        )
+        q_strides = (0, 0)
+    score = _new_score(heads, rows, max_seq_len, index_query.device)
+    out2d = score.view(heads * rows, score.shape[2])
+    launcher, _ = compile_pa_mqa_block_score_fp4_rowpack_decode_gfx942(
+        block_k=plan.block_k,
+        max_blocks_per_seq=plan.page64_table.shape[1],
+        head_dim=index_query.shape[-1],
+        kv_page_stride=cache_kw["kv_page_stride"],
+        kv_scale_page_stride=cache_kw["kv_scale_page_stride"],
+        kv_scale_offset=cache_kw["kv_scale_offset"],
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        sentinel_init=SENTINEL_INIT,
+        sentinel_local=SENTINEL_LOCAL,
+        fused_q_heads=heads if fuse_q else 0,
+        fused_q_len=query_len if fuse_q else 1,
+    )
+    _launch_rowpack_cached(
+        launcher,
+        (
+            out2d,
+            q_arg,
+            qs_arg,
             k,
             k_scale,
-            table,
-            *inputs[2:],
-            max_seq_len,
-            page_max,
-            weight_scale=scale,
-            **cache_kw,
-        )
-        score[head] = page_max.view(rows, width, 2).amax(-1)
+            plan.page64_table,
+            meta,
+            plan.cta_info,
+            out2d.stride(0),
+            out2d.shape[1],
+            batch * KERNEL_HEADS,
+            out2d.numel(),
+            float(scale),
+            seq_lens,
+            q_strides[0],
+            q_strides[1],
+            rows,
+            plan.num_ctas,
+            torch.cuda.current_stream(),
+        ),
+    )
+    return score
+
+
+def mxfp4_gfx942_index_scores_prefill_fp8copy(
+    index_query: torch.Tensor,  # [rows, H, 128] bf16
+    index_pages: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seq_lens: torch.Tensor,
+    context_lens: torch.Tensor,
+    num_valid_pages: torch.Tensor,
+    *,
+    max_query_len: int,
+    max_seq_len: int,
+    scale: float,
+    init_blocks: int,
+    local_blocks: int,
+) -> torch.Tensor:
+    """Prefill index scores from an exact e4m3fnuz copy of the MXFP4 index K.
+
+    e2m1 * 2^e with the RMS-normed index K's block exponents is exactly
+    representable in e4m3fnuz, so the transient fp8 copy holds the same K the
+    MXFP4 scorer decodes; the copy feeds the fp8 MFMA
+    Triton score kernel the fp8 indexer uses. Q is rounded to e4m3fnuz per
+    element there (the fp8 indexer's Q precision; finer than MXFP4 Q).
+    The copy is gathered in request-block order into a compact buffer so it
+    never needs the cache's full size.
+    """
+    from .ops.index_topk import minimax_m3_index_score
+    from .ops.mxfp4_gfx942 import mxfp4_pages_to_fp8_gfx942
+
+    rows, heads = index_query.shape[:2]
+    nblk = block_table.shape[1]
+    batch = block_table.shape[0]
+    fp8 = current_platform.fp8_dtype()
+    need = batch * nblk
+    buf = _FP8_COPY.get(index_pages.device)
+    if buf is None or buf.shape[0] < need:
+        buf = torch.empty((need, 128, 128), dtype=fp8, device=index_pages.device)
+        _FP8_COPY[index_pages.device] = buf
+    from .ops.mxfp4_gfx942 import MANAGER_BLOCK_BYTES
+
+    mxfp4_pages_to_fp8_gfx942(
+        index_pages.reshape(-1, MANAGER_BLOCK_BYTES),
+        block_table.reshape(-1),
+        buf[:need],
+    )
+    compact_bt = torch.arange(need, dtype=torch.int32, device=block_table.device).view(
+        batch, nblk
+    )
+    score = minimax_m3_index_score(
+        index_query.to(fp8),
+        buf[:need],
+        compact_bt,
+        cu_seqlens_q,
+        seq_lens,
+        context_lens,
+        max_query_len,
+        max_seq_len,
+        heads,
+    )
+    # The top-k reads power-of-two-padded rows; copy into that layout.
+    out = _new_score(heads, rows, max_seq_len, index_query.device)
+    w = min(out.shape[2], score.shape[2])
+    torch.mul(score[..., :w], scale, out=out[..., :w])
+    score = out
     _pin_forced_blocks(
         score,
         init_blocks=init_blocks,
@@ -591,6 +899,9 @@ def mxfp4_gfx942_index_scores_prefill(
         num_valid_pages=num_valid_pages,
     )
     return score
+
+
+_FP8_COPY: dict[torch.device, torch.Tensor] = {}
 
 
 def mxfp4_index_topk_prefill(
@@ -663,14 +974,73 @@ class MiniMaxM3IndexerRocmMxfp4Impl(MiniMaxM3IndexerImpl):
         )
         if reason is not None:
             raise ValueError(f"MiniMax M3 MXFP4 indexer on ROCm {reason}")
+        cfg = get_current_vllm_config()
+        self._workspace_dims = (
+            cfg.scheduler_config.max_num_batched_tokens,
+            cfg.model_config.max_model_len,
+        )
         self.sparse_bt_buffer: torch.Tensor | None = None
         self.sparse_ctx_buffer: torch.Tensor | None = None
+
+    def reserve_workspace(self) -> None:
+        """Make the memory-profiling run see the transient score buffers of a
+        full prefill chunk at max_model_len.
+
+        The profile run skips ``forward`` (caches unbound), so without this the
+        fp32 ``[H, max_num_batched_tokens, blocks]`` score tensors
+        a long-context prefill allocates are unaccounted for and the KV cache
+        is sized into them (OOM at 512k / 16k-token chunks on TP4).
+        """
+        if _mxfp4_arch() != "gfx942":
+            return
+        rows, msl = self._workspace_dims
+        heads = self.num_index_heads
+        dev = self.index_cache.kv_cache.device
+        if dev.type != "cuda":
+            dev = torch.device("cuda", torch.cuda.current_device())
+        score = torch.empty(
+            (heads, rows, _score_width(msl, MSA_SPARSE_BLOCK_SIZE)),
+            dtype=torch.float32,
+            device=dev,
+        )
+        # The fp8-copy prefill's unpadded block scores, live alongside the
+        # padded copy the top-k reads.
+        page_max = torch.empty(
+            (heads * rows, 2 * cdiv(msl, MSA_SPARSE_BLOCK_SIZE)),
+            dtype=torch.float32,
+            device=dev,
+        )
+        # Touch both so the caching allocator's peak includes them.
+        score[0, 0, 0] = 0
+        page_max[0, 0] = 0
+        if not getattr(MiniMaxM3IndexerRocmMxfp4Impl, "_logged_reserve", False):
+            MiniMaxM3IndexerRocmMxfp4Impl._logged_reserve = True
+            from vllm.logger import init_logger
+
+            init_logger(__name__).info(
+                "MiniMax M3 MXFP4 indexer: reserving %.2f GiB of prefill "
+                "score workspace in the memory profile (rows=%d, max_len=%d)",
+                (score.numel() + page_max.numel()) * 4 / 2**30,
+                rows,
+                msl,
+            )
+        del score, page_max
 
     @property
     def pages_per_block(self) -> int:
         from .ops.sparse_pa import ASM_PAGE_SIZE
 
         return self.block_size // ASM_PAGE_SIZE
+
+    def _decode_topk_counter(self, rows: int) -> torch.Tensor | None:
+        """Per-row arrival counters of the Triton selector's merge. Zero
+        between launches (the merging program resets its row), so a persistent
+        buffer keeps a captured graph's address fixed. ``None`` lets the
+        selector allocate zeros itself (eager, no shared top-k buffer)."""
+        counter = getattr(self, "topk_completion_counter", None)
+        if counter is None or counter.shape[1] < rows:
+            return None
+        return counter
 
     def _table_rows(self, lo: int, hi: int) -> tuple[torch.Tensor, torch.Tensor]:
         rows = (hi - lo) * self.num_kv_heads
@@ -696,7 +1066,9 @@ class MiniMaxM3IndexerRocmMxfp4Impl(MiniMaxM3IndexerImpl):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
-            return None, None  # profiling run; caches unbound
+            # Profiling run, caches unbound: charge the prefill transients.
+            self.reserve_workspace()
+            return None, None
         md = attn_metadata[self.index_cache.prefix]
         assert isinstance(md, MiniMaxM3IndexerMxfp4Metadata)
         num_tokens = md.num_actual_tokens
@@ -740,11 +1112,7 @@ class MiniMaxM3IndexerRocmMxfp4Impl(MiniMaxM3IndexerImpl):
                     local_blocks=self.local_blocks,
                 )
                 sparse_bt, sparse_ctx = self._table_rows(0, nd)
-                pa_sparse_block_topk(
-                    score,
-                    decode_topk,
-                    page16,
-                    d.seq_lens,
+                topk_args = dict(
                     sparse_bt=sparse_bt,
                     sparse_ctx=sparse_ctx,
                     max_seq_len=d.max_seq_len,
@@ -753,6 +1121,24 @@ class MiniMaxM3IndexerRocmMxfp4Impl(MiniMaxM3IndexerImpl):
                     num_kv_heads=self.num_kv_heads,
                     pages_per_block=self.pages_per_block,
                 )
+                backend = gfx942_decode_topk_backend(
+                    nd, self.num_index_heads, d.max_seq_len, self.block_size
+                )
+                if backend == "triton":
+                    from .ops.mxfp4_decode_topk import mxfp4_decode_topk
+
+                    mxfp4_decode_topk(
+                        score,
+                        decode_topk,
+                        page16,
+                        d.seq_lens,
+                        counter=self._decode_topk_counter(nd),
+                        **topk_args,
+                    )
+                else:
+                    pa_sparse_block_topk(
+                        score, decode_topk, page16, d.seq_lens, **topk_args
+                    )
             else:
                 mxfp4_index_topk_decode(
                     iq[:nd],
@@ -777,13 +1163,15 @@ class MiniMaxM3IndexerRocmMxfp4Impl(MiniMaxM3IndexerImpl):
                 assert page16 is not None
                 assert md.prefill_row_req_id is not None
                 assert md.prefill_kv_lens is not None
-                score = mxfp4_gfx942_index_scores_prefill(
+                score = mxfp4_gfx942_index_scores_prefill_fp8copy(
                     iq[nd:],
                     pages,
                     p.block_table,
                     p.cu_seqlens_q,
                     p.seq_lens,
+                    p.context_lens,
                     md.prefill_num_valid_pages,
+                    max_query_len=p.max_query_len,
                     max_seq_len=p.max_seq_len,
                     scale=self.scale,
                     init_blocks=self.init_blocks,

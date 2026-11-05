@@ -1077,23 +1077,58 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             dim=-1,
         )
 
-        q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
-        k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
-        q, k = self.rotary_emb.forward_native(positions, q, k)
-        assert k is not None
-        q = q.reshape(num_tokens, self.q_size)
+        main_rope = self.rotary_emb
+        if (
+            main_rope.is_neox_style
+            and type(main_rope).forward_native is RotaryEmbedding.forward_native
+            and qkv.stride(-1) == 1
+        ):
+            from vllm.models.minimax_m3.amd.ops.main_norm_rope_gfx942 import (
+                main_norm_rope_gfx942,
+            )
+
+            # Per-head Gemma RMSNorm + partial NeoX RoPE for q and k in one
+            # launch instead of ~10 eager ops.
+            q, k = main_norm_rope_gfx942(
+                qkv,
+                positions,
+                self.q_norm.weight,
+                self.k_norm.weight,
+                main_rope.cos_sin_cache,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                rotary_dim=main_rope.rotary_dim,
+                eps=self.q_norm.variance_epsilon,
+            )
+        else:
+            q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim))
+            k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim))
+            q, k = main_rope.forward_native(positions, q, k)
+            assert k is not None
+            q = q.reshape(num_tokens, self.q_size)
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        if self.kv_cache.numel() != 0:
-            if self.use_aiter_sparse_pa:
-                cache = self.kv_cache
-                if is_quantized_kv_cache(self.kv_cache_dtype):
-                    cache = cache.view(self.impl.kv_cache_fp8_dtype)
-                key_cache, value_cache = cache.unbind(1)
-            else:
-                key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
-                    self.head_dim, dim=-1
-                )
+        if self.kv_cache.numel() != 0 and self.use_aiter_sparse_pa:
+            # The AITER sparse PA attend reads its own page-16 x-packed layout;
+            # write K/V the way the fused path does, not as a flash cache.
+            key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+            self._insert_aiter_sparse_pa_kv(
+                k,
+                v.view(num_tokens, self.num_kv_heads, self.head_dim),
+                None,
+                self._get_aiter_sparse_pa_slot_mapping(
+                    main_slot_mapping, key_cache, value_cache
+                ),
+                None,
+                key_cache,
+                value_cache,
+            )
+        elif self.kv_cache.numel() != 0:
+            # [block, head, token, 2 * dim] -> [block, token, head, dim].
+            key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
+                self.head_dim, dim=-1
+            )
             triton_reshape_and_cache_flash(
                 k,
                 v.view(num_tokens, self.num_kv_heads, self.head_dim),
@@ -1110,42 +1145,47 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         rope = self.index_rotary_emb
         mxfp4_index = self.indexer_kv_dtype == "mxfp4"
+        index_cache = self.indexer.index_cache.kv_cache
+        index_slot_mapping = fwd_slot_mapping.get(self.indexer.index_cache.prefix)
         if (
             mxfp4_index
             and rope.is_neox_style
             and type(rope).forward_native is RotaryEmbedding.forward_native
         ):
-            from vllm.models.minimax_m3.amd.ops.index_norm_rope_gfx942 import (
-                index_norm_rope_gfx942,
+            from vllm.models.minimax_m3.amd.ops.index_norm_rope_store_gfx942 import (
+                index_norm_rope_store_gfx942,
             )
 
-            index_q, index_k = index_norm_rope_gfx942(
+            # Index norm + RoPE + MXFP4 index-K insert in one launch
+            # (bit-identical to index_norm_rope_gfx942 + store_k_gfx942).
+            index_q = index_norm_rope_store_gfx942(
                 qkv,
                 positions,
                 self.index_q_norm.weight,
                 self.index_k_norm.weight,
                 rope.cos_sin_cache,
+                index_cache,
+                index_slot_mapping,
                 q_start=self.q_size + 2 * self.kv_size,
                 num_heads=self.num_idx_heads,
                 head_dim=self.idx_head_dim,
                 rotary_dim=rope.rotary_dim,
                 eps=self.index_q_norm.variance_epsilon,
             )
-        else:
-            index_q = self.index_q_norm(
-                index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
+            return q, index_q.reshape(num_tokens, self.index_q_size).to(
+                self.indexer.index_cache.query_dtype
             )
-            index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
-            index_q, index_k = rope.forward_native(positions, index_q, index_k)
-            assert index_k is not None
+        index_q = self.index_q_norm(
+            index_q_raw.view(num_tokens, self.num_idx_heads, self.idx_head_dim)
+        )
+        index_k = self.index_k_norm(index_k_raw.view(num_tokens, self.idx_head_dim))
+        index_q, index_k = rope.forward_native(positions, index_q, index_k)
+        assert index_k is not None
         index_q = index_q.reshape(num_tokens, self.index_q_size).to(
             self.indexer.index_cache.query_dtype
         )
         index_k = index_k.reshape(num_tokens, self.idx_head_dim)
-
-        index_cache = self.indexer.index_cache.kv_cache
         if index_cache.numel() != 0:
-            index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
             if mxfp4_index:
                 from vllm.models.minimax_m3.amd.ops.mxfp4_gfx942 import store_k_gfx942
 

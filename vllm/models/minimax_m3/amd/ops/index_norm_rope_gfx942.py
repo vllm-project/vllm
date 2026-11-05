@@ -122,6 +122,6 @@ def index_norm_rope_gfx942(
             HEADS=num_heads,
             HEAD_DIM=head_dim,
             ROT=rotary_dim,
-            num_warps=1,
+            num_warps=4,  # = gemma_rmsnorm reduction order (bit-exact)
         )
     return q_out, k_out
