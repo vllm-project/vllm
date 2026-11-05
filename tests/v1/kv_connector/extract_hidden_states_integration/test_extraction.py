@@ -275,7 +275,7 @@ def test_decode_drafts_option_saves_all_positions(
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
-            "extract_hidden_states_decode_drafts": decode_drafts,
+            "disable_extract_hidden_states_decode_drafts": not decode_drafts,
             "draft_model_config": {
                 "hf_config": {"eagle_aux_hidden_state_layer_ids": layer_ids}
             },

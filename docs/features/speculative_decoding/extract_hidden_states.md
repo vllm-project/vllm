@@ -117,13 +117,13 @@ The `kv_connector_extra_config` dict accepts these server-level options:
 
 By default, this method schedules one draft token per request on every decode step. The draft is the token that was just sampled, so it is accepted only if the model repeats that token. Saving hidden states does not depend on these drafts, including with `include_output_tokens`, but they add a scheduled token per request per decode step.
 
-Set `extract_hidden_states_decode_drafts` to `False` in `speculative_config` to schedule none:
+Set `disable_extract_hidden_states_decode_drafts` to `True` in `speculative_config` to schedule none:
 
 ```python
 speculative_config={
     "method": "extract_hidden_states",
     "num_speculative_tokens": 1,
-    "extract_hidden_states_decode_drafts": False,
+    "disable_extract_hidden_states_decode_drafts": True,
     "draft_model_config": {
         "hf_config": {
             "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],

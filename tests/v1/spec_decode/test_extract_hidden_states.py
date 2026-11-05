@@ -502,7 +502,7 @@ def _create_config_without_decode_drafts(
             method="extract_hidden_states",
             num_speculative_tokens=1,
             num_speculative_tokens_per_batch_size=schedule,
-            extract_hidden_states_decode_drafts=False,
+            disable_extract_hidden_states_decode_drafts=True,
             draft_model_config={
                 "hf_config": {"eagle_aux_hidden_state_layer_ids": [1, 2]}
             },
@@ -550,5 +550,5 @@ def test_no_decode_drafts_rejects_other_methods():
         SpeculativeConfig(
             method="ngram",
             num_speculative_tokens=1,
-            extract_hidden_states_decode_drafts=False,
+            disable_extract_hidden_states_decode_drafts=True,
         )

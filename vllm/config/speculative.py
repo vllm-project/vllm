@@ -582,14 +582,14 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
-    extract_hidden_states_decode_drafts: bool = True
-    """Whether ``method="extract_hidden_states"`` schedules a draft on decode steps.
-
-    These drafts are not needed to save hidden states, including with
-    ``include_output_tokens``, and are rarely accepted. ``False`` schedules none by
-    setting ``num_speculative_tokens_per_batch_size`` to K=0 for all batch sizes.
-    ``False`` requires Model Runner V2 and does not support data parallelism.
-    """
+    disable_extract_hidden_states_decode_drafts: bool = False
+    """Disable the draft token that the extract_hidden_states method schedules
+    on every decode step. Saving hidden states does not need these drafts, even
+    with include_output_tokens, and they are rarely accepted. If set to True,
+    num_speculative_tokens_per_batch_size is set to 0 speculative tokens for
+    all batch sizes, so the two cannot be combined. Requires
+    method='extract_hidden_states' and Model Runner V2, and does not support
+    data parallelism."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -1710,15 +1710,15 @@ class SpeculativeConfig:
                 "may degrade model outputs."
             )
 
-        if not self.extract_hidden_states_decode_drafts:
+        if self.disable_extract_hidden_states_decode_drafts:
             if not self.uses_extract_hidden_states():
                 raise ValueError(
-                    "extract_hidden_states_decode_drafts=False requires "
+                    "disable_extract_hidden_states_decode_drafts=True requires "
                     "method='extract_hidden_states'."
                 )
             if self.num_speculative_tokens_per_batch_size not in (None, [(1, 1, 0)]):
                 raise ValueError(
-                    "extract_hidden_states_decode_drafts=False sets "
+                    "disable_extract_hidden_states_decode_drafts=True sets "
                     "num_speculative_tokens_per_batch_size, so the two cannot be "
                     "combined."
                 )
