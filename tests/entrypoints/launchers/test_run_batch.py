@@ -665,7 +665,7 @@ async def test_batch_embedding_json_responses(response_factory):
 async def test_batch_embedding_json_body_is_written_as_is():
     # Built the way EmbeddingServing builds it for encoding_format=float.
     item = EmbeddingResponseData(index=0, embedding=[]).model_dump()
-    item["embedding"] = np.array([7.177709e-6, -0.5], dtype=np.float32)
+    item["embedding"] = np.array([7.177709e-6, np.nan], dtype=np.float32)
     body = EmbeddingResponse(
         id="embd-test",
         model=EMBEDDING_MODEL_NAME,
@@ -682,33 +682,13 @@ async def test_batch_embedding_json_body_is_written_as_is():
         INPUT_EMBEDDING_BATCH.splitlines()[0]
     )
     result = await run_batch_module.run_request(handler, request)
+    line = result.to_json_line()
 
-    # orjson writes the float32 value as 0.000007177709. Parsing the body back
-    # and dumping it again would write 7.177709e-6. If this fails after a change
-    # to the embeddings response, update the "data"/"usage" check in run_request.
-    assert bytes(response.body).decode() in result.to_json_line()
-
-
-@pytest.mark.asyncio
-async def test_batch_embedding_non_finite_response_is_an_error():
-    response = EmbeddingResponse(
-        id="embd-test",
-        model=EMBEDDING_MODEL_NAME,
-        data=[EmbeddingResponseData(index=0, embedding=[float("nan")])],
-        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
-    )
-
-    async def handler(request):
-        return create_json_response(response.model_dump())
-
-    request = run_batch_module.BatchRequestInput.model_validate_json(
-        INPUT_EMBEDDING_BATCH.splitlines()[0]
-    )
-    result = await run_batch_module.run_request(handler, request)
-
-    assert result.error is not None
-    assert result.response is not None
-    assert result.response.status_code != 200
+    # orjson writes the float32 value as 0.000007177709 and NaN as null, as the
+    # online server returns them. Parsing the body back would rewrite the first
+    # and reject the second.
+    assert bytes(response.body).decode() in line
+    assert json.loads(line)["error"] is None
 
 
 @pytest.mark.asyncio

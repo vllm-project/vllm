@@ -653,20 +653,11 @@ async def run_request(
         and not isinstance(response, StreamingResponse)
         and response.media_type == "application/json"
     ):
-        body = bytes(response.body)
-        data_start = body.find(b'"data":')
-        data_end = body.rfind(b'"usage":')
-        # orjson writes NaN and Inf as null. Parse those so they still fail.
-        if (
-            request.url == "/v1/embeddings"
-            and response.status_code == HTTPStatus.OK
-            and 0 <= data_start < data_end
-            and b"null" not in body[data_start:data_end]
-        ):
-            raw_body = body
+        if request.url == "/v1/embeddings" and response.status_code == HTTPStatus.OK:
+            raw_body = bytes(response.body)
         else:
             with contextlib.suppress(pydantic.ValidationError):
-                response = _ALL_RESPONSE_ADAPTER.validate_json(body)
+                response = _ALL_RESPONSE_ADAPTER.validate_json(response.body)
 
     if raw_body is not None:
         batch_output = BatchRequestOutput(
