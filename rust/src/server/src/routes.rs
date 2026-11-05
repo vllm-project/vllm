@@ -46,8 +46,6 @@ const SCALE_OUT_DISABLED_MESSAGE: &str =
 /// `/inference/v1/generate` but the Rust frontend does not implement yet.
 const UNIMPLEMENTED_SCALE_OUT_ROUTES: &[&str] = &[
     "/inference/v1/abort_requests",
-    "/v1/chat/completions/render",
-    "/v1/completions/render",
     "/v1/messages/render",
     "/v1/responses/render",
     "/v1/chat/completions/derender",
@@ -173,13 +171,27 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
 
     if gates.scale_out {
         router = router.route("/inference/v1/generate", post(inference::generate));
+        // Render routes reuse the standalone `vllm-rs render` pipeline over
+        // the serving processors, so no second model load is needed.
+        router = router
+            .route(
+                "/v1/chat/completions/render",
+                post(render::server_render_chat),
+            )
+            .route(
+                "/v1/completions/render",
+                post(render::server_render_completion),
+            );
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(not_supported));
         }
     } else {
         info!("{SCALE_OUT_DISABLED_MESSAGE}");
-        router = router.route("/inference/v1/generate", post(disabled_scale_out));
+        router = router
+            .route("/inference/v1/generate", post(disabled_scale_out))
+            .route("/v1/chat/completions/render", post(disabled_scale_out))
+            .route("/v1/completions/render", post(disabled_scale_out));
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
         }

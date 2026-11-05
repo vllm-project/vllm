@@ -1088,10 +1088,8 @@ async fn scale_out_generate_route_can_be_enabled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
-    const ROUTES: [&str; 7] = [
+    const ROUTES: [&str; 5] = [
         "/inference/v1/abort_requests",
-        "/v1/chat/completions/render",
-        "/v1/completions/render",
         "/v1/messages/render",
         "/v1/responses/render",
         "/v1/chat/completions/derender",
@@ -1118,6 +1116,60 @@ async fn unimplemented_scale_out_routes_follow_scale_out_gate() {
 
     let disabled = build_router_with_gates(state, RouteGates::default());
     for uri in ROUTES {
+        let response = disabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .body(Body::from("not JSON"))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+    }
+}
+
+/// The chat and completions render routes are implemented: the enabled router
+/// validates them like ordinary OpenAI routes (a bad body is a 400, not the
+/// 501 placeholder), while the disabled router still answers 403 instead of
+/// falling through to a 404.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_routes_follow_scale_out_gate() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render-gate",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let state = Arc::new(AppState::new(vec!["model".to_string()], chat));
+
+    let enabled = build_router_with_scale_out_endpoints(state.clone(), true);
+    // Bodies missing their required fields fail extraction, which is how an
+    // ordinary OpenAI route would reject them.
+    for (uri, body) in [
+        ("/v1/chat/completions/render", json!({"foo": "bar"})),
+        ("/v1/completions/render", json!({})),
+    ] {
+        let response = enabled
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+    }
+
+    let disabled = build_router_with_scale_out_endpoints(state, false);
+    for uri in ["/v1/chat/completions/render", "/v1/completions/render"] {
         let response = disabled
             .clone()
             .call(
@@ -2173,6 +2225,290 @@ async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
     // the prompt as the chat route would.
     assert_eq!(generate_json["prompt_token_ids"], expected_prompt_token_ids);
     engine_task.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_chat_returns_generate_request_with_header_request_id() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render-chat",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "cache_salt": "render-cache-salt",
+                        "priority": -3
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["request_id"], "chatcmpl-header-req");
+    assert_eq!(json["model"], "model");
+    assert_eq!(json["stream"], true);
+    assert_eq!(json["stream_options"]["include_usage"], true);
+    assert_eq!(json["cache_salt"], "render-cache-salt");
+    assert_eq!(json["priority"], -3);
+    assert_eq!(json["sampling_params"]["max_tokens"], 8);
+    assert!(!json["token_ids"].as_array().unwrap().is_empty());
+    assert!(json.get("prompt_token_ids").is_none());
+    assert!(json.get("mm_features").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_completion_returns_generate_requests() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render-completion",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "model",
+                        "prompt": "hello",
+                        "max_tokens": 8,
+                        "return_token_ids": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    // Like Python, the completions route answers with a list of requests.
+    let requests = json.as_array().expect("list of generate requests");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["request_id"], "cmpl-body-req");
+    assert_eq!(request["model"], "model");
+    assert_eq!(request["stream"], false);
+    assert_eq!(request["sampling_params"]["max_tokens"], 8);
+    assert_eq!(request["return_token_ids"], true);
+    assert!(!request["token_ids"].as_array().unwrap().is_empty());
+    assert!(request.get("stream_options").is_none());
+    assert!(request.get("prompt_token_ids").is_none());
+    assert!(request.get("mm_features").is_none());
+    assert!(request.get("reasoning_ended").is_none());
+    assert!(request.get("reasoning_parser_kwargs").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_chat_response_can_be_submitted_to_generate_unchanged() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render-round-trip",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut render_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+    let render_response = render_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "round-trip",
+                        "model": "model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "bad_words": ["blocked"],
+                        "vllm_xargs": {"custom": 1},
+                        "kv_transfer_params": {"do_remote_decode": true},
+                        "ec_transfer_params": {"do_remote_encode": true},
+                        "chat_template_kwargs": {"enable_thinking": false},
+                        "return_token_ids": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build render request"),
+        )
+        .await
+        .expect("call render app");
+
+    assert_eq!(render_response.status(), StatusCode::OK);
+    let render_body = to_bytes(render_response.into_body(), usize::MAX)
+        .await
+        .expect("read render response");
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_body).expect("decode render response");
+    let token_ids: Vec<u32> = serde_json::from_value(render_json["token_ids"].clone())
+        .expect("decode rendered token IDs");
+
+    assert_eq!(render_json["model"], "model");
+    assert_eq!(
+        render_json["sampling_params"]["bad_words"],
+        json!(["blocked"])
+    );
+    // Transfer params move to the top level, like Python render.
+    assert_eq!(
+        render_json["sampling_params"]["vllm_xargs"],
+        json!({"custom": 1})
+    );
+    assert_eq!(
+        render_json["kv_transfer_params"],
+        json!({"do_remote_decode": true})
+    );
+    assert_eq!(
+        render_json["ec_transfer_params"],
+        json!({"do_remote_encode": true})
+    );
+    assert_eq!(
+        render_json["reasoning_parser_kwargs"],
+        json!({"chat_template_kwargs": {"enable_thinking": false}})
+    );
+    assert_eq!(render_json["return_token_ids"], true);
+
+    let expected_prompt_token_ids = json!(token_ids);
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-scale-out-render-generate-round-trip",
+        |request_id| engine_outputs_for_request(request_id, default_stream_output_specs()),
+        move |request| {
+            assert_eq!(
+                request.prompt_token_ids.as_deref(),
+                Some(token_ids.as_slice())
+            );
+            assert_eq!(
+                request
+                    .reasoning_parser_kwargs
+                    .as_ref()
+                    .map(|kwargs| &kwargs.chat_template_kwargs["enable_thinking"]),
+                Some(&json!(false))
+            );
+            let extra_args = request
+                .sampling_params
+                .as_ref()
+                .and_then(|params| params.extra_args.as_ref())
+                .expect("extra args");
+            assert_eq!(extra_args["custom"], json!(1));
+            assert_eq!(
+                extra_args["kv_transfer_params"],
+                json!({"do_remote_decode": true})
+            );
+            assert_eq!(
+                extra_args["ec_transfer_params"],
+                json!({"do_remote_encode": true})
+            );
+        },
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut generate_app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+    let generate_response = generate_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(render_body))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("call generate app");
+
+    assert_eq!(generate_response.status(), StatusCode::OK);
+    let generate_body = to_bytes(generate_response.into_body(), usize::MAX)
+        .await
+        .expect("read generate response");
+    let generate_json: serde_json::Value =
+        serde_json::from_slice(&generate_body).expect("decode generate response");
+    // The request's `return_token_ids` survives render, so generate echoes
+    // the prompt as the chat route would.
+    assert_eq!(generate_json["prompt_token_ids"], expected_prompt_token_ids);
+    engine_task.finish().await;
+}
+
+/// Like the chat and completions routes, the scale-out render routes reject a
+/// requested output budget above the engine-reported context window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn scale_out_render_rejects_max_tokens_above_max_model_len() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-scale-out-render-max-tokens",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_scale_out_endpoints(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        true,
+    );
+    let max_tokens = DEFAULT_MOCK_MAX_MODEL_LEN + 1;
+
+    let mut errors = Vec::new();
+    for (uri, body) in [
+        (
+            "/v1/chat/completions/render",
+            json!({
+                "model": "model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_completion_tokens": max_tokens,
+            }),
+        ),
+        (
+            "/v1/completions/render",
+            json!({"model": "model", "prompt": "hello", "max_tokens": max_tokens}),
+        ),
+    ] {
+        let (status, json) = post_json(&mut app, uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {json}");
+        errors.push(json.to_string());
+    }
+    expect_test::expect![[r#"
+        {"error":{"message":"max_completion_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_completion_tokens","code":400}}
+        {"error":{"message":"max_tokens=1048577 cannot be greater than max_model_len=1048576. Please request fewer output tokens.","type":"BadRequestError","param":"max_tokens","code":400}}"#]].assert_eq(&errors.join("\n"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
