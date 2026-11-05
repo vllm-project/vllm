@@ -175,15 +175,12 @@ def _fused_mla_prefill_qkv_supported() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def _fused_mla_prefill_supported() -> bool:
-    """Whether prefill with context may take one causal launch.
-
-    Requires gfx950, the only arch the fused path is measured on.
-    """
+    """Whether prefill with context may take one causal launch."""
     try:
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
     except Exception:  # noqa: BLE001
         return False
-    return on_gfx950()
+    return on_gfx950() or on_gfx1250()
 
 
 @functools.lru_cache(maxsize=1)
