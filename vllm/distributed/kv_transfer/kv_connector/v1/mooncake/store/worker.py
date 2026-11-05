@@ -41,6 +41,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.circuit_breaker import (  # noqa: E501
+    CircuitBreaker,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -2740,9 +2743,11 @@ class LookupKeyServer:
 class LookupState:
     future: Future[MooncakeLookupResult]
     signature: tuple[int, int, bytes]
+    deadline: float
     # Freshness runs from when the RPC returned, not when it was queued.
     completed_at: float | None = None
-    error_logged: bool = False
+    # Repeated reads of a cached outcome must not update the breaker again.
+    result: MooncakeLookupResult | None = None
 
     def __post_init__(self) -> None:
         self.future.add_done_callback(self._mark_completed)
@@ -2771,6 +2776,11 @@ class LookupKeyClient:
     """
 
     def __init__(self, vllm_config: VllmConfig):
+        self._lookup_timeout_s = envs.VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS
+        cooldown_s = envs.VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS
+        threshold = envs.VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD
+        assert self._lookup_timeout_s > 0, "Mooncake lookup timeout must be positive"
+        self.circuit_breaker = CircuitBreaker(cooldown_s, threshold)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -2780,7 +2790,12 @@ class LookupKeyClient:
             bind=False,
         )
 
+        # Allow a new request after a timeout and discard late replies to it.
+        self.socket.setsockopt(zmq.REQ_RELAXED, 1)
+        self.socket.setsockopt(zmq.REQ_CORRELATE, 1)
+
         # Async lookup support
+        # One shared ZMQ REQ socket requires serial send/receive operations.
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
@@ -2793,8 +2808,13 @@ class LookupKeyClient:
         )
         self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
+    def _wait_for_socket(self, event: int, deadline: float) -> None:
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0 or not self.socket.poll(remaining_ms, event):
+            raise TimeoutError("Mooncake lookup timed out")
+
     def _lookup(
-        self, num_tokens: int, block_hashes: list[BlockHash]
+        self, num_tokens: int, block_hashes: list[BlockHash], deadline: float
     ) -> MooncakeLookupResult:
         hash_len = len(block_hashes[0]) if block_hashes else 0
         all_frames = (
@@ -2803,9 +2823,10 @@ class LookupKeyClient:
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
         )
-        self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
-        return decode_lookup_response(resp)
+        self._wait_for_socket(zmq.POLLOUT, deadline)
+        self.socket.send_multipart(all_frames, copy=False, flags=zmq.NOBLOCK)
+        self._wait_for_socket(zmq.POLLIN, deadline)
+        return decode_lookup_response(self.socket.recv(flags=zmq.NOBLOCK))
 
     def lookup(
         self,
@@ -2816,6 +2837,9 @@ class LookupKeyClient:
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
         then cache it until expiry or discard()."""
+        if self.circuit_breaker.is_open:
+            self.discard(req_id)
+            return MooncakeLookupResult(0)
         now = time.monotonic()
         signature = _lookup_signature(num_tokens, block_hashes)
         state = self._lookups.get(req_id)
@@ -2829,22 +2853,27 @@ class LookupKeyClient:
             self.discard(req_id)
             state = None
         if state is None:
+            deadline = now + self._lookup_timeout_s
             state = LookupState(
                 future=self.executor.submit(
-                    self._lookup, num_tokens, list(block_hashes)
+                    self._lookup, num_tokens, list(block_hashes), deadline
                 ),
                 signature=signature,
+                deadline=deadline,
             )
             self._lookups[req_id] = state
-        if non_block and not state.future.done():
-            return None
-        try:
-            result = state.future.result()
-        except Exception as e:
-            if not state.error_logged:
-                state.error_logged = True
+        if state.result is None:
+            remaining_s = state.deadline - time.monotonic()
+            if non_block and not state.future.done() and remaining_s > 0:
+                return None
+            try:
+                state.result = state.future.result(timeout=max(0, remaining_s))
+                self.circuit_breaker.record_success()
+            except Exception as e:
+                self.circuit_breaker.record_failure()
                 logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
-            result = MooncakeLookupResult(0)
+                state.result = MooncakeLookupResult(0)
+        result = state.result
         if not non_block:
             self.discard(req_id)
         return result
@@ -2856,11 +2885,16 @@ class LookupKeyClient:
         reuses it. At most ``lookup_prefetch_limit`` prefetches are in flight;
         beyond that, returns False and the scheduler looks up as usual."""
         assert req_id not in self._lookups
+        if self.circuit_breaker.is_open:
+            return False
         slots = self._prefetch_slots
         if slots is None or not slots.acquire(blocking=False):
             return False
         try:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+            deadline = time.monotonic() + self._lookup_timeout_s
+            future = self.executor.submit(
+                self._lookup, num_tokens, list(block_hashes), deadline
+            )
         except RuntimeError:  # executor shut down
             slots.release()
             return False
@@ -2868,6 +2902,7 @@ class LookupKeyClient:
         self._lookups[req_id] = LookupState(
             future=future,
             signature=_lookup_signature(num_tokens, block_hashes),
+            deadline=deadline,
         )
         return True
 

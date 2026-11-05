@@ -821,7 +821,7 @@ def _gated_recv(gate: threading.Event, value: int):
     """Mock recv side-effect that blocks until ``gate`` is set, so the
     executor's lookup can be held pending deterministically."""
 
-    def recv():
+    def recv(flags: int = 0) -> bytes:
         gate.wait()
         return value.to_bytes(4, "big")
 

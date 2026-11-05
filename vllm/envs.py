@@ -247,6 +247,9 @@ if TYPE_CHECKING:
     VLLM_EC_SIDE_CHANNEL_PORT: int = 0
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS: float = 5.0
+    VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS: float = 30.0
+    VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 3
     VLLM_MOONCAKE_STORE_SELECTIVE_LEASE: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
@@ -1852,6 +1855,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "False").lower()
         in ("true", "1")
+    ),
+    # Maximum prefix-lookup wait, including time queued on the lookup executor.
+    # On timeout, return a cache miss so the scheduler can compute locally.
+    "VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS": lambda: float(
+        os.getenv("VLLM_MOONCAKE_STORE_LOOKUP_TIMEOUT_SECONDS", "5.0")
+    ),
+    # Skip prefix lookups for this long once the circuit breaker opens, then
+    # retry through the serial lookup executor. A successful retry closes the
+    # circuit breaker; another failure starts the cooldown again.
+    "VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS": lambda: float(
+        os.getenv("VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "30.0")
+    ),
+    # Consecutive failed prefix lookups needed to open the circuit breaker.
+    # A successful lookup resets the count. Default: 3.
+    "VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD": lambda: int(
+        os.getenv("VLLM_MOONCAKE_STORE_LOOKUP_CIRCUIT_BREAKER_FAILURE_THRESHOLD", "3")
     ),
     # Number of parallel KV-load receive threads per worker rank. Lets the
     # per-request control overhead (Python prep + master key lookup) of one
