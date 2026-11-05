@@ -601,7 +601,21 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
             "max_model_len": 1024,
             "max_num_batched_tokens": 256,
         },
-        daemon_args=[*K3_CASE.daemon_args, "--max-num-batched-tokens", "256"],
+        daemon_args=[
+            *K3_CASE.daemon_args,
+            "--max-num-batched-tokens",
+            "256",
+            # Keep the daemon's config hash identical to the engine's.
+            "--max-model-len",
+            "1024",
+            "--enforce-eager",
+            "--max-num-seqs",
+            "1",
+        ],
+    )
+    # The baseline engine tunes from scratch in its own empty cache root.
+    monkeypatch.setenv(
+        "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "engine_baseline")
     )
     baseline_outputs = generate(vllm_runner, case, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
@@ -637,7 +651,15 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, tmp_path, monkeypatch):
             assert gen2.logs.count(adopted) == 2
             assert "Running FlashInfer autotune" not in gen2.logs
 
+            # The engine hits the daemon-written table: same root, same hash.
+            monkeypatch.setenv(
+                "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path / "gen2")
+            )
+            cache_files = set((tmp_path / "gen2").rglob("*.json"))
             gen2_outputs = generate(vllm_runner, case, gen2.socket_dir, fallback=False)
+            assert set((tmp_path / "gen2").rglob("*.json")) == cache_files, (
+                "gen2 engine re-tuned instead of hitting the daemon's cache"
+            )
 
     assert gen2_outputs == baseline_outputs
 
