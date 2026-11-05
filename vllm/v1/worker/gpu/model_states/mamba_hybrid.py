@@ -341,7 +341,6 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
             tree_parents=input_batch.tree_parents,
-            tree_ancestors=input_batch.tree_ancestors,
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(

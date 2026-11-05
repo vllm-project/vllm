@@ -157,7 +157,6 @@ class SpecRound:
         if resources.max_branching > 1:
             self.layout = PlanLayout(self.max_num_tokens, self.max_rows, self.device)
             input_buffers.tree_parents = self.layout.tree_parents
-            input_buffers.tree_ancestors = self.layout.tree_ancestors
 
     def capture(self) -> None:
         """Capture the bound spec kernels' graphs, if they have any."""
@@ -268,7 +267,6 @@ class SpecRound:
         )
         num_tokens = input_batch.num_tokens_after_padding
         input_batch.tree_parents = self.layout.tree_parents[:num_tokens]
-        input_batch.tree_ancestors = self.layout.tree_ancestors[:num_tokens]
         input_batch.tree_pos_delta = self.layout.pos_delta[:num_tokens]
 
     def restore(self, input_batch: "InputBatch") -> None:

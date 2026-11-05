@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reference versions of the tree parts vLLM leaves to a speculator's plugin,
-in PyTorch, for correctness only: the tree walk (``tree_accept``) and the KV
-compaction (``layout:paged_token`` commit)."""
+in PyTorch, for correctness only: the tree walk (``tree_accept``), the KV
+compaction (``layout:paged_token`` commit) and the tree attention mask."""
 
 from collections.abc import Mapping, Sequence
 
@@ -54,6 +54,28 @@ def walk_tree(plan: VerifyPlan, target: TargetTokens, width: int) -> AcceptResul
         alive &= child < num_cols
         node = torch.where(alive, child, node)
     return AcceptResult(path=path, path_len=path_len, sampled=sampled)
+
+
+def tree_ancestors(
+    parents: torch.Tensor, query_start_loc: torch.Tensor
+) -> list[torch.Tensor | None]:
+    """Per request, ``[n, n]`` bool over its ``n`` query rows: row ``i`` sees
+    row ``j`` when ``j`` is ``i`` or an ancestor along ``parents`` (rows of the
+    query, -1 for the first). None for a request whose rows form a chain, which
+    attends causally."""
+    bounds = query_start_loc.tolist()
+    masks: list[torch.Tensor | None] = []
+    for start, end in zip(bounds[:-1], bounds[1:]):
+        local = parents[start:end].tolist()
+        if local == list(range(-1, end - start - 1)):
+            masks.append(None)
+            continue
+        sees = torch.eye(end - start, dtype=torch.bool, device=parents.device)
+        for row, parent in enumerate(local):
+            if parent >= 0:
+                sees[row] |= sees[parent]
+        masks.append(sees)
+    return masks
 
 
 # Caches copy as integers of their element size (fp8 has no index_put on CPU).

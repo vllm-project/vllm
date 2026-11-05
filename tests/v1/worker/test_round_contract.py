@@ -4,6 +4,7 @@
 under ``TRITON_INTERPRET=1``. ``parent[i]`` is the row that row ``i`` extends."""
 
 import os
+import types
 
 import numpy as np
 import pytest
@@ -155,11 +156,10 @@ def _random_batch(gen, max_rows):
 @pytest.mark.parametrize("seed", range(3))
 def test_layout_matches_reference(kind, seed):
     """Plan rows are the last ``count`` tokens of each query: each sits at the
-    root's position plus its depth, with the plan's token, a query-local parent
-    and plan-relative ancestor bits. Tokens in front of a plan, and every token
-    of the runner's chain, attend causally (no ancestor bits). A parent that is
-    not an earlier row is a chain step. ``restore`` brings the chain positions
-    back."""
+    root's position plus its depth, with the plan's token and a query-local
+    parent. Tokens in front of a plan chain on the token before them. A parent
+    that is not an earlier row is a chain step. ``restore`` brings the chain
+    positions back."""
     gen = np.random.default_rng(seed)
     max_rows = int(gen.integers(2, 9))
     qsl, query_lens, counts = _random_batch(gen, max_rows)
@@ -192,24 +192,21 @@ def test_layout_matches_reference(kind, seed):
     layout.apply(plan, _t(counts), _t(qsl), positions, input_ids, num_reqs, num_tokens)
 
     want_pos, want_ids = chain.tolist(), [7] * num_tokens
-    want_parents, want_ancestors = [], []
+    want_parents = []
     for b, count in enumerate(counts):
         offset = int(query_lens[b] - count)
         root = int(qsl[b]) + offset
         for t in range(int(query_lens[b])):
             row = t - offset
             want_parents.append(t - 1 if row <= 0 else offset + int(parent[b, row]))
-            path = _path_to(parent[b], row) if row >= 0 else []
-            bits = sum(1 << r for r in path)
-            want_ancestors.append(0 if kind == "runner-chain" else bits)
             if row > 0:
+                path = _path_to(parent[b], row)
                 want_pos[root + row] = want_pos[root] + len(path) - 1
                 if kind != "runner-chain":
                     want_ids[root + row] = int(tokens[b, row])
     assert positions.tolist() == want_pos
     assert input_ids.tolist() == want_ids
     assert layout.tree_parents[:num_tokens].tolist() == want_parents
-    assert layout.tree_ancestors[:num_tokens].tolist() == want_ancestors
     assert layout.pos_delta[:num_tokens].tolist() == (positions - chain).tolist()
     layout.restore_positions(positions, num_tokens)
     assert torch.equal(positions, chain)
@@ -241,11 +238,10 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
 
     assert batch.positions.tolist() == list(range(6))
     if max_branching == 1:
-        assert batch.tree_parents is None and batch.tree_ancestors is None
+        assert batch.tree_parents is None
     else:
-        assert batch.tree_parents is not None and batch.tree_ancestors is not None
+        assert batch.tree_parents is not None
         assert batch.tree_parents.tolist() == [-1, 0, 1, -1, 0, 1]
-        assert batch.tree_ancestors.tolist() == [0] * 6  # a chain: causal
 
     # A speculator without ``plan`` verifies the scheduled chains: no result.
     batch.verify_plan = spec_round.chain_plan
@@ -253,6 +249,55 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
     sampled = SamplerOutput(zeros, None, None, zeros[:, 0], zeros[:, 0])
     result = spec_round.accept_result(sampled, batch)
     assert (result is None) == (max_branching == 1)
+
+
+def test_reference_tree_attention_follows_parents():
+    """The test plugin's tree attention, masked from vLLM's parents: each plan
+    row attends exactly as the chain of its path would."""
+    reference = pytest.importorskip("vllm_add_test_speculators.reference")
+    tree_attn = pytest.importorskip("vllm_add_test_speculators.tree_attn")
+    torch.manual_seed(0)
+    block_size, heads, dim, context = 4, 2, 8, 5
+    parents = [-1, 0, 0, 1]  # query rows: the root, two children, a grandchild
+    num_rows, seq_len = len(parents), context + len(parents)
+    keys = torch.randn(3, heads, block_size, dim)
+    values = torch.randn(3, heads, block_size, dim)
+    query = torch.randn(num_rows, heads, dim)
+    qsl = torch.tensor([0, num_rows])
+    metadata = types.SimpleNamespace(
+        query_start_loc=qsl,
+        seq_lens=torch.tensor([seq_len]),
+        block_table=torch.tensor([[2, 0, 1]]),
+        tree_ancestors=reference.tree_ancestors(torch.tensor(parents), qsl),
+    )
+    output = torch.zeros(num_rows, heads * dim)
+
+    tree_attn.tree_attention(query, keys, values, metadata, 0.5, output)
+
+    flat_k = keys[[2, 0, 1]].transpose(1, 2).flatten(0, 1)  # [token, head, dim]
+    flat_v = values[[2, 0, 1]].transpose(1, 2).flatten(0, 1)
+    for row, path in enumerate([[0], [0, 1], [0, 2], [0, 1, 3]]):
+        seen = list(range(context)) + [context + r for r in path]
+        scores = torch.einsum("hd,khd->hk", query[row], flat_k[seen]) * 0.5
+        want = torch.einsum("hk,khd->hd", scores.softmax(-1), flat_v[seen])
+        torch.testing.assert_close(output[row], want.flatten())
+
+
+def test_reference_tree_ancestors():
+    """The test plugin's mask from vLLM's parents: a row sees itself and its
+    ancestors; a chain request (prompt rows included) attends causally."""
+    reference = pytest.importorskip("vllm_add_test_speculators.reference")
+    # A chain of 3, then a prompt row in front of the plan [-1, 0, 0, 1].
+    parents = _t([-1, 0, 1, -1, 0, 1, 1, 2])
+    masks = reference.tree_ancestors(parents, _t([0, 3, 8]))
+    assert masks[0] is None
+    assert masks[1].int().tolist() == [
+        [1, 0, 0, 0, 0],
+        [1, 1, 0, 0, 0],
+        [1, 1, 1, 0, 0],
+        [1, 1, 0, 1, 0],
+        [1, 1, 1, 0, 1],
+    ]
 
 
 @requires_kernels

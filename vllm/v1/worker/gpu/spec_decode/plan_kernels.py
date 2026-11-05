@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The layout a :class:`VerifyPlan` gives the target's verify forward: plan
-positions (``num_computed_tokens + depth``) and ancestor sets over the chain slot
-mappings, which stay as they are."""
+positions (``num_computed_tokens + depth``) and each row's parent, over the chain
+slot mappings, which stay as they are. Which rows a row attends to is the tree
+attention backend's to derive from the parents."""
 
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
-
-MAX_PLAN_ROWS = 64
-"""Rows per request a plan can have: one bit per row in an int64 ancestor set."""
 
 
 def arange_table(
@@ -33,12 +31,10 @@ def _plan_layout_kernel(
     positions_ptr,  # [num_tokens] int64: chain positions in, plan positions out
     input_ids_ptr,  # [num_tokens] int32: candidate rows take the plan's tokens
     tree_parents_ptr,  # [num_tokens] int32 out: parent row within the request
-    tree_ancestors_ptr,  # [num_tokens] int64 out: ancestor bits, 0 = causal
     pos_delta_ptr,  # [num_tokens] int32 out: plan position - chain position
     C: tl.constexpr,
     CP: tl.constexpr,
     TOKENS: tl.constexpr,
-    CHAIN: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     b = tl.program_id(0)
@@ -52,7 +48,6 @@ def _plan_layout_kernel(
         offs = block + tl.arange(0, BLOCK)
         in_query = offs < start
         tl.store(tree_parents_ptr + offs, offs - query_start - 1, mask=in_query)
-        tl.store(tree_ancestors_ptr + offs, tl.zeros([BLOCK], tl.int64), mask=in_query)
         tl.store(pos_delta_ptr + offs, 0, mask=in_query)
 
     rows = tl.arange(0, CP)
@@ -64,15 +59,10 @@ def _plan_layout_kernel(
 
     # Rows are ordered parent first, so one pass in row order sees every parent done.
     depth = tl.zeros([CP], dtype=tl.int32)
-    ancestors = tl.full([CP], 1, dtype=tl.int64)
     for r in range(1, C):
         parent = tl.sum(tl.where(rows == r, parents, 0))
-        at_parent = rows == parent
-        depth = tl.where(rows == r, tl.sum(tl.where(at_parent, depth, 0)) + 1, depth)
-        own_bit = tl.cast(1, tl.int64) << r
-        ancestors = tl.where(
-            rows == r, tl.sum(tl.where(at_parent, ancestors, 0)) | own_bit, ancestors
-        )
+        parent_depth = tl.sum(tl.where(rows == parent, depth, 0))
+        depth = tl.where(rows == r, parent_depth + 1, depth)
     # Chain position = context + row; plan position = context + depth.
     positions = tl.load(positions_ptr + start + rows, mask=is_row, other=0)
     tl.store(positions_ptr + start + rows, positions - rows + depth, mask=is_row)
@@ -82,14 +72,6 @@ def _plan_layout_kernel(
     offset = start - query_start
     local_parent = tl.where(parents >= 0, offset + parents, offset - 1)
     tl.store(tree_parents_ptr + start + rows, local_parent, mask=is_row)
-    # A chain attends causally; a branching plan is the whole query (prefills
-    # verify chains only), so its bits index the request's query rows.
-    if CHAIN:
-        tl.store(
-            tree_ancestors_ptr + start + rows, tl.zeros([CP], tl.int64), mask=is_row
-        )
-    else:
-        tl.store(tree_ancestors_ptr + start + rows, ancestors, mask=is_row)
     if TOKENS:
         is_candidate = is_row & (rows > 0)
         tokens = tl.load(tokens_ptr + b * stride_tokens + rows, mask=is_candidate)
@@ -98,9 +80,8 @@ def _plan_layout_kernel(
 
 class PlanLayout:
     """Per query token, in static buffers: ``tree_parents`` (parent row in the
-    query, -1 for its first token), ``tree_ancestors`` (ancestor bits; 0 =
-    causal) and ``pos_delta`` (plan minus chain position), plus the chain
-    positions to put back after the forward."""
+    query, -1 for its first token) and ``pos_delta`` (plan minus chain
+    position), plus the chain positions to put back after the forward."""
 
     def __init__(
         self,
@@ -108,17 +89,9 @@ class PlanLayout:
         max_rows: int,
         device: torch.device,
     ):
-        if max_rows > MAX_PLAN_ROWS:
-            raise ValueError(
-                f"a verify plan has at most {MAX_PLAN_ROWS} rows per request, "
-                f"got {max_rows}"
-            )
         self.max_rows = max_rows
         self.tree_parents = torch.full(
             (max_num_tokens,), -1, dtype=torch.int32, device=device
-        )
-        self.tree_ancestors = torch.zeros(
-            max_num_tokens, dtype=torch.int64, device=device
         )
         self.pos_delta = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.chain_positions = torch.zeros(
@@ -146,7 +119,6 @@ class PlanLayout:
         self.chain_positions[:num_tokens].copy_(positions[:num_tokens])
         if num_tokens_padded is not None and num_tokens_padded > num_tokens:
             self.tree_parents[num_tokens:num_tokens_padded].fill_(-1)
-            self.tree_ancestors[num_tokens:num_tokens_padded].zero_()
             self.pos_delta[num_tokens:num_tokens_padded].zero_()
         width = plan.parent.shape[1]
         tokens = plan.tokens
@@ -161,12 +133,10 @@ class PlanLayout:
             positions,
             input_ids if input_ids is not None else positions,
             self.tree_parents,
-            self.tree_ancestors,
             self.pos_delta,
             C=width,
             CP=triton.next_power_of_2(width),
             TOKENS=tokens is not None,
-            CHAIN=plan.is_chain,
             BLOCK=256,
             num_warps=1,
         )

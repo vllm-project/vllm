@@ -72,9 +72,9 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
-    # Does forward() verify tree plans: attend each plan row to the rows set in
-    # CommonAttentionMetadata.tree_ancestors, not causally? Without it, a full
-    # attention layer verifies chains.
+    # Does forward() verify tree plans: attend each plan row to its context and
+    # its ancestors along CommonAttentionMetadata.tree_parents, not causally?
+    # Without it, a full attention layer verifies chains.
     serves_trees: bool = False
 
     @staticmethod
@@ -489,16 +489,11 @@ class CommonAttentionMetadata:
     tree_parents: torch.Tensor | None = None
     """(num_tokens,) int32 for a tree verify: each token's parent as a row
     index within its request, -1 for the request's first row, every other
-    row's parent an earlier row (``i - 1`` in a chain). Only the rows of
-    speculative decodes are read. None means every request is a chain."""
-
-    tree_ancestors: torch.Tensor | None = None
-    """(num_tokens,) int64 alongside ``tree_parents``: bit ``j`` is set when the
-    token sees row ``j`` of its plan, so a plan row attends to the request's
-    context and to the rows whose bits are set: the row's own bit and its
-    ancestors' bits. 0 for a token that is not a plan row (a prompt token in
-    front of the plan), which attends causally. Plan rows are the request's last
-    ``count`` query tokens."""
+    row's parent an earlier row (``i - 1`` in a chain). A row attends to the
+    request's context, itself and its ancestors along these parents; a backend
+    that ``serves_trees`` derives its mask from them in its metadata builder.
+    ``positions`` holds each row's plan position. None means every request is a
+    chain."""
 
     _num_computed_tokens_cache: torch.Tensor | None = None
     _token_to_req_indices_cache: torch.Tensor | None = None

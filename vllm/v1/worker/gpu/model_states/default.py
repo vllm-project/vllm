@@ -245,6 +245,5 @@ class DefaultModelState(ModelState):
             fast_prefill=input_batch.fast_prefill,
             model_specific_attn_metadata=model_specific_attn_metadata,
             tree_parents=input_batch.tree_parents,
-            tree_ancestors=input_batch.tree_ancestors,
         )
         return attn_metadata

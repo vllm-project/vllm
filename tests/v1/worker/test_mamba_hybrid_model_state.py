@@ -55,7 +55,6 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
         tree_parents=None,
-        tree_ancestors=None,
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
         prefill_runs_as_decode_np=None,
@@ -131,7 +130,6 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
         tree_parents=None,
-        tree_ancestors=None,
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=np.array([False, True, False]),
@@ -206,7 +204,6 @@ def _input_batch(
         max_query_len=None,
         seq_lens_cpu_upper_bound=seq_lens,
         tree_parents=None,
-        tree_ancestors=None,
         is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=None,
         num_draft_tokens_per_req=None

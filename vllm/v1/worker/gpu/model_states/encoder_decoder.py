@@ -155,7 +155,6 @@ class EncoderDecoderModelState(ModelState):
             rswa_prefix_lens=input_batch.prompt_lens,
             positions=input_batch.positions,
             tree_parents=input_batch.tree_parents,
-            tree_ancestors=input_batch.tree_ancestors,
         )
         return attn_metadata
 
