@@ -293,6 +293,9 @@ class RejectionSampler:
             fly_window_size=self.fly_window_size,
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
+            skip_masked_vocab_blocks=bool(
+                np.any(self.sampler.may_mask_logits[idx_mapping_np])
+            ),
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

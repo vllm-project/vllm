@@ -7,13 +7,13 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config, get_current_vllm_config_or_none
 from vllm.config.kernel import (
     FLASHINFER_MOE_EP_CUTEDSL,
     FLASHINFER_MOE_EP_DEEP_GEMM,
     MoEBackend,
 )
-from vllm.config.quantization import QuantizationConfigArgs
+from vllm.config.quantization import user_activation_override
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -503,27 +503,30 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
 
 def _user_moe_activation_override() -> QuantKey | None:
     """User's MoE activation override from quantization_config, or None."""
-    args = get_current_vllm_config().model_config.quantization_config
-    if not isinstance(args, QuantizationConfigArgs) or args.moe is None:
-        return None
-    return args.moe.activation
+    return user_activation_override("moe", get_current_vllm_config())[0]
+
+
+def _user_moe_activation_override_is_set() -> bool:
+    """Whether the user set the MoE activation, explicit `null` included."""
+    return user_activation_override("moe", get_current_vllm_config_or_none())[1]
 
 
 def _resolve_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Combine the model-supplied activation key with the user override.
-    Raises on conflict (both set and disagreeing)."""
+    """Apply ``--quantization-config.moe.activation`` to the checkpoint's
+    activation key. An explicit override wins, ``null`` included (BF16)."""
     user_override = _user_moe_activation_override()
-    if user_override is None:
+    if user_override is None and not _user_moe_activation_override_is_set():
         return model_activation_key
-    if model_activation_key is None or model_activation_key == user_override:
-        return user_override
-    raise ValueError(
-        f"checkpoint declares MoE activation={model_activation_key} but "
-        f"quantization_config.moe.activation={user_override}; remove the "
-        f"override or align it with the checkpoint."
-    )
+    if model_activation_key is not None and model_activation_key != user_override:
+        logger.warning_once(
+            "Overriding the checkpoint MoE activation=%s with "
+            "quantization_config.moe.activation=%s.",
+            model_activation_key,
+            user_override,
+        )
+    return user_override
 
 
 def _humming_input_schema(model_activation_key: QuantKey | None):
@@ -1646,8 +1649,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
+        stage_moe_weights_for_humming(
+            layer, w13_weight, w2_weight, w13_weight_scale, w2_weight_scale
+        )
         convert_to_humming_moe_kernel_format(
             layer,
             quant_config={"quant_method": "mxfp4"},
