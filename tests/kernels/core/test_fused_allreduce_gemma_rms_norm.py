@@ -8,10 +8,13 @@ path (TP>1 with flashinfer + NVSwitch) and on the eager fallback (TP==1, or when
 flashinfer is unavailable / the GPU has no NVSwitch).
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch.multiprocessing import spawn
 
+import vllm.model_executor.layers.fused_allreduce_gemma_rms_norm as fused_ar_norm
 from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
@@ -107,3 +110,54 @@ def test_fused_allreduce_gemma_rms_norm(
         nprocs=world_size,
         join=True,
     )
+
+
+class _FakeQuickReduce:
+    def __init__(self, accept: bool):
+        self.accept = accept
+        self.calls = []
+
+    def should_fused_allreduce_rmsnorm(self, inp, residual, weight):
+        return self.accept
+
+    def fused_allreduce_rmsnorm(self, inp, residual, weight, epsilon, gemma_norm):
+        self.calls.append(gemma_norm)
+        return inp + 1, residual + 1
+
+
+@pytest.mark.parametrize("accept", [True, False])
+def test_fused_allreduce_gemma_rms_norm_routes_prefill_to_quick_reduce(
+    monkeypatch: pytest.MonkeyPatch, default_vllm_config, accept: bool
+):
+    """Sizes the one-stage custom all-reduce declines go to the QuickReduce
+    fused kernel with ``gemma_norm`` when it accepts the operands, and to
+    all-reduce + GemmaRMSNorm otherwise."""
+    norm = GemmaRMSNorm(64, eps=1e-6).to(torch.bfloat16)
+    hidden = torch.randn(8, 64, dtype=torch.bfloat16)
+    residual = torch.randn(8, 64, dtype=torch.bfloat16)
+    ref_out, ref_res = norm(hidden * 4, residual.clone())
+
+    qr = _FakeQuickReduce(accept)
+    tp_group = SimpleNamespace(device_communicator=SimpleNamespace(qr_comm=qr))
+    rocm = SimpleNamespace(is_rocm=lambda: True)
+    monkeypatch.setattr(
+        fused_ar_norm, "get_tensor_model_parallel_world_size", lambda: 4
+    )
+    monkeypatch.setattr(fused_ar_norm, "get_tp_group", lambda: tp_group)
+    monkeypatch.setattr(fused_ar_norm, "_can_use_flashinfer", lambda *_: (False, 0))
+    monkeypatch.setattr(fused_ar_norm, "_can_use_aiter_fused_ar_rms", lambda *_: False)
+    monkeypatch.setattr(fused_ar_norm, "current_platform", rocm)
+    monkeypatch.setattr(
+        fused_ar_norm, "tensor_model_parallel_all_reduce", lambda x: x * 4
+    )
+
+    out, res = fused_ar_norm.fused_allreduce_gemma_rms_norm(hidden, residual, norm)
+
+    if accept:
+        assert qr.calls == [True]
+        torch.testing.assert_close(out, hidden + 1)
+        torch.testing.assert_close(res, residual + 1)
+    else:
+        assert qr.calls == []
+        torch.testing.assert_close(out, ref_out)
+        torch.testing.assert_close(res, ref_res)

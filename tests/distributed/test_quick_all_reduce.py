@@ -98,6 +98,17 @@ class _FakeFlyDSLInt4:
     def allreduce(self, inp, out):
         self.allreduce_calls += 1
 
+    @staticmethod
+    def supports_rmsnorm(hidden, nbytes):
+        return hidden in (2048, 4096, 8192, 16384) and nbytes < 1 << 31
+
+    def allreduce_rmsnorm(
+        self, inp, residual, weight, eps, out, residual_out, *, gemma_norm
+    ):
+        self.allreduce_calls.append((inp, out, residual, weight, eps, gemma_norm))
+        residual_out.copy_(inp + residual)
+        out.copy_(residual_out)
+
     def close(self):
         self.closed = True
 
@@ -149,6 +160,35 @@ def test_close_closes_flydsl_int4():
 
     assert fake.closed
     assert quick_reduce._flydsl_int4 is None
+
+
+def test_flydsl_int4_should_fused_allreduce_rmsnorm_gates_operands():
+    quick_reduce, _ = _make_flydsl_quick_allreduce_for_test()
+    hidden = 8192
+    inp = torch.empty((MB // hidden, hidden), dtype=torch.bfloat16)
+    residual = torch.empty_like(inp)
+    weight = torch.empty(hidden, dtype=torch.bfloat16)
+
+    assert quick_reduce.should_fused_allreduce_rmsnorm(inp, residual, weight)
+    # Below the QuickReduce window, so the one-stage custom all-reduce owns it.
+    assert not quick_reduce.should_fused_allreduce_rmsnorm(
+        inp[:16], residual[:16], weight
+    )
+    # A row that does not tile the kernel's 32 KiB blocks.
+    odd = torch.empty((MB // 7168 + 1, 7168), dtype=torch.bfloat16)
+    assert quick_reduce.should_quick_allreduce(odd)
+    assert not quick_reduce.should_fused_allreduce_rmsnorm(
+        odd, torch.empty_like(odd), torch.empty(7168, dtype=torch.bfloat16)
+    )
+    # The fused kernel normalizes with a bf16 weight.
+    assert not quick_reduce.should_fused_allreduce_rmsnorm(
+        inp, residual, weight.float()
+    )
+    transposed = torch.empty((hidden, MB // hidden), dtype=torch.bfloat16).t()
+    assert not quick_reduce.should_fused_allreduce_rmsnorm(inp, transposed, weight)
+
+    quick_reduce._flydsl_int4 = None
+    assert not quick_reduce.should_fused_allreduce_rmsnorm(inp, residual, weight)
 
 
 def test_should_quick_allreduce_uses_builtin_min_size_when_unset():
@@ -318,7 +358,7 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         def __init__(self):
             self.checked_input = None
 
-        def uses_flydsl_int4(self, inp):
+        def should_fused_allreduce_rmsnorm(self, inp, residual, weight):
             return False
 
         def should_quick_allreduce(self, inp):
@@ -328,7 +368,21 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
         def _get_qr_quant_level(self, inp):
             return QuickReduceRegime.INT4.value
 
-    qr_comm = FakeQuickReduce()
+    if flydsl:
+        # The fused op only asks qr_comm whether the payload is eligible. It
+        # runs on its own AITER communicator, so a FlyDSL qr_comm (with no
+        # HIP _ptr) must not stop it. FlyDSL's 2 MiB floor needs 256 tokens.
+        # Decline the FlyDSL fused kernel so the HIP QR+RMSNorm path runs.
+        qr_comm, _ = _make_flydsl_quick_allreduce_for_test()
+        monkeypatch.setattr(
+            qr_comm, "should_fused_allreduce_rmsnorm", lambda *args: False
+        )
+        num_tokens = 256
+    else:
+        qr_comm = FakeQuickReduce()
+        # token_num > 80 forces vLLM's AITER fused AR+RMS wrapper onto its
+        # non-1stage prefill path.
+        num_tokens = 81
     device_comm = SimpleNamespace(cpu_group=object(), qr_comm=qr_comm)
     monkeypatch.setattr(
         vllm_distributed,
@@ -413,6 +467,49 @@ def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
     assert calls[0]["cast_bf2half"] is True
     torch.testing.assert_close(out, inp)
     torch.testing.assert_close(residual_out, residual)
+
+
+@pytest.mark.parametrize("gemma_norm", [False, True])
+def test_rocm_aiter_fused_rmsnorm_uses_flydsl_int4_for_prefill(
+    monkeypatch: pytest.MonkeyPatch, gemma_norm: bool
+):
+    class FakeAiterAllReduce:
+        aiter_ca = SimpleNamespace(world_size=2, fully_connected=True)
+
+        def use_1stage_fused_ar_rms(self, inp):
+            return False
+
+    quick_reduce, fake = _make_flydsl_quick_allreduce_for_test()
+    device_comm = SimpleNamespace(cpu_group=object(), qr_comm=quick_reduce)
+    monkeypatch.setattr(
+        vllm_distributed,
+        "get_tp_group",
+        lambda: SimpleNamespace(device_communicator=device_comm),
+    )
+    monkeypatch.setattr(
+        aiter_ops.rocm_aiter_ops,
+        "get_aiter_allreduce",
+        lambda: FakeAiterAllReduce(),
+    )
+
+    def _no_hip_qr(device_comm):
+        raise AssertionError("HIP QR+RMSNorm must not run with FlyDSL INT4")
+
+    monkeypatch.setattr(aiter_ops, "_get_or_create_aiter_qr_rmsnorm_comm", _no_hip_qr)
+
+    inp = torch.randn(MB // 8192, 8192, dtype=torch.bfloat16)
+    residual = torch.randn_like(inp)
+    weight = torch.randn(8192, dtype=torch.bfloat16)
+
+    out, residual_out = aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
+        inp, residual, weight, 1e-6, gemma_norm
+    )
+
+    ((got_inp, got_out, got_res, got_w, eps, got_gemma),) = fake.allreduce_calls
+    assert got_inp is inp and got_res is residual and got_w is weight
+    assert got_out is out
+    assert (eps, got_gemma) == (1e-6, gemma_norm)
+    torch.testing.assert_close(residual_out, inp + residual)
 
 
 def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
