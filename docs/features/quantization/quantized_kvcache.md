@@ -40,6 +40,10 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
 
+For an FP8 KV cache, Qwen4Exp QSA uses the checkpoint's per-tensor K and V scales on CUDA.
+On ROCm, Qwen4Exp QSA requires both scales to be `1.0`.
+Use `--kv-cache-dtype bfloat16` on ROCm if either scale differs from `1.0`.
+
 ### Skipping Specific Layers from KV-Cache Quantization
 
 Some attention layer types (e.g. sliding-window) are more sensitive to KV-cache quantization. The `--kv-cache-dtype-skip-layers` flag leaves the specified layers at the model's native dtype while keeping the rest of the layers under the chosen quantized dtype. The flag accepts either layer indices or layer-type names:

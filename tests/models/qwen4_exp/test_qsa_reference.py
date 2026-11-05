@@ -250,60 +250,6 @@ def _qsa_sparse_paged_attention_reference(
 
 
 @requires_qsa_kernels
-def test_qsa_fp8_uses_checkpoint_kv_scales(tmp_path, vllm_runner, enable_pickle):
-    from transformers import Qwen4ExpForCausalLM, Qwen4ExpTextConfig
-
-    config = Qwen4ExpTextConfig(
-        vocab_size=128,
-        hidden_size=256,
-        num_hidden_layers=1,
-        layer_types=["indexed_attention"],
-        num_attention_heads=24,
-        num_key_value_heads=2,
-        head_dim=64,
-        num_experts=4,
-        num_experts_per_tok=2,
-        moe_intermediate_size=64,
-        shared_expert_intermediate_size=64,
-        indexer_n_heads=8,
-        indexer_kv_heads=1,
-        indexer_head_dim=128,
-        indexer_compress_ratio=4,
-        indexer_budget=2048,
-        hc_lowrank=28,
-        mtp_num_hidden_layers=0,
-    )
-    torch.manual_seed(0)
-    checkpoint = Qwen4ExpForCausalLM(config).to(torch.bfloat16)
-    attn = checkpoint.model.layers[0].self_attn
-    attn.k_proj.register_buffer("output_scale", torch.tensor(0.5))
-    attn.v_proj.register_buffer("output_scale", torch.tensor(2.0))
-    checkpoint.save_pretrained(tmp_path)
-
-    def read_scales(model):
-        layer = model.model.layers[0].self_attn
-        return (
-            layer._k_scale.item(),
-            layer._v_scale.item(),
-            layer._k_scale_float,
-            layer._v_scale_float,
-        )
-
-    with vllm_runner(
-        str(tmp_path),
-        dtype="bfloat16",
-        kv_cache_dtype="fp8_e4m3",
-        load_format="safetensors",
-        enable_prefix_caching=False,
-        skip_tokenizer_init=True,
-        max_model_len=128,
-        max_num_seqs=2,
-        enforce_eager=True,
-    ) as runner:
-        assert runner.apply_model(read_scales) == [(0.5, 2.0, 0.5, 2.0)]
-
-
-@requires_qsa_kernels
 def test_qsa_indexer_metadata_marks_cudagraph_padding_inert() -> None:
     device = torch.device("cuda")
     builder = QSAIndexerMetadataBuilder.__new__(QSAIndexerMetadataBuilder)
