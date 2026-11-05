@@ -249,7 +249,8 @@ def test_gemma4_per_layer_embeddings_pipeline_parallel(
 ) -> None:
     """Stages after the first must use the per-layer embeddings they receive
     from the previous stage, so PP=2 matches PP=1."""
-    model = "google/gemma-4-E2B-it"
+    # The base model continues raw prompts; the -it model ends the turn at once.
+    model = "google/gemma-4-E2B"
     text_only = {"image": 0, "audio": 0, "video": 0}
     with vllm_runner(model, limit_mm_per_prompt=text_only) as vllm_model:
         pp1_outputs = vllm_model.generate_greedy_logprobs(example_prompts, 32, 5)
