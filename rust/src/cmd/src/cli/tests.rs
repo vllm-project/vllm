@@ -8,8 +8,8 @@ use expect_test::expect;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 use vllm_server::{
-    Config, GenerationConfigMode, HttpListenerMode, LoraModulePath, OutputLogConfig, OutputLogging,
-    ParserSelection, ReasoningEffort, RendererSelection,
+    Config, FingerprintMode, GenerationConfigMode, HttpListenerMode, LoraModulePath,
+    OutputLogConfig, OutputLogging, ParserSelection, ReasoningEffort, RendererSelection,
 };
 use vllm_text::backend::hf::ModelSource;
 
@@ -64,6 +64,9 @@ fn render_args_build_config_without_tls() {
         // hidden flag.
         "--skip-model-name-validation",
         "True",
+        // Set through `VLLM_MAX_N_SEQUENCES`, which binds this hidden flag.
+        "--max-n-sequences",
+        " 4 ",
     ])
     .unwrap();
 
@@ -87,6 +90,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.max_model_len, Some(32768));
     assert_eq!(config.served_model_name, ["qwen"]);
     assert!(config.skip_model_name_validation);
+    assert_eq!(config.max_n_sequences, 4);
     assert_eq!(config.tool_call_parser, ParserSelection::Auto);
     assert_eq!(config.reasoning_parser, ParserSelection::Auto);
     assert_eq!(config.renderer, RendererSelection::DeepSeekV32);
@@ -105,6 +109,7 @@ fn render_args_allow_omitted_max_model_len() {
 
     assert_eq!(config.max_model_len, None);
     assert!(!config.skip_model_name_validation);
+    assert_eq!(config.max_n_sequences, 16384);
 }
 
 #[test]
@@ -257,9 +262,12 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -268,6 +276,8 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
+                        max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -768,6 +778,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
     assert!(!config.api_server_options.skip_model_name_validation);
+    assert!(!config.api_server_options.server_dev_mode);
+    assert_eq!(config.api_server_options.max_n_sequences, 16384);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -775,8 +787,9 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
-    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, and
-    // `VLLM_SKIP_MODEL_NAME_VALIDATION`, which bind these hidden flags.
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
+    // `VLLM_SERVER_DEV_MODE`, and `VLLM_MAX_N_SEQUENCES`, which bind these
+    // hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -786,10 +799,16 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1048576",
         "--skip-model-name-validation",
         "1",
+        "--server-dev-mode",
+        " 1",
+        "--max-n-sequences",
+        " 8 ",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
     assert!(config.api_server_options.skip_model_name_validation);
+    assert!(config.api_server_options.server_dev_mode);
+    assert_eq!(config.api_server_options.max_n_sequences, 8);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
@@ -800,15 +819,17 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--http-max-request-body-size",
-        "32MiB",
-    ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    for invalid in [
+        ["--http-max-request-body-size", "32MiB"],
+        // Python's `int()` fails startup on a non-integer dev mode.
+        ["--server-dev-mode", "true"],
+        ["--max-n-sequences", "1e3"],
+    ] {
+        let error =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(&invalid))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
 
 #[test]
@@ -825,6 +846,8 @@ fn args_json_reads_env_only_settings_from_env() {
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
     assert!(!args.api_server_options().skip_model_name_validation);
+    assert!(!args.api_server_options().server_dev_mode);
+    assert_eq!(args.api_server_options().max_n_sequences, 16384);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -835,11 +858,15 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
+        ("VLLM_SERVER_DEV_MODE", " 1"),
+        ("VLLM_MAX_N_SEQUENCES", " 8 "),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
     assert!(args.api_server_options().skip_model_name_validation);
+    assert!(args.api_server_options().server_dev_mode);
+    assert_eq!(args.api_server_options().max_n_sequences, 8);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -855,6 +882,8 @@ fn args_json_reads_env_only_settings_from_env() {
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
+        apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
+        apply(&[("VLLM_MAX_N_SEQUENCES", "1e3")]).unwrap_err(),
     ];
     expect![[r#"
         [
@@ -862,9 +891,51 @@ fn args_json_reads_env_only_settings_from_env() {
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
+            "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
+            "invalid VLLM_MAX_N_SEQUENCES: `1e3` is not an integer",
         ]
     "#]]
     .assert_debug_eq(&errors);
+}
+
+/// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
+/// flag out of `--args-json` when it matches that default, so check both paths.
+#[test]
+fn log_error_stack_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .log_error_stack
+    };
+    // `--server-dev-mode` is the hidden flag bound to `VLLM_SERVER_DEV_MODE`.
+    assert!(!serve(&[]));
+    assert!(serve(&["--log-error-stack"]));
+    assert!(serve(&["--server-dev-mode", "1"]));
+    assert!(!serve(&[
+        "--server-dev-mode",
+        "1",
+        "--log-error-stack",
+        "false"
+    ]));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().log_error_stack
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    assert!(!json(model_only, &[]));
+    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
 }
 
 #[test]
@@ -1194,6 +1265,73 @@ fn frontend_args_json_passes_output_logging_into_config() {
             outputs: OutputLogging::Complete,
             max_log_len: Some(5),
         }
+    );
+}
+
+#[test]
+fn fingerprint_flags_select_system_fingerprint_mode() {
+    let serve = |flags: &[&str]| {
+        let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(flags))
+            .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .fingerprint_mode
+    };
+    let frontend = |args_json: &str| {
+        let cli = Cli::try_parse_from([
+            "vllm-rs",
+            "frontend",
+            "--listen-fd",
+            "3",
+            "--input-listener-fd",
+            "999999",
+            "--output-listener-fd",
+            "999998",
+            "--args-json",
+            args_json,
+        ])
+        .unwrap();
+        let Command::Frontend(args) = cli.command else {
+            panic!("expected frontend args");
+        };
+        args.into_config().fingerprint_mode
+    };
+
+    assert_eq!(serve(&[]), FingerprintMode::Full);
+    assert_eq!(
+        serve(&["--fingerprint-mode", "hash"]),
+        FingerprintMode::Hash
+    );
+    assert_eq!(
+        serve(&["--fingerprint-mode", "none"]),
+        FingerprintMode::None
+    );
+    assert_eq!(
+        serve(&[
+            "--fingerprint-mode",
+            "custom",
+            "--fingerprint-value",
+            "fp-1"
+        ]),
+        FingerprintMode::Custom("fp-1".to_string())
+    );
+    // Like Python, `custom` without a value reports no fingerprint.
+    assert_eq!(
+        serve(&["--fingerprint-mode", "custom"]),
+        FingerprintMode::None
+    );
+    // Python ignores the value in other modes.
+    assert_eq!(
+        serve(&["--fingerprint-value", "fp-1"]),
+        FingerprintMode::Full
+    );
+    assert_eq!(
+        frontend(
+            r#"{"model_tag":"Qwen/Qwen3-0.6B","fingerprint_mode":"custom","fingerprint_value":"fp-1"}"#
+        ),
+        FingerprintMode::Custom("fp-1".to_string())
     );
 }
 
@@ -1815,9 +1953,12 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -1826,6 +1967,8 @@ fn frontend_args_accept_json() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
+                        max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2743,9 +2886,12 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
+                        fingerprint_mode: Full,
+                        fingerprint_value: None,
                         disable_log_stats: false,
                         custom_histogram_buckets: CustomHistogramBuckets(
                             {},
@@ -2754,6 +2900,8 @@ fn serve_args_accept_handshake_aliases() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
+                        max_n_sequences: None,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -3043,14 +3191,18 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
                 ),
+                max_n_sequences: 16384,
             },
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3171,14 +3323,18 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
                 ),
+                max_n_sequences: 16384,
             },
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
@@ -3412,14 +3568,18 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
                 ),
+                max_n_sequences: 16384,
             },
+            fingerprint_mode: Full,
             cors: CorsConfig {
                 allow_origins: [],
                 allow_methods: [
