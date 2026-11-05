@@ -243,13 +243,14 @@ class NCCLWeightTransferEngine(
                         "metadata in the init info"
                     )
                 check_plannable(self._default_model)
+                self._plan_metadata = [
+                    ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
+                    for name, dtype_name, shape in init_info.metadata
+                ]
             except Exception:
+                self._plan_metadata = None
                 self.shutdown()
                 raise
-            self._plan_metadata = [
-                ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
-                for name, dtype_name, shape in init_info.metadata
-            ]
             self._plan_manifest = _manifest(self._plan_metadata)
 
     def start_weight_update(self) -> None:
