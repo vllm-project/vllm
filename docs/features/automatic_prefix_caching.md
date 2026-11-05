@@ -75,3 +75,9 @@ We describe two example workloads, where APC can provide huge performance benefi
 ## Limits
 
 APC in general does not reduce the performance of vLLM. With that being said, APC only reduces the time of processing the queries (the prefilling phase) and does not reduce the time of generating new tokens (the decoding phase). So APC does not bring performance gain when vLLM spends most of the time generating answers to the queries (e.g. when the length of the answer is long), or new queries do not share the same prefix with any of existing queries (so that the computation cannot be reused).
+
+## Determinism
+
+A prefix-cache hit and a cold prefill compute the same tokens through different kernel paths, and floating-point addition is not associative, so the two paths are not guaranteed to produce bitwise-identical logits. At `temperature=0` this can make an identical request return different text depending on whether its prefix was already cached, even with a single request at a time (no concurrent batching involved). This is not specific to any particular `--prefix-caching-hash-algo`.
+
+This is expected: outside of [batch-invariant mode](batch_invariance.md), vLLM does not guarantee bitwise-reproducible outputs across different cache states. If your workload requires deterministic outputs regardless of prefix-cache hits, set `VLLM_BATCH_INVARIANT=1` (see [Batch Invariance](batch_invariance.md)), or disable prefix caching with `--no-enable-prefix-caching`.
