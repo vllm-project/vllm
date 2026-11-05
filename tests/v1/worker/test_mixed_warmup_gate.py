@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
@@ -39,12 +40,24 @@ def test_mixed_warmup_disables_watermarking():
         max_num_reqs=2,
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))
+                SimpleNamespace(
+                    kv_cache_spec=SimpleNamespace(
+                        block_size=16,
+                        dcp_sharded=False,
+                        max_num_blocks_per_req=lambda vllm_config, max_len: cdiv(
+                            max_len, 16
+                        ),
+                    )
+                )
             ],
             num_blocks=128,
         ),
-        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        vllm_config=SimpleNamespace(
+            num_lookahead_tokens=0,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
         max_model_len=128,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         num_speculative_steps=0,
         model_state=SimpleNamespace(max_encoder_len=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
@@ -63,7 +76,10 @@ def test_mixed_warmup_disables_watermarking():
         for request in output.scheduled_new_reqs
     ]
     assert len(sampling_params) == 2
-    assert all(params.watermarking is False for params in sampling_params)
+    assert all(
+        params is not None and params.watermarking is False
+        for params in sampling_params
+    )
 
 
 @pytest.mark.parametrize("fail_warmup", [False, True])
@@ -73,8 +89,13 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     rejection_sampler = SimpleNamespace(enable_adaptive_verification=True)
     runner = SimpleNamespace(
         adaptive_verification=manager,
+        speculator=None,
         rejection_sampler=rejection_sampler,
         speculative_config=SimpleNamespace(),
+    )
+    budget_warmups = []
+    manager.warmup_budget_kernel = lambda: budget_warmups.append(
+        runner.adaptive_verification
     )
 
     def run_steps(model_runner, execute, sample, greedy=False):
@@ -92,6 +113,8 @@ def test_kernel_warmup_restores_uncalibrated_adaptive_manager(monkeypatch, fail_
     assert runner.adaptive_verification is manager
     assert manager.cost_tables is None
     assert rejection_sampler.enable_adaptive_verification
+    # The budget kernel is warmed once, after the manager is restored.
+    assert budget_warmups == ([] if fail_warmup else [manager])
 
 
 @pytest.mark.parametrize("speculative", [False, True])
@@ -107,6 +130,7 @@ def test_kernel_warmup_runs_same_rounds_on_every_pp_stage(monkeypatch, speculati
         rounds.clear()
         runner = SimpleNamespace(
             adaptive_verification=None,
+            speculator=None,
             speculative_config=SimpleNamespace() if speculative else None,
             rejection_sampler=(
                 SimpleNamespace(enable_adaptive_verification=False)

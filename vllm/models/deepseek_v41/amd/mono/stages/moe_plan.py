@@ -15,9 +15,12 @@ slots' flags (``polled_tile`` its tiles) before it reads their MID rows. Called
 by the kernel on traced Int32 and by the CPU property test on Python ints.
 """
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
 from vllm.models.deepseek_v41.amd.mono.common.plan import cdiv, imin
 
-TILE = 16  # picks a pick tile: an MFMA's N
+# The picks a pick tile takes: a token tile's (``stages.gemv.TILE``), whose x
+# rows the ug task of the tile gathers into LDS. 6 on gfx942, 16 elsewhere.
+TILE = 6 if GFX942 else 16
 
 
 def pick_tiles(count):

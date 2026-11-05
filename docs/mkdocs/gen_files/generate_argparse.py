@@ -79,7 +79,7 @@ mock_if_no_torch(
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
-    VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
+    VERSIONS = dict(line.split()[0].split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
@@ -183,7 +183,7 @@ DownloadKernelsSubcommand = auto_mock(
     "vllm.entrypoints.cli.download_kernels", "DownloadKernelsSubcommand"
 )
 sweep_subcommands = auto_mock("vllm.benchmarks.sweep.cli", "SUBCOMMANDS")
-openai_cli_args = auto_mock("vllm.entrypoints.launchers", "cli_args")
+openai_cli_args = auto_mock("vllm.entrypoints.common", "cli_args")
 run_batch = auto_mock("vllm.entrypoints.launchers", "run_batch")
 
 if TYPE_CHECKING:
