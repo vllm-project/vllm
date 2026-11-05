@@ -1032,6 +1032,20 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _validate_extract_hidden_states_decode_drafts(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or speculative_config.extract_hidden_states_decode_drafts
+        ):
+            return
+
+        if self.parallel_config.data_parallel_size > 1:
+            raise ValueError(
+                "extract_hidden_states_decode_drafts=False is not supported with "
+                "data parallelism, because it relies on dynamic speculative decoding."
+            )
+
     def _maybe_disable_dynamic_sd_for_data_parallel(self) -> None:
         speculative_config = self.speculative_config
         if (
@@ -1793,6 +1807,7 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        self._validate_extract_hidden_states_decode_drafts()
         self._maybe_disable_dynamic_sd_for_data_parallel()
 
         if (

@@ -113,6 +113,27 @@ The `kv_connector_extra_config` dict accepts these server-level options:
 | `num_writer_threads` | `8` | Thread pool size for async disk writes |
 | `use_synchronization_lock` | `True` | Use file locks so concurrent readers block until writes complete. Can be disabled for batch generation where synchronization is not needed. |
 
+## Disabling Decode Drafts
+
+By default, this method schedules one draft token per request on every decode step. The draft is the token that was just sampled, so it is accepted only if the model repeats that token. Saving hidden states does not depend on these drafts, including with `include_output_tokens`, but they add a scheduled token per request per decode step.
+
+Set `extract_hidden_states_decode_drafts` to `False` in `speculative_config` to schedule none:
+
+```python
+speculative_config={
+    "method": "extract_hidden_states",
+    "num_speculative_tokens": 1,
+    "extract_hidden_states_decode_drafts": False,
+    "draft_model_config": {
+        "hf_config": {
+            "eagle_aux_hidden_state_layer_ids": [1, 2, 3, 4],
+        },
+    },
+}
+```
+
+This sets `num_speculative_tokens_per_batch_size` to K=0 for all batch sizes, so it cannot be combined with another schedule. It requires Model Runner V2, and raises an error on Model Runner V1 or with `data_parallel_size` greater than 1.
+
 ## Output Format
 
 Each request produces a `.safetensors` file containing:
