@@ -688,6 +688,50 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     assert not any(os.path.exists(path) for path, _, _ in segments)
 
 
+@pytest.mark.parametrize("num_segments", [1, 3])
+def test_single_chunk_segments_preserve_shared_canonical_views(
+    iid, monkeypatch, num_segments
+):
+    """Backing boundaries must not change flat HiSparse views or peer writes."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    huge_page = 2 << 20
+    pool_bytes = 5 * huge_page + PAGE_SIZE
+    regions = [
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=1,
+            rank=0,
+            kv_bytes_per_chunk=pool_bytes,
+            cpu_page_size=pool_bytes,
+            num_segments=num_segments,
+        )
+        for _ in range(2)
+    ]
+    paths = [path for path, _, _ in regions[0]._segments]
+    try:
+        assert len(paths) == num_segments
+        segments = regions[0]._segments
+        assert all(offset % huge_page == 0 for _, offset, _ in segments)
+        assert sum(length for _, _, length in segments) == pool_bytes
+        if num_segments > 1:
+            assert [length for _, _, length in segments] == [
+                2 * huge_page,
+                2 * huge_page,
+                huge_page + PAGE_SIZE,
+            ]
+        a = regions[0].create_next_canonical_view(pool_bytes)
+        b = regions[1].create_next_canonical_view(pool_bytes)
+        a.fill_(17)
+        assert (b == 17).all()
+        b[2 * huge_page - 1 : 2 * huge_page + 1] = 29
+        assert (a[2 * huge_page - 1 : 2 * huge_page + 1] == 29).all()
+        del a, b
+    finally:
+        for region in regions:
+            region.cleanup()
+    assert not any(os.path.exists(path) for path in paths)
+
+
 # ---------------------------------------------------------------------------
 # Multi-worker race — concurrent construction
 # ---------------------------------------------------------------------------

@@ -242,6 +242,174 @@ def test_hisparse_rejects_deepseek_v4():
         get_hisparse_kv_cache_groups(config, full_specs)
 
 
+@pytest.mark.parametrize("block_size", [64, 256])
+@pytest.mark.parametrize("sources", [[20], [2], [2, 8, 14, 20]])
+def test_hisparse_v41_offloads_selected_pools(monkeypatch, block_size, sources):
+    from vllm.v1.hisparse.layout import get_hisparse_kv_cache_config
+    from vllm.v1.kv_cache_layout import KVCacheLayout
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    specs = {}
+    for owner, ratio in [(2, 2), (8, 2), (14, 2), (20, 1)]:
+        name = f"model.layers.{owner}.attn"
+        specs[name] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            tokens_per_state=ratio,
+            state_content_bytes=584,
+            alignment=576,
+            model_version="deepseek_v4",
+            is_index_group_leader=owner in sources,
+        )
+        specs[name + ".indexer"] = MLAAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            alignment=576,
+            tokens_per_state=ratio,
+            cache_role=SparseCacheRole.INDEXER,
+        )
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(
+            kv_connector_extra_config={"dsv41_sources": sources}
+        ),
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(device_buffer_size=4096)
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41", index_topk=512),
+            max_model_len=1048576,
+        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=8, world_size=8, decode_context_parallel_size=1
+        ),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=1024),
+    )
+    groups = get_hisparse_kv_cache_groups(config, specs)
+    assert groups is not None
+    (host,) = [g for g in groups if g.host_resident]
+    source_names = {f"model.layers.{owner}.attn" for owner in sources}
+    assert set(host.layer_names) == source_names
+    assert host.kv_cache_spec.page_size_bytes == sum(
+        block_size // (1 if owner == 20 else 2) * 584 for owner in sources
+    )
+    device_names = {n for g in groups if not g.host_resident for n in g.layer_names}
+    assert not source_names & device_names
+    assert set(specs) - source_names <= device_names
+    hot_groups = [g for g in groups if isinstance(g.kv_cache_spec, HiSparseHotSpec)]
+    assert {name for g in hot_groups for name in g.layer_names} == {
+        name + ".hisparse_hot" for name in source_names
+    }
+    for group in hot_groups:
+        source_name = group.layer_names[0].removesuffix(".hisparse_hot")
+        physical_rows = specs[source_name].num_states
+        assert group.kv_cache_spec.blocks_per_request == 4096 // physical_rows
+    config.parallel_config.tensor_parallel_size = 1
+    config.cache_config.num_gpu_blocks_override = None
+    config.cache_config.prefix_cache_retention_interval = None
+    config.cache_config.get_resolved_kv_cache_layout = lambda: KVCacheLayout.BLHNC
+    allocated = get_hisparse_kv_cache_config(config, groups, 4 * 2**20, 4 * 2**30)
+    native_stride = kv_cache_planning._get_kv_cache_bytes_per_block(
+        [g for g in groups if not g.host_resident], KVCacheLayout.BLHNC
+    )
+    gpu = [t for t in allocated.kv_cache_tensors if not t.host_resident]
+    assert gpu and all(t.block_stride == native_stride for t in gpu)
+    assert kv_cache_planning._pool_bytes_per_block(config, groups) == native_stride
+    legacy_groups = [
+        replace(
+            g, kv_cache_spec=replace(g.kv_cache_spec, supports_strided_attention=False)
+        )
+        if isinstance(g.kv_cache_spec, HiSparseHotSpec)
+        else g
+        for g in groups
+        if not g.host_resident
+    ]
+    legacy_stride = kv_cache_planning._get_kv_cache_bytes_per_block(
+        legacy_groups, KVCacheLayout.BLHNC
+    )
+    assert native_stride <= legacy_stride
+    if sources == [20]:
+        assert native_stride < legacy_stride
+    assert all(t.size <= 4 * 2**20 for t in gpu)
+
+
+def test_hisparse_v41_regular_groups_do_not_hide_reclaimed_memory():
+    from vllm.v1.hisparse.layout import _split_group_to_block
+
+    spec = SlidingWindowSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=584,
+        dtype=torch.uint8,
+        sliding_window=128,
+    )
+    group = KVCacheGroupSpec(["swa.0", "swa.1", "swa.2"], spec)
+    split = _split_group_to_block(group, 2 * spec.page_size_bytes)
+    assert len(split) == 2
+    assert {n for g in split for n in g.layer_names} == set(group.layer_names)
+    assert sum(len(g.layer_names) for g in split) == len(group.layer_names)
+    assert all(g.kv_cache_spec == spec and len(g.layer_names) <= 2 for g in split)
+
+
+def test_hisparse_v41_worker_specs_before_layout_resolution(monkeypatch):
+    from vllm.v1.hisparse.binding import resolve_hisparse_specs
+
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
+    source = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.uint8,
+        state_content_bytes=584,
+        alignment=576,
+        model_version="deepseek_v4",
+        is_index_group_leader=True,
+    )
+    index = MLAAttentionSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=132,
+        dtype=torch.uint8,
+        cache_role=SparseCacheRole.INDEXER,
+    )
+    swa = SlidingWindowSpec(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+    )
+    specs = {"source": source, "index": index, "swa": swa}
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(
+            hisparse_config=HiSparseConfig(device_buffer_size=4096)
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(model_type="deepseek_v41", index_topk=512)
+        ),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=1024),
+    )
+
+    class Backend:
+        @staticmethod
+        def get_supported_kernel_block_sizes(spec=None):
+            return [64]
+
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: Backend) for name in specs}
+    derived = resolve_hisparse_specs(config, specs, layers)
+    assert derived["swa"] is swa
+    assert isinstance(derived["source.hisparse_hot"], HiSparseHotSpec)
+    assert isinstance(derived["source.hisparse_resident"], HiSparseResidentSpec)
+
+
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn(request):
     hash_fn: Callable

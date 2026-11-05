@@ -451,6 +451,8 @@ class HiSparseHotSpec(KVCacheSpec):
 
     page_size: int
     blocks_per_request: int
+    supports_strided_attention: bool = False
+    """Whether attention consumes padded page strides without flattening rows."""
 
     @property
     def prefix_cacheable(self) -> bool:

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections import defaultdict
-from dataclasses import dataclass
-from typing import cast
+from dataclasses import dataclass, replace
+
+import regex as re
 
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import hisparse_host_pool_gib
@@ -45,6 +46,36 @@ class HiSparseLayout:
     shared_host_pool: bool
 
 
+def dsv41_offloaded_sources(vllm_config: VllmConfig) -> set[int]:
+    transfer = getattr(vllm_config, "kv_transfer_config", None)
+    extra = transfer.kv_connector_extra_config if transfer is not None else {}
+    sources = set(extra.get("dsv41_sources", [20]))
+    if not sources or not sources <= {2, 8, 14, 20}:
+        raise ValueError("dsv41_sources must select KV owners 2, 8, 14, or 20")
+    return sources
+
+
+def is_hisparse_spec(
+    vllm_config: VllmConfig, spec: KVCacheSpec, layer_name: str | None = None
+) -> bool:
+    if not isinstance(spec, MLAAttentionSpec):
+        return False
+    if (
+        getattr(vllm_config.model_config.hf_config, "model_type", None)
+        == "deepseek_v41"
+    ):
+        sources = dsv41_offloaded_sources(vllm_config)
+        if sources == {20}:
+            return spec.tokens_per_state == 1
+        if spec.cache_role is SparseCacheRole.INDEXER:
+            return True
+        if layer_name is None:
+            return spec.tokens_per_state in ({1} if sources == {20} else {1, 2})
+        match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", layer_name)
+        return match is not None and int(match[1]) in sources
+    return True
+
+
 def get_hisparse_kv_cache_groups(
     vllm_config: VllmConfig, kv_cache_spec: dict[str, KVCacheSpec]
 ) -> list[KVCacheGroupSpec] | None:
@@ -59,14 +90,13 @@ def get_hisparse_kv_cache_groups(
     mla_specs: dict[str, KVCacheSpec] = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if isinstance(spec, MLAAttentionSpec)
+        if is_hisparse_spec(vllm_config, spec, name)
     }
     other_specs = {
         name: spec
         for name, spec in kv_cache_spec.items()
-        if not isinstance(
-            spec, (MLAAttentionSpec, HiSparseResidentSpec, HiSparseHotSpec)
-        )
+        if not is_hisparse_spec(vllm_config, spec, name)
+        and not isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
     }
     if not mla_specs:
         return None
@@ -90,16 +120,20 @@ def get_hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int:
 
 
 def _partition_hisparse_specs(
-    groups: list[KVCacheGroupSpec],
+    groups: list[KVCacheGroupSpec], vllm_config: VllmConfig
 ) -> tuple[dict[str, MLAAttentionSpec], dict[str, MLAAttentionSpec]]:
     group_spec = groups[0].kv_cache_spec
     if not isinstance(group_spec, UniformTypeKVCacheSpecs):
         raise ValueError("HiSparse requires uniform sparse-MLA cache specs.")
 
     specs = group_spec.kv_cache_specs
-    if any(
-        isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
-        for spec in specs.values()
+    if (
+        any(
+            isinstance(spec, MLAAttentionSpec) and spec.model_version == "deepseek_v4"
+            for spec in specs.values()
+        )
+        and getattr(vllm_config.model_config.hf_config, "model_type", None)
+        != "deepseek_v41"
     ):
         raise ValueError("HiSparse does not support DeepSeek V4.")
     if not all(isinstance(spec, MLAAttentionSpec) for spec in specs.values()):
@@ -125,7 +159,7 @@ def _partition_hisparse_specs(
 def _lay_out_hisparse_groups(
     vllm_config: VllmConfig, groups: list[KVCacheGroupSpec]
 ) -> list[KVCacheGroupSpec]:
-    source_specs, indexer_specs = _partition_hisparse_specs(groups)
+    source_specs, indexer_specs = _partition_hisparse_specs(groups, vllm_config)
     block_sizes = {
         spec.block_size for spec in (*source_specs.values(), *indexer_specs.values())
     }
@@ -139,19 +173,30 @@ def _lay_out_hisparse_groups(
         gpu_block_size,
     )
     assert config is not None
-    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        cast(dict[str, KVCacheSpec], indexer_specs)
-    )
+    device_specs: dict[str, KVCacheSpec] = dict(indexer_specs)
+    regular_groups = []
+    for group in groups[1:]:
+        spec = group.kv_cache_spec
+        candidate = (
+            dict(spec.kv_cache_specs)
+            if isinstance(spec, UniformTypeKVCacheSpecs)
+            else dict.fromkeys(group.layer_names, spec)
+        )
+        merged = device_specs | candidate
+        if UniformTypeKVCacheSpecs.is_uniform_type(merged):
+            device_specs = merged
+        else:
+            regular_groups.append(group)
+    indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(device_specs)
     assert indexer_group_spec is not None
     indexer_group = KVCacheGroupSpec(
-        list(indexer_specs),
+        list(device_specs),
         indexer_group_spec,
         enable_kv_transfer=True,
         role=KVCacheGroupRole.HISPARSE_INDEXER,
     )
 
-    indexer_page = sum(spec.page_size_bytes for spec in indexer_specs.values())
-    hot_blocks_per_request = cdiv(config.device_buffer_size, gpu_block_size)
+    indexer_page = sum(spec.page_size_bytes for spec in device_specs.values())
     hot_units: list[list[tuple[str, MLAAttentionSpec]]] = []
     for layer_name, layer_spec in source_specs.items():
         if layer_spec.is_index_group_leader or not hot_units:
@@ -169,6 +214,7 @@ def _lay_out_hisparse_groups(
                 f"{sorted(page_sizes)}."
             )
         page_size = page_sizes.pop()
+        physical_block_size = layers[0][1].num_states
         names = [name for name, _ in layers]
         resident_groups.append(
             KVCacheGroupSpec(
@@ -189,7 +235,13 @@ def _lay_out_hisparse_groups(
                 HiSparseHotSpec(
                     block_size=gpu_block_size,
                     page_size=page_size,
-                    blocks_per_request=hot_blocks_per_request,
+                    blocks_per_request=cdiv(
+                        config.device_buffer_size, physical_block_size
+                    ),
+                    supports_strided_attention=(
+                        getattr(vllm_config.model_config.hf_config, "model_type", None)
+                        == "deepseek_v41"
+                    ),
                 ),
                 enable_kv_transfer=False,
             )
@@ -199,7 +251,10 @@ def _lay_out_hisparse_groups(
     current_page = 0
     for unit in hot_units:
         unit_page = sum(spec.page_size_bytes for _, spec in unit)
-        if current and current_page + unit_page > indexer_page:
+        if current and (
+            current_page + unit_page > indexer_page
+            or current[0][1].page_size_bytes != unit[0][1].page_size_bytes
+        ):
             append_hot_group(current)
             current = []
             current_page = 0
@@ -209,7 +264,10 @@ def _lay_out_hisparse_groups(
         append_hot_group(current)
 
     source_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        cast(dict[str, KVCacheSpec], source_specs)
+        {
+            name: replace(spec, alignment=None, page_size_padded=None)
+            for name, spec in source_specs.items()
+        }
     )
     assert source_group_spec is not None
     source_group = KVCacheGroupSpec(
@@ -219,14 +277,51 @@ def _lay_out_hisparse_groups(
         host_resident=True,
         enable_kv_transfer=True,
     )
-    regular_groups = groups[1:]
     return [
         source_group,
         indexer_group,
         *resident_groups,
         *hot_groups,
-        *regular_groups,
+        *(
+            split
+            for group in regular_groups
+            for split in _split_group_to_block(group, indexer_page)
+        ),
     ]
+
+
+def _split_group_to_block(
+    group: KVCacheGroupSpec, block_bytes: int
+) -> list[KVCacheGroupSpec]:
+    """Keep regular groups from padding every block to their original width."""
+    spec = group.kv_cache_spec
+    specs = (
+        dict(spec.kv_cache_specs)
+        if isinstance(spec, UniformTypeKVCacheSpecs)
+        else dict.fromkeys(group.layer_names, spec)
+    )
+    page_size_layers: defaultdict[int, list[str]] = defaultdict(list)
+    for name, layer_spec in specs.items():
+        page_size_layers[layer_spec.page_size_bytes].append(name)
+    if len(set(map(len, page_size_layers.values()))) != 1:
+        return [group]
+    repeats = list(zip(*page_size_layers.values()))
+    per_group = max(block_bytes // sum(page_size_layers), 1)
+    num_groups = cdiv(len(repeats), per_group)
+    if num_groups == 1:
+        return [group]
+    result = []
+    for i in range(num_groups):
+        names = [name for repeat in repeats[i::num_groups] for name in repeat]
+        split_spec = spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            uniform_spec = UniformTypeKVCacheSpecs.from_specs(
+                {name: specs[name] for name in names}
+            )
+            assert uniform_spec is not None
+            split_spec = uniform_spec
+        result.append(replace(group, layer_names=names, kv_cache_spec=split_spec))
+    return result
 
 
 def create_hisparse_layout(

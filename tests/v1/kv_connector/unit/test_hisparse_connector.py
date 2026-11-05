@@ -42,6 +42,124 @@ from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
 
 
+@pytest.mark.parametrize("offloaded", [False, True])
+@pytest.mark.parametrize("already_written", [False, True])
+def test_v41_replay_preserves_previously_written_host_rows(
+    monkeypatch, offloaded, already_written
+):
+    from vllm.models.deepseek_v41 import compressor as compressor_module
+    from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
+
+    native = torch.zeros(1, 8, 584, dtype=torch.uint8)
+    resident = torch.zeros_like(native)
+    handle = SimpleNamespace(
+        view=SimpleNamespace(cache=resident),
+        slot_mapping=torch.tensor([1, 2]),
+        finish_kv_update=MagicMock(),
+    )
+    metadata = DeepseekV4FlashMLAMetadata(
+        num_reqs=1,
+        max_query_len=2,
+        max_seq_len=8,
+        num_actual_tokens=2,
+        query_start_loc=torch.tensor([0, 2]),
+        slot_mapping=torch.tensor([-1, 6]),
+        block_table=torch.tensor([[0]]),
+        req_id_per_token=torch.tensor([0, 0]),
+        block_size=8,
+        topk_tokens=512,
+        kv_already_written=already_written,
+    )
+    layer = SimpleNamespace(
+        kv_cache=native, hisparse_cache=handle if offloaded else None
+    )
+    compressor = SimpleNamespace(
+        k_cache_prefix="main", _static_forward_context={"main": layer}, compress_ratio=1
+    )
+    insert = MagicMock()
+    monkeypatch.setattr(compressor_module, "rope_quant_insert", insert)
+    monkeypatch.setattr(
+        compressor_module,
+        "get_forward_context",
+        lambda: SimpleNamespace(attn_metadata={"main": metadata}),
+    )
+
+    compressor_module.DeepseekCompressor.insert_cache(
+        compressor,
+        torch.empty(2, 576),
+        torch.arange(2),
+        SimpleNamespace(cos_sin_cache=None),
+    )
+
+    if offloaded and already_written:
+        insert.assert_not_called()
+        handle.finish_kv_update.assert_not_called()
+    else:
+        insert.assert_called_once()
+        assert insert.call_args.args[3] is (resident if offloaded else native)
+        assert insert.call_args.args[4].tolist() == [-1, 2 if offloaded else 6]
+        assert handle.finish_kv_update.call_count == int(offloaded)
+
+
+def test_row_dma_preserves_compressed_planes_and_partial_rows():
+    worker = object.__new__(HiSparseConnectorWorker)
+    worker.kernel_block_size = 64
+    worker.row_value_bytes = 576
+    worker.is_host_writer = True
+    worker.cache_handles = []
+    worker.resident_caches = []
+    worker.host_caches = []
+    expected = []
+    for source_index, ratio in enumerate((2, 1)):
+        block = 64 // ratio
+        source = (
+            (torch.arange(2 * block * 584) % 251).to(torch.uint8).reshape(2, block, 584)
+        )
+        host = torch.full((2 * block, 584), 253, dtype=torch.uint8)
+        worker.resident_caches.append(source)
+        worker.host_caches.append(host)
+        worker.cache_handles.append(
+            SimpleNamespace(
+                runtime=SimpleNamespace(
+                    resident_source_index=source_index, tokens_per_state=ratio
+                ),
+                view=SimpleNamespace(block_size=block),
+            )
+        )
+        reference = host.clone().flatten()
+        # Tokens [1, 4) complete rows 0 and 1 in a two-token compressor.
+        first, count = (0, 2) if ratio == 2 else (1, 3)
+        for offset, width in ((0, 576), (block * 576, 8)):
+            start = block * 584 + offset + first * width
+            reference[start : start + count * width] = source.flatten()[
+                start : start + count * width
+            ]
+        expected.append(reference)
+    worker._set_row_mirrors(
+        (
+            SparseKVRowMirror(
+                source_starts=(65, 65),
+                destination_start=65,
+                num_rows=3,
+            ),
+        )
+    )
+    worker._acquire_dma_descriptors = worker_module._allocate_dma_descriptors
+
+    def copy_descriptors(descriptors, count, **kwargs):
+        for i in range(count):
+            ctypes.memmove(
+                int(descriptors.dst_np[i]),
+                int(descriptors.src_np[i]),
+                int(descriptors.sizes_np[i]),
+            )
+
+    worker._submit_dma_descriptors = copy_descriptors
+    worker._enqueue_row_dma((0, 1))
+    for actual, reference in zip(worker.host_caches, expected):
+        assert torch.equal(actual.flatten(), reference)
+
+
 @pytest.mark.parametrize("nested", [False, True])
 def test_cache_manager_binding_preserves_hisparse_and_legacy_pool_hooks(nested):
     """Composite binding must reach HiSparse and existing pool-only connectors."""
@@ -161,10 +279,12 @@ def test_no_forward_enqueues_deferred_hisparse_transfers():
     connector.finish_forward.assert_called_once_with()
 
 
-def test_full_graph_step_prepares_host_mirror_outside_model():
-    """Graph replay must restore host-mirror state cleared at step start."""
+@pytest.mark.parametrize("full_graph", [False, True])
+def test_step_prepares_host_mirror_outside_model(full_graph):
+    """Graph and eager forwards restore mirror state cleared at step start."""
     runtime = SimpleNamespace(
         is_group_leader=True,
+        tokens_per_state=1,
         eager_host_mirror=True,
         begin_forward=MagicMock(),
         invalidate_written_slots=MagicMock(),
@@ -198,11 +318,13 @@ def test_full_graph_step_prepares_host_mirror_outside_model():
         req_id_per_token=req_id_per_token,
     )
 
+    metadata = {"layer": attn_metadata}
+    kwargs = {"attn_metadata": metadata} if full_graph else {}
     connector.start_load_kv(
-        SimpleNamespace(),
+        SimpleNamespace(attn_metadata=None if full_graph else metadata),
         request_state_indices=None,
         request_ids=[],
-        attn_metadata={"layer": attn_metadata},
+        **kwargs,
     )
 
     worker._enqueue_host_mirror()
@@ -264,8 +386,10 @@ def test_draft_layer_rows_mirrored_after_drafter(monkeypatch, cg_mode):
     for draft_layer in (False, True):
         runtime = SimpleNamespace(
             is_group_leader=True,
+            tokens_per_state=1,
             eager_host_mirror=True,
             resident_source_index=0,
+            row_value_bytes=0,
             host_cache=torch.zeros(4 * block_size, width),
             request_state_indices=request_state_indices,
             begin_forward=MagicMock(),
@@ -448,7 +572,8 @@ def test_zero_token_step_holds_tp_ranks_after_host_write_wait(
     assert calls == expected
 
 
-def test_scheduled_prefix_hit_publishes_adopted_copies():
+@pytest.mark.parametrize("num_resident_groups", [1, 2])
+def test_scheduled_prefix_hit_publishes_adopted_copies(num_resident_groups):
     """Copies adopted after scheduling reach the worker as a residency update,
     leaving the block-table row the scheduler output carries untouched."""
     from tests.v1.core.test_prefix_caching import (
@@ -462,7 +587,9 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     from vllm.v1.core.kv_cache_utils import init_none_hash
 
     init_none_hash(sha256)
-    manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
+    manager = make_hisparse_kv_cache_manager(
+        32, 16, enable_caching=True, num_resident_groups=num_resident_groups
+    )
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
     original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
     assert _allocate_scheduled(manager, original, num_new_tokens=len(tokens))
@@ -504,7 +631,7 @@ def test_scheduled_prefix_hit_publishes_adopted_copies():
     assert update.pages == [0, 1, 2, 3]
     assert update.block_ids[0][:3] == copy_ids[:3]
     assert manager.get_block_ids(resumed.request_id)[2] == core_row
-    assert core_row[:3] == [0, 0, 0]
+    assert core_row[:3] == [0] * 3
 
 
 def test_residency_updates_persist_by_state_row():

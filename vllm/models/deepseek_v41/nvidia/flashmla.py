@@ -29,6 +29,7 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
+from vllm.v1.hisparse.runtime import build_hisparse_prefill_staging_plan
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -176,6 +177,12 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 output=output[:num_decode_tokens],
             )
 
+    def _hisparse_source(self):
+        if self.compressed_cache_prefix is None:
+            return None
+        source = self._static_forward_context[self.compressed_cache_prefix]
+        return source if source.hisparse_cache is not None else None
+
     def _forward_decode(
         self,
         q: torch.Tensor,
@@ -197,13 +204,34 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             assert self.topk_indices_buffer is not None
             block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
-            global_indices, topk_lens = compute_global_topk_indices_and_lens(
-                self.topk_indices_buffer[:num_decode_tokens],
-                swa_metadata.token_to_req_indices,
-                attn_metadata.block_table[:num_decodes],
-                block_size,
-                is_valid,
-            )
+            source = self._hisparse_source()
+            if source is None:
+                global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                    self.topk_indices_buffer[:num_decode_tokens],
+                    swa_metadata.token_to_req_indices,
+                    attn_metadata.block_table[:num_decodes],
+                    block_size,
+                    is_valid,
+                )
+            else:
+                cache = source.hisparse_cache
+                assert attn_metadata.block_table is not None
+                assert swa_metadata.query_start_loc is not None
+                if self.is_index_source:
+                    cache.runtime.begin_forward()
+                    source._hisparse_topk = cache.swap_in(
+                        attn_metadata.req_id_per_token,
+                        attn_metadata.block_table[:num_decodes],
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        block_size=block_size,
+                        num_valid_rows=swa_metadata.query_start_loc[
+                            num_decodes : num_decodes + 1
+                        ],
+                        return_valid_counts=True,
+                    )
+                assert source._hisparse_topk is not None
+                global_indices, topk_lens = source._hisparse_topk
+                kv_cache = cache.runtime.hot.attention_cache
             topk_indices = global_indices.view(num_decode_tokens, 1, -1)
 
         swa_indices = swa_metadata.decode_swa_indices
@@ -314,12 +342,24 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
+                source = self._hisparse_source()
+                chunk_cache = compressed_k_cache
+                chunk_table = block_table[chunk_start:chunk_end]
+                if source is not None:
+                    chunk_cache, chunk_table = self._stage_hisparse_prefill(
+                        compressed_k_cache,
+                        chunk_table,
+                        attn_metadata,
+                        swa_metadata,
+                        chunk_start,
+                        chunk_end,
+                    )
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
-                    compressed_k_cache,
+                    chunk_cache,
                     seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
                     gather_lens=None,
-                    block_table=block_table[chunk_start:chunk_end],
+                    block_table=chunk_table,
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
                 )
@@ -369,3 +409,54 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 topk_length=combined_lens,
                 out=output[query_start:query_end],
             )
+
+    def _stage_hisparse_prefill(
+        self,
+        host_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        attn_metadata: DeepseekV4FlashMLAMetadata,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        chunk_start: int,
+        chunk_end: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The cache and block table holding these prefills' compressed KV."""
+        source = self._hisparse_source()
+        assert source is not None
+        key = (source.prefix, chunk_start, chunk_end)
+        cached = attn_metadata.hisparse_prefill_caches.get(key)
+        if cached is not None:
+            return cached
+        cache = source.hisparse_cache
+        assert cache is not None and cache.view is not None
+        assert cache.block_table is not None
+        state_indices = cache.runtime.request_state_indices
+        assert state_indices is not None
+        num_decodes = swa_metadata.num_decodes
+        state_indices = state_indices[
+            num_decodes + chunk_start : num_decodes + chunk_end
+        ].clamp(min=0)
+        if cache.all_context_pages_resident:
+            return cache.view.cache, cache.block_table.index_select(0, state_indices)
+
+        block_rows = host_cache.shape[1]
+        plan = attn_metadata.hisparse_prefill_plans.get(key)
+        if plan is None:
+            seq_lens = swa_metadata.prefill_seq_lens
+            seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
+            assert seq_lens is not None and seq_lens_cpu is not None
+            rows = seq_lens_cpu[chunk_start:chunk_end] // self.compress_ratio
+            plan = build_hisparse_prefill_staging_plan(
+                block_table,
+                seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                block_rows,
+                int(((rows + block_rows - 1) // block_rows).sum()),
+            )
+            attn_metadata.hisparse_prefill_plans[key] = plan
+        plan.ensure_gpu_sources(cache.block_table, state_indices, block_rows)
+        staged = cache.runtime.gather_prefill_cache(
+            host_cache, plan, resident_cache=cache.view.cache
+        )
+        # Every C1 consumer reads the same source pool after its only writer.
+        result = staged, plan.block_table
+        attn_metadata.hisparse_prefill_caches[key] = result
+        return result

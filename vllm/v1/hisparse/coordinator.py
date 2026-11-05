@@ -181,10 +181,12 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.request_states: dict[str, _HiSparseRequestState] = {}
         self.next_spill_id = 0
-        # Published host block hash -> GPU copies of that page, readable until
+        # Published host page -> GPU copies of that page, readable until
         # the pool reuses them. Lets a host prefix hit come back GPU-resident.
-        self.copies: dict[BlockHashWithGroupId, tuple[KVCacheBlock, ...]] = {}
-        self._copy_by_block: dict[int, BlockHashWithGroupId] = {}
+        self.copies: dict[
+            tuple[int, BlockHashWithGroupId], tuple[KVCacheBlock, ...]
+        ] = {}
+        self._copy_by_block: dict[int, tuple[int, BlockHashWithGroupId]] = {}
         # Unpinned GPU block id -> (request, page) pairs still reading it.
         self._owners: dict[int, set[tuple[str, int]]] = {}
 
@@ -267,7 +269,7 @@ class HiSparseCoordinator:
         for host_idx, host_block in enumerate(host_blocks):
             if host_block.is_null or host_block.block_hash is None:
                 continue
-            blocks = self.copies.get(host_block.block_hash)
+            blocks = self.copies.get((host_block.block_id, host_block.block_hash))
             if blocks is None:
                 continue
             for manager, block in zip(self.resident_managers, blocks):
@@ -308,13 +310,16 @@ class HiSparseCoordinator:
             if block is None:
                 return
             blocks.append(block)
-        self._drop_copy(host_block.block_hash)
-        self.copies[host_block.block_hash] = tuple(blocks)
+        # Recomputed prefixes can have duplicate hashes but different KV bytes.
+        # Adopt only a copy of the exact host page selected by the cache lookup.
+        host_page = (host_block.block_id, host_block.block_hash)
+        self._drop_copy(host_page)
+        self.copies[host_page] = tuple(blocks)
         for block in blocks:
-            self._copy_by_block[block.block_id] = host_block.block_hash
+            self._copy_by_block[block.block_id] = host_page
 
-    def _drop_copy(self, host_hash: BlockHashWithGroupId) -> None:
-        blocks = self.copies.pop(host_hash, None)
+    def _drop_copy(self, host_page: tuple[int, BlockHashWithGroupId]) -> None:
+        blocks = self.copies.pop(host_page, None)
         if blocks is None:
             return
         for block in blocks:
@@ -383,9 +388,9 @@ class HiSparseCoordinator:
             self._unpin_page(request_id, state, page_idx)
 
     def _on_block_reused(self, block: KVCacheBlock) -> None:
-        host_hash = self._copy_by_block.get(block.block_id)
-        if host_hash is not None:
-            self._drop_copy(host_hash)
+        host_page = self._copy_by_block.get(block.block_id)
+        if host_page is not None:
+            self._drop_copy(host_page)
         for request_id, page_idx in self._owners.pop(block.block_id, ()):
             self._lose_page(request_id, page_idx)
 

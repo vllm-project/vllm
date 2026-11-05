@@ -35,6 +35,9 @@ def _replay_scheduler(
     *,
     long_prefill_token_threshold: int = 0,
     use_kv_connector: MockKVConfig | None = None,
+    window: int = WINDOW,
+    num_blocks: int = 10000,
+    max_num_batched_tokens: int = 8192,
 ) -> Scheduler:
     """A hybrid layout: one prefix-cacheable full-attention group and one
     replayed sliding-window group."""
@@ -43,10 +46,12 @@ def _replay_scheduler(
         enable_prefix_caching=True,
         long_prefill_token_threshold=long_prefill_token_threshold,
         use_kv_connector=use_kv_connector,
+        num_blocks=num_blocks,
+        max_num_batched_tokens=max_num_batched_tokens,
     )
     vllm_config = base.vllm_config
     kv_cache_config = KVCacheConfig(
-        num_blocks=10000,
+        num_blocks=num_blocks,
         kv_cache_tensors=[],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -65,7 +70,7 @@ def _replay_scheduler(
                     num_kv_heads=1,
                     head_size=64,
                     dtype=torch.bfloat16,
-                    sliding_window=WINDOW,
+                    sliding_window=window,
                     bounded_replay=True,
                 ),
             ),
@@ -79,7 +84,7 @@ def _replay_scheduler(
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
     scheduler.use_v2_model_runner = True
-    assert scheduler.prefix_replay_tokens == WINDOW
+    assert scheduler.prefix_replay_tokens == window
     return scheduler
 
 
@@ -219,6 +224,40 @@ def test_async_remote_kv_hit_replays_after_load():
         out.num_scheduled_tokens[request.request_id]
         == NUM_PROMPT_TOKENS - matched + WINDOW
     )
+
+
+@pytest.mark.parametrize("loads_window", [False, True])
+def test_async_load_leaves_room_for_window_replay(loads_window):
+    """Null prefix entries cannot count as owned sliding-window slots."""
+    scheduler = _replay_scheduler(
+        use_kv_connector=MockKVConfig(matched_tokens=1024, is_async=True),
+        num_blocks=140,
+        max_num_batched_tokens=128,
+    )
+    if loads_window:
+        scheduler.connector.get_loaded_kv_cache_group_ids = lambda _: (FULL, SWA)
+    first, second = create_requests(
+        num_requests=2,
+        num_tokens=1100,
+        block_size=BLOCK_SIZE,
+        req_ids=["first", "second"],
+    )
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+    out = scheduler.schedule()
+    assert first.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert second.status == RequestStatus.WAITING
+    scheduler.update_from_output(
+        out,
+        create_model_runner_output(
+            [],
+            finished_recving={first.request_id},
+        ),
+    )
+
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[first.request_id] > 0
+    assert first.status == RequestStatus.RUNNING
 
 
 def test_remote_kv_hit_is_taken_in_whole_blocks():

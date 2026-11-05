@@ -3433,6 +3433,46 @@ def test_hisparse_prefill_staging_plan_resolves_resident_sources():
     assert (plan.gpu_row_ids == -1).all()
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_hisparse_prefill_resident_sources_bound_temporary_storage(device):
+    """Wide tables must not be copied once per staged history block."""
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from torch.utils._pytree import tree_leaves
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+
+    class StorageSizes(TorchDispatchMode):
+        peak = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            result = func(*args, **(kwargs or {}))
+            for value in tree_leaves(result):
+                if isinstance(value, torch.Tensor):
+                    self.peak = max(self.peak, value.untyped_storage().nbytes())
+            return result
+
+    block_size = 4
+    block_table = torch.arange(1, 513, dtype=torch.int32, device=device).view(4, 128)
+    plan = build_hisparse_prefill_staging_plan(
+        block_table,
+        torch.full((4,), 128 * block_size, dtype=torch.int32, device=device),
+        block_size,
+        staging_block_capacity=512,
+    )
+    state_indices = torch.tensor([1, 3, 5, 7], dtype=torch.int32, device=device)
+    resident_table = torch.zeros((8, 4096), dtype=torch.int32, device=device)
+    resident_table[state_indices.long(), :128] = block_table + 1000
+    with StorageSizes() as sizes:
+        plan.ensure_gpu_sources(resident_table, state_indices, block_size)
+
+    expected = torch.where(
+        plan.row_ids >= block_size, plan.row_ids + 1000 * block_size, -1
+    )
+    torch.testing.assert_close(plan.gpu_row_ids, expected)
+    assert sizes.peak <= 2 * resident_table.nbytes
+
+
 def test_hisparse_prefill_resident_sources_follow_each_resident_group():
     """Layers of different resident groups share one batch staging plan.
 
@@ -3921,37 +3961,45 @@ def test_sparse_mqa_hisparse_lanes(
 
 @pytest.mark.parametrize("max_swap_rows", [1, 4], ids=["over_capacity", "mixed"])
 def test_hisparse_resident_prefill_uses_attention_block_stride(max_swap_rows):
-    """Resident batches with prefill rows read resident pages directly, whether
-    they exceed the swap-row capacity or fit it."""
-    expected = torch.tensor([[19]], dtype=torch.int32)
-    cache_handle = SimpleNamespace(
+    """Resident conversion waits for the batch table and uses the attention stride."""
+    topk = torch.zeros((2, 128), dtype=torch.int32, device=DEVICE_TYPE)
+    blocks = torch.full((2, 1), 3, dtype=torch.int32, device=DEVICE_TYPE)
+    batch_table = torch.zeros_like(blocks)
+
+    def batch_block_table():
+        torch.cuda._sleep(200_000_000)
+        batch_table.copy_(blocks)
+        return batch_table
+
+    cache = SimpleNamespace(
         all_context_pages_resident=True,
         num_decode_tokens=1,
         num_actual_tokens=2,
         view=SimpleNamespace(block_size=64, attention_block_stride=832),
-        block_table=torch.tensor([[3]], dtype=torch.int32),
-        batch_block_table=lambda: torch.tensor([[3]], dtype=torch.int32),
+        block_table=blocks,
+        batch_block_table=batch_block_table,
         runtime=SimpleNamespace(max_swap_rows=max_swap_rows),
     )
-    index_group = object.__new__(HiSparseMLAIndexGroup)
-    index_group.caches = [cache_handle]
-    index_group.physical_topk_indices = torch.empty((2, 1), dtype=torch.int32)
-    index_group._convert_once = MagicMock(return_value=expected)
-    topk = torch.zeros((2, 1), dtype=torch.int32)
-    metadata = SimpleNamespace(
-        req_id_per_token=torch.zeros(2, dtype=torch.int32),
+    group = HiSparseMLAIndexGroup(
+        logical_topk_indices=topk,
+        physical_topk_indices=torch.empty_like(topk),
+        valid_topk_counts=torch.empty(2, dtype=torch.int32, device=DEVICE_TYPE),
+        side_stream=torch.Stream(),
+        logical_topk_ready=torch.Event(),
+        physical_topk_ready=torch.Event(),
+        has_indexer=True,
+        caches=[cache],
     )
-
-    result = index_group.convert_logical_to_physical_topk(
-        0,
-        topk,
-        metadata,
-        block_stride_rows=None,
-        return_valid_counts=False,
-    )
-
-    assert result is expected
-    assert index_group._convert_once.call_args.kwargs["block_stride_rows"] == 832
+    metadata = SimpleNamespace(req_id_per_token=torch.zeros_like(topk[:, 0]))
+    # Repeat after compilation so its host delay cannot hide the stream race.
+    for _ in range(2):
+        batch_table.zero_()
+        torch.accelerator.synchronize()
+        group.set_logical_topk_ready(0)
+        physical = group.convert_logical_to_physical_topk(
+            0, topk, metadata, block_stride_rows=None, return_valid_counts=False
+        )
+        torch.testing.assert_close(physical, torch.full_like(topk, 3 * 832))
 
 
 def test_hisparse_flashmla_reorders_full_speculative_window_as_decode():

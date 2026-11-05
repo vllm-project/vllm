@@ -19,11 +19,12 @@ from vllm.models.deepseek_v41.decoder_replay_layers import (
 from vllm.models.deepseek_v41.nvidia.decoder_replay_cudagraph import (
     DecoderReplayCudaGraphManager,
 )
+from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import NewRequestData
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec, KVCacheConfig
 from vllm.v1.worker.dp_utils import should_skip_dp_coordination
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -330,7 +331,12 @@ class DeepseekV41ModelState(DefaultModelState):
             self._replay = (
                 max(spec.prefix_replay_tokens for spec in specs),
                 torch.tensor(
-                    [i for i, spec in enumerate(specs) if spec.prefix_cacheable],
+                    [
+                        i
+                        for i, spec in enumerate(specs)
+                        if spec.prefix_cacheable
+                        or isinstance(spec, HiSparseResidentSpec)
+                    ],
                     dtype=torch.int32,
                     device=self.device,
                 ),
@@ -534,6 +540,9 @@ class DeepseekV41ModelState(DefaultModelState):
                 self._kept_kv_start[:num_reqs]
             ),
         )
+        for metadata in attn_metadata.values():
+            if isinstance(metadata, DeepseekV4FlashMLAMetadata):
+                metadata.kv_already_written = True
         # The first replay layer wrote every row's window KV: its window starts
         # are the batch's.
         first_swa = layers.first_swa_prefix

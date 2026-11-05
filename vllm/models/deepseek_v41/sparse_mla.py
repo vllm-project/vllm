@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 FlashMLA sparse backend, metadata, and metadata builders."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import torch
@@ -165,6 +165,12 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int
     topk_tokens: int
+    num_decode_tokens: int = 0
+    kv_already_written: bool = False
+    hisparse_prefill_plans: dict = field(default_factory=dict)
+    hisparse_prefill_caches: dict[
+        tuple[str, int, int], tuple[torch.Tensor, torch.Tensor]
+    ] = field(default_factory=dict)
 
 
 class DeepseekV4SparseMLAMetadataBuilder(
@@ -244,6 +250,9 @@ class DeepseekV4SparseMLAMetadataBuilder(
             max_query_len=cm.max_query_len,
             max_seq_len=cm.max_seq_len,
             num_actual_tokens=cm.num_actual_tokens,
+            num_decode_tokens=int(
+                (cm.query_start_loc_cpu[1:] - cm.query_start_loc_cpu[:-1] == 1).sum()
+            ),
             query_start_loc=cm.query_start_loc,
             slot_mapping=slot_mapping,
             block_table=cm.block_table_tensor,

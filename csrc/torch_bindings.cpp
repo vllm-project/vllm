@@ -1055,14 +1055,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor miss_mask,"
       "                     Tensor? request_state_indices,"
       "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     int attention_block_stride=0, int "
+      "row_value_bytes=0) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"
       "                        Tensor! hot_cache,"
       "                        Tensor miss_global_indices,"
       "                        Tensor miss_hot_indices,"
-      "                        Tensor miss_counts) -> ()");
+      "                        Tensor miss_counts, int row_value_bytes=0) -> "
+      "()");
 
 #endif  // !USE_ROCM
 

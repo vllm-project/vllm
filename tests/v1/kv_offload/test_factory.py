@@ -391,8 +391,10 @@ def test_cpu_spec_create_worker_uses_mmap_on_cuda(monkeypatch):
     kv_caches = MagicMock()
     spec.create_worker(kv_caches)
 
-    assert region_calls[0]["engine_id"] == "test-engine"
-    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block * 4
+    # The logical rank keys its private region, regardless of the CUDA device.
+    assert region_calls[0]["engine_id"] == "test-engine_0"
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["kv_bytes_per_chunk"] == worker_kv_bytes_per_block
     assert worker_calls[0]["kv_caches"] is kv_caches
     assert worker_calls[0]["mmap_region"] is region
 
@@ -462,16 +464,16 @@ def test_cpu_spec_create_worker_skips_mmap_for_empty_cache(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("replicated_layout", "rank", "device_index", "world_size", "expected_rank"),
+    ("replicated_layout", "rank", "device_index", "world_size", "expected_engine_id"),
     [
-        (True, 1, 5, 4, 0),
-        (True, 0, 0, 4, 0),
-        (False, 1, 5, 4, 1),
-        (False, 3, 6, 4, 3),
+        (True, 1, 5, 4, "test-engine"),
+        (True, 0, 0, 4, "test-engine"),
+        (False, 1, 5, 4, "test-engine_1"),
+        (False, 3, 6, 4, "test-engine_3"),
     ],
 )
-def test_cpu_spec_create_worker_rank_assignment(
-    monkeypatch, replicated_layout, rank, device_index, world_size, expected_rank
+def test_cpu_spec_create_worker_region_assignment(
+    monkeypatch, replicated_layout, rank, device_index, world_size, expected_engine_id
 ):
     import vllm.v1.kv_offload.cpu.spec as cpu_spec_module
 
@@ -498,7 +500,11 @@ def test_cpu_spec_create_worker_rank_assignment(
 
     spec.create_worker(MagicMock())
 
-    assert region_calls[0]["rank"] == expected_rank
+    assert region_calls[0]["engine_id"] == expected_engine_id
+    assert region_calls[0]["rank"] == 0
+    assert region_calls[0]["populate_shard"] == (
+        (rank, world_size) if replicated_layout else None
+    )
 
 
 def test_offloading_spec_has_replicated_layout_default():

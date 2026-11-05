@@ -16,6 +16,7 @@ from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v41.nvidia.model_state import DeepseekV41ModelState
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+from vllm.v1.kv_cache_interface import HiSparseResidentSpec
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 
@@ -110,3 +111,22 @@ def test_only_prefills_carry_a_replay_start(state):
     replay_start, slots = _prepare(state, batch)
     assert replay_start == [0]
     assert slots.tolist() == [[0], [1]]
+
+
+def test_replayed_prefix_pads_hisparse_resident_writes(state):
+    state.add_request(0, SimpleNamespace(replay_start=16))
+    batch = _batch([6], [22], idx_mapping=[0], is_prefilling=[True])
+    groups = [
+        *KV_CACHE_CONFIG.kv_cache_groups,
+        SimpleNamespace(kv_cache_spec=HiSparseResidentSpec(block_size=8, page_size=16)),
+    ]
+    slots = torch.arange(3 * batch.num_tokens, device=DEVICE).view(3, -1)
+    state.prepare_attn(
+        batch,
+        CUDAGraphMode.NONE,
+        (),
+        slots,
+        [],
+        SimpleNamespace(kv_cache_groups=groups),
+    )
+    assert slots[2].tolist() == [PAD_SLOT_ID] * WINDOW + [16, 17]

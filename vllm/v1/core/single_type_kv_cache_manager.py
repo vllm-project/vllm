@@ -222,8 +222,11 @@ class SingleTypeKVCacheManager(ABC):
             # `sum(reservations) <= pool` <=> `sum(peak_real_held) <= pool`.
             # Drift between the two would re-introduce the deadlock from
             # issue #39734 or, worse, mid-prefill OOM.
+            # The skipped prefix still occupies absolute block-table indices.
             num_required_blocks = min(
-                num_required_blocks, self.max_admission_blocks_per_request
+                num_required_blocks,
+                self.get_num_skipped_tokens(total_computed_tokens) // self.block_size
+                + self.max_admission_blocks_per_request,
             )
         num_req_blocks = len(self.req_to_blocks.get(request_id, ()))
 

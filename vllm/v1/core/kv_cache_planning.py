@@ -596,6 +596,7 @@ def _get_kv_cache_bytes_per_block(
         group.kv_cache_spec.page_size_bytes
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
+        and not group.kv_cache_spec.supports_strided_attention
     ]
     alignments.extend(
         _get_per_layer_spec(group, layer_name).get_block_stride_alignment()

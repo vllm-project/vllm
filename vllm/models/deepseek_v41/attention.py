@@ -81,6 +81,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
+    SparseCacheRole,
     get_kv_quant_mode,
 )
 
@@ -585,6 +586,33 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # The attention layer itself was already registered with the
         # compilation context above (before indexer/compressor creation).
+
+        self.hisparse_cache = None
+        self.is_draft_layer = False
+        from vllm.v1.hisparse.layout import dsv41_offloaded_sources
+
+        if (
+            vllm_config.attention_config.hisparse_config is not None
+            and self.is_kv_source
+            and layer_id in dsv41_offloaded_sources(vllm_config)
+        ):
+            from vllm.v1.hisparse.runtime import create_hisparse_cache_handle
+
+            if (
+                self.kv_cache_dtype != "fp8_ds_mla"
+                or self.compressed_bytes_per_token != 584
+            ):
+                raise ValueError(
+                    "The V4.1 HiSparse experiment requires 584-byte FP8 KV"
+                )
+            self.hisparse_cache = create_hisparse_cache_handle(
+                vllm_config,
+                config.index_topk,
+                is_index_group_leader=True,
+                row_width=584,
+                kv_dtype=torch.uint8,
+            )
+            self._hisparse_topk = None
 
         # Compressors live only on kv-source layers; consumers read the
         # source's compressed cache through the forward context.
@@ -1212,6 +1240,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_dtype_str=self.kv_cache_dtype,
             alignment=self.kv_page_alignment if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
+            is_index_group_leader=self.hisparse_cache is not None,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             # Packed record width; head_size stays semantic (512).
             state_content_bytes=(
@@ -1278,6 +1307,11 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            cache_role=(
+                SparseCacheRole.INDEXER
+                if vllm_config.attention_config.hisparse_config is not None
+                else SparseCacheRole.SPARSE
+            ),
             tokens_per_state=self.compress_ratio,
             # The indexer page shares a physical block with the main KV cache
             # (the block stride is the sum of every page in the group), so it

@@ -676,7 +676,8 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     if num_tokens % HISPARSE_BLOCK_SIZE:
         assert source[-1].block_hash is None
     else:
-        assert coordinator.copies[source[-1].block_hash] == (resident[-1],)
+        key = (source[-1].block_id, source[-1].block_hash)
+        assert coordinator.copies[key] == (resident[-1],)
 
 
 def test_hisparse_aborted_tail_restore_retains_both_endpoints():
@@ -1239,7 +1240,8 @@ def test_mamba_boundary_handoffs_do_not_pin_obsolete_blocks():
     assert all(block.ref_cnt == 0 for block in old_blocks[:-1])
 
 
-def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
+@pytest.mark.parametrize("recompute", [False, True])
+def test_hisparse_prefix_hit_adopts_gpu_shadow_pages(recompute):
     """A host prefix hit must come back GPU-resident while shadows survive."""
     manager = make_hisparse_kv_cache_manager(32, 16, enable_caching=True)
     tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
@@ -1252,6 +1254,12 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
         block.block_id for block in manager.get_blocks("original").blocks[2]
     ]
     manager.free(original)
+
+    if recompute:
+        repeated = make_request("repeated", tokens, HISPARSE_BLOCK_SIZE, sha256)
+        assert _allocate_scheduled(manager, repeated, num_new_tokens=len(tokens))
+        _publish_hisparse_pages(manager)
+        manager.free(repeated)
 
     resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
     computed, num_computed, _ = manager.get_computed_blocks(resumed)
@@ -1267,6 +1275,56 @@ def test_hisparse_prefix_hit_adopts_gpu_shadow_pages():
     assert get_hisparse_coordinator(manager).all_context_pages_resident(
         ((resumed.request_id, num_computed, len(tokens) - num_computed),)
     )
+
+
+@pytest.mark.parametrize("fillers", [2, 4])
+def test_hisparse_cpu_copies_yield_before_gpu_prefixes(fillers):
+    """GPU-only indexer prefixes survive while CPU-backed copies can be reused."""
+    manager = make_hisparse_kv_cache_manager(32, 64, enable_caching=True)
+    tokens = list(range(4 * HISPARSE_BLOCK_SIZE))
+    original = make_request("original", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert _allocate_scheduled(manager, original, num_new_tokens=len(tokens))
+    _publish_hisparse_pages(manager)
+    host = manager.get_blocks(original.request_id).blocks[0]
+    copy_key = (host[0].block_id, host[0].block_hash)
+    manager.free(original)
+
+    for index in range(fillers):
+        request = make_request(
+            f"filler-{index}",
+            [token + 1000 * (index + 1) for token in tokens],
+            HISPARSE_BLOCK_SIZE,
+            sha256,
+        )
+        assert _allocate_scheduled(manager, request, num_new_tokens=len(tokens))
+        _publish_hisparse_pages(manager)
+        manager.free(request)
+
+    resumed = make_request("resumed", tokens, HISPARSE_BLOCK_SIZE, sha256)
+    assert manager.get_computed_blocks(resumed)[1] == 3 * HISPARSE_BLOCK_SIZE
+    if fillers == 2:
+        assert copy_key in get_hisparse_coordinator(manager).copies
+
+
+def test_readable_copy_lease_respects_prefix_eviction_priority():
+    pool = BlockPool(5, enable_caching=True, hash_block_size=HISPARSE_BLOCK_SIZE)
+    request = make_request(
+        "cached", list(range(HISPARSE_BLOCK_SIZE)), HISPARSE_BLOCK_SIZE, sha256
+    )
+    [cached, copy] = pool.get_new_blocks(2)
+    pool.cache_full_blocks(request, [cached], 0, 1, HISPARSE_BLOCK_SIZE, 0)
+    pool.free_blocks([cached])
+    reused: list[KVCacheBlock] = []
+    pool.unpin_blocks([copy], reused.append)
+
+    pool.touch([copy])
+    assert copy not in pool.get_new_blocks(2)
+    assert copy.ref_cnt == 1 and not reused
+
+    pool.free_blocks([copy])
+    assert pool.get_new_blocks(1) == [copy]
+    assert reused == [copy]
+    assert pool.get_cached_block(request.block_hashes[0], [0]) == [cached]
 
 
 @pytest.mark.parametrize("free_blocks,adopted_pages", [(7, []), (10, [0, 1])])

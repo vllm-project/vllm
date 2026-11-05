@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, cast
 
 import torch
@@ -397,6 +397,24 @@ class DeepseekCompressor(nn.Module):
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
+        hisparse = getattr(k_cache_layer, "hisparse_cache", None)
+        if hisparse is not None:
+            if k_cache_metadata.kv_already_written:
+                return
+            assert hisparse.view is not None and hisparse.slot_mapping is not None
+            kv_cache = hisparse.view.cache
+            resident_slots = hisparse.slot_mapping[
+                : k_cache_metadata.slot_mapping.numel()
+            ]
+            if self.compress_ratio > 1:
+                resident_slots = resident_slots // self.compress_ratio
+            resident_slots = torch.where(
+                k_cache_metadata.slot_mapping >= 0, resident_slots, -1
+            )
+            k_cache_metadata = replace(
+                k_cache_metadata,
+                slot_mapping=resident_slots,
+            )
         # Plain-row per-tensor fp8 caches (FlashInfer) carry the layer's scale;
         # fp8_ds_mla and bf16 rows need none.
         fp8_scale = (
@@ -414,3 +432,5 @@ class DeepseekCompressor(nn.Module):
             self.compress_ratio,
             fp8_scale=fp8_scale,
         )
+        if hisparse is not None:
+            hisparse.finish_kv_update()

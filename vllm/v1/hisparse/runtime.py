@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import mmap
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -399,6 +400,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        num_segments=32,
     )
     try:
         for start, end in _hisparse_registration_ranges(
@@ -567,11 +569,9 @@ class HiSparsePrefillStagingPlan:
         res_cols = resident_block_table.shape[1]
         res_blocks = torch.where(
             res_pos < res_cols,
-            torch.gather(
-                resident_block_table.to(torch.int64)[rep_row],
-                1,
-                res_pos.clamp(max=max(res_cols - 1, 0)),
-            ),
+            resident_block_table[
+                rep_row[:, None], res_pos.clamp(max=max(res_cols - 1, 0))
+            ].to(torch.int64),
             torch.zeros_like(res_pos),
         )
         offsets = torch.arange(block_size, device=device)
@@ -736,6 +736,16 @@ class HiSparseRuntime:
             )
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
+        self.tokens_per_state = 1
+        self.row_value_bytes = (
+            576 if row_width == 584 and kv_dtype == torch.uint8 else 0
+        )
+        self.ops = torch.ops._C_cache_ops
+        if self.row_value_bytes and (
+            library := os.getenv("VLLM_DSV41_HISPARSE_OPS_LIB")
+        ):
+            torch.ops.load_library(library)
+            self.ops = torch.ops._C_dsv41_hisparse
         self.kv_dtype = kv_dtype
         self.device = torch.device(device)
         # Logical slots per request. Physical rows come from its ephemeral HMA
@@ -746,7 +756,7 @@ class HiSparseRuntime:
             _check_residency_shared_memory(self.device, config)
 
         row_bytes = row_width * kv_dtype.itemsize
-        if row_bytes % 16 != 0:
+        if row_bytes % 16 != 0 and not self.row_value_bytes:
             raise ValueError(
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
             )
@@ -864,8 +874,32 @@ class HiSparseRuntime:
             rows = resident_cache[src // resident_block_size, src % resident_block_size]
             if rows.dtype != staged.dtype:
                 rows = rows.contiguous().view(staged.dtype)
-            staged.view(-1, row_width).copy_(rows)
-        torch.ops._C_cache_ops.hisparse_gather_plan(
+            if not self.row_value_bytes:
+                staged.view(-1, row_width).copy_(rows)
+            else:
+                for offset, width in (
+                    (0, self.row_value_bytes),
+                    (
+                        plan.block_size * self.row_value_bytes,
+                        row_width - self.row_value_bytes,
+                    ),
+                ):
+                    source = resident_cache.as_strided(
+                        (resident_cache.shape[0], resident_block_size, width),
+                        (resident_cache.stride(0), width, 1),
+                        storage_offset=resident_cache.storage_offset() + offset,
+                    )
+                    target = staged.as_strided(
+                        (staged.shape[0], plan.block_size, width),
+                        (staged.stride(0), width, 1),
+                        storage_offset=staged.storage_offset() + offset,
+                    )
+                    target.copy_(
+                        source[
+                            src // resident_block_size, src % resident_block_size
+                        ].view_as(target)
+                    )
+        self.ops.hisparse_gather_plan(
             kv_cache.view(-1, row_width),
             staged,
             plan.row_ids,
@@ -874,6 +908,7 @@ class HiSparseRuntime:
             None,
             None,
             0,
+            self.row_value_bytes,
         )
         return staged
 
@@ -979,7 +1014,7 @@ class HiSparseRuntime:
 
         # Padded rows are skipped by the kernel (request_state_indices) and must
         # come out as -1 so the attention kernel masks them.
-        torch.ops._C_cache_ops.hisparse_resolve_residency(
+        self.ops.hisparse_resolve_residency(
             host_cache,
             hot.cache,
             self.hot_block_table,
@@ -1012,12 +1047,13 @@ class HiSparseRuntime:
     def _swap_rows(self, shared_rows: slice) -> None:
         hot = self.hot
         shared = self.index_group.shared_topk
-        torch.ops._C_cache_ops.hisparse_gather_compact(
+        self.ops.hisparse_gather_compact(
             self.host_cache,
             hot.cache,
             shared.swap_host_physical_rows[shared_rows],
             shared.swap_device_physical_rows[shared_rows],
             shared.swap_counts[shared_rows],
+            self.row_value_bytes,
         )
 
     def _resolve_and_stage_group(
