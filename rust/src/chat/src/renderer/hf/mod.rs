@@ -23,6 +23,7 @@ use crate::{
     AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
 };
 
+mod developer;
 mod error;
 mod format;
 mod generation;
@@ -252,33 +253,10 @@ impl HfChatRenderer {
         effective_template: &CompiledChatTemplate,
         request: &ChatRequest,
     ) -> Result<RenderedPrompt> {
-        let content_format = effective_template.content_format_for(&request.messages);
-        let mut messages = to_template_messages(
-            &request.messages,
-            content_format,
-            self.multimodal.as_ref(),
-            effective_template.supports_developer_role(),
-        )?;
-        let has_developer_messages = request
-            .messages
-            .iter()
-            .any(|message| matches!(message, ChatMessage::Developer { .. }));
-        if has_developer_messages && !effective_template.supports_developer_role() {
-            // Consolidation moves every non-leading system message to the front,
-            // ahead of earlier media. Media data stays in message order, so the
-            // rendered placeholders would no longer match it.
-            let moves_media = request.messages.iter().skip(1).any(|message| {
-                matches!(
-                    message,
-                    ChatMessage::System { content } | ChatMessage::Developer { content, .. }
-                        if content.has_multimodal()
-                )
-            });
-            if moves_media {
-                return Err(Error::UnsupportedMultimodalSystemFallback);
-            }
-            messages = consolidate_system_messages(messages);
-        }
+        let lowered = effective_template.developer_role().lower(&request.messages);
+        let content_format = effective_template.content_format_for(&lowered);
+        let mut messages =
+            to_template_messages(&lowered, content_format, self.multimodal.as_ref())?;
 
         // Handling of `continue_final_message`:
         // Append a sentinel tag to the final message content, render as usual, then
@@ -387,91 +365,6 @@ enum TemplateContentPart {
     Audio,
 }
 
-/// Match Python vLLM's fallback for templates that do not support `developer`.
-fn consolidate_system_messages<'a>(messages: Vec<TemplateMessage<'a>>) -> Vec<TemplateMessage<'a>> {
-    let needs_consolidation = messages
-        .iter()
-        .enumerate()
-        .any(|(index, message)| message.role == "system" && index > 0)
-        || messages.iter().filter(|message| message.role == "system").count() > 1;
-    if !needs_consolidation {
-        return messages;
-    }
-
-    let mut system_contents = Vec::new();
-    let mut non_system = Vec::with_capacity(messages.len());
-    for message in messages {
-        if message.role == "system" {
-            system_contents.push(message.content);
-        } else {
-            non_system.push(message);
-        }
-    }
-
-    let mut consolidated = Vec::with_capacity(non_system.len() + 1);
-    consolidated.push(TemplateMessage {
-        role: "system",
-        content: merge_system_content(system_contents),
-        tools: None,
-        reasoning: None,
-        reasoning_content: None,
-        tool_calls: None,
-        tool_call_id: None,
-    });
-    consolidated.extend(non_system);
-    consolidated
-}
-
-/// Merge system/developer content without changing the format selected by the
-/// chat template. OpenAI content arrays retain all text and multimodal parts.
-fn merge_system_content(contents: Vec<TemplateContent>) -> TemplateContent {
-    let mut contents = contents.into_iter();
-    let Some(mut merged) = contents.next() else {
-        return TemplateContent::String(String::new());
-    };
-
-    for content in contents {
-        merged = match (merged, content) {
-            (TemplateContent::String(mut left), TemplateContent::String(right)) => {
-                if !left.is_empty() && !right.is_empty() {
-                    left.push_str("\n\n");
-                }
-                left.push_str(&right);
-                TemplateContent::String(left)
-            }
-            (TemplateContent::OpenAi(mut left), TemplateContent::OpenAi(mut right)) => {
-                if !left.is_empty() && !right.is_empty() {
-                    left.push(TemplateContentPart::Text {
-                        text: "\n\n".to_string(),
-                    });
-                }
-                left.append(&mut right);
-                TemplateContent::OpenAi(left)
-            }
-            (left, right) => {
-                let mut left = into_openai_parts(left);
-                let mut right = into_openai_parts(right);
-                if !left.is_empty() && !right.is_empty() {
-                    left.push(TemplateContentPart::Text {
-                        text: "\n\n".to_string(),
-                    });
-                }
-                left.append(&mut right);
-                TemplateContent::OpenAi(left)
-            }
-        };
-    }
-
-    merged
-}
-
-fn into_openai_parts(content: TemplateContent) -> Vec<TemplateContentPart> {
-    match content {
-        TemplateContent::String(text) => vec![TemplateContentPart::Text { text }],
-        TemplateContent::OpenAi(parts) => parts,
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct TemplateToolCall {
     id: String,
@@ -508,13 +401,10 @@ fn to_template_messages<'a>(
     messages: &'a [ChatMessage],
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
-    supports_developer_role: bool,
 ) -> Result<Vec<TemplateMessage<'a>>> {
     messages
         .iter()
-        .map(|message| {
-            to_template_message(message, content_format, multimodal, supports_developer_role)
-        })
+        .map(|message| to_template_message(message, content_format, multimodal))
         .collect()
 }
 
@@ -522,7 +412,6 @@ fn to_template_message<'a>(
     message: &'a ChatMessage,
     content_format: ChatTemplateContentFormat,
     multimodal: Option<&MultimodalRenderInfo>,
-    supports_developer_role: bool,
 ) -> Result<TemplateMessage<'a>> {
     Ok(match message {
         ChatMessage::System { content } => TemplateMessage {
@@ -535,15 +424,9 @@ fn to_template_message<'a>(
             tool_call_id: None,
         },
         ChatMessage::Developer { content, tools } => TemplateMessage {
-            role: if supports_developer_role {
-                "developer"
-            } else {
-                "system"
-            },
+            role: "developer",
             content: to_template_content(content, content_format, multimodal)?,
-            tools: supports_developer_role
-                .then(|| tools.as_deref().map(to_template_tools))
-                .flatten(),
+            tools: tools.as_deref().map(to_template_tools),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -792,9 +675,11 @@ mod tests {
 
     use expect_test::expect;
     use serde_json::Value;
+    use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
+    use super::developer::tests::ALTERNATING_TURNS;
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::EffortValue;
     use crate::request::{
@@ -1006,53 +891,125 @@ mod tests {
     }
 
     #[test]
-    fn developer_fallback_preserves_openai_content_parts() {
-        let request = sample_request(vec![
-            ChatMessage::system(vec![
-                ChatContentPart::text("base policy"),
-                ChatContentPart::image_url("data:image/png;base64,test"),
-            ]),
-            ChatMessage::developer("additional policy", None),
+    fn developer_messages_follow_template_system_support() {
+        // Codex: instructions, its base prompt as a developer message, and a
+        // developer context update mid-conversation.
+        let codex = sample_request(vec![
+            ChatMessage::system("instructions"),
+            ChatMessage::developer("base", None),
             ChatMessage::user("question"),
+            ChatMessage::assistant_text("answer"),
+            ChatMessage::developer("update", None),
+            ChatMessage::user("follow-up"),
         ]);
-        let rendered = render_mm(
-            "{% for message in messages %}{{ message.role }}={% for part in message.content %}{% if part.type == 'text' %}{{ part.text }}{% elif part.type == 'image' %}<image>{% endif %}{% endfor %};{% endfor %}",
-            &request,
-            ChatTemplateContentFormatOption::OpenAi,
-        )
-        .unwrap();
+        // The caller's own non-leading system message stays as sent.
+        let caller_system = sample_request(vec![
+            ChatMessage::developer("base", None),
+            ChatMessage::user("question"),
+            ChatMessage::system("update"),
+            ChatMessage::user("follow-up"),
+        ]);
 
-        assert_eq!(
-            rendered.prompt,
-            Prompt::Text(
-                "system=base policy<image>\n\nadditional policy;user=question;".to_string()
-            )
-        );
+        // No user turn follows the developer message: it joins the previous one.
+        let before_assistant = sample_request(vec![
+            ChatMessage::user("question"),
+            ChatMessage::developer("update", None),
+            ChatMessage::assistant_text("answer"),
+            ChatMessage::user("follow-up"),
+        ]);
+
+        let render = |template, request| match render(Some(template), request) {
+            Ok(prompt) => prompt,
+            Err(error) => error.to_report_string(),
+        };
+        // Qwen3 renders a system message anywhere; Qwen3.5 only first, and
+        // Llama 2 also requires alternating user and assistant turns.
+        expect![[r#"
+            [
+                "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer<|im_end|>\n<|im_start|>system\nupdate<|im_end|>\n<|im_start|>user\nfollow-up<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>system\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>system\nupdate<|im_end|>\n<|im_start|>user\nfollow-up<|im_end|>\n<|im_start|>assistant\n",
+                "<|im_start|>system\ninstructions\n\nbase<|im_end|>\n<|im_start|>user\nquestion<|im_end|>\n<|im_start|>assistant\nanswer<|im_end|>\n<|im_start|>user\nupdate\n\nfollow-up<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+                "System message must be at the beginning.",
+                "system=instructions\n\nbase;user=question;assistant=answer;user=update\n\nfollow-up;",
+                "user=question\n\nupdate;assistant=answer;user=follow-up;",
+            ]
+        "#]]
+        .assert_debug_eq(&[
+            render(QWEN3_0_6B_TEMPLATE, &codex),
+            render(QWEN3_0_6B_TEMPLATE, &caller_system),
+            render(QWEN3_5_0_8B_TEMPLATE, &codex),
+            render(QWEN3_5_0_8B_TEMPLATE, &caller_system),
+            render(ALTERNATING_TURNS, &codex),
+            render(ALTERNATING_TURNS, &before_assistant),
+        ]);
     }
 
     #[test]
-    fn developer_fallback_rejects_media_in_moved_messages() {
+    fn developer_messages_choose_content_format_by_lowered_role() {
+        // A leading developer message renders as the system message it is
+        // lowered to, so the user turn renders as without one.
+        let render = |first| {
+            let request = sample_request(vec![
+                first,
+                ChatMessage::user(vec![
+                    ChatContentPart::text("question"),
+                    ChatContentPart::image_url("data:image/png;base64,a"),
+                ]),
+            ]);
+            render_mm(
+                QWEN3_5_0_8B_TEMPLATE,
+                &request,
+                ChatTemplateContentFormatOption::Auto,
+            )
+            .unwrap()
+            .prompt
+            .into_text()
+            .unwrap()
+        };
+        let with_system = render(ChatMessage::system("base"));
+        assert_eq!(render(ChatMessage::developer("base", None)), with_system);
+        assert!(with_system.contains("<|vision_start|><|image_pad|><|vision_end|>"));
+    }
+
+    #[test]
+    fn developer_fallback_keeps_media_in_place() {
+        // A developer message after the leading run joins the user turn
+        // next to it, so its media placeholder stays in media order.
         let request = sample_request(vec![
+            ChatMessage::developer("base", None),
             ChatMessage::user(vec![
                 ChatContentPart::text("question"),
                 ChatContentPart::image_url("data:image/png;base64,a"),
             ]),
             ChatMessage::developer(
                 vec![
-                    ChatContentPart::text("policy"),
+                    ChatContentPart::text("update"),
                     ChatContentPart::image_url("data:image/png;base64,b"),
                 ],
                 None,
             ),
         ]);
-        let error = render_mm(
-            "{% for message in messages %}{{ message.role }}={{ message.content }};{% endfor %}",
+        let rendered = render_mm(
+            QWEN3_5_0_8B_TEMPLATE,
             &request,
-            ChatTemplateContentFormatOption::String,
+            ChatTemplateContentFormatOption::Auto,
         )
-        .unwrap_err();
+        .unwrap()
+        .prompt
+        .into_text()
+        .unwrap();
+        expect![[r#"
+            <|im_start|>system
+            base<|im_end|>
+            <|im_start|>user
+            question<|vision_start|><|image_pad|><|vision_end|>update<|vision_start|><|image_pad|><|vision_end|><|im_end|>
+            <|im_start|>assistant
+            <think>
 
-        assert!(matches!(error, Error::UnsupportedMultimodalSystemFallback));
+            </think>
+
+        "#]]
+        .assert_eq(&rendered);
     }
 
     #[test]
@@ -1275,26 +1232,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "developer|policy|get_weather|city");
-    }
-
-    #[test]
-    fn chat_template_without_developer_role_consolidates_developer_as_system() {
-        let request = sample_request(vec![
-            ChatMessage::system("base policy"),
-            ChatMessage::user("question"),
-            ChatMessage::developer("additional policy", None),
-        ]);
-
-        let rendered = render(
-            Some("{% for m in messages %}{{ m.role }}={{ m.content }};{% endfor %}"),
-            &request,
-        )
-        .unwrap();
-
-        assert_eq!(
-            rendered,
-            "system=base policy\n\nadditional policy;user=question;"
-        );
     }
 
     #[test]

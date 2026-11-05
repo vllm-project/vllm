@@ -20,6 +20,7 @@ use serde_json::{self};
 use thiserror::Error as ThisError;
 use vllm_text::backend::hf::HfSpecialTokens;
 
+use super::developer::DeveloperRole;
 use super::error::TemplateError;
 use super::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption, ContentCapabilities, ProbeContext,
@@ -48,10 +49,6 @@ pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>
             .ok_or_else(|| TemplateError::InvalidFuel(value.to_owned()))?,
     };
     Ok((fuel > 0).then_some(fuel))
-}
-
-fn supports_developer_role(template: &str) -> bool {
-    template.contains("\"developer\"") || template.contains("'developer'")
 }
 
 /// Render the `chat` template of `env` with `ctx`.
@@ -178,7 +175,7 @@ pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
     content_format: ContentFormatSelection,
-    supports_developer_role: bool,
+    developer_role: DeveloperRole,
 }
 
 /// How a template's content format is chosen.
@@ -203,7 +200,6 @@ impl CompiledChatTemplate {
         probe: &ProbeContext<'_>,
     ) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
-        let supports_developer_role = supports_developer_role(&template);
         let mut env = build_environment(template)?;
         env.set_fuel(fuel);
         let content_format = match content_format {
@@ -217,10 +213,15 @@ impl CompiledChatTemplate {
                 ContentFormatSelection::Configured(ChatTemplateContentFormat::OpenAi)
             }
         };
+        let developer_role = DeveloperRole::probe(
+            env.get_template("chat")?.source(),
+            &|ctx| render(&env, ctx),
+            probe,
+        );
         Ok(Self {
             env,
             content_format,
-            supports_developer_role,
+            developer_role,
         })
     }
 
@@ -238,8 +239,9 @@ impl CompiledChatTemplate {
         }
     }
 
-    pub fn supports_developer_role(&self) -> bool {
-        self.supports_developer_role
+    /// How developer messages reach this template.
+    pub fn developer_role(&self) -> DeveloperRole {
+        self.developer_role
     }
 }
 
