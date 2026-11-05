@@ -73,7 +73,7 @@ logger = init_logger(__name__)
 
 
 @triton.jit
-def _fill_short_context_topk_indices(
+def fill_short_context_topk_indices(
     output,
     positions,
     TOP_K: tl.constexpr,
@@ -1132,7 +1132,7 @@ class DeepseekV4Indexer(nn.Module):
                     + indexer_metadata.num_prefill_tokens
                 )
                 if num_tokens > 0:
-                    _fill_short_context_topk_indices[(num_tokens,)](
+                    fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
                         positions,
                         TOP_K=self.topk_tokens,

@@ -3,12 +3,15 @@
 """Utils for model executor."""
 
 import copy
+import functools
+import mmap
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, overload
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 _weights_pre_processed: ContextVar[bool] = ContextVar(
@@ -66,6 +69,38 @@ def set_weight_attrs(
         if current_platform.use_sync_weight_loader() and key == "weight_loader":
             value = current_platform.make_synced_weight_loader(value)
         setattr(weight, key, value)
+
+
+@functools.cache
+def _is_integrated_gpu(device: torch.device) -> bool:
+    return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)
+
+
+def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
+    """`dst.copy_(src)` for weight loaders.
+
+    Model-specific weight loaders should call this instead of `.copy_()` when
+    copying a checkpoint tensor to the device. Off integrated GPUs it is a
+    plain `copy_`.
+
+    On integrated GPUs, a host-to-device copy straight from a safetensors mmap
+    takes its page faults inside the driver copy, which is several times slower
+    than faulting them on the CPU, so touch one byte per page of `src` first.
+    PyTorch already stages non-contiguous and dtype-converting copies through
+    a CPU temporary. Sources with at most one element are skipped: they count
+    as contiguous with any stride, which `view(torch.uint8)` rejects.
+    """
+    if (
+        src.device.type == "cpu"
+        and src.dtype == dst.dtype
+        and src.numel() > 1
+        and src.is_contiguous()
+        and _is_integrated_gpu(dst.device)
+    ):
+        flat = src.reshape(-1).view(torch.uint8)
+        flat[:: mmap.PAGESIZE].sum()
+        flat[-1:].sum()
+    return dst.copy_(src)
 
 
 def _extent(t: torch.Tensor) -> int:
@@ -222,6 +257,32 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+
+
+@overload
+def refill_derived(obj: object, name: str, new: None) -> None: ...
+
+
+@overload
+def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: ...
+
+
+def refill_derived(
+    obj: object, name: str, new: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Set ``obj.name`` (a plain attribute, never a parameter or buffer) to a
+    tensor derived from the weights. A held tensor of the same shape, dtype and
+    device is refilled in place, so captured CUDA graphs keep its address; it
+    must own its storage. Returns the tensor now held under ``name``."""
+    old = getattr(obj, name, None)
+    if (
+        isinstance(old, torch.Tensor)
+        and new is not None
+        and (old.shape, old.dtype, old.device) == (new.shape, new.dtype, new.device)
+    ):
+        return old.copy_(new)
+    setattr(obj, name, new)
+    return new
 
 
 def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:

@@ -16,6 +16,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig, get_current_vllm_config_or_none
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import StackedColumnParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -530,8 +531,12 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> None:
         weights_to_load = {name for name, _ in model.named_parameters()}
         if loaded_weights is not None:
-            # ignore online quantization scales
             for name, module in model.named_modules():
+                if isinstance(module, StackedColumnParallelLinear):
+                    weights_to_load.update(
+                        f"{name}.{shard_id}" for shard_id in module.pop_missing_shards()
+                    )
+                # ignore online quantization scales
                 quant_method = getattr(module, "quant_method", None)
                 has_online_quant = getattr(quant_method, "uses_meta_device", False)
                 has_postprocess_quant = getattr(
