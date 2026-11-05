@@ -23,11 +23,12 @@ use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
 use super::types::{
-    InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
-    ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
-    ResponseObject, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
-    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
-    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier,
+    InputTokensDetails, OutputTokensDetails, ResponseEchoFields, ResponseInputContentPart,
+    ResponseInputItem, ResponseInputReasoning, ResponseInputRole, ResponseItemStatus,
+    ResponseMessageContent, ResponseObject, ResponseTextConfig, ResponseTextFormat,
+    ResponseToolChoice, ResponseToolChoiceObject, ResponseTruncation, ResponseUsage,
+    ResponsesInput, ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool,
+    ServiceTier,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -48,18 +49,17 @@ use crate::utils::{
 pub(crate) struct ResponseMeta {
     pub model: String,
     pub instructions: Option<String>,
-    pub metadata: Option<std::collections::HashMap<String, String>>,
+    /// Request fields echoed back unchanged.
+    pub echo: ResponseEchoFields,
     pub tools: Vec<ResponsesTool>,
     pub tool_choice: ResponseToolChoice,
     pub parallel_tool_calls: bool,
-    pub max_tool_calls: Option<u32>,
     pub previous_response_id: Option<String>,
     pub reasoning: Option<ResponsesReasoning>,
     pub service_tier: ServiceTier,
     pub top_logprobs: Option<i32>,
     pub text: Option<ResponseTextConfig>,
     pub truncation: ResponseTruncation,
-    pub user: Option<String>,
 }
 
 /// Lowered responses request plus the response metadata carried by every SSE
@@ -93,8 +93,7 @@ pub(crate) fn prepare_responses_request(
         tool_choice,
         parallel_tool_calls,
         max_output_tokens,
-        max_tool_calls,
-        metadata,
+        echo,
         previous_response_id,
         previous_input_messages: _,
         prompt: _,
@@ -111,7 +110,6 @@ pub(crate) fn prepare_responses_request(
         top_logprobs,
         text,
         truncation,
-        user,
         include: _,
         presence_penalty,
         frequency_penalty,
@@ -284,18 +282,16 @@ pub(crate) fn prepare_responses_request(
     let meta = ResponseMeta {
         model: response_model,
         instructions,
-        metadata,
+        echo,
         tools,
         tool_choice: tool_choice_echo,
         parallel_tool_calls: parallel_tool_calls.unwrap_or(true),
-        max_tool_calls,
         previous_response_id,
         reasoning,
         service_tier: service_tier.unwrap_or_default(),
         top_logprobs,
         text,
         truncation,
-        user,
     };
 
     Ok(PreparedResponsesRequest {
@@ -688,18 +684,16 @@ pub(crate) fn build_response(
     ResponseMeta {
         model,
         instructions,
-        metadata,
+        echo,
         tools,
         tool_choice,
         parallel_tool_calls,
-        max_tool_calls,
         previous_response_id,
         reasoning,
         service_tier,
         top_logprobs,
         text,
         truncation,
-        user,
     }: ResponseMeta,
     sampling: EffectiveSampling,
     request_id: String,
@@ -715,8 +709,7 @@ pub(crate) fn build_response(
         incomplete_details: None,
         instructions,
         max_output_tokens: sampling.max_tokens,
-        max_tool_calls,
-        metadata,
+        echo,
         model,
         output: vec![],
         parallel_tool_calls,
@@ -732,7 +725,6 @@ pub(crate) fn build_response(
         top_logprobs,
         truncation,
         usage: None,
-        user,
         metrics: None,
         presence_penalty: sampling.presence_penalty,
         frequency_penalty: sampling.frequency_penalty,
