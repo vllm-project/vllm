@@ -81,7 +81,7 @@ async fn list_models(State(state): State<Arc<RenderState>>) -> Json<ListModelsRe
 /// through as the generate request's model.
 fn model_resolution(state: &RenderState) -> LoraModelResolution {
     LoraModelResolution {
-        model_names: state.model_names(),
+        model_names: state.model_names.clone(),
         lora_request: None,
     }
 }
@@ -146,7 +146,7 @@ fn lower_render_request(
         .then_some(text_request.reasoning_parser_kwargs),
         other: Default::default(),
     };
-    validate_generate_request(&request, &state.model_names())?;
+    validate_generate_request(&request, &state.model_names)?;
     Ok(request)
 }
 

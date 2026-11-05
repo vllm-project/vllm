@@ -61,6 +61,13 @@ pub async fn generate(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
 
+    if body.content_parts.is_some() && body.features.is_some() {
+        return ApiError::invalid_request(
+            "content_parts and features are mutually exclusive.",
+            Some("features"),
+        )
+        .into_response();
+    }
     let mm_features = if let Some(parts) = body.content_parts.take() {
         match state
             .chat

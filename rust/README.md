@@ -149,7 +149,12 @@ For multimodal models, chat render fetches and preprocesses images, video and
 audio, and returns them as the `features` object that `/inference/v1/generate`
 accepts, in the format the Python render API uses. The tensors are produced in
 `--dtype`, which must match the engine's: `auto` (the default) follows the
-model config, running float32 checkpoints in bfloat16 like vLLM. Set
+model config, running float32 checkpoints in bfloat16 like vLLM, but unlike
+vLLM it does not look at the weights or the GPU, so pass the engine's dtype
+when they decide it. Set `--max-model-len` to the engine's too: some image
+processors size images to fit the context. Large images make `features` big;
+the generate server may need `VLLM_HTTP_MAX_REQUEST_BODY_SIZE` raised above
+its 32 MiB default to accept them. Set
 `"mm_payload": "none"` on a render request to get only item hashes and
 placeholder ranges, for example for cache-aware routing; such a response cannot
 be sent to generate. Pass `--language-model-only` to skip multimodal

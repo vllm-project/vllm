@@ -3060,6 +3060,7 @@ fn render_state() -> RenderState {
         text: TextRequestProcessor::new(backend.clone(), 1024),
         chat: ChatRequestProcessor::render_only(backend),
         lora_modules: Vec::new(),
+        model_names: ServedModelNames::new(vec!["render-model".to_string()]),
     }
 }
 
@@ -3255,6 +3256,7 @@ async fn render_chat_rejects_unknown_model() {
 async fn render_chat_accepts_lora_adapter_model() {
     let service = RenderServiceImpl::new(Arc::new(RenderState {
         lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        model_names: ServedModelNames::new(vec!["render-model".into(), "adapter-a".into()]),
         ..render_state()
     }));
     let chat = pb::ChatRequest {

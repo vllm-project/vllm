@@ -68,7 +68,7 @@ impl RenderContext for RenderState {
     }
 
     async fn is_served_model(&self, model: &str) -> bool {
-        self.model_names().accepts(Some(model))
+        self.model_names.accepts(Some(model))
     }
 }
 

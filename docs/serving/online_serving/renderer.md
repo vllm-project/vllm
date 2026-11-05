@@ -198,7 +198,8 @@ The Rust `vllm-rs render` server returns the same `features` object, except
 `mm_metadata`, and adds an `is_embed` mask to placeholder ranges of models with
 sparse placeholders, such as Qwen-VL. The Rust `/inference/v1/generate` accepts
 `features` with `kwargs_data` for every item, and ignores `mm_metadata`. Set the
-render server's `--dtype` to the engine's dtype.
+render server's `--dtype` to the engine's dtype. Large `features` can exceed generate's
+32 MiB default request limit; raise it with `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
 
 ## Example
 

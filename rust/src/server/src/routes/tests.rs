@@ -826,6 +826,7 @@ fn test_render_state(
         chat: ChatRequestProcessor::render_only(backend)
             .with_parser_selections(tool_call_parser, reasoning_parser),
         lora_modules: Vec::new(),
+        model_names: ServedModelNames::new(vec!["render-model".to_string()]),
     }
 }
 
@@ -1097,6 +1098,39 @@ async fn scale_out_generate_route_can_be_enabled() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generate_rejects_content_parts_with_features() {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-generate-mm-exclusive",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut app = build_router_with_gates(
+        Arc::new(AppState::new(vec!["model".to_string()], chat)),
+        RouteGates {
+            scale_out: true,
+            ..RouteGates::default()
+        },
+    );
+
+    let (status, json) = post_json(
+        &mut app,
+        "/inference/v1/generate",
+        json!({
+            "token_ids": [1, 2],
+            "sampling_params": {},
+            "content_parts": [],
+            "features": {"mm_hashes": {}, "mm_placeholders": {}},
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"]["param"], "features");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1914,6 +1948,7 @@ async fn render_list_models_reports_configured_max_model_len() {
 async fn render_accepts_lora_adapter_model() {
     let mut app = build_render_router(Arc::new(RenderState {
         lora_modules: vec!["adapter-a=org/adapter-a".parse().expect("lora module")],
+        model_names: ServedModelNames::new(vec!["render-model".into(), "adapter-a".into()]),
         ..test_render_state(Some(128), ParserSelection::Auto, ParserSelection::Auto)
     }));
 
@@ -2089,6 +2124,7 @@ async fn render_glm_tools_for_none_follow_server_exclusion_setting() {
         let mut app = build_render_router(Arc::new(RenderState {
             model: "glm-test".into(),
             served_model_names: ServedModelNames::new(vec!["glm-test".into()]),
+            model_names: ServedModelNames::new(vec!["glm-test".into()]),
             max_model_len: Some(4096),
             max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
             text: TextRequestProcessor::new(Arc::new(FakeChatBackend::new()), 4096),
@@ -12075,6 +12111,7 @@ async fn n_limit_follows_max_n_sequences_option() {
         text: TextRequestProcessor::new(backend.clone(), 128),
         chat: ChatRequestProcessor::render_only(backend),
         lora_modules: Vec::new(),
+        model_names: ServedModelNames::new(vec!["render-model".to_string()]),
     }));
     for (uri, body) in [
         (
