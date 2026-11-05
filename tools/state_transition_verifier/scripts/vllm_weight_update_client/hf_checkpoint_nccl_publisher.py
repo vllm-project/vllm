@@ -111,6 +111,15 @@ class CheckpointManifest:
     ) -> CheckpointManifest:
         root = _resolve_checkpoint(model, revision, checkpoint_path)
         tensor_entries = _checkpoint_tensor_entries(root, expert_tensor_order)
+        # Tensors a trainer does not sync (e.g. frozen embedding tables too
+        # large for one packed chunk) stay at their cold-start values.
+        exclude = os.environ.get("VERIFIER_EXCLUDE_REGEX")
+        if exclude:
+            tensor_entries = [
+                (name, file_name)
+                for name, file_name in tensor_entries
+                if not re.search(exclude, name)
+            ]
         tensors: list[TensorMetadata] = []
         with ExitStack() as stack:
             opened_files: dict[str, Any] = {}
