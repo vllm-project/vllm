@@ -74,6 +74,8 @@ _MODALITY_SIZE_KEYS = {
 # past which a pixel budget only shrinks the frames, so Qwen3-VL's most is
 # 12168 tokens at 16 frames and 9600 at its `max_frames` of 768
 _MAX_FRAMES_PER_VIDEO = 16
+# Models with no limit of their own to read, as in the native VibeVoice-ASR PR
+_MAX_LONG_FORM_AUDIO_S = 60 * 60
 # Arbitrary large size, bounded only by the processor's own resizing
 _MAX_DUMMY_SIDE = 10_000
 # Tiny inputs trip processors' channel-axis inference
@@ -217,9 +219,24 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         seq = cached_encode(tokenizer, replacement, add_special_tokens=False)
         return num_samples / int(_count_embed_tokens([seq])[0])
 
+    @cached_property
+    def _is_long_form_audio_model(self) -> bool:
+        """Whether a whole recording goes through in a single pass."""
+        return self._get_max_audio_length() is None and hasattr(
+            self.get_hf_processor(), "apply_transcription_request"
+        )
+
+    def _get_max_long_form_audio_length(self, seq_len: int) -> int:
+        """Samples of the longest audio, set with `--limit-mm-per-prompt`."""
+        options = self.ctx.get_mm_config().limit_per_prompt.get("audio")
+        default = int(_MAX_LONG_FORM_AUDIO_S * self._get_audio_sampling_rate())
+        length = getattr(options, "length", None) or default
+        return min(length, int(seq_len * self._audio_samples_per_token))
+
     def get_max_audio_tokens(self, seq_len: int) -> int:
-        if self._get_max_audio_length() is None:
-            return seq_len
+        if self._is_long_form_audio_model:
+            length = self._get_max_long_form_audio_length(seq_len)
+            return math.ceil(length / self._audio_samples_per_token)
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
@@ -378,9 +395,17 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
-            if (length := self.info._get_max_audio_length()) is None:
-                max_tokens = seq_len // num_audios
-                length = int(max_tokens * self.info._audio_samples_per_token)
+            if self.info._is_long_form_audio_model:
+                length = self.info._get_max_long_form_audio_length(
+                    seq_len // num_audios
+                )
+            else:
+                sampling_rate = self.info._get_audio_sampling_rate()
+                sub = self.info._get_audio_processor()
+                chunk_length = getattr(sub, "chunk_length", None) if sub else None
+                if chunk_length is None:
+                    chunk_length = 30
+                length = int(chunk_length * sampling_rate)
             data["audio"] = self._get_dummy_audios(
                 length=length,
                 num_audios=num_audios,

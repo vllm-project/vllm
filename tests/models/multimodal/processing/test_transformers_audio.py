@@ -176,15 +176,16 @@ def test_unclaimed_fields_warn_rather_than_raise():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "truncates"),
+    ("model_id", "long_form"),
     [
-        ("zai-org/GLM-ASR-Nano-2512", True),
-        ("microsoft/VibeVoice-ASR-HF", False),
+        ("zai-org/GLM-ASR-Nano-2512", False),
+        ("ibm-granite/granite-speech-3.3-2b", False),
+        ("microsoft/VibeVoice-ASR-HF", True),
     ],
 )
-def test_max_audio_tokens_follow_processor_truncation(model_id, truncates):
-    """Only an audio processor that truncates caps audio below the context length,
-    and profiling should then use one audio that fills the context."""
+def test_only_long_form_audio_fills_the_context(model_id, long_form):
+    """Audio models keep their usual budget unless they take whole recordings, as
+    sizing them all by the context stops small GPUs from starting."""
     seq_len = 4096
     mm_processor = MULTIMODAL_REGISTRY.create_processor(
         ModelConfig(model=model_id, model_impl="transformers")
@@ -203,12 +204,30 @@ def test_max_audio_tokens_follow_processor_truncation(model_id, truncates):
     )
     num_tokens = result["mm_placeholders"]["audio"][0].length
 
-    if truncates:
-        assert max_tokens != seq_len
-        assert num_tokens <= max_tokens
-    else:
+    if long_form:
         assert max_tokens == seq_len
         assert num_tokens == pytest.approx(seq_len, rel=0.01)
+    else:
+        assert max_tokens != seq_len
+        assert num_tokens <= max_tokens
+
+
+@pytest.mark.parametrize(
+    ("limit", "expected_tokens"),
+    [({"count": 1}, 27000), ({"count": 1, "length": 24000 * 60}, 450)],
+)
+def test_long_form_audio_limit(limit, expected_tokens):
+    """Long-form audio stops at an hour unless the audio limit says otherwise."""
+    info = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(
+            model="microsoft/VibeVoice-ASR-HF",
+            model_impl="transformers",
+            limit_mm_per_prompt={"audio": limit},
+        )
+    ).info
+
+    max_tokens = info.get_mm_max_tokens_per_item(10**6, {"audio": 1})
+    assert max_tokens == {"audio": expected_tokens}
 
 
 VIBEVOICE_OUTPUT = (
