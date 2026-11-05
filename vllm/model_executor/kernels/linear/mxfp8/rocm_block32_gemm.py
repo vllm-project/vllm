@@ -54,6 +54,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -67,6 +68,12 @@ BLOCK_ROWS = 32
 _XCD_STRIDE = 8
 # One arrival counter per output tile of an in-launch split-K GEMM.
 _SPLIT_COUNTERS = 1 << 16
+
+_FUSED_SPLITS_SUPPORTED = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+
+    _FUSED_SPLITS_SUPPORTED = on_gfx950()
 
 
 @triton.jit
@@ -785,7 +792,12 @@ def _launch(
     splits = cfg.fused_splits if cfg.fused_splits > 1 or cfg.packed else cfg.k_split
     k_per_split, splits = _k_partition(K, splits, step)
     counters = None
-    if cfg.fused_splits > 1 and splits > 1 and tiles <= _SPLIT_COUNTERS:
+    if (
+        _FUSED_SPLITS_SUPPORTED
+        and cfg.fused_splits > 1
+        and splits > 1
+        and tiles <= _SPLIT_COUNTERS
+    ):
         counters = _split_counters(out.device)
     if counters is not None:
         fused = splits

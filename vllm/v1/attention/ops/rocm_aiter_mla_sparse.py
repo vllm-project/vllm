@@ -27,6 +27,7 @@ if current_platform.is_rocm():
         _ON_GFX942,
         _ON_GFX950,
         _ON_GFX1151,
+        _ON_GFX1250,
         _ON_RDNA,
         get_cdna_version,
     )
@@ -34,6 +35,7 @@ else:
     _ON_GFX942 = False
     _ON_GFX950 = False
     _ON_GFX1151 = False
+    _ON_GFX1250 = False
     _ON_RDNA = False
 
     def get_cdna_version() -> int:
@@ -842,7 +844,14 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        if _ON_GFX942 or _ON_GFX950 or (_ON_RDNA and not _ON_GFX1151):
+        # gfx1250 needs a preshuffled indexer K cache when block_size > 1;
+        # C4A (DeepSeek-V4) is row-major, so it never takes this path.
+        if (
+            _ON_GFX942
+            or _ON_GFX950
+            or (_ON_RDNA and not _ON_GFX1151)
+            or (_ON_GFX1250 and not _indexer_k_is_c4a_block_flat(compress_ratio))
+        ):
             logger.info_once(
                 "Using AITER paged-MQA logits from %s.",
                 aiter_paged_mqa_logits_module.__name__,

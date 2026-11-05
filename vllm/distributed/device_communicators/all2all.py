@@ -996,17 +996,22 @@ class MoriAll2AllManager(All2AllManagerBase):
     ):
         import mori  # type: ignore[import-not-found]
 
-        from vllm.platforms.rocm import on_gfx942, on_gfx950
+        from vllm.platforms.rocm import (
+            get_cdna_version,
+            on_gfx942,
+            on_gfx950,
+            on_gfx1250,
+        )
 
-        assert on_gfx942() or on_gfx950(), (
-            "mori currently only support arch gfx942 and gfx950"
+        assert get_cdna_version() >= 3, (
+            "mori is currently only supported on gfx942 and newer"
         )
 
         if not self.internode:
             # single node
             kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
             rdma_block_num = 0
-            warp_num_per_block = 16
+            warp_num_per_block = 32 if on_gfx1250() else 16
             block_num = 80
         else:
             # Multi-node: mori_low_latency → InterNodeV1LL; mori_high_throughput
@@ -1030,11 +1035,18 @@ class MoriAll2AllManager(All2AllManagerBase):
                 warp_num_per_block = 8
                 block_num = 64
                 rdma_block_num = 32
+            elif on_gfx1250():
+                warp_num_per_block = 16
+                block_num = 64
+                rdma_block_num = 32
             else:
                 raise NotImplementedError(
-                    "mori currently only support arch gfx942 and gfx950"
+                    "mori currently only support arch gfx942, gfx950 and gfx1250"
                 )
-
+        gpu_per_node = min(
+            4 if on_gfx1250() else 8,
+            num_ep_ranks,
+        )
         return dict(
             rank=rank,
             world_size=num_ep_ranks,
@@ -1050,7 +1062,7 @@ class MoriAll2AllManager(All2AllManagerBase):
             block_num=block_num,
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
-            gpu_per_node=min(8, num_ep_ranks),
+            gpu_per_node=gpu_per_node,
         )
 
     def _make_handle(self, **kwargs):

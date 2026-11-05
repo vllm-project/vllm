@@ -147,6 +147,7 @@ try:
         IOEngine,
         IOEngineConfig,
     )
+    from mori.io.fabric_allocator import make_fabric_mem_pool
 
     logger.info("MoRIIO is available")
     MoRIIO_enabled = True
@@ -1905,11 +1906,8 @@ class MoRIIOConnectorWorker:
             transfer_timeout=self.moriio_config.transfer_timeout,
         )
         self.moriio_wrapper.set_moriio_engine(self.moriio_engine)
-        backend = (
-            BackendType.XGMI
-            if self.moriio_config.backend == "xgmi"
-            else BackendType.RDMA
-        )
+        _backend_map = {"xgmi": BackendType.XGMI, "fabric": BackendType.FABRIC}
+        backend = _backend_map.get(self.moriio_config.backend, BackendType.RDMA)
         self.moriio_wrapper.set_backend_type(
             backend,
             qp_per_transfer=self.moriio_config.qp_per_transfer,
@@ -1917,6 +1915,11 @@ class MoRIIOConnectorWorker:
             num_workers=self.moriio_config.num_workers,
         )
         self.moriio_wrapper.notify_port = self.moriio_config.notify_port
+        # Fabric memory pool: KV cache tensors must be allocated under this pool
+        # for the FABRIC backend to export fabric handles over UALink.
+        self.fabric_pool = (
+            make_fabric_mem_pool() if self.moriio_config.backend == "fabric" else None
+        )
         self.local_kv_cache_metadata: list[bytes] = []
         self.local_kv_cache_size: list[int] = []
         self.layer_name_to_local_kv_cache_metadata: dict[str, list[bytes]] = {}

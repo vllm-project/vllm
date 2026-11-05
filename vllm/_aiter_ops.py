@@ -2094,6 +2094,11 @@ def _resolve_situv2_activation() -> str:
     auto (default) and the legacy 1 mean a4w4; legacy 0 means a16w4.
     """
     value = envs.VLLM_ROCM_USE_AITER_MOE_SITUV2.lower()
+    if value == "auto" and current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        if on_gfx1250():
+            return "a8w4"
     if value in ("auto", "1"):
         return "a4w4"
     if value == "0":
@@ -2776,11 +2781,14 @@ class rocm_aiter_ops:
         RMSNorm in one launch, plain and speculative decode) ships CDNA4+
         (gfx950, gfx1250) builds only, and is absent in older aiter releases.
         """
-        from vllm.platforms.rocm import get_cdna_version
+        from vllm.platforms.rocm import get_cdna_version, on_gfx1250
 
+        # Not yet validated for Kimi-K3 on gfx1250, which keeps the Triton
+        # decode there.
         return (
             cls._AITER_ENABLED
             and get_cdna_version() >= 4
+            and not on_gfx1250()
             and cls._kda_gluon_decode_importable()
         )
 

@@ -38,7 +38,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV41SparseSWAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import _ON_GFX950
+from vllm.platforms.rocm import _ON_GFX950, on_gfx1250
 from vllm.triton_utils import tl, triton
 from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
@@ -607,6 +607,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         if not rocm_aiter_ops.is_enabled():
             return
+        # gemm_a8w8_blockscale_bpreshuffle has no working gfx1250 path
+        if on_gfx1250():
+            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
         )
@@ -1174,6 +1177,11 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             )
             return q.shape[0]
 
+        fuse_inv_rope = not on_gfx1250()
+        assert output_mxfp8 is None or fuse_inv_rope, (
+            "MXFP8 decode output needs the fused inverse RoPE; only gfx950 "
+            "allocates it (see _alloc_attn_out)"
+        )
         return rocm_sparse_attn_decode(
             q=q,
             kv_cache=kv_cache,
@@ -1194,8 +1202,10 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             rope_head_dim=self.rope_head_dim,
             output=output,
             output_mxfp8=output_mxfp8,
-            inv_rope_positions=positions,
-            inv_rope_cos_sin_cache=self.rotary_emb.cos_sin_cache,
+            inv_rope_positions=positions if fuse_inv_rope else None,
+            inv_rope_cos_sin_cache=(
+                self.rotary_emb.cos_sin_cache if fuse_inv_rope else None
+            ),
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,

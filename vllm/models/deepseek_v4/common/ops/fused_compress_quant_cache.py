@@ -38,9 +38,10 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.ops.common import pack_ue8m0_x4
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import _ON_GFX950
+    from vllm.platforms.rocm import _ON_GFX950, _ON_GFX1250
 else:
     _ON_GFX950 = False
+    _ON_GFX1250 = False
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
 
@@ -76,7 +77,9 @@ def compress_norm_rope_store_triton(
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
-        num_warps = 4
+        # The (1 + overlap) * compress_ratio x 512 tile at 4 warps hangs the
+        # gfx1250 LLVM register allocator for C128 and spills heavily anyway.
+        num_warps = 16 if _ON_GFX1250 and compress_ratio >= 128 else 4
         kernel_kwargs = {"SANITIZE_CACHE_NANS": _ON_GFX950}
     else:
         _FUSED_KV_COMPRESS_NORM_ROPE_INSERT_INDEXER_TRITON_KERNEL(
