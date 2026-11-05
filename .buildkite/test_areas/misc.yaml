@@ -359,7 +359,6 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -374,11 +373,17 @@ steps:
     - vllm/utils/
     - vllm/v1/
     - tests/v1
+    - tests/distributed/test_kv_cache_events.py
+    - tests/distributed/test_events.py
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
     - rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
   device: cpu-small
   commands:
+    - >-
+      pytest -v -s
+      distributed/test_kv_cache_events.py
+      distributed/test_events.py
     # split the test to avoid interference
     - pytest -v -s -m 'cpu_test' v1/core
     - pytest -v -s v1/structured_output

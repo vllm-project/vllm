@@ -57,7 +57,11 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
-    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_events import (
+        EventSource,
+        KVCacheEvent,
+        KVConnectorKVEvents,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -689,6 +693,20 @@ class KVConnectorBase_V1(ABC):
 
         """
         return ()
+
+    def take_events_with_source(
+        self, source: "EventSource"
+    ) -> Iterable["KVCacheEvent"]:
+        """Drain scheduler events with framework-owned producer metadata.
+
+        Annotation happens after worker aggregation and does not mutate events
+        retained by the connector. Composite connectors may attribute children
+        by overriding this method; opaque composites are a single source.
+        """
+        from msgspec.structs import replace
+
+        for event in self.take_events():
+            yield replace(event, source=source)
 
     def has_pending_block_frees(self) -> bool:
         """Whether pending transfers can release blocks instead of preemption."""

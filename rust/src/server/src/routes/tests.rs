@@ -2790,6 +2790,7 @@ async fn kv_event_sources_reports_each_ready_engine() {
         data_parallel_rank: 1,
         kv_events_config: Some(
             vllm_engine_core_client::protocol::handshake::KvEventsConfig {
+                enable_source_attribution: true,
                 enable_kv_cache_events: true,
                 publisher: "zmq".to_string(),
                 endpoint: "tcp://10.0.0.2:41233".to_string(),
@@ -2821,6 +2822,7 @@ async fn kv_event_sources_reports_each_ready_engine() {
         json!({
             "1": {
                 "enable_kv_cache_events": true,
+                "enable_source_attribution": true,
                 "publisher": "zmq",
                 "endpoint": "tcp://10.0.0.2:41233",
                 "replay_endpoint": null,

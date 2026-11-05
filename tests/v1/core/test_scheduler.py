@@ -9246,3 +9246,58 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+def test_native_source_attribution_through_llm(vllm_runner):
+    """Real engine execution publishes attributed native stores for replay."""
+    import time
+
+    import msgspec
+    import zmq
+
+    from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
+    from vllm.utils.network_utils import get_open_port
+
+    replay_endpoint = f"tcp://127.0.0.1:{get_open_port()}"
+    config = {
+        "enable_kv_cache_events": True,
+        "enable_source_attribution": True,
+        "endpoint": "tcp://127.0.0.1:0",
+        "replay_endpoint": replay_endpoint,
+        "buffer_steps": 100,
+    }
+    with vllm_runner(
+        "facebook/opt-125m",
+        enforce_eager=True,
+        block_size=32,
+        max_model_len=128,
+        enable_prefix_caching=True,
+        kv_events_config=config,
+    ) as model:
+        output = model.generate_greedy([[42] * 64], max_tokens=1)
+        assert len(output[0][0]) == 65
+        replay = zmq.Context.instance().socket(zmq.DEALER)
+        replay.connect(replay_endpoint)
+        try:
+            stores = []
+            deadline = time.monotonic() + 10
+            # Wait for the asynchronous publisher to drain its event queue.
+            while not stores and time.monotonic() < deadline:
+                replay.send_multipart([b"", (0).to_bytes(8, "big")])
+                while time.monotonic() < deadline:
+                    assert replay.poll(1000), "publisher replay did not respond"
+                    delimiter, topic, sequence, payload = replay.recv_multipart()
+                    assert delimiter == b""
+                    if sequence == ZmqEventPublisher.END_SEQ:
+                        break
+                    batch = msgspec.msgpack.decode(payload, type=KVEventBatch)
+                    stores.extend(e for e in batch.events if isinstance(e, BlockStored))
+            assert stores, "native BlockStored event missing"
+            assert all(
+                e.source is not None
+                and e.source.source_id == "cache_manager"
+                and e.source.kind == "native"
+                for e in stores
+            )
+        finally:
+            replay.close(linger=0)
