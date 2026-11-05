@@ -422,6 +422,18 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub return_tokens_as_token_ids: bool,
 
+    /// Whether to trust per-request multimodal kwargs (`mm_processor_kwargs`
+    /// and `media_io_kwargs`). If False, the server rejects non-empty values
+    /// because they can change multimodal preprocessing resource usage. Only
+    /// the gRPC `Generate` path accepts them.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub trust_request_mm_kwargs: bool,
+
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
     #[arg(long)]
@@ -1008,6 +1020,7 @@ impl SharedRuntimeArgs {
             },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
+            trust_request_mm_kwargs: self.trust_request_mm_kwargs,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             log_error_stack: self.log_error_stack.unwrap_or(self.server_dev_mode),
