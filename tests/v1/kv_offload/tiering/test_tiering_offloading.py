@@ -657,9 +657,9 @@ class TestTieringOffloadingManager:
         # abandons it eventually.
         max_attempts = 3
         success = False
-        for attempt in range(max_attempts):
-            if all(self.manager.lookup(key, _CTX) is LookupResult.MISS for key in keys):
-                success = True
+        for _ in range(max_attempts):
+            results = [self.manager.lookup(key, _CTX) for key in keys]
+            if success := all(r is LookupResult.MISS for r in results):
                 break
             self._simulate_on_schedule_end()
 
