@@ -3,6 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -29,6 +30,10 @@ class NvFp4LinearKernel(ABC):
     priority order,calling ``is_supported`` and ``can_implement`` to find the best
     match for the current hardware.
     """
+
+    # True if apply_weights honors layer.partial_sum_dtype/partial_sum_scale
+    # (FP16 partial sums of RowParallelLinear, VLLM_TP_FP16_PARTIAL_SUMS).
+    supports_partial_sum_dtype: ClassVar[bool] = False
 
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]

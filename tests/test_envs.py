@@ -34,6 +34,16 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+def test_tp_fp16_partial_sums_shift(monkeypatch: pytest.MonkeyPatch):
+    assert envs.get_tp_fp16_partial_sums_shift() == 2
+    monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", "14")
+    assert envs.get_tp_fp16_partial_sums_shift() == 14
+    for bad in ("15", "-1", "two"):
+        monkeypatch.setenv("VLLM_TP_FP16_PARTIAL_SUMS_SHIFT", bad)
+        with pytest.raises(ValueError, match="VLLM_TP_FP16_PARTIAL_SUMS_SHIFT"):
+            envs.get_tp_fp16_partial_sums_shift()
+
+
 def test_nixl_side_channel_host_is_not_compile_factor(
     monkeypatch: pytest.MonkeyPatch,
 ):
