@@ -59,6 +59,7 @@ def weights_key(vllm_config) -> str:
         p.pipeline_parallel_size,
         getattr(p, "enable_expert_parallel", None),
         s,
+        getattr(m.multimodal_config, "language_model_only", None),
         torch.__version__,
         _MAGIC,
     ]
