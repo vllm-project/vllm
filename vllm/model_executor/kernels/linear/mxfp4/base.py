@@ -52,6 +52,13 @@ class MxFp4LinearKernel(ABC):
         raise NotImplementedError
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the
+        batch, as ``VLLM_BATCH_INVARIANT=1`` requires. A kernel that picks its
+        tiling or K-split from the token count must leave this False."""
+        return False
+
+    @classmethod
     def _supports_quant_scheme(
         cls,
         weight_key: QuantKey | None,

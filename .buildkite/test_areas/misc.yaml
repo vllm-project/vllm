@@ -1014,6 +1014,7 @@ steps:
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
+    - pytest -v -s v1/determinism/test_mx_linear_e2e_batch_invariant.py
   mirror:
     amd:
       label: ":amd: (MI355) Batch Invariance"

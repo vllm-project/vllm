@@ -59,6 +59,13 @@ class Mxfp8LinearKernel(ABC):
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """Whether a row's output is independent of the other rows in the
+        batch, as ``VLLM_BATCH_INVARIANT=1`` requires. A kernel that picks its
+        tiling or K-split from the token count must leave this False."""
+        return False
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
