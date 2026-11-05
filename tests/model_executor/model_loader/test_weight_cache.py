@@ -7,8 +7,10 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import psutil
 import pytest
 import regex as re
 
@@ -119,7 +122,9 @@ class WeightCacheDaemon:
                 if time.monotonic() > deadline:
                     raise
                 if self._proc is not None and self._proc.poll() is not None:
-                    raise AssertionError("vllm preload exited before ready") from None
+                    raise AssertionError(
+                        f"vllm preload exited before ready: {self.logs}"
+                    ) from None
                 time.sleep(2)
 
     def _stop(self) -> None:
@@ -131,6 +136,53 @@ class WeightCacheDaemon:
             self._proc.kill()
             self._proc.wait()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "after_ready,stop_sibling",
+    [(False, False), (True, False), (True, True)],
+    ids=["startup", "serving", "unresponsive-sibling"],
+)
+def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibling):
+    """A failed later rank must not leave preload waiting on an earlier rank."""
+    children: list[psutil.Process] = []
+    with WeightCacheDaemon(
+        "facebook/opt-125m",
+        tp_size=2,
+        extra_args=["--disable-flashinfer-autotune"],
+    ) as daemon:
+        try:
+            assert daemon._proc is not None
+            parent = psutil.Process(daemon._proc.pid)
+            deadline = time.monotonic() + 120
+            while len(children) != 2:
+                assert daemon._proc.poll() is None, "preload exited before spawning"
+                children = []
+                for child in parent.children():
+                    try:
+                        if "spawn_main" in " ".join(child.cmdline()):
+                            children.append(child)
+                    except psutil.NoSuchProcess:
+                        # Short-lived children can exit before cmdline is read.
+                        continue
+                assert time.monotonic() < deadline, "daemon ranks did not spawn"
+                time.sleep(0.1)
+            if after_ready:
+                daemon.wait_until_ready()
+            if stop_sibling:
+                # A stopped process cannot handle SIGTERM; cleanup must escalate.
+                children[0].send_signal(signal.SIGSTOP)
+            children[-1].send_signal(signal.SIGKILL)
+            assert daemon._proc.wait(timeout=30) == 128 + signal.SIGKILL
+            _, alive = psutil.wait_procs(children, timeout=10)
+            assert not alive, "preload left sibling ranks running"
+        finally:
+            # Also clean up on the unfixed launcher, which waits indefinitely.
+            for child in children:
+                if child.is_running():
+                    child.kill()
+            psutil.wait_procs(children, timeout=10)
 
 
 @dataclass
@@ -181,6 +233,32 @@ QWEN_CASE = ModelCase(
         enforce_eager=True,
         enable_chunked_prefill=True,
     ),
+)
+
+# Online FP8 exercises the runtime weight transpose and kernel state that
+# must survive mapping the daemon's processed tensors into a fresh engine.
+FP8_CASE = ModelCase(
+    model="facebook/opt-125m",
+    prompts=["Hello, my name is", "The capital of France is"],
+    llm_kwargs=dict(
+        quantization="fp8_per_tensor",
+        kernel_config={"linear_backend": "cutlass"},
+        attention_config={"backend": "TRITON_ATTN"},
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+    ),
+    daemon_args=[
+        "--quantization",
+        "fp8_per_tensor",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
 )
 
 # Kimi K3 adds the mxfp4-pack MoE path (post-load kernel setup runs in
@@ -282,6 +360,166 @@ def test_ipc_cache_cold_start_and_warm_restart(
         # inherit it.
         monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Online FP8 CUTLASS weight cache requires SM89+",
+)
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
+def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
+    """Online FP8 weights are shared without requantizing on warm restarts."""
+    _run_online_quantization(
+        vllm_runner, quantization, "cutlass", tmp_path, monkeypatch
+    )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Block FP8/MXFP8 online weight cache requires SM100+",
+)
+@pytest.mark.parametrize(
+    "quantization,linear_backend",
+    [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
+)
+def test_ipc_cache_online_blackwell(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    """Reuse packed block scales with the same backend on each restart."""
+    _run_online_quantization(
+        vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+    )
+
+
+def _run_online_quantization(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kernel_config = {"linear_backend": linear_backend}
+    daemon_args = list(FP8_CASE.daemon_args)
+    daemon_args[daemon_args.index("--quantization") + 1] = quantization
+    daemon_args[daemon_args.index("--kernel-config") + 1] = json.dumps(kernel_config)
+    case = ModelCase(
+        model=FP8_CASE.model,
+        prompts=FP8_CASE.prompts,
+        llm_kwargs={
+            **FP8_CASE.llm_kwargs,
+            "quantization": quantization,
+            "kernel_config": kernel_config,
+        },
+        daemon_args=daemon_args,
+    )
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+MODELOPT_FP8_CASE = ModelCase(
+    model="CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        revision="d9c87375a9b950b1c7965a1110ac6ca455929726",
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--revision",
+        "d9c87375a9b950b1c7965a1110ac6ca455929726",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="ModelOpt FP8 CUTLASS weight cache requires SM89+",
+)
+def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, MODELOPT_FP8_CASE, tmp_path)
+
+
+NVFP4_CASE = ModelCase(
+    model="nvidia/Qwen3-30B-A3B-NVFP4",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"moe_backend": "cutlass", "linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"moe_backend": "cutlass", "linear_backend": "cutlass"}',
+    ],
+)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="NVFP4 CUTLASS MoE requires SM100+",
+)
+def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC attachment must not fuse the shared MoE scales again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Requires CUDA or ROCm"
+)
+def test_ipc_fallback_restores_memory_budget(vllm_runner, enable_pickle):
+    """A reachable but incompatible daemon must not reduce the disk-load budget."""
+    model = "Qwen/Qwen3-0.6B"
+    budgets = []
+    outputs = []
+    with WeightCacheDaemon(
+        model,
+        tp_size=1,
+        extra_args=["--dtype", "bfloat16", "--disable-flashinfer-autotune"],
+    ) as daemon:
+        daemon.wait_until_ready()
+        for load_format in ("auto", "ipc_cache"):
+            extra = (
+                {"socket_dir": daemon.socket_dir, "fallback": True}
+                if load_format == "ipc_cache"
+                else {}
+            )
+            with vllm_runner(
+                model,
+                dtype="float16",
+                load_format=load_format,
+                model_loader_extra_config=extra,
+                enforce_eager=True,
+                gpu_memory_utilization=0.1,
+                max_model_len=1024,
+                max_num_batched_tokens=1024,
+                max_num_seqs=1,
+                kernel_config={"enable_flashinfer_autotune": False},
+            ) as llm:
+                budgets.append(
+                    llm.collective_rpc(lambda worker: worker.requested_memory)[0]
+                )
+                outputs.append(
+                    llm.generate_greedy(["The capital of France is"], max_tokens=8)
+                )
+
+    assert budgets[1] == budgets[0], "Disk fallback retained the external weight charge"
+    assert outputs[1] == outputs[0]
 
 
 @create_new_process_for_each_test()
@@ -395,8 +633,8 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         d.wait_until_ready()
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
             # (their OPENAI_API_SERVER-keyed table) must appear.
@@ -579,6 +817,7 @@ def test_daemon_sets_its_rank_like_engine_workers(monkeypatch):
             ),
             model_config=SimpleNamespace(is_moe=False),
             cache_config=None,
+            kernel_config=None,
         )
         server = daemon.WeightCacheDaemon(
             vllm_config, global_rank, global_rank, "tcp://127.0.0.1:0"
@@ -765,6 +1004,7 @@ def test_ipc_rope_matching(
                         model_config,
                         default_vllm_config.cache_config,
                         default_vllm_config.parallel_config,
+                        default_vllm_config.kernel_config,
                     )
             if is_reload:
                 expected = torch.zeros(2) if mismatch else server.model.rotary_cache
@@ -786,6 +1026,102 @@ def test_ipc_loader_copy_mode_reports_no_external_weight_memory():
     )
     loader = IpcModelLoader(copy_mode)
     assert loader.get_external_weight_memory(None) == 0
+
+
+def _serve_one(handler):
+    """Fake ``IpcModelLoader._connect``: serve each request on a thread and
+    close the accepted connection afterwards, like ``serve_forever``.
+
+    Returns the fake and the list of server threads it started.
+    """
+    import socket
+
+    server_threads: list[threading.Thread] = []
+
+    def connect(timeout: float) -> socket.socket:
+        client, connection = socket.socketpair()
+
+        def serve() -> None:
+            with connection:
+                handler(connection)
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        server_threads.append(server_thread)
+        return client
+
+    return connect, server_threads
+
+
+def test_ipc_loader_detects_daemon_exit(monkeypatch):
+    """A zero-copy engine's watch connection closes exactly when the daemon
+    that served it exits; watches of exited engines are pruned."""
+    import socket
+
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+
+    server = object.__new__(daemon.WeightCacheDaemon)
+    server._watchers = []
+    connect, server_threads = _serve_one(server._handle_connection)
+    load_config = LoadConfig(
+        load_format="ipc_cache",
+        model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+    )
+    loaders = [ipc_loader.IpcModelLoader(load_config) for _ in range(2)]
+    threads = []
+    for loader in loaders:
+        monkeypatch.setattr(loader, "_connect", connect)
+        thread = loader._watch_daemon()
+        assert thread is not None
+        threads.append(thread)
+    for server_thread in server_threads:
+        server_thread.join(timeout=5)
+    # The second watch prunes nothing while the first engine is alive.
+    assert len(server._watchers) == 2
+    threads[0].join(timeout=0.2)
+    assert threads[0].is_alive() and not loaders[0].daemon_lost.is_set()
+
+    # The daemon exiting closes its end of every watch connection.
+    for watcher in server._watchers:
+        watcher.close()
+    for loader, thread in zip(loaders, threads):
+        thread.join(timeout=5)
+        assert loader.daemon_lost.is_set()
+
+    # A watcher whose engine has exited is pruned; a live one is kept.
+    peers = [socket.socketpair() for _ in range(2)]
+    server._watchers = [ours for ours, _ in peers]
+    peers[0][1].close()
+    server._prune_watchers()
+    assert server._watchers == [peers[1][0]]
+    for ours, theirs in peers:
+        ours.close()
+        theirs.close()
+
+
+def test_ipc_loader_skips_watch_on_old_daemon(monkeypatch):
+    """Daemons predating the watch command reject it; loading still works."""
+    from vllm.config import LoadConfig
+    from vllm.model_executor.model_loader.weight_cache import ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        recv_msg,
+        send_msg,
+    )
+
+    def reject(connection) -> None:
+        assert recv_msg(connection) == {"cmd": "watch"}
+        send_msg(connection, {"status": "error", "message": "Unknown command"})
+
+    loader = ipc_loader.IpcModelLoader(
+        LoadConfig(
+            load_format="ipc_cache",
+            model_loader_extra_config={"socket_path": "/unused/daemon.sock"},
+        )
+    )
+    monkeypatch.setattr(loader, "_connect", _serve_one(reject)[0])
+    assert loader._watch_daemon() is None
+    assert not loader.daemon_lost.is_set()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -822,6 +1158,26 @@ def test_daemon_releases_cublas_workspaces():
         "daemon retained BLAS workspaces"
     )
     torch.testing.assert_close(result, torch.full_like(result, 128), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("is_draft,fallback_bytes", [(False, 8), (True, 4)])
+def test_external_weight_fallback_preserves_other_role(is_draft, fallback_bytes):
+    """Only the failed role's charge is reported, at most once."""
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+
+    accounting = ExternalWeightCharges()
+    with accounting.track():
+        record_external_weight_charge("target.sock", False, 8)
+        record_external_weight_charge("draft.sock", True, 4)
+        source = "draft.sock" if is_draft else "target.sock"
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback(source, is_draft)
+        record_external_weight_fallback("uncharged.sock", False)
+    assert accounting.fallback_bytes == fallback_bytes
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -885,7 +1241,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
 
     import torch
 
-    from vllm.config import CacheConfig, LoadConfig, ParallelConfig
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
     from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
     from vllm.model_executor.model_loader.weight_cache.protocol import (
         WeightCacheKey,
@@ -909,6 +1265,7 @@ def test_ipc_cache_key_tracks_kv_quantization(
         cache_config=CacheConfig(
             cache_dtype="fp8", kv_cache_dtype_skip_layers=["1", "2"]
         ),
+        kernel_config=KernelConfig(),
     )
     server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
     config.cache_config = CacheConfig(
@@ -937,6 +1294,88 @@ def test_ipc_cache_key_tracks_kv_quantization(
     config.parallel_config.enable_expert_parallel = True
     config.parallel_config.expert_placement_strategy = "round_robin"
     loader.load_weights(model, model_config)
+    assert len(requested_keys) == 2
+    for key in requested_keys:
+        assert server.cache_key.mismatched_fields(key) == mismatched_fields
+
+
+@pytest.mark.parametrize(
+    "engine_kernel_config,mismatched_fields",
+    [
+        ({"moe_backend": "flashinfer_cutlass"}, []),
+        ({"moe_backend": "flashinfer_trtllm"}, ["moe_backend"]),
+        (
+            {"moe_backend": "flashinfer_cutlass", "linear_backend": "cutlass"},
+            ["linear_backend"],
+        ),
+        (
+            {
+                "moe_backend": "flashinfer_cutlass",
+                "linear_backend_per_quant": {"nvfp4_w4a16": "humming"},
+            },
+            ["linear_backend_per_quant"],
+        ),
+    ],
+)
+def test_ipc_cache_key_tracks_kernel_backends(
+    tmp_path, monkeypatch, engine_kernel_config, mismatched_fields
+):
+    """Weights processed for one MoE or linear backend have that backend's
+    layout, so an engine selecting a different backend must not reuse them."""
+    from types import SimpleNamespace
+
+    import torch
+
+    from vllm.config import CacheConfig, KernelConfig, LoadConfig, ParallelConfig
+    from vllm.model_executor.model_loader.weight_cache import daemon, ipc_loader
+    from vllm.model_executor.model_loader.weight_cache.protocol import (
+        WeightCacheKey,
+        WeightCacheState,
+    )
+
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        dtype=torch.bfloat16,
+        quantization="modelopt_fp4",
+        quantization_config=None,
+        revision=None,
+        hf_config=SimpleNamespace(architectures=["Qwen3MoeForCausalLM"]),
+        hf_text_config=SimpleNamespace(),
+        is_moe=True,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        parallel_config=ParallelConfig(),
+        speculative_config=None,
+        cache_config=CacheConfig(),
+        kernel_config=KernelConfig(moe_backend="flashinfer_cutlass"),
+    )
+    server = daemon.WeightCacheDaemon(config, 0, 0, "unused")
+    config.kernel_config = KernelConfig(**engine_kernel_config)
+    for name in ("get_dp_group", "get_pp_group"):
+        monkeypatch.setattr(
+            ipc_loader, name, lambda: SimpleNamespace(world_size=1, rank_in_group=0)
+        )
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    requested_keys: list[WeightCacheKey] = []
+
+    def request_state(key, *, is_reload=False):
+        requested_keys.append(key)
+        return WeightCacheState(entries={}, aliases={}, attrs={})
+
+    loader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(loader, "_request_state", request_state)
+    monkeypatch.setattr(loader, "_build_model", lambda *args: torch.nn.Module())
+    loader.load_model(config, model_config)
+    # A standalone reload on a fresh loader has no recorded key, so it keys on
+    # the current engine config.
+    reloader = ipc_loader.IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    monkeypatch.setattr(reloader, "_request_state", request_state)
+    reloader.load_weights(torch.nn.Module(), model_config)
     assert len(requested_keys) == 2
     for key in requested_keys:
         assert server.cache_key.mismatched_fields(key) == mismatched_fields

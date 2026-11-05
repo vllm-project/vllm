@@ -198,13 +198,39 @@ def test_dict_serialization():
     assert obj == decoded, "Decoded object does not match the original object."
 
 
-def test_tensor_serialization():
-    """Test encoding and decoding of a torch.Tensor."""
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+        torch.float64,
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+        torch.uint16,
+        torch.uint32,
+        torch.uint64,
+        torch.bool,
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2fnuz,
+        torch.float8_e8m0fnu,
+        torch.float4_e2m1fn_x2,
+    ],
+)
+@pytest.mark.parametrize("shape", [(), (10, 10)])
+def test_tensor_serialization(dtype: torch.dtype, shape: tuple[int, ...]):
+    """Preserve tensor dtype, shape and bytes, including NumPy-unsupported types."""
     encoder = MsgpackEncoder()
     decoder = MsgpackDecoder(torch.Tensor)
 
-    # Create a sample tensor
-    tensor = torch.rand(10, 10)
+    tensor = torch.empty(shape, dtype=dtype)
+    raw = tensor.reshape(-1).view(torch.uint8)
+    raw.copy_(torch.arange(raw.numel()) % (2 if dtype == torch.bool else 127))
 
     # Encode the tensor
     encoded = encoder.encode(tensor)
@@ -213,9 +239,9 @@ def test_tensor_serialization():
     decoded = decoder.decode(encoded)
 
     # Verify the decoded tensor matches the original
-    assert torch.allclose(tensor, decoded), (
-        "Decoded tensor does not match the original tensor."
-    )
+    assert decoded.dtype == tensor.dtype
+    assert decoded.shape == tensor.shape
+    assert torch.equal(raw, decoded.reshape(-1).view(torch.uint8))
 
 
 def test_numpy_array_serialization():
