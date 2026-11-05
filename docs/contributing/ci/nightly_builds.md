@@ -162,3 +162,29 @@ Key files involved in the nightly wheel mechanism:
 - **`.buildkite/scripts/upload-wheels.sh`**: Script that uploads wheels and generates indices
 - **`.buildkite/scripts/generate-nightly-index.py`**: Python script that generates PyPI-compatible indices
 - **`setup.py`**: Contains `precompiled_wheel_utils` class for fetching and using precompiled wheels
+
+## Docker Hub publishing credentials
+
+Docker publishing and nightly cleanup use the Buildkite secret
+`VLLM_DOCKERHUB_TOKEN`, mapped to `RELEASE_DOCKERHUB_TOKEN` on publishing
+steps. Use Docker Hub organization username `vllm` with an organization access
+token granting Image Push, Image Delete, and Tag Admin on `vllm/vllm-openai`,
+`vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, and `vllm/vllm-openai-xpu`.
+Tag Admin and Image Delete are needed for nightly tag cleanup. Do not grant
+organization administration or access to unrelated repositories.
+
+Store the secret in the dedicated vLLM Release cluster and restrict its access
+policy to the immutable Release v2 pipeline ID, the `main` and `releases/*`
+branches, and the small CPU publishing queue ID. Build workers do not need it.
+Step-level secrets require Buildkite agent 3.106.0 or newer. Protect release
+branches and pipeline settings in addition to configuring the secret policy.
+
+The cleanup script exchanges the organization token through `/v2/auth/token`
+and uses the namespace-scoped tag API. It keeps credentials out of shell
+traces and command arguments. For manual cleanup, supply
+`RELEASE_DOCKERHUB_TOKEN` and `DOCKERHUB_USERNAME=vllm` through a secure
+local environment, never command-line arguments or committed files.
+
+Validate publishing, multi-architecture manifests, and cleanup before removing
+legacy S3 credentials. Revoke a shared token only after all its consumers have
+migrated; deleting one stored copy does not invalidate the token.
