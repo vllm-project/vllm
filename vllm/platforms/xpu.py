@@ -123,6 +123,7 @@ class XPUPlatform(Platform):
         "mxfp8",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
         "modelopt",
@@ -157,8 +158,36 @@ class XPUPlatform(Platform):
             logger.info_once("Using XPU MLA Sparse backend.")
             return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
-            logger.info_once("Using Triton MLA backend on V1 engine.")
-            return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend == AttentionBackendEnum.TRITON_MLA:
+                logger.info_once("Using Triton MLA backend on V1 engine.")
+                return AttentionBackendEnum.TRITON_MLA.get_path()
+            if selected_backend not in (None, AttentionBackendEnum.FLASH_ATTN_MLA):
+                raise ValueError(
+                    f"Invalid attention backend for {cls.device_name}, "
+                    f"with use_mla: {attn_selector_config.use_mla}"
+                )
+            from vllm.v1.attention.backends.mla.flashattn_mla import (
+                XPUFlashAttnMLABackend,
+            )
+
+            invalid_reasons = XPUFlashAttnMLABackend.validate_configuration(
+                device_capability=cls.get_device_capability(),  # type: ignore[arg-type]
+                **attn_selector_config._asdict(),
+            )
+            if invalid_reasons:
+                if selected_backend == AttentionBackendEnum.FLASH_ATTN_MLA:
+                    raise ValueError(
+                        f"FlashAttnMLA on XPU is not valid for this "
+                        f"configuration: {invalid_reasons}"
+                    )
+                logger.info_once(
+                    "FlashAttnMLA on XPU is not valid for this configuration "
+                    "(%s); falling back to Triton MLA backend.",
+                    tuple(invalid_reasons),
+                )
+                return AttentionBackendEnum.TRITON_MLA.get_path()
+            logger.info_once("Using Flash Attention MLA backend on XPU.")
+            return "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend"
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
@@ -184,8 +213,8 @@ class XPUPlatform(Platform):
         elif attn_selector_config.use_mm_prefix:
             # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
             # multimodal prefix-LM bidirectional mask. Honor an explicit Flash
-            # Attention request (for text-only workloads); otherwise fall back
-            # to Triton Attention, which supports mm_prefix.
+            # Attention request (for text-only workloads); otherwise use the
+            # Triton/FlashAttention composite, falling back to Triton Attention.
             if selected_backend == AttentionBackendEnum.FLASH_ATTN:
                 logger.warning_once(
                     "Using Flash Attention on XPU for a multimodal prefix-LM "
@@ -195,6 +224,29 @@ class XPUPlatform(Platform):
                     "text-only workloads."
                 )
                 return AttentionBackendEnum.FLASH_ATTN.get_path()
+            if (
+                selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
+                and dtype != torch.float32
+            ):
+                from vllm.v1.attention.backends.triton_flash_attn import (
+                    TritonFlashAttentionBackend,
+                )
+
+                if TritonFlashAttentionBackend.supports_head_size(
+                    attn_selector_config.head_size
+                ):
+                    logger.info_once(
+                        "Using the Triton/FlashAttention composite backend on "
+                        "XPU: batches with multimodal prefix masks run Triton "
+                        "Attention, causal batches run Flash Attention."
+                    )
+                    return AttentionBackendEnum.TRITON_FLASH_ATTN.get_path()
+                if selected_backend == AttentionBackendEnum.TRITON_FLASH_ATTN:
+                    raise ValueError(
+                        "TRITON_FLASH_ATTN on XPU supports head sizes "
+                        f"{TritonFlashAttentionBackend.get_supported_head_sizes()}"
+                        f", got {attn_selector_config.head_size}."
+                    )
             logger.warning_once(
                 "Flash Attention on XPU does not support multimodal prefix-LM "
                 "attention. Falling back to Triton Attention backend."
@@ -352,7 +404,6 @@ class XPUPlatform(Platform):
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",

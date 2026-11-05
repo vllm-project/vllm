@@ -4,6 +4,9 @@
 """Tests that FusedRMSNormGated decomposes correctly under torch.compile,
 matching the eager triton kernel output."""
 
+import subprocess
+import sys
+
 import pytest
 import torch
 
@@ -21,6 +24,27 @@ NUM_TOKENS = [64, 128]
 ACTIVATIONS = ["swish", "sigmoid"]
 ELEMENTWISE_AFFINE = [True, False]
 SEEDS = [0]
+
+
+@pytest.mark.parametrize("first", ["kda", "fused_norm_gate"])
+def test_norm_gate_import_order(first):
+    second = "fused_norm_gate" if first == "kda" else "kda"
+    code = """
+import importlib
+import sys
+from vllm.model_executor.custom_op import op_registry
+
+prefix = "vllm.third_party.flash_linear_attention.ops."
+first, second = [importlib.import_module(prefix + name) for name in sys.argv[1:]]
+assert first.FusedRMSNormGated is second.FusedRMSNormGated
+assert op_registry["fused_rms_norm_gated"] is first.FusedRMSNormGated
+"""
+    subprocess.run(
+        [sys.executable, "-c", code, first, second],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

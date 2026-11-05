@@ -13,16 +13,41 @@ from tests.v1.attention.test_gdn_metadata_builder import (
     DEVICE,
     _create_gdn_builder,
 )
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.mamba import MambaBackendEnum
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionBackend
+from vllm.v1.attention.backends.mamba2_attn import (
+    Mamba2AttentionBackend,
+    Mamba2AttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
     RecoverSSMPostprocessMetadata,
 )
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states import mamba_hybrid
-from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
+    MambaHybridModelState,
+)
 from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
+from vllm.v1.worker.utils import AttentionGroup
+
+
+def _recoverssm_attn_groups(layer_name: str) -> list[list[AttentionGroup]]:
+    """RecoverSSMState.record_step reads only each group's ``layer_names``."""
+    group = SimpleNamespace(layer_names=[layer_name])
+    return [[group]]  # type: ignore[list-item]  # layer_names-only stand-in
+
+
+GPU_DEVICE = current_platform.device_type
+HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
 
 
 def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,6 +55,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.vllm_config = SimpleNamespace(num_speculative_tokens=0)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state._use_flashinfer_replayssm = False
     state.recoverssm = None
 
     positions = torch.tensor([1536], dtype=torch.int64)
@@ -67,6 +93,22 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     assert build_attn_metadata.call_args.kwargs["positions"] is positions
 
 
+def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
+    """A drafter group can lower cache_config.block_size below the mamba
+    block size; the seeded column must still be in mamba blocks."""
+    state = object.__new__(MambaHybridModelState)
+    state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
+    state._align_mode = True
+    state.rope_state = None
+    state.prompt_embeds_state = None
+    state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
+    state._mamba_state_idx_gpu = torch.zeros(2, dtype=torch.int32)
+
+    state.add_request(1, SimpleNamespace(num_computed_tokens=107_360))
+
+    assert state._mamba_state_idx_gpu[1] == 121
+
+
 def test_padded_prompt_tail_builds_as_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -80,6 +122,7 @@ def test_padded_prompt_tail_builds_as_spec_decode(
     state.vllm_config = SimpleNamespace(num_speculative_tokens=k)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state._use_flashinfer_replayssm = False
     state.recoverssm = None
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32)
 
@@ -122,7 +165,6 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         "model_specific_attn_metadata"
     ]
     assert mamba_metadata.is_prefilling.tolist() == [False, False, True]
-
     builder = _create_gdn_builder(num_speculative_tokens=k)
     common = create_common_attn_metadata(
         BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, DEVICE
@@ -145,6 +187,7 @@ def _mamba_hybrid_state(num_speculative_tokens: int) -> MambaHybridModelState:
     state.vllm_config = SimpleNamespace(num_speculative_tokens=num_speculative_tokens)
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
+    state._use_flashinfer_replayssm = False
     state.recoverssm = None
     # A request that accepted 3 drafts (plus the bonus token) on the previous
     # step; the others have never had a draft accepted.
@@ -186,6 +229,122 @@ def _input_batch(
         positions=torch.zeros(num_tokens, dtype=torch.int64),
         prompt_lens=None,
     )
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens,prefilling,prompt_tail,for_capture,expected",
+    [
+        ([4, 8], [68, 72], [False, False], None, False, [False, True]),
+        (
+            [4, 4, 4],
+            [68, 68, 4],
+            [False, True, True],
+            [False, True, False],
+            False,
+            [False, False, True],
+        ),
+        ([4, 4], [68, 68], [False, False], None, True, [False, False, False]),
+        ([8, 8], [72, 72], [True, True], None, False, None),
+    ],
+    ids=[
+        "resumed-chunk",
+        "padded-prompt-tail",
+        "full-graph-padding",
+        "autotune-no-mamba",
+    ],
+)
+def test_replayssm_uses_built_mamba_decode_split(
+    query_lens, seq_lens, prefilling, prompt_tail, for_capture, expected
+):
+    """ReplaySSM uses Mamba's split, including resumed chunks and graph padding."""
+    gdn_builder = _create_gdn_builder(num_speculative_tokens=3, full_cuda_graph=True)
+    config = gdn_builder.vllm_config
+    config.model_config.hf_text_config.mamba_chunk_size = 256
+    mamba_builder = Mamba2AttentionMetadataBuilder(
+        gdn_builder.kv_cache_spec, ["mamba"], config, DEVICE
+    )
+    # Classification uses the provider-independent Mamba builder on CPU.
+    state_config = create_vllm_config(max_num_seqs=4, max_num_batched_tokens=16)
+    state_config.speculative_config = config.speculative_config
+    state_config.cache_config.use_replayssm = True
+    state_config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    state = MambaHybridModelState(state_config, torch.nn.Module(), None, DEVICE)
+    # The groups use these backend types without instantiating them.
+    groups = [
+        AttentionGroup(
+            GDNAttentionBackend,  # type: ignore[type-abstract]
+            ["gdn"],
+            gdn_builder.kv_cache_spec,
+            kv_cache_group_id=0,
+            metadata_builders=[gdn_builder],
+        ),
+        AttentionGroup(
+            Mamba2AttentionBackend,  # type: ignore[type-abstract]
+            ["mamba"],
+            mamba_builder.kv_cache_spec,
+            kv_cache_group_id=1,
+            metadata_builders=[mamba_builder],
+        ),
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(group.layer_names, group.kv_cache_spec) for group in groups
+        ],
+    )
+    num_reqs, num_tokens = len(query_lens), sum(query_lens)
+    padded_reqs = len(expected) if expected is not None else num_reqs
+    buffers = InputBuffers(padded_reqs, num_tokens, DEVICE)
+    batch = InputBatch.make_dummy(num_reqs, num_tokens, buffers)
+    batch.num_reqs_after_padding = padded_reqs
+    batch.num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
+    batch.num_draft_tokens_per_req = np.array(
+        [min(length - 1, 3) for length in query_lens], dtype=np.int32
+    )
+    batch.query_start_loc_np = np.array(
+        [0, *np.cumsum(query_lens), *([num_tokens] * (padded_reqs - num_reqs))],
+        dtype=np.int32,
+    )
+    buffers.query_start_loc.copy_(torch.from_numpy(batch.query_start_loc_np))
+    batch.query_start_loc = buffers.query_start_loc
+    batch.seq_lens_cpu_upper_bound = torch.tensor(
+        seq_lens + [0] * (padded_reqs - num_reqs), dtype=torch.int32
+    )
+    batch.seq_lens = batch.seq_lens_cpu_upper_bound
+    batch.is_prefilling_np = np.array(prefilling)
+    batch.prefill_runs_as_decode_np = (
+        np.array(prompt_tail) if prompt_tail is not None else None
+    )
+    attn_groups = [[group] for group in groups]
+    if expected is None:
+        # Profiling dummy runs omit Mamba groups before building metadata.
+        attn_groups = [
+            [
+                group
+                for group in group_list
+                if not isinstance(group.kv_cache_spec, MambaSpec)
+            ]
+            for group_list in attn_groups
+        ]
+    metadata = state.prepare_attn(
+        batch,
+        CUDAGraphMode.FULL if for_capture else CUDAGraphMode.NONE,
+        block_tables=(torch.ones(padded_reqs, 8, dtype=torch.int32),) * 2,
+        slot_mappings=torch.zeros(2, num_tokens, dtype=torch.int64),
+        attn_groups=attn_groups,
+        kv_cache_config=kv_cache_config,
+        for_capture=for_capture,
+    )
+    if expected is None:
+        assert metadata == {}
+        assert state._replayssm_query_start_loc is None
+        assert not state._is_prefilling_gpu.any()
+        return
+    assert list(metadata) == ["gdn", "mamba"]
+    assert metadata["mamba"].num_decodes == expected.count(False)
+    assert state._is_prefilling_gpu[:padded_reqs].tolist() == expected
+    assert state._replayssm_query_start_loc is batch.query_start_loc
 
 
 def _prepare_attn_metadata(
@@ -298,6 +457,17 @@ def test_padded_rows_keep_the_sentinel(monkeypatch):
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, 0, -1, -1]
 
 
+def test_rows_wider_than_the_speculative_state_window_keep_the_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _mamba_hybrid_state(num_speculative_tokens=7)
+    input_batch = _input_batch([12, 8, 1], None, [False, False, False])
+
+    metadata = _prepare_attn_metadata(state, monkeypatch, input_batch)
+
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, 0, 0]
+
+
 def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     monkeypatch,
 ):
@@ -311,26 +481,67 @@ def test_chunked_prefill_tail_of_two_or_three_tokens_keeps_the_sentinel(
     assert metadata.num_decode_draft_tokens_cpu.tolist() == [-1, -1]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(not HAS_GPU, reason="Requires CUDA or XPU")
 @pytest.mark.parametrize(("num_sampled", "expected_value"), [(0, 1), (3, 3)])
 def test_postprocess_state_scalar_with_int32_mapping(
     num_sampled: int, expected_value: int
 ) -> None:
     state = object.__new__(MambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.full(
-        (4,), 9, dtype=torch.int32, device="cuda"
+        (4,), 9, dtype=torch.int32, device=GPU_DEVICE
     )
     state._align_mode = False
+    state._use_flashinfer_replayssm = False
     state.recoverssm = None
     state._mamba_ctx = None
-    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device="cuda")
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=GPU_DEVICE)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
     expected = torch.tensor(
-        [expected_value, 9, expected_value, 9], dtype=torch.int32, device="cuda"
+        [expected_value, 9, expected_value, 9], dtype=torch.int32, device=GPU_DEVICE
     )
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = True
+    state._use_flashinfer_replayssm = True
+    state.recoverssm = None
+    state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
+    state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32, device="cuda")
+    state._is_prefilling_gpu = torch.zeros(4, dtype=torch.bool, device="cuda")
+    state._replayssm_query_start_loc = torch.tensor(
+        [0, 4], dtype=torch.int32, device="cuda"
+    )
+    replayssm = Mock()
+    accepted_snapshot = torch.zeros(4, dtype=torch.int32, device="cuda")
+    ctx = Mock(
+        is_initialized=True,
+        replayssm=replayssm,
+        num_accepted_tokens_snapshot=accepted_snapshot,
+    )
+
+    def normalize_live(*_args) -> None:
+        accepted_snapshot.copy_(state.num_accepted_tokens_gpu)
+        state.num_accepted_tokens_gpu[2] = 1
+
+    ctx.run_fused_postprocess_align.side_effect = normalize_live
+    state._mamba_ctx = ctx
+
+    state.postprocess_state(
+        torch.tensor([2], dtype=torch.int32, device="cuda"),
+        torch.tensor([3], dtype=torch.int32, device="cuda"),
+        num_computed_tokens=torch.tensor([0, 0, 8, 0], device="cuda"),
+    )
+
+    kwargs = replayssm.postprocess.call_args.kwargs
+    assert kwargs["num_accepted_tokens"] is accepted_snapshot
+    assert accepted_snapshot[2].item() == 3
+    assert state.num_accepted_tokens_gpu[2].item() == 1
+    assert state._replayssm_query_start_loc is None
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
@@ -340,9 +551,9 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
     num_accepted_tokens = torch.ones(2, dtype=torch.int32)
-    group = SimpleNamespace(layer_names=["layer"])
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.record_step({"layer": metadata}, attn_groups, for_capture=False)
     state.commit_step(
         num_sampled,
         idx_mapping,
@@ -359,33 +570,44 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -> None:
+@pytest.mark.skipif(not HAS_GPU, reason="Requires CUDA or XPU")
+@pytest.mark.parametrize(
+    ("computed", "sampled", "expected_column"),
+    [(4, 3, 0), (4, 4, 0), (4, 5, 1), (8, 8, 1), (8, 9, 2)],
+)
+def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias(
+    computed: int, sampled: int, expected_column: int
+) -> None:
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
+    state._use_flashinfer_replayssm = False
     state._mamba_ctx = None
-    state._mamba_state_idx_gpu = torch.full((5,), -1, dtype=torch.int32, device="cuda")
+    state._mamba_state_idx_gpu = torch.full(
+        (5,), -1, dtype=torch.int32, device=GPU_DEVICE
+    )
     state.recoverssm = RecoverSSMState()
     state.num_accepted_tokens_gpu = torch.full(
-        (5,), 9, dtype=torch.int32, device="cuda"
+        (5,), 9, dtype=torch.int32, device=GPU_DEVICE
     )
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = RecoverSSMPostprocessMetadata(
         num_spec_decodes=1,
-        request_indices=torch.tensor([1], dtype=torch.int32, device="cuda"),
-        num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
+        request_indices=torch.tensor([1], dtype=torch.int32, device=GPU_DEVICE),
+        num_computed_tokens=torch.tensor(
+            [6, computed], dtype=torch.int32, device=GPU_DEVICE
+        ),
         block_size=8,
-        block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
+        block_table=torch.zeros((2, 4), dtype=torch.int32, device=GPU_DEVICE),
     )
-    num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
-    idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
-    group = SimpleNamespace(layer_names=["layer"])
+    num_sampled = torch.tensor([2, sampled], dtype=torch.int32, device=GPU_DEVICE)
+    idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device=GPU_DEVICE)
+    attn_groups = _recoverssm_attn_groups("layer")
 
-    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.recoverssm.record_step({"layer": metadata}, attn_groups, for_capture=False)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
-    expected_state_indices = [-1, 1, -1, -1, -1]
+    expected_state_indices = [-1, expected_column, -1, -1, -1]
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted

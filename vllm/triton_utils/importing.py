@@ -3,11 +3,10 @@
 
 import os
 import types
-from importlib.metadata import version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, vllm_version_matches_substr
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
@@ -35,7 +34,7 @@ if HAS_TRITON:
         ]
 
         # Check Triton CPU
-        if "cpu" in version("vllm"):
+        if vllm_version_matches_substr("cpu"):
             if "cpu" in backends:
                 HAS_TRITON = True
                 # Suppress following warnings on CPU-only platforms
