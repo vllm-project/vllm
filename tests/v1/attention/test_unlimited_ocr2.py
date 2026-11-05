@@ -10,8 +10,11 @@ from vllm.model_executor.layers.dash_attention import (
     page_coordinates,
     route_blocks,
 )
+from vllm.platforms import current_platform
 
-pytest.importorskip("flashinfer")
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Unlimited-OCR-2 DASH attention is CUDA-only"
+)
 
 
 def test_page_coordinates_continue_across_prompt_and_response():
