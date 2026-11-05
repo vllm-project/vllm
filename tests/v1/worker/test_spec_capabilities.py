@@ -527,6 +527,13 @@ def test_registry_lookup(caplog):
             "chain",
             "ToyKernel verifies chain",
         ),
+        # The layer runs its verify kernel on chains too.
+        (
+            {GDN_VERIFY: ToyKernel(kinds={"tree"}), STATE_COMMIT: ToyKernel()},
+            _mamba_layer("m"),
+            "chain",
+            "ToyKernel does not verify chains",
+        ),
     ],
     ids=[
         "gdn",
@@ -539,6 +546,7 @@ def test_registry_lookup(caplog):
         "accepted",
         "declined",
         "lowest-kind",
+        "tree-only-verify",
     ],
 )
 def test_registry_plan_kind(providers, layer, plan_kind, why):
@@ -597,6 +605,12 @@ def test_bind_commit_capture():
             assert step.num_reqs == ctx.max_num_reqs
             assert step.result.path.tolist() == [[0, 1, 2, 3]] * 3
             assert torch.equal(step.result.path_len, step.count)
+
+    # A kernel runs only the plan kinds it supports.
+    tree_only = ToyKernel(kinds={"tree"})
+    layer = _mamba_layer("m.0")
+    KernelRegistry([Provider({GDN_VERIFY: tree_only})]).bind(_ctx("chain"), [layer])
+    assert not tree_only.binds and layer.module.spec_verify_kernel is None
 
     stale = _mamba_layer("m.0")
     stale.module.spec_verify_kernel = "stale"

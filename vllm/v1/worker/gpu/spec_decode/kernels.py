@@ -200,7 +200,8 @@ class SpecKernel:
     def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
         """The plan kinds this kernel runs for ``layer``; empty declines the
         layer (e.g. on its state dtype, head size or conv width), which then
-        verifies chains. Called before :meth:`bind`."""
+        verifies chains. A verify kernel without ``"chain"`` is not used: its
+        layer runs it on chain batches too. Called before :meth:`bind`."""
         raise NotImplementedError
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
@@ -317,6 +318,9 @@ class KernelRegistry:
                 found: tuple[PlanKind, str] = ("chain", f"no {key_name(key)} kernel")
             elif not kernel.supports(layer):
                 found = ("chain", f"{type(kernel).__name__} declines the layer")
+            elif key[1] == "verify" and "chain" not in kernel.supports(layer):
+                # The layer runs its verify kernel on chain batches too.
+                found = ("chain", f"{type(kernel).__name__} does not verify chains")
             else:
                 kind = max(kernel.supports(layer), key=plan_kind_rank)
                 found = (kind, f"{type(kernel).__name__} verifies {kind}")
@@ -342,7 +346,7 @@ class KernelRegistry:
                 if key[1] == "commit" and not commits:
                     continue
                 kernel = self.kernel_for(key, layer)
-                if kernel is None:
+                if kernel is None or ctx.plan_kind not in kernel.supports(layer):
                     continue
                 served.setdefault(id(kernel), (key, kernel, []))[2].append(layer)
                 if key[1] == "verify":
