@@ -53,6 +53,9 @@ _FP8_AMAX_HISTORY_LEN = 16
 # across model init, not forward passes).
 _fp8_scale_save_path: str | None = None
 _fp8_scale_save_margin: float = MultiModalConfig.mm_encoder_fp8_scale_save_margin
+_fp8_scale_save_every_wrap: bool = (
+    MultiModalConfig.mm_encoder_fp8_scale_save_every_wrap
+)
 _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
@@ -110,7 +113,7 @@ def _maybe_save_fp8_scales(
 ) -> None:
     """Accumulate a layer's scale tensors; on the first amax buffer wrap,
     dump all accumulated scales to ``mm_encoder_fp8_scale_save_path``.
-    With VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP=1 the file is rewritten at
+    With ``mm_encoder_fp8_scale_save_every_wrap`` the file is rewritten at
     every wrap, so it ends with the scales of the last amax window (e.g. the
     real images of an evaluation that runs after warm-up traffic).
 
@@ -142,7 +145,7 @@ def _maybe_save_fp8_scales(
         }
         for name, (q, k, v) in _fp8_saved_scale_refs.items()
     }
-    if not envs.VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP:
+    if not _fp8_scale_save_every_wrap:
         _fp8_scale_save_path = None
         _fp8_saved_scale_refs.clear()
     # Write atomically: the ranks of a data-parallel vision encoder share the
@@ -485,8 +488,10 @@ class MMEncoderAttention(CustomOp):
             and self._fp8_dynamic_scale
         ):
             global _fp8_scale_save_path, _fp8_scale_save_margin
+            global _fp8_scale_save_every_wrap
             _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
             _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
+            _fp8_scale_save_every_wrap = mm_cfg.mm_encoder_fp8_scale_save_every_wrap
 
     def process_weights_after_loading(self) -> None:
         """Populate FP8 scale buffers (always float32) after weights are loaded."""

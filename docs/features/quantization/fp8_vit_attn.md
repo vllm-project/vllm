@@ -72,6 +72,11 @@ Saved scales are multiplied by `--mm-encoder-fp8-scale-save-margin` (default
 calibration set. The default has been validated to generalize across datasets
 (e.g. VisionArena-Chat calibration maintains BF16 accuracy on ChartQA).
 
+The file is written once, when the 16-entry amax history first wraps. Pass
+`--mm-encoder-fp8-scale-save-every-wrap` to rewrite it at every wrap instead,
+so it ends with the scales of the last 16 forwards (for example the images of
+an evaluation that follows warm-up traffic).
+
 ## Scale File Format
 
 ```json
