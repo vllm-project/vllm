@@ -217,6 +217,19 @@ class ClientRole:
             )
         )
 
+    def abort_loads(self) -> None:
+        """Abort every load not already aborting, for a cache reset.
+
+        Each is reported failed at once with its release deferred, so a
+        drain waits only for the AbortAcks (or the abort-ack timeout's
+        disconnect) instead of the full load timeout. Lookup state is
+        left alone.
+        """
+        for req_id in self._active_loads:
+            for round_seq, load in self._requests[req_id].loads.items():
+                if load.aborted_at is None:
+                    self._abort_load(req_id, round_seq, load)
+
     @property
     def has_active_loads(self) -> bool:
         """True if any kv_request_id has a fetch in flight."""

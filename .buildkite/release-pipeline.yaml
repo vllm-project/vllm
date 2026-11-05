@@ -512,13 +512,15 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
+        secrets:
+          RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
         plugins:
           - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
         env:
           DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
+          DOCKERHUB_USERNAME: "vllm"
 
       - label: "Publish nightly multi-arch Rubin image to DockerHub - CUDA 13.4"
         depends_on:
@@ -530,13 +532,15 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh cu134"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh cu134-nightly-"
+        secrets:
+          RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
         plugins:
           - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
         env:
           DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
+          DOCKERHUB_USERNAME: "vllm"
 
       - label: "Publish nightly multi-arch EFA image to DockerHub - CUDA 13.0"
         depends_on:
@@ -548,13 +552,15 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds.sh efa"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh efa-nightly-"
+        secrets:
+          RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
         plugins:
           - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
         env:
           DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
+          DOCKERHUB_USERNAME: "vllm"
 
       - label: "Publish nightly CPU multi-arch image to DockerHub"
         depends_on:
@@ -567,13 +573,15 @@ steps:
           - "bash .buildkite/scripts/push-nightly-builds-cpu.sh"
           # Clean up old nightly builds (keep only last 14)
           - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-cpu"
+        secrets:
+          RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
         plugins:
           - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
         env:
           DOCKER_BUILDKIT: "1"
-          DOCKERHUB_USERNAME: "vllmbot"
+          DOCKERHUB_USERNAME: "vllm"
 
   - trigger: "perf-eval"
     label: "Trigger perf-eval (CUDA)"
@@ -635,10 +643,6 @@ steps:
           - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
           - bash .buildkite/scripts/rocm/build.sh rocm release-base
         retry: &rocm_release_retry {automatic: [{exit_status: 75, limit: 1}]}   # registry error (build.sh)
-        plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
-          - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
 
       - label: ":rocm: Build ROCm 10.1 release image + wheels"
         key: build-rocm101-release
@@ -650,7 +654,6 @@ steps:
           - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
           - bash .buildkite/scripts/rocm/build.sh rocm release
         retry: *rocm_release_retry
-        plugins: *rocm_hub_login
 
       - label: ":s3: Upload ROCm 10.1 wheels"
         key: upload-rocm101-wheels
@@ -659,7 +662,6 @@ steps:
         timeout_in_minutes: 60
         env: {S3_BUCKET: vllm-wheels, ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
-        plugins: *rocm_hub_login
 
       - label: ":docker: ROCm 10.1 image: ECR tags (+ nightly Docker Hub)"
         key: build-rocm101-release-image
@@ -670,7 +672,12 @@ steps:
         agents: {queue: small_cpu_queue_release}
         env: {ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
-        plugins: *rocm_hub_login
+        secrets:
+          RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllm
+              password-env: RELEASE_DOCKERHUB_TOKEN
 
       # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant).
       - block: "Generate Root Index for ROCm Wheels for Release"
@@ -693,13 +700,15 @@ steps:
     commands:
       - "bash .buildkite/scripts/xpu/push-nightly-builds-xpu.sh"
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
+    secrets:
+      RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
     plugins:
       - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
+          username: vllm
+          password-env: RELEASE_DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
-      DOCKERHUB_USERNAME: "vllmbot"
+      DOCKERHUB_USERNAME: "vllm"
 
   # =============================================================================
   # Publish to DockerHub and PyPI (at the end so all builds complete first)
@@ -740,13 +749,15 @@ steps:
       - "rocm"
       - "xpu"
       - "cpu"
+    secrets:
+      RELEASE_DOCKERHUB_TOKEN: VLLM_DOCKERHUB_TOKEN
     plugins:
       - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
+          username: vllm
+          password-env: RELEASE_DOCKERHUB_TOKEN
     env:
       DOCKER_BUILDKIT: "1"
-      DOCKERHUB_USERNAME: "vllmbot"
+      DOCKERHUB_USERNAME: "vllm"
 
   - group: "Publish wheels"
     key: "publish-wheels"
