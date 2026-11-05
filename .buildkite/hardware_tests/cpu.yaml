@@ -79,6 +79,7 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - vllm/v1/attention/backends/cpu_attn.py
   - vllm/config/speculative.py
+  - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_5.py
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/model_executor/models/llama_eagle3.py
@@ -256,8 +257,11 @@ steps:
   agents:
     queue: amd-cpu
   source_file_dependencies:
+    - setup.py
     - .buildkite/hardware_tests/cpu.yaml
+    - .buildkite/hardware_tests/zen.yaml
     - .buildkite/image_build/image_build_zen_cpu.sh
+    - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
     - docker/Dockerfile.zen
     - docker/Dockerfile.cpu
     - requirements/cpu.txt

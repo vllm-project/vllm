@@ -16,21 +16,35 @@ with two changes, neither of which issues a collective:
   kernel returns every counter to zero when it finishes, so a buffer zeroed
   once stays valid for launches that do not overlap, as in the FlashInfer MLA
   backend.
+
+Batches whose clusters fit the GPU at once (at width 640, up to 8 requests with
+DSpark on a GB300) run the CuTe DSL kernel of ``sparse_mla_cute`` instead of
+TRTLLM-gen: it spreads a token's columns over one CTA per 128 instead of at most
+3.
 """
 
+import inspect
+from functools import cache
 from typing import TYPE_CHECKING, cast
 
 import torch
 
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 
 from ...flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
-    _get_flashinfer_dsv4_workspace,
+    get_flashinfer_dsv4_workspace,
 )
-from .. import uses_checked_flashinfer
+from .sparse_mla_cute import (
+    SWA_COLUMNS,
+    sparse_mla_decode,
+    supports_sparse_mla_cute,
+)
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -41,17 +55,40 @@ SparseIndexTable = tuple[torch.Tensor, torch.Tensor]
 _kv_counters_by_device: dict[torch.device, torch.Tensor] = {}
 
 
+@cache
+def _takes_kv_counters() -> bool:
+    """Whether the installed FlashInfer's sparse-MLA decode takes caller-owned
+    KV counters (``multi_ctas_kv_counter_buffer``, since 0.7.1); logs once when
+    it does not."""
+    try:
+        import flashinfer.utils
+        from flashinfer.decode import trtllm_batch_decode_sparse_mla_dsv4
+    except ImportError:
+        return False
+    if "multi_ctas_kv_counter_buffer" in inspect.signature(
+        trtllm_batch_decode_sparse_mla_dsv4
+    ).parameters and hasattr(
+        flashinfer.utils, "get_trtllm_gen_multi_ctas_kv_counter_bytes"
+    ):
+        return True
+    logger.warning(
+        "DeepSeek-V4.1 specialized decode: the installed FlashInfer's sparse-MLA "
+        "decode takes no KV counter buffer; each decode allocates its own."
+    )
+    return False
+
+
 def kv_counter_buffer(max_rows: int) -> torch.Tensor | None:
     """Zeroed multi-CTA KV counters on the current device for decode launches
-    of up to ``max_rows`` rows (requests x heads), or None off the checked
-    FlashInfer version.
+    of up to ``max_rows`` rows (requests x heads), or None when FlashInfer's
+    decode takes no counter buffer.
 
     Allocated when the executor is built, outside any CUDA graph capture. Every
     layer shares the buffer, as it shares the workspace: their decode launches
     run one after another on one stream. Decode launches that overlap on one
     device would race on it.
     """
-    if not uses_checked_flashinfer("the sparse-MLA decode's persistent KV counters"):
+    if not _takes_kv_counters():
         return None
     from flashinfer.utils import (
         get_device_sm_count,
@@ -369,12 +406,41 @@ class SparseMlaDecode:
             output = output.unsqueeze(1)
             decode_cu = None
             max_decode_query_len = 1
+        decode_indices = sparse_indices[:num_tokens]
+        # The CuTe kernel reads the first SWA_COLUMNS columns from the SWA pool.
+        if (
+            attn.window_size == SWA_COLUMNS
+            and swa_metadata.decode_swa_width == SWA_COLUMNS
+            and supports_sparse_mla_cute(
+                query,
+                swa_k_cache,
+                compressed_kv_cache,
+                decode_indices,
+                decode_topk_lens,
+                output,
+                bmm1_scale,
+                bmm2_scale,
+                attn.attn_sink,
+            )
+        ):
+            sparse_mla_decode(
+                query,
+                swa_k_cache,
+                compressed_kv_cache,
+                decode_indices,
+                decode_topk_lens,
+                output,
+                cast(float, bmm1_scale),
+                cast(float, bmm2_scale),
+                attn.attn_sink,
+            )
+            return
         trtllm_decode_sparse_mla_dsv4(
             query=query,
             swa_kv_cache=swa_k_cache,
             compressed_kv_cache=compressed_kv_cache,
-            workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
-            sparse_indices=sparse_indices[:num_tokens],
+            workspace_buffer=get_flashinfer_dsv4_workspace(q.device),
+            sparse_indices=decode_indices,
             sparse_topk_lens=decode_topk_lens,
             seq_lens=decode_seq_lens,
             out=output,

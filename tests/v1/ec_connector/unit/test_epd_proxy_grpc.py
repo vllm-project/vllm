@@ -58,6 +58,11 @@ async def worker(
     class Inference(inference.InferenceServicer):  # type: ignore[name-defined]
         async def Generate(self, request, context):
             seen.append((role, request, dict(context.invocation_metadata())))
+            if request.stopping.stop_strings and not request.response.output_text:
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT,
+                    "stop strings require detokenization",
+                )
             if started is not None:
                 started.set()
             if blocked is not None:
@@ -310,6 +315,7 @@ async def test_dynamic_grpc_epd_preserves_features_and_selected_replica(
                     "max_tokens": 8,
                     "temperature": 0,
                     "stream": stream,
+                    **({"stop": ["unused-stop"]} if not stream else {}),
                     **({"stream_options": {"include_usage": True}} if stream else {}),
                 },
             )

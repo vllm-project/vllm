@@ -310,7 +310,7 @@ class GrpcBackend:
             ),
             response=self.pb.ResponseOptions(
                 prompt_token_ids=True,
-                output_text=False,
+                output_text=bool(params.stop),
                 output_token_ids=True,
                 output_logprobs=bool(request.logprobs),
                 skip_special_tokens=params.skip_special_tokens,
@@ -517,11 +517,12 @@ class GrpcResponse:
                 choices=[GenerateTokensChoice(**choice)],
             )
             # Encoder-only workers finish without sampling a token.
-            choices = (
-                await self.derender.derender_chat(gen, self.request, self.prompt_ids)
-                if choice["token_ids"]
-                else []
-            )
+            if choice["token_ids"]:
+                choices, _ = await self.derender.derender_chat(
+                    gen, self.request, self.prompt_ids
+                )
+            else:
+                choices = []
             prompt_tokens = self.prompt_tokens
             completion_tokens = reply.outputs.finish_info.num_output_tokens
             response = ChatCompletionResponse(

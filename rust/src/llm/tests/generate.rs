@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
-    WeightVersionSpan,
+    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
+    GenerateRequest, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -199,7 +199,7 @@ async fn connect_async_llm_with_ipc(
     client_index: u32,
     model_name: &str,
     ipc: &IpcNamespace,
-) -> Llm {
+) -> EngineCoreLlm {
     let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name(model_name)
@@ -211,7 +211,7 @@ async fn connect_async_llm_with_ipc(
     )
     .await
     .unwrap();
-    Llm::new(client)
+    EngineCoreLlm::new(client)
 }
 
 fn request_metrics_model_name(prefix: &str) -> String {
@@ -245,7 +245,7 @@ async fn generate_streams_outputs() {
                 assert!(request.request_id.starts_with("req-delta-"));
                 assert_ne!(request.request_id, "req-delta");
                 assert_eq!(request.client_index, 7);
-                assert_eq!(request.prompt_token_ids, Some(vec![11, 22]));
+                assert_eq!(request.prompt_token_ids, Some(vec![11, 22].into()));
 
                 send_outputs(
                     push,
@@ -438,8 +438,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     assert_eq!(
         weight_versions,
         [
-            None,
-            None,
+            Some(vec![span("v7", 0, 1)]),
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
@@ -488,6 +488,7 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
                                     num_prompt_tokens: 2,
                                     num_cached_tokens: 1,
                                     num_local_cached_tokens: 1,
+                                    num_cache_creation_tokens: 1,
                                     ..Default::default()
                                 })),
                                 new_sampling_mask: Some(MaybeWireSamplingMask::Direct(
@@ -541,7 +542,11 @@ async fn collect_output_aggregates_raw_tokens_logprobs_and_terminal_metadata() {
     assert_eq!(collected.prompt_token_ids, vec![11, 22]);
     assert_eq!(collected.token_ids, vec![33, 44]);
     assert_eq!(collected.finish_reason, FinishReason::stop_eos());
-    assert_eq!(collected.usage.cached_token_count, 1);
+    assert_eq!(collected.usage.prompt_cache_usage.cached_token_count, 1);
+    assert_eq!(
+        collected.usage.prompt_cache_usage.cache_creation_token_count,
+        1
+    );
     assert_eq!(collected.prompt_logprobs, Some(prompt_logprobs()));
     assert_eq!(
         collected.logprobs.as_ref().map(|lp| lp.positions.len()),
@@ -571,7 +576,7 @@ async fn collect_output_rejects_partial_sampling_mask() {
         token_ids: vec![33, 44],
         logprobs: None,
         finish_reason: Some(FinishReason::Length),
-        cached_token_count: 0,
+        prompt_cache_usage: Default::default(),
         kv_transfer_params: None,
         ec_transfer_params: None,
         sampling_mask: Some(SamplingMask {
@@ -666,11 +671,17 @@ async fn remote_prefill_cache_usage_preserves_decoder_metrics() {
             .generate(request)
             .await
             .unwrap()
-            .inspect(|output| streamed_counts.push(output.as_ref().unwrap().cached_token_count))
+            .inspect(|output| {
+                streamed_counts.push(output.as_ref().unwrap().prompt_cache_usage.cached_token_count)
+            })
             .collect_output()
             .await
             .unwrap();
-        results.push((name, streamed_counts, collected.usage.cached_token_count));
+        results.push((
+            name,
+            streamed_counts,
+            collected.usage.prompt_cache_usage.cached_token_count,
+        ));
         expected.push((
             name,
             vec![remote_count.unwrap_or(7), remote_count.unwrap_or(0)],
@@ -1269,7 +1280,7 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
     )
     .await
     .unwrap();
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let mut request = sample_generate_request("req-no-log-stats", 8);
     request.arrival_time = None;
     request.lora_request = Some(LoraRequest {

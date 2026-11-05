@@ -448,6 +448,14 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Run in headless mode. See multi-node data parallel "
         "documentation for more details.",
     )
+    # Internal: the Rust frontend's managed `serve` passes its local handshake
+    # endpoint so that headless engines also handshake with it.
+    parser.add_argument(
+        "--headless-client-handshake-address",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "--api-server-count",
         "-asc",
