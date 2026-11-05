@@ -1397,26 +1397,15 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             * next(iter([video_second_per_grid_t]))
             * position_id_per_seconds
         )
-        video_data_index, audio_data_index = 0, 0
-        updates = [audio_start_token_id]
-        while video_data_index < len(video_token_indices) and audio_data_index < len(
-            audio_token_indices
-        ):
-            if (
-                video_token_indices[video_data_index]
-                <= audio_token_indices[audio_data_index]
-            ):
-                updates += [video_token_id]
-                video_data_index += 1
-            else:
-                updates += [audio_token_id]
-                audio_data_index += 1
-        if video_data_index < len(video_token_indices):
-            updates += [video_token_id] * (len(video_token_indices) - video_data_index)
-        if audio_data_index < len(audio_token_indices):
-            updates += [audio_token_id] * (len(audio_token_indices) - audio_data_index)
-        updates += [audio_end_token_id]
-        return updates
+        # Both index sequences are sorted, so a stable sort of their
+        # concatenation merges them, placing the video token first on ties.
+        order = np.argsort(
+            np.concatenate([video_token_indices, audio_token_indices]), kind="stable"
+        )
+        token_ids = np.where(
+            order < len(video_token_indices), video_token_id, audio_token_id
+        )
+        return [audio_start_token_id, *token_ids.tolist(), audio_end_token_id]
 
     def _get_prompt_updates(
         self,
@@ -2140,28 +2129,13 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         video_pos = np.stack([t_index, h_index, w_index]) + start_idx
         audio_pos = np.broadcast_to(np.arange(audio_len), (3, audio_len)) + start_idx
 
-        video_t_values = video_pos[0]
-        audio_t_values = audio_pos[0]
+        # Both sequences are sorted by temporal position, so a stable sort of
+        # their concatenation merges them, placing the video token first on ties.
+        order = np.argsort(np.concatenate([video_pos[0], audio_pos[0]]), kind="stable")
+        pos_ids = np.concatenate([video_pos, audio_pos], axis=1)[:, order]
 
-        pos_ids_list: list[np.ndarray] = []
-        video_idx, audio_idx = 0, 0
-        num_video = grid_t * grid_h * grid_w
-
-        while video_idx < num_video and audio_idx < audio_len:
-            if video_t_values[video_idx] <= audio_t_values[audio_idx]:
-                pos_ids_list.append(video_pos[:, video_idx : video_idx + 1])
-                video_idx += 1
-            else:
-                pos_ids_list.append(audio_pos[:, audio_idx : audio_idx + 1])
-                audio_idx += 1
-
-        if video_idx < num_video:
-            pos_ids_list.append(video_pos[:, video_idx:])
-        if audio_idx < audio_len:
-            pos_ids_list.append(audio_pos[:, audio_idx:])
-
-        total_tokens = num_video + audio_len
-        return np.concatenate(pos_ids_list, axis=1), total_tokens
+        total_tokens = grid_t * grid_h * grid_w + audio_len
+        return pos_ids, total_tokens
 
     @classmethod
     def get_speech_to_text_config(

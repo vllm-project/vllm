@@ -3,6 +3,7 @@
 import dataclasses
 from dataclasses import dataclass
 
+import numpy as np
 import pytest
 import torch
 
@@ -214,3 +215,55 @@ def test_mrope_positions_image_then_text():
     )
     torch.testing.assert_close(positions, expected)
     assert delta == 9 - len(input_tokens)
+
+
+def _reference_interleaved_positions(model, start_idx, data):
+    """The token-by-token merge `_compute_interleaved_positions` replaced."""
+    grid_t, grid_h, grid_w = data["grid_t"], data["grid_h"], data["grid_w"]
+    audio_len = model._compute_audio_token_count(data["audio_feature_length"])
+    t_index = np.repeat(
+        (np.arange(grid_t) * data["t_factor"]).astype(np.int64), grid_h * grid_w
+    )
+    h_index = np.tile(np.arange(grid_h).reshape(1, -1, 1), (grid_t, 1, grid_w))
+    w_index = np.tile(np.arange(grid_w).reshape(1, 1, -1), (grid_t, grid_h, 1))
+    video_pos = np.stack([t_index, h_index.flatten(), w_index.flatten()]) + start_idx
+    audio_pos = np.broadcast_to(np.arange(audio_len), (3, audio_len)) + start_idx
+    v, a, out = 0, 0, []
+    while v < video_pos.shape[1] and a < audio_len:
+        if video_pos[0, v] <= audio_pos[0, a]:
+            out.append(video_pos[:, v : v + 1])
+            v += 1
+        else:
+            out.append(audio_pos[:, a : a + 1])
+            a += 1
+    out += [video_pos[:, v:], audio_pos[:, a:]]
+    return np.concatenate(out, axis=1)
+
+
+@pytest.mark.parametrize(
+    ("grid_thw", "audio_feature_length", "second_per_grid_ts"),
+    [
+        ((2, 2, 2), 16, None),
+        ((4, 4, 4), 1000, None),
+        ((2, 2, 2), 0, None),
+        ((1, 2, 2), 3000, None),
+        ((6, 3, 4), 400, 0.5),
+        ((30, 8, 14), 3000, None),
+    ],
+)
+def test_interleaved_positions_match_token_by_token_merge(
+    grid_thw, audio_feature_length, second_per_grid_ts
+):
+    model = make_model()
+    video = make_video_feature(1, grid_thw, use_audio_in_video=True)
+    if second_per_grid_ts is not None:
+        video.data["second_per_grid_ts"] = _elem(second_per_grid_ts)
+    mm_features = [video, make_audio_feature(1, audio_feature_length)]
+    data = next(d for _, m, d in model.iter_mm_features(mm_features) if m == "video")
+
+    positions, num_tokens = model._compute_interleaved_positions(7, data)
+
+    expected = _reference_interleaved_positions(model, 7, data)
+    assert positions.dtype == expected.dtype
+    np.testing.assert_array_equal(positions, expected)
+    assert num_tokens == expected.shape[1]

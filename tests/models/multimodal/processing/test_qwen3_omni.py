@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+import torch
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -138,3 +139,62 @@ def test_audio_in_video_follows_requested_fps(model_id: str) -> None:
         text=[prompt], videos=[video], audio=[audio], return_tensors="pt", **mm_kwargs
     )
     assert processed["prompt_token_ids"] == expected["input_ids"][0].tolist()
+
+
+@pytest.fixture(scope="module")
+def qwen3_omni_processor():
+    ctx = build_model_context(
+        "Qwen/Qwen3-Omni-30B-A3B-Instruct",
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 1},
+    )
+    return MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+
+def _reference_updates(cfg, audio_len, video_grid_thw, video_second_per_grid_t):
+    """The token-by-token merge `get_updates_use_audio_in_video` replaced."""
+    merge = cfg.vision_config.spatial_merge_size
+    t, h, w = (int(x) for x in video_grid_thw)
+    video_idx = np.broadcast_to(
+        np.arange(t).reshape(-1, 1, 1), (t, h // merge, w // merge)
+    ).reshape(-1)
+    video_idx = video_idx * video_second_per_grid_t * cfg.position_id_per_seconds
+    v, a, updates = 0, 0, [cfg.audio_start_token_id]
+    while v < len(video_idx) and a < audio_len:
+        if video_idx[v] <= a:
+            updates.append(cfg.video_token_id)
+            v += 1
+        else:
+            updates.append(cfg.audio_token_id)
+            a += 1
+    updates += [cfg.video_token_id] * (len(video_idx) - v)
+    updates += [cfg.audio_token_id] * (audio_len - a)
+    return updates + [cfg.audio_end_token_id]
+
+
+@pytest.mark.parametrize(
+    ("grid_thw", "second_per_grid_t", "audio_len"),
+    [
+        ((4, 8, 8), 1.0, 60),
+        ((4, 8, 8), 1.0, 0),
+        ((2, 4, 4), 1.0, 500),
+        ((6, 8, 12), 0.5, 37),
+        ((60, 32, 56), 1.0, 750),
+    ],
+)
+def test_audio_in_video_updates_match_reference(
+    qwen3_omni_processor, grid_thw, second_per_grid_t, audio_len
+):
+    thinker_config = qwen3_omni_processor.info.get_hf_config()
+    video_grid_thw = torch.tensor(grid_thw)
+
+    updates = qwen3_omni_processor.get_updates_use_audio_in_video(
+        thinker_config=thinker_config,
+        audio_len=audio_len,
+        video_grid_thw=video_grid_thw,
+        video_second_per_grid_t=second_per_grid_t,
+    )
+
+    assert updates == _reference_updates(
+        thinker_config, audio_len, video_grid_thw, second_per_grid_t
+    )
+    assert all(type(t) is int for t in updates)
