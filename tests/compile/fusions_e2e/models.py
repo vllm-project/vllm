@@ -96,8 +96,8 @@ llama3_8b_fp4 = ModelFusionInfo(
 )
 
 # ModelOpt MIXED_PRECISION: FP8 attention projections, NVFP4 MLPs. It resolves to
-# modelopt_mixed, not modelopt_fp4, and its MLP has no manual act+quant fusion, so
-# every MLP boundary is left to ActivationQuantFusionPass.
+# modelopt_mixed, not modelopt_fp4. NVIDIA Qwen uses explicit MLP act+quant
+# fusion; the count below is the number of MLP boundaries to validate.
 qwen3_8_27b_mixed_fp4 = ModelFusionInfo(
     model_name="nvidia/Qwen3.8-27B-NVFP4",
     hf_overrides=lambda n_layers: {

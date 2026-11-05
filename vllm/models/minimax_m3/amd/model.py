@@ -48,6 +48,7 @@ from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
+    RoutedExperts,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -65,6 +66,7 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Dynamic
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -93,6 +95,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_splits_layer_sharing,
     spec_decode_needs_target_embed,
 )
 from vllm.model_executor.models.vision import run_dp_sharded_mrope_vision_model
@@ -383,6 +386,30 @@ class MiniMaxM3MoE(nn.Module):
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_local_experts}."
+            )
+
+        # MiniMax-M3.1 like checkpoints (`quant_method: mxfp8`, `moe_quant_algo:
+        # NVFP4`) have no native NVFP4 MoE backend on ROCm: the routed experts must be
+        # re-quantized online.
+        experts_prefix = f"{prefix}.experts"
+        if (
+            isinstance(quant_config, ModelOptMxFp8Config)
+            and quant_config.moe_quant_algo == "NVFP4"
+            and not quant_config.is_layer_excluded(experts_prefix)
+            and (
+                quant_config.online_quantization_config is None
+                or quant_config.online_quantization_config.resolve_quant_method_cls(
+                    RoutedExperts, experts_prefix
+                )
+                is None
+            )
+        ):
+            raise NotImplementedError(
+                "This MiniMax model with NVFP4 MoE experts "
+                "(`moe_quant_algo: NVFP4`, `moe_quant_format: nvfp4-pack-quantized`) "
+                "is not supported on ROCm. Please use `--quantization-config.moe "
+                "mxfp8` (or `--quantization-config.moe mxfp4`) to re-quantize the "
+                "MoE to MXFP8 (or MXFP4) when loading to serve on ROCm."
             )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
@@ -1585,9 +1612,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(
-            vllm_config, include_mtp=vllm_config.use_v2_model_runner
-        ):
+        if get_pp_group().is_first_rank or spec_decode_needs_target_embed(vllm_config):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -1682,6 +1707,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 )
         else:
             self.topk_indices_buffer = None
+        sparse_layers = _sparse_attention_layer_ids(config)
+        skip_layers = {i for i in sparse_layers if _should_skip_index_topk(config, i)}
+        if pp_splits_layer_sharing(
+            config.num_hidden_layers, sparse_layers, skip_layers
+        ):
+            # The top-k is sharded over TP index heads, so PP cannot send it.
+            raise NotImplementedError(
+                "use_index_cache with a PP stage that starts on a top-k sharing "
+                "layer is not supported. Set VLLM_PP_LAYER_PARTITION so every "
+                "stage starts on a top-k computing layer."
+            )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
