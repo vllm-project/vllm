@@ -882,6 +882,13 @@ class NanoNemotronVLDummyInputsBuilder(
                 video_width, video_height = target_w, target_h
             else:
                 video_width, video_height = image_size, image_size
+            if processor.device_resize:
+                # The model resizes the decoded frames itself. Profile frames
+                # larger than the target (same aspect ratio and token count) so
+                # the memory profile includes that resize: its upload buffers
+                # and CV-CUDA's workspace, allocated on first use. The dummy
+                # image is already larger than its target.
+                video_width, video_height = 2 * video_width, 2 * video_height
 
             target_num_frames = self.info.get_num_frames_with_most_features(
                 seq_len, mm_counts

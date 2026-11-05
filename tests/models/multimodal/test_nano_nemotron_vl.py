@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import numpy as np
@@ -16,6 +17,7 @@ from vllm.config import MultiModalConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.layers.fusion.mm_input_norm import FusedMMInputNorm
 from vllm.model_executor.models.nano_nemotron_vl import (
+    NanoNemotronVLDummyInputsBuilder,
     NanoNemotronVLImagePixelInputsDynamic,
     NanoNemotronVLMultiModalProcessor,
     NanoNemotronVLVideoPixelInputs,
@@ -306,6 +308,45 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
     for raw_pixels, source in zip(raw, sources, strict=True):
         assert raw_pixels.dtype == torch.uint8
         assert torch.equal(raw_pixels, torch.from_numpy(source))
+
+
+def test_nemotron_device_resize_profiles_a_real_video_resize(default_vllm_config):
+    device_kwargs = MultiModalConfig(
+        mm_device_do_normalize=True
+    ).merge_mm_processor_kwargs({})
+    results = {}
+    for device_resize in (False, True):
+        processor = _make_processor(**device_kwargs, device_resize=device_resize)
+        info = SimpleNamespace(
+            get_dummy_image_size_and_max_tokens=lambda mm_counts: ((16, 16), 4),
+            get_hf_processor=lambda processor=processor: processor,
+            supports_video=True,
+            get_hf_config=lambda: SimpleNamespace(
+                force_image_size=16, patch_size=4, downsample_ratio=0.5
+            ),
+            get_num_frames_with_most_features=lambda seq_len, mm_counts: 4,
+            ctx=SimpleNamespace(
+                get_mm_config=lambda: SimpleNamespace(media_io_kwargs={})
+            ),
+            sound_config=None,
+        )
+        builder = NanoNemotronVLDummyInputsBuilder(info)  # type: ignore[arg-type]
+        videos = cast(list, builder.get_dummy_mm_data(64, {"video": 1}, {})["video"])
+        results[device_resize] = (
+            videos[0][0].shape,
+            processor._preprocess_video(["<video>"], videos),
+        )
+
+    shape, (text, inputs) = results[False]
+    raw_shape, (raw_text, raw_inputs) = results[True]
+    # Without device_resize, profiling frames are already at the target size.
+    assert tuple(inputs["pixel_values_flat_video"].shape[-2:]) == shape[1:3]
+    # With it, they are twice the target, so the profile run includes the
+    # resize on the device; the prompt and token counts are unchanged.
+    assert raw_text == text
+    (frame_size,) = raw_inputs["video_frame_sizes"].tolist()
+    assert raw_shape[1:3] == (2 * frame_size[0], 2 * frame_size[1])
+    assert tuple(frame_size) == shape[1:3]
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CV-CUDA needs CUDA")
