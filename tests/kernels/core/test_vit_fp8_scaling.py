@@ -374,3 +374,65 @@ def test_scale_save_every_wrap_requires_save_path(tmp_path) -> None:
         mm_encoder_fp8_scale_save_every_wrap=True,
     )
     assert cfg.mm_encoder_fp8_scale_save_every_wrap
+
+
+@pytest.mark.parametrize("every_wrap", [False, True])
+def test_scale_file_written_once_per_wrap(tmp_path, monkeypatch, every_wrap) -> None:
+    """Layers wrap in the same forward; the file is written once per wrap, by
+    the last layer, with every layer's complete window (not once per layer)."""
+    save_file = tmp_path / "scales.json"
+    mod, renames = _save_scales_state(monkeypatch, save_file)
+    monkeypatch.setattr(mod, "_fp8_scale_save_every_wrap", every_wrap)
+    num_layers, num_forwards = 8, 2 * _FP8_AMAX_HISTORY_LEN
+    layers = [f"visual.blocks.{i}.attn.attn" for i in range(num_layers)]
+    for step in range(num_forwards):
+        wrapped = step % _FP8_AMAX_HISTORY_LEN == _FP8_AMAX_HISTORY_LEN - 1
+        for i, name in enumerate(layers):
+            s = torch.tensor(float(step * num_layers + i))
+            mod._maybe_save_fp8_scales(name, s, s, s, wrapped)
+
+    assert len(renames) == (2 if every_wrap else 1)
+    last_step = _FP8_AMAX_HISTORY_LEN - 1 if not every_wrap else num_forwards - 1
+    assert renames[-1][2] == {
+        name: {k: 2.0 * (last_step * num_layers + i) for k in "qkv"}
+        for i, name in enumerate(layers)
+    }
+
+
+@pytest.mark.parametrize("first_rank", [True, False])
+def test_scale_save_armed_on_first_rank_only(tmp_path, monkeypatch, first_rank):
+    """Only the global first rank writes the scale file, so the result does
+    not depend on which rank of a data-parallel encoder writes last."""
+    import vllm.model_executor.layers.attention.mm_encoder_attention as mod
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+    from vllm.config.multimodal import MultiModalConfig
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    monkeypatch.setattr(mod, "_fp8_scale_save_path", None)
+    monkeypatch.setattr(mod, "_fp8_scale_save_every_wrap", False)
+    monkeypatch.setattr(mod, "is_global_first_rank", lambda: first_rank)
+    monkeypatch.setattr(
+        mod, "is_flashinfer_cudnn_fp8_prefill_attn_supported", lambda: True
+    )
+    monkeypatch.setattr(mod, "_get_flashinfer_workspace_buffer", lambda: None)
+    monkeypatch.setattr(
+        mod, "get_vit_attn_backend", lambda **_: AttentionBackendEnum.FLASHINFER
+    )
+    save_file = tmp_path / "scales.json"
+    vllm_config = VllmConfig()
+    vllm_config.model_config = MagicMock(
+        spec=ModelConfig,
+        multimodal_config=MultiModalConfig(
+            mm_encoder_attn_dtype="fp8",
+            mm_encoder_fp8_scale_save_path=str(save_file),
+            mm_encoder_fp8_scale_save_every_wrap=True,
+        ),
+    )
+    with set_current_vllm_config(vllm_config):
+        mod.MMEncoderAttention(num_heads=NUM_HEADS, head_size=HEAD_DIM, prefix=LAYER_0)
+
+    if first_rank:
+        assert mod._fp8_scale_save_path == str(save_file)
+        assert mod._fp8_scale_save_every_wrap
+    else:
+        assert mod._fp8_scale_save_path is None

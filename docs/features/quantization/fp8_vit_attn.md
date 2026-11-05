@@ -77,6 +77,12 @@ The file is written once, when the 16-entry amax history first wraps. Pass
 so it ends with the scales of the last 16 forwards (for example the images of
 an evaluation that follows warm-up traffic).
 
+With tensor parallelism only global rank 0 writes the file, so its scales
+come from rank 0's share of the work: its images with
+`--mm-encoder-tp-mode data` (about 1/TP of the calibration set, so size the
+set accordingly), its attention heads otherwise. The margin covers the
+difference to the other ranks.
+
 ## Scale File Format
 
 ```json
