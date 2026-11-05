@@ -16,12 +16,13 @@ use thiserror_ext::AsReport as _;
 use tracing::warn;
 use vllm_chat::{
     AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, ChatTool, ChatToolChoice, Error as ChatError, GenerationPromptMode,
+    ChatOptions, ChatRequest, ChatToolChoice, Error as ChatError, GenerationPromptMode,
     ResolvedToolContext,
 };
 use vllm_text::output::TextDecodeOptions;
 use vllm_text::{EffectiveSampling, SamplingParams};
 
+use super::tools::{ResponsesToolNames, ToolIdentity};
 use super::types::{
     InputTokensDetails, OutputTokensDetails, ResponseInputContentPart, ResponseInputItem,
     ResponseInputReasoning, ResponseInputRole, ResponseItemStatus, ResponseMessageContent,
@@ -70,6 +71,8 @@ pub(crate) struct PreparedResponsesRequest {
     pub meta: ResponseMeta,
     /// Whether reasoning items appear in the output.
     pub include_reasoning: bool,
+    /// Maps called tool names back to namespaced functions in the output.
+    pub tool_names: ResponsesToolNames,
     pub chat_request: ChatRequest,
 }
 
@@ -148,11 +151,9 @@ pub(crate) fn prepare_responses_request(
         GenerationPromptMode::StartNewAssistant
     };
 
-    let converted_tools = tools
-        .iter()
-        .map(|ResponsesTool::Function(function)| ChatTool::from(function.clone()))
-        .collect::<Vec<_>>();
-    let requested_tool_choice = normalize_tool_choice(tool_choice, converted_tools.is_empty())?;
+    let (converted_tools, tool_names) = ResponsesToolNames::convert(&tools);
+    let requested_tool_choice =
+        normalize_tool_choice(tool_choice, &tools, &tool_names, converted_tools.is_empty())?;
     let tool_context = ResolvedToolContext::new(
         &messages,
         converted_tools,
@@ -302,6 +303,7 @@ pub(crate) fn prepare_responses_request(
         request_id,
         meta,
         include_reasoning,
+        tool_names,
         chat_request,
     })
 }
@@ -329,10 +331,12 @@ fn response_prompt_truncation(
 /// Resolve the requested tool choice, mirroring the Python
 /// `check_tool_usage` validator: without tools, `auto` is normalized to
 /// `none` and named function choices are errors; with tools, named choices
-/// must exist (enforced by
-/// [`ResolvedToolContext`]).
+/// must exist and resolve to the name the model sees (see
+/// [`ResponsesToolNames::resolve_choice`]).
 fn normalize_tool_choice(
     tool_choice: Option<ResponseToolChoice>,
+    tools: &[ResponsesTool],
+    tool_names: &ResponsesToolNames,
     tools_empty: bool,
 ) -> Result<Option<ChatToolChoice>, ApiError> {
     let Some(tool_choice) = tool_choice else {
@@ -350,7 +354,9 @@ fn normalize_tool_choice(
                     "Tool choice 'function' not found in 'tools' parameter."
                 );
             }
-            ChatToolChoice::Function { name }
+            ChatToolChoice::Function {
+                name: tool_names.resolve_choice(name, tools)?,
+            }
         }
         ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
             bail_invalid_request!(
@@ -430,9 +436,18 @@ fn convert_input(
                 }
             },
             ResponseInputItem::FunctionCall(call) => {
+                let name = match &call.namespace {
+                    Some(namespace) => ToolIdentity {
+                        namespace: Some(namespace),
+                        name: &call.name,
+                    }
+                    .flat_name()
+                    .into_owned(),
+                    None => call.name,
+                };
                 assistant.push_block(AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: call.call_id,
-                    name: call.name,
+                    name,
                     arguments: call.arguments,
                 }));
             }
@@ -776,30 +791,89 @@ fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use vllm_chat::ChatTokenUsage;
+    use vllm_chat::{ChatTokenUsage, ChatTool};
     use vllm_llm::TokenUsage;
 
     use super::*;
+    use crate::model_names::ServedModelNames;
 
     #[test]
     fn auto_tool_choice_without_tools_normalizes_to_none() {
         let tool_choice = serde_json::from_value(json!("auto")).unwrap();
 
         assert_eq!(
-            normalize_tool_choice(Some(tool_choice), true).unwrap(),
+            normalize_tool_choice(Some(tool_choice), &[], &ResponsesToolNames::default(), true)
+                .unwrap(),
             Some(ChatToolChoice::None)
         );
     }
 
     #[test]
     fn responses_function_tool_defaults_parameters_to_null() {
-        let ResponsesTool::Function(function) = serde_json::from_value(json!({
+        let Ok(ResponsesTool::Function(function)) = serde_json::from_value(json!({
             "type": "function",
             "name": "lookup",
-        }))
-        .expect("deserialize function tool");
+        })) else {
+            panic!("deserialize function tool");
+        };
 
         assert_eq!(ChatTool::from(function).parameters, Value::Null);
+    }
+
+    #[test]
+    fn namespace_tools_reach_the_model_by_their_flat_names() {
+        let request: ResponsesRequest = serde_json::from_value(json!({
+            "input": [
+                {"role": "user", "content": "Who is Ada?"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_contact",
+                    "namespace": "crm",
+                    "arguments": "{\"name\":\"Ada\"}"
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "found"}
+            ],
+            "tools": [{
+                "type": "namespace",
+                "name": "crm",
+                "description": "CRM tools.",
+                "tools": [{"type": "function", "name": "get_contact"}]
+            }],
+            "tool_choice": {"type": "function", "name": "get_contact"}
+        }))
+        .expect("deserialize request");
+        let served = LoraModelResolution {
+            model_names: ServedModelNames::new(vec!["test-model".to_string()]),
+            lora_request: None,
+        };
+
+        let prepared = prepare_responses_request(request, &served, Default::default())
+            .expect("prepare request");
+
+        let tool_context = &prepared.chat_request.tool_context;
+        let names = tool_context.initial_tools.iter().map(|tool| tool.name.as_str());
+        assert_eq!(names.collect::<Vec<_>>(), ["crm__get_contact"]);
+        let flat_choice = ChatToolChoice::Function {
+            name: "crm__get_contact".to_string(),
+        };
+        assert_eq!(tool_context.tool_choice, flat_choice);
+        assert_eq!(
+            prepared.meta.tool_choice,
+            ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice {
+                name: "crm__get_contact".to_string(),
+            }))
+        );
+        let ChatMessage::Assistant { content } = &prepared.chat_request.messages[1] else {
+            panic!("assistant turn: {:?}", prepared.chat_request.messages);
+        };
+        assert!(
+            matches!(
+                content.as_slice(),
+                [AssistantContentBlock::ToolCall(call)] if call.name == "crm__get_contact"
+            ),
+            "{content:?}"
+        );
     }
 
     #[test]
