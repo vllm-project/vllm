@@ -39,6 +39,7 @@ from vllm.model_executor.models.vision import (
     is_vit_use_data_parallel,
 )
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def _compute_vision_cos_sin(
@@ -391,6 +392,58 @@ class DeepseekV4Aligner(nn.Module):
         hidden, _ = self.w1(gathered)
         out, _ = self.w2(F.gelu(hidden))
         return out
+
+
+def encode_images(
+    vision_model: DeepseekV4ViT,
+    aligner: DeepseekV4Aligner,
+    patches: torch.Tensor,
+    vit_grid: list[list[int]],
+) -> list[torch.Tensor]:
+    """Run the ViT + aligner over a call's images, packed into one pass if possible.
+
+    With FlashAttention, all images share one varlen run. Rows can differ from
+    the per-image path by rounding, since each matmul sees more rows.
+
+    Args:
+        vision_model: The ViT tower.
+        aligner: The spatial-merge projector.
+        patches: ``(sum(n_vit_h * n_vit_w), 3, p, p)`` patches of all images.
+        vit_grid: ``[n_vit_h, n_vit_w]`` per image.
+
+    Returns:
+        One ``(n_aligner_rows, hidden_size)`` embedding tensor per image.
+
+    """
+    sizes = [h * w for h, w in vit_grid]
+    attn_backend = vision_model.blocks[0].attn.attn.attn_backend
+    if len(vit_grid) == 1 or attn_backend != AttentionBackendEnum.FLASH_ATTN:
+        return [
+            aligner(vision_model(item, h, w), h, w)
+            for item, (h, w) in zip(patches.split(sizes), vit_grid, strict=True)
+        ]
+
+    r = aligner.downsample_ratio
+    vit_metadata = build_packed_vit_metadata(
+        vit_grid,
+        rope_dim=vision_model.rope_dim,
+        rope_theta=vision_model.rope_theta,
+        device=patches.device,
+    )
+    merge_metadata = build_packed_merge_metadata(
+        vit_grid, r, device=patches.device, dtype=aligner.w1.weight.dtype
+    )
+    hidden_states = vision_model.forward_packed(
+        patches,
+        vit_metadata["vit_cos"],
+        vit_metadata["vit_sin"],
+        vit_metadata["cu_seqlens"],
+        vit_metadata["max_seqlen"],
+    )
+    rows = aligner.forward_packed(
+        hidden_states, merge_metadata["merge_idx"], merge_metadata["merge_mask"]
+    )
+    return list(rows.split([-(-h // r) * -(-w // r) for h, w in vit_grid]))
 
 
 def run_dp_sharded_vision_tower(
