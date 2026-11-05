@@ -41,7 +41,10 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba_align_fused_kernel,
     validate_mamba_state_copy_funcs,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import (
+    initialize_replayssm_ring_trackers,
+    may_cross_mamba_block_boundary,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -99,6 +102,7 @@ class MambaHybridModelState(DefaultModelState):
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self._replayssm_query_start_loc: torch.Tensor | None = None
+        self._replayssm_may_materialize = True
         # Pre-copy prefix-cache state (V2). The migration of each request's
         # mamba state across block boundaries runs as a fused GPU kernel reusing
         # the postprocess copy machinery, so the per-step src columns and the
@@ -384,6 +388,21 @@ class MambaHybridModelState(DefaultModelState):
         )
         if self._use_flashinfer_replayssm:
             self._replayssm_query_start_loc = None
+            self._replayssm_may_materialize = True
+            if (
+                self._use_gdn_replayssm
+                and self._align_mode
+                and self.vllm_config.num_speculative_tokens == 0
+            ):
+                assert self._mamba_ctx is not None
+                replay = self._mamba_ctx.replayssm
+                assert replay is not None
+                # Speculative CPU positions are upper bounds, so keep MTP conservative.
+                self._replayssm_may_materialize = may_cross_mamba_block_boundary(
+                    input_batch.num_computed_tokens_np,
+                    input_batch.num_scheduled_tokens,
+                    replay.mamba_block_size,
+                )
             metadata_type = (
                 GDNAttentionMetadata
                 if self._use_gdn_replayssm
@@ -519,6 +538,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=self._is_prefilling_gpu[:num_reqs],
             live_cols=(self._mamba_state_idx_gpu if self._align_mode else None),
             num_reqs=num_reqs,
+            may_materialize=self._replayssm_may_materialize,
         )
 
 

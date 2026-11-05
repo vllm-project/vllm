@@ -300,9 +300,15 @@ def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
     assert env_func() == "cuda"
 
-    for value in ("cuda", "triton", "flashinfer_replayssm"):
+    for value in (
+        "cuda",
+        "triton",
+        "flashinfer_replayssm",
+        "CUDA",
+        "FLASHINFER_REPLAYSSM",
+    ):
         monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
-        assert env_func() == value
+        assert env_func() == value.lower()
 
     for value in ("fused", "invalid"):
         monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)

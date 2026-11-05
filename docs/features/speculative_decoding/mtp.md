@@ -82,17 +82,24 @@ vllm serve Qwen/Qwen3.5-0.8B \
     --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
 ```
 
-This backend supports one to seven speculative tokens. It requires BF16 state and
+This backend supports standard decoding and one to seven speculative tokens.
+Omit `--speculative-config` for standard decoding. It requires BF16 state and
 128-element key and value heads. Pipeline parallelism, microbatching, and KV
-connectors are unsupported. Adaptive verification is unsupported because GDN
-output indices require fixed verification lengths.
+connectors are unsupported. Ragged scheduled rows are supported. Adaptive
+verification is unsupported because it changes row lengths on the GPU after the
+CPU metadata builder determines the output indices.
 Set `enable_adaptive_verification` to `false` in the speculative configuration.
 Prefix caching requires `--mamba-cache-mode align`.
 
-FlashInfer must provide `gated_delta_rule_stp_ucache_flush` and
-`gated_delta_rule_mtp_ucache_flush`. Prefix caching also requires
-`gdn_prefix_materialize`. Check these APIs before use; a version number alone does
-not establish availability. This integration does not install missing kernels.
+Standard decoding requires `gated_delta_rule_stp_ucache_flush`. Speculative
+decoding requires `gated_delta_rule_mtp_ucache_flush`, available in FlashInfer
+0.7.2.post1. Prefix caching also requires `gdn_prefix_materialize`, available in
+FlashInfer 0.7.3. The STP API is not included in either release, so standard
+decoding requires a compatible provider build. This integration does not install
+missing kernels or change FlashInfer.
+
+Set `SGLANG_GDN_WY_STRIDED_QKV=1` before process startup. FlashInfer reads this
+setting when its kernel module is imported; setting it later is insufficient.
 
 ## Notes
 

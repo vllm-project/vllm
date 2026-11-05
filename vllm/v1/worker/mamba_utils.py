@@ -34,6 +34,7 @@ from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
     _reinterpret_u64_as_i64,
     mamba_state_copy_boundary,
+    may_cross_mamba_block_boundary,
 )
 
 logger = init_logger(__name__)
@@ -1759,6 +1760,15 @@ def postprocess_mamba_gpu(
             is_prefilling=ctx.is_prefilling_buf.gpu,
             live_cols=live_cols,
             num_reqs=num_reqs,
+            may_materialize=(
+                not ctx.replayssm.materialize_prefixes
+                or ctx.replayssm.mamba_type != MambaAttentionBackendEnum.GDN_ATTN
+                or may_cross_mamba_block_boundary(
+                    ctx.num_computed_tokens_buf.np[:num_reqs],
+                    ctx.num_scheduled_tokens_buf.np[:num_reqs],
+                    ctx.replayssm.mamba_block_size,
+                )
+            ),
         )
 
     if num_accepted_tokens_cpu_tensor is not None and ctx.replayssm is None:

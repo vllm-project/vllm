@@ -634,6 +634,8 @@ class Qwen3_5ForConditionalGeneration(
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
+        # The language model owns the recurrent layers. Reuse its cache schema,
+        # including ReplaySSM rings, for this multimodal wrapper.
         return Qwen3_5ForCausalLMBase.get_mamba_state_dtype_from_config(vllm_config)
 
     @classmethod

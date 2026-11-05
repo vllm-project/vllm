@@ -925,20 +925,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> str | None:
         conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()[:2]
         if self.gqa_interleaved_layout:
-            return "Qwen3-Next's interleaved GQA layout has not been validated"
+            return "interleaved GQA layout is not supported by this integration"
         if self.head_k_dim != 128 or self.head_v_dim != 128:
-            return "the FlashInfer kernel requires K=V=128"
+            return "the selected FlashInfer kernel requires K=V=128"
         if self.num_k_heads % self.tp_size or self.num_v_heads % self.tp_size:
             return "tensor-parallel head counts must divide evenly"
         if self.num_v_heads % self.num_k_heads:
             return "value heads must be an integer multiple of key heads"
         if vllm_config.model_config.dtype != torch.bfloat16:
-            return "model activations must use bfloat16"
+            return "the GDN ReplaySSM adapter requires bfloat16 model activations"
         if (
             conv_state_dtype != torch.bfloat16
             or recurrent_state_dtype != torch.bfloat16
         ):
-            return "convolution and recurrent state must use bfloat16"
+            return (
+                "the GDN ReplaySSM adapter requires bfloat16 convolution "
+                "and recurrent state"
+            )
         if not current_platform.has_device_capability(90):
             return "the initial integration requires an SM90+ CUDA device"
         return None
@@ -1958,6 +1961,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         if self.use_replayssm and spec_sequence_masks is not None:
+            # ReplaySSM splits packed QKV inside its adapter. Other decode
+            # paths consume the separate query, key, and value views below.
             query_spec, key_spec, value_spec = None, None, None
         else:
             query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
@@ -2023,7 +2028,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
-        if spec_sequence_masks is not None and self.use_replayssm:
+        if self.use_replayssm and spec_sequence_masks is not None:
             assert mixed_qkv_spec is not None
             assert a_spec is not None and b_spec is not None
             assert spec_state_indices_tensor is not None
@@ -2044,6 +2049,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 query_start_loc=spec_query_start_loc[: num_replay_rows + 1],
                 state_indices=spec_state_indices_tensor[:num_replay_rows, 0],
                 output_indices=attn_metadata.replayssm_output_indices,
+                uniform_query_length=attn_metadata.uniform_spec_sequence_length,
                 executed_query_width=(attn_metadata.replayssm_executed_query_width),
                 num_k_heads=self.num_k_heads // self.tp_size,
                 num_v_heads=self.num_v_heads // self.tp_size,

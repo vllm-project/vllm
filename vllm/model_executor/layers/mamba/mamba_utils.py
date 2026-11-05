@@ -29,7 +29,12 @@ ConvStateLayoutType = Literal["SD", "DS"]
 
 
 def gdn_replayssm_geometry(num_speculative_tokens: int) -> tuple[int, int]:
-    """Return GDN's executed query width and physical replay ring slots."""
+    """Return the selected GDN provider's query width and physical ring slots.
+
+    Both paths retain at most 16 logical history records. MTP needs extra
+    physical slots for verification writes while other blocks read history.
+    STP appends one record or folds the current token without appending.
+    """
     if num_speculative_tokens == 0:
         return 1, 16
     if 1 <= num_speculative_tokens <= 3:

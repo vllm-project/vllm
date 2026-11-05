@@ -129,8 +129,8 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
 )
 
 # SupportsReplaySSM advertises support for some ReplaySSM implementation. This
-# allowlist selects architectures validated for the FlashInfer GDN integration:
-# sharing a layer or inheriting the marker does not validate the model lifecycle.
+# allowlist defines the current FlashInfer GDN integration scope. Sharing a
+# layer or inheriting the marker does not opt another model into this integration.
 _GDN_REPLAYSSM_ARCHITECTURES = frozenset(
     {
         "Qwen3_5ForCausalLM",
@@ -3945,7 +3945,7 @@ class VllmConfig:
         return self
 
     @model_validator(mode="after")
-    def validate_mamba_cached_kernel(self) -> "VllmConfig":
+    def validate_gdn_replayssm(self) -> "VllmConfig":
         # Call the implementation on the class so this validator remains usable
         # by focused tests that pass a config-shaped object rather than a full
         # pydantic model.
@@ -3988,6 +3988,7 @@ class VllmConfig:
                 gdn_replayssm_geometry,
             )
 
+            # Integration constraints: fixed verify widths and none/align caches.
             if (
                 self.speculative_config is not None
                 and self.speculative_config.enable_adaptive_verification
@@ -4009,11 +4010,13 @@ class VllmConfig:
                     "FlashInfer GDN ReplaySSM prefix caching requires "
                     "--mamba-cache-mode=align"
                 )
+            # Selected provider constraints: history tile and launch widths.
             if self.cache_config.replayssm_buffer_len != 16:
                 raise ValueError(
                     "FlashInfer GDN ReplaySSM requires --replayssm-buffer-len=16"
                 )
             gdn_replayssm_geometry(self.num_speculative_tokens)
+            # This integration selects the provider's BF16 path.
             if self.model_config is not None:
                 if self.model_config.dtype != torch.bfloat16:
                     raise ValueError(
@@ -4036,6 +4039,7 @@ class VllmConfig:
                 raise ValueError(
                     "FlashInfer GDN ReplaySSM requires a bfloat16 recurrent state"
                 )
+            # These execution modes need additional tracker lifecycle support.
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
                     "FlashInfer GDN ReplaySSM currently requires "
@@ -4046,11 +4050,13 @@ class VllmConfig:
                     "FlashInfer GDN ReplaySSM does not support overlapping "
                     "microbatch execution"
                 )
+            # The provider selects its strided-QKV specialization at import time.
             if os.environ.get("SGLANG_GDN_WY_STRIDED_QKV") != "1":
                 raise ValueError(
                     "FlashInfer GDN ReplaySSM requires "
                     "SGLANG_GDN_WY_STRIDED_QKV=1 before process startup"
                 )
+            # This integration does not transfer replay rings and trackers.
             if (
                 self.kv_transfer_config is not None
                 and self.kv_transfer_config.is_kv_transfer_instance
@@ -4060,8 +4066,16 @@ class VllmConfig:
                     "(P/D disaggregation, KV cache offload)"
                 )
             self.cache_config.use_kda_recoverssm = False
-            # The GDN allowlist above validates this integration's lifecycle;
-            # the generic SupportsReplaySSM marker alone is not sufficient.
+            return self
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm:
+            self.cache_config.use_kda_recoverssm = False
+            return self
+        # The preceding GDN validator owns its provider and lifecycle checks.
+        if VllmConfig.is_gdn_replayssm_enabled(self):
             return self
 
         kda_architectures = (

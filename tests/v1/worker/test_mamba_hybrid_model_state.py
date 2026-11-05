@@ -520,6 +520,7 @@ def test_flashinfer_replayssm_prefix_uses_original_accepted_counts() -> None:
     state.num_accepted_tokens_gpu = torch.ones(4, dtype=torch.int32, device="cuda")
     state._mamba_state_idx_gpu = torch.zeros(4, dtype=torch.int32, device="cuda")
     state._is_prefilling_gpu = torch.zeros(4, dtype=torch.bool, device="cuda")
+    state._replayssm_may_materialize = True
     state._replayssm_query_start_loc = torch.tensor(
         [0, 4], dtype=torch.int32, device="cuda"
     )

@@ -1,16 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import builtins
 import math
+from types import ModuleType
 
 import pytest
 import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers.mamba.gdn.replayssm import (
+    check_gdn_replayssm_dependencies,
     pack_replayssm_rows,
     run_gdn_replayssm,
 )
+
+
+@pytest.mark.parametrize("width,mode", [(1, "stp"), (4, "mtp"), (8, "mtp")])
+def test_dependencies_import_only_selected_decode_api(monkeypatch, width, mode):
+    """An MTP-only FlashInfer installation must not need the STP module."""
+    module = ModuleType("provider")
+    kernel = lambda **kwargs: None
+    setattr(module, f"gated_delta_rule_{mode}_ucache_flush", kernel)
+    suffix = "stp" if mode == "stp" else "flush"
+    expected = f"flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_{suffix}"
+    original_import = builtins.__import__
+
+    def import_provider(name, *args, **kwargs):
+        if name.startswith("flashinfer"):
+            assert name == expected, f"Unselected dependency: {name}"
+            return module
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
+    monkeypatch.setattr(builtins, "__import__", import_provider)
+    check_gdn_replayssm_dependencies.cache_clear()
+    try:
+        assert check_gdn_replayssm_dependencies(width, False) is kernel
+    finally:
+        check_gdn_replayssm_dependencies.cache_clear()
 
 
 def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
@@ -27,6 +55,31 @@ def test_pack_replayssm_rows_preserves_tokens_and_masks_padding():
             ]
         ),
     )
+
+
+@pytest.mark.parametrize("width", [4, 8])
+def test_uniform_replayssm_packing_preserves_alignment_and_padding(width):
+    values = torch.arange(2 * width * 4, dtype=torch.bfloat16).view(2 * width, 4)
+    starts = torch.tensor([0, width, 2 * width])
+    packed = pack_replayssm_rows(values, starts, width, uniform=True)
+    assert packed.data_ptr() == values.data_ptr()
+    torch.testing.assert_close(packed, pack_replayssm_rows(values, starts, width))
+    # A gate view can be contiguous but start at an unaligned byte offset.
+    unaligned = torch.zeros(values.numel() + 1, dtype=values.dtype)[1:].view_as(values)
+    unaligned.copy_(values)
+    aligned = pack_replayssm_rows(unaligned, starts, width, uniform=True)
+    assert aligned.data_ptr() % 16 == 0
+    torch.testing.assert_close(aligned, packed)
+    strided = torch.zeros(2 * width, 8, dtype=values.dtype)[:, ::2]
+    strided.copy_(values)
+    torch.testing.assert_close(
+        pack_replayssm_rows(strided, starts, width, uniform=True), packed
+    )
+    # Eager staging can include a zero-token graph-padding row.
+    padded_starts = torch.tensor([0, width, width])
+    padded = pack_replayssm_rows(values[:width], padded_starts, width, uniform=True)
+    torch.testing.assert_close(padded[0], values[:width])
+    assert padded[1].eq(0).all()
 
 
 def _reference_gdn_step(
@@ -93,7 +146,10 @@ def _reconstruct_replayssm_state(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (9, 0),
     reason="FlashInfer GDN ReplaySSM requires an SM90+ CUDA device",
 )
-@pytest.mark.parametrize("width,query_len,accepted", [(1, 1, 1), (4, 3, 2), (8, 6, 4)])
+@pytest.mark.parametrize(
+    "width,query_len,accepted",
+    [(1, 1, 1), (4, 3, 2), (4, 4, 2), (8, 6, 4), (8, 8, 4)],
+)
 def test_gdn_replayssm_output_and_accepted_state(
     monkeypatch, width, query_len, accepted
 ):
@@ -156,6 +212,7 @@ def test_gdn_replayssm_output_and_accepted_state(
             state_indices=torch.tensor([1], dtype=torch.int32, device=device),
             output_indices=torch.arange(query_len, dtype=torch.int32, device=device),
             executed_query_width=width,
+            uniform_query_length=query_len,
             num_k_heads=1,
             num_v_heads=2,
             head_k_dim=128,

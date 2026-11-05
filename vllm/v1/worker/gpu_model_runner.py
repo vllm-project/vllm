@@ -3720,6 +3720,20 @@ class GPUModelRunner(
         )
 
     @staticmethod
+    def _gdn_has_prefill(
+        computed: np.ndarray,
+        prompt: np.ndarray,
+        query: np.ndarray,
+        draft: np.ndarray | None,
+    ) -> bool:
+        # Match GDNAttentionMetadataBuilder's canonical-prefill classification.
+        decode_rows = query == 1
+        if draft is not None:
+            decode_rows |= (draft >= 0) & (query == draft + 1)
+        final_decode = (computed > 0) & (computed + query >= prompt) & decode_rows
+        return bool(((computed < prompt) & ~final_decode).any())
+
+    @staticmethod
     def _is_uniform_decode(
         max_num_scheduled_tokens: int,
         uniform_decode_query_len: int,
@@ -3814,6 +3828,18 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        gdn_prefill = (
+            force_uniform_decode is None
+            and self.vllm_config.is_gdn_replayssm_enabled()
+            and self._gdn_has_prefill(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                self.input_batch.num_prompt_tokens[:num_reqs],
+                num_scheduled_tokens_np[:num_reqs],
+                self.num_decode_draft_tokens.np[:num_reqs]
+                if self.speculative_config is not None
+                else None,
+            )
+        )
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
@@ -3835,7 +3861,9 @@ class GPUModelRunner(
                 uniform_decode=uniform_decode,
                 num_active_loras=num_active_loras,
                 valid_modes={CUDAGraphMode.NONE} if force_eager else valid_modes,
-                invalid_modes={CUDAGraphMode.FULL} if disable_full else None,
+                invalid_modes={CUDAGraphMode.FULL}
+                if disable_full or gdn_prefill
+                else None,
             )
 
         cudagraph_mode, batch_descriptor = dispatch_cudagraph(

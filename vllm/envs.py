@@ -9,7 +9,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -1285,12 +1285,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # where supported and falls back to "triton" otherwise; explicitly selecting
     # "cuda" raises when unsupported. "flashinfer_replayssm" selects checkpoint
     # and replay execution and requires --use-replayssm.
-    "VLLM_GDN_DECODE_KERNEL": env_with_choices(
-        "VLLM_GDN_DECODE_KERNEL",
-        "cuda",
-        ["cuda", "triton", "flashinfer_replayssm"],
-        case_sensitive=False,
-    ),
+    "VLLM_GDN_DECODE_KERNEL": lambda: cast(
+        str,
+        env_with_choices(
+            "VLLM_GDN_DECODE_KERNEL",
+            "cuda",
+            ["cuda", "triton", "flashinfer_replayssm"],
+            case_sensitive=False,
+        )(),
+    ).lower(),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")

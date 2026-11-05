@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import cache
 from typing import Any, NamedTuple
 
+import numpy as np
 import torch
 
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -18,6 +19,13 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+
+
+def may_cross_mamba_block_boundary(
+    computed: np.ndarray, scheduled: np.ndarray, block_size: int
+) -> bool:
+    """Bound accepted progress using exact pre-step counts and scheduled lengths."""
+    return bool(((computed + scheduled) // block_size > computed // block_size).any())
 
 
 def initialize_replayssm_ring_trackers(
@@ -637,6 +645,7 @@ class ReplaySSMModelContext:
         is_prefilling: torch.Tensor,
         live_cols: torch.Tensor | None,
         num_reqs: int,
+        may_materialize: bool = True,
     ) -> None:
         """Commit all groups before publishing their canonical prefix states."""
         if num_reqs == 0:
@@ -673,7 +682,7 @@ class ReplaySSMModelContext:
                 and self.executed_query_width == 1
             ),
         )
-        if not self.materialize_prefixes:
+        if not self.materialize_prefixes or not may_materialize:
             return
         _compact_replayssm_requests_kernel[(1,)](
             self.plan_flush_count,

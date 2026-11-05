@@ -331,3 +331,18 @@ def test_no_speculator_dispatches_on_query_length_alone():
         "these speculators classify a decode batch by query length alone; use "
         f"get_uniform_decode_token_count instead: {offenders}"
     )
+
+
+def test_replayssm_materialization_bound_covers_partial_acceptance():
+    from vllm.v1.worker.replayssm_utils import may_cross_mamba_block_boundary
+
+    for computed in (0, 12, 15, 16, 31):
+        for scheduled in (1, 4, 8):
+            may_cross = may_cross_mamba_block_boundary(
+                np.array([computed]), np.array([scheduled]), 16
+            )
+            for accepted in range(1, scheduled + 1):
+                crosses = computed // 16 != (computed + accepted) // 16
+                assert may_cross or not crosses
+    assert not may_cross_mamba_block_boundary(np.array([16]), np.array([8]), 16)
+    assert may_cross_mamba_block_boundary(np.array([15]), np.array([1]), 16)

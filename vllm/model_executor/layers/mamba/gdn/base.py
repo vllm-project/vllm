@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     gdn_replayssm_geometry,
+    mamba_state_alignment,
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -48,7 +49,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         )
         self.use_replayssm = vllm_config.is_gdn_replayssm_enabled()
         self.use_flashinfer_replayssm = self.use_replayssm
-        self.state_alignment = 16 if self.use_flashinfer_replayssm else 1
+        self.state_alignment = mamba_state_alignment(vllm_config)
         self.replayssm_buffer_len = (
             self.cache_config.replayssm_buffer_len if self.use_replayssm else None
         )
@@ -59,7 +60,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 gdn_replayssm_geometry(self.num_spec)
             )
         if self.replayssm_executed_query_width is not None:
-            # STP executes one token but still uses four staging rows.
+            # STP accepts four input positions: one real token and three zeros.
+            # These offsets pack token inputs; they are not replay-ring cursors.
             packed_width = max(self.replayssm_executed_query_width, 4)
             self.register_buffer(
                 "_replayssm_offsets",

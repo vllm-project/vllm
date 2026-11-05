@@ -229,6 +229,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
+        # ReplaySSM uses one canonical state plus replay records. The ordinary
+        # speculative path keeps a separate state index for each token.
         self.state_table_width = 1 if self.use_gdn_replayssm else self.num_spec + 1
         self.spec_state_indices_tensor: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.state_table_width),
@@ -759,6 +761,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.replayssm_output_indices[:output_count].copy_(
                     replayssm_output_indices, non_blocking=True
                 )
+                # Captured graphs retain a longer view when live rows shrink.
+                self.replayssm_output_indices[output_count:].zero_()
                 replayssm_output_indices = self.replayssm_output_indices[:output_count]
 
         if self._stage_decode(num_prefills, num_decodes, num_spec_decodes):

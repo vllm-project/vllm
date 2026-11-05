@@ -14,62 +14,35 @@ GDN_REPLAY_LOGICAL_WINDOW = 16
 
 
 @cache
-def _check_gdn_replayssm_environment() -> None:
+def check_gdn_replayssm_dependencies(
+    executed_width: int, needs_materializer: bool
+) -> Callable[..., torch.Tensor]:
+    """Validate the environment and return only the selected decode API."""
+    if executed_width not in (1, 4, 8):
+        raise ValueError(f"Unsupported GDN ReplaySSM executed width: {executed_width}")
     if os.environ.get("SGLANG_GDN_WY_STRIDED_QKV") != "1":
         raise RuntimeError(
             "FlashInfer GDN ReplaySSM requires "
             "SGLANG_GDN_WY_STRIDED_QKV=1 before importing FlashInfer"
         )
-
-
-@cache
-def _load_gdn_replayssm_mtp_kernel() -> Callable[..., torch.Tensor]:
-    _check_gdn_replayssm_environment()
-    try:
-        from flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush import (
-            gated_delta_rule_mtp_ucache_flush,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "FlashInfer GDN ReplaySSM requires a compatible flashinfer-python "
-            "build exposing gated_delta_rule_mtp_ucache_flush"
-        ) from e
-    return gated_delta_rule_mtp_ucache_flush
-
-
-@cache
-def _load_gdn_replayssm_stp_kernel() -> Callable[..., torch.Tensor]:
-    _check_gdn_replayssm_environment()
-    try:
-        from flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_stp import (
-            gated_delta_rule_stp_ucache_flush,
-        )
-    except ImportError as e:
-        raise ImportError(
-            "FlashInfer GDN ReplaySSM STP requires a compatible "
-            "flashinfer-python build exposing "
-            "gated_delta_rule_stp_ucache_flush"
-        ) from e
-    return gated_delta_rule_stp_ucache_flush
-
-
-def check_gdn_replayssm_dependencies(
-    executed_width: int, needs_materializer: bool
-) -> None:
-    """Check selected FlashInfer exports during GPU worker layer construction."""
-    if executed_width == 1:
-        loader = _load_gdn_replayssm_stp_kernel
-        api = "gated_delta_rule_stp_ucache_flush"
-    elif executed_width in (4, 8):
-        loader = _load_gdn_replayssm_mtp_kernel
-        api = "gated_delta_rule_mtp_ucache_flush"
-    else:
-        raise ValueError(f"Unsupported GDN ReplaySSM executed width: {executed_width}")
+    api = (
+        "gated_delta_rule_stp_ucache_flush"
+        if executed_width == 1
+        else "gated_delta_rule_mtp_ucache_flush"
+    )
     mode = f"executed width={executed_width}, cache mode=" + (
         "align" if needs_materializer else "none"
     )
     try:
-        loader()
+        # MTP-only providers need not ship the separate STP API.
+        if executed_width == 1:
+            from flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_stp import (
+                gated_delta_rule_stp_ucache_flush as kernel,
+            )
+        else:
+            from flashinfer.gdn_kernels.gdn_decode_bf16_wy_ucache_flush import (
+                gated_delta_rule_mtp_ucache_flush as kernel,
+            )
     except ImportError as e:
         raise ImportError(
             f"FlashInfer GDN ReplaySSM ({mode}) requires {api}: {e}"
@@ -86,6 +59,7 @@ def check_gdn_replayssm_dependencies(
                 f"FlashInfer GDN ReplaySSM ({mode}) requires "
                 f"gdn_prefix_materialize: {e}"
             ) from e
+    return kernel
 
 
 def pack_replayssm_rows(
@@ -94,9 +68,17 @@ def pack_replayssm_rows(
     executed_query_width: int,
     offsets: torch.Tensor | None = None,
     padding_value: float = 0.0,
+    uniform: bool = False,
 ) -> torch.Tensor:
     """Pack flattened ragged rows into fixed-width rows."""
     num_rows = query_start_loc.numel() - 1
+    if (
+        uniform
+        and values.shape[0] == num_rows * executed_query_width
+        and values.is_contiguous()
+        and values.data_ptr() % 16 == 0
+    ):
+        return values.view(num_rows, executed_query_width, *values.shape[1:])
     if num_rows == 0:
         return values.new_empty((0, executed_query_width, *values.shape[1:]))
     if values.shape[0] == 0:
@@ -142,12 +124,13 @@ def run_gdn_replayssm(
     head_v_dim: int,
     offsets: torch.Tensor | None = None,
     kernel: Callable[..., torch.Tensor] | None = None,
+    uniform_query_length: int | None = None,
 ) -> torch.Tensor:
     """Pack rows, invoke FlashInfer, and return only real-token outputs.
 
     STP receives one real row per request. The adapter supplies FlashInfer's
-    caller-owned padded T=4 staging layout, while vLLM keeps cursor publication
-    model-wide so every layer observes the same pre-step cursor.
+    four-token input buffer: one real token followed by three zero rows.
+    vLLM publishes cursors once per model step, after every layer runs.
     """
     if executed_query_width not in (1, 4, 8):
         raise ValueError(
@@ -167,7 +150,10 @@ def run_gdn_replayssm(
     # caller-owned zero-padded T=4 buffer. Packing a shared QKV allocation here
     # preserves the common token stride required by block-strided cache pools.
     packed_width = 4 if executed_query_width == 1 else executed_query_width
-    packed_qkv = pack_replayssm_rows(mixed_qkv, query_start_loc, packed_width, offsets)
+    uniform = executed_query_width > 1 and uniform_query_length == packed_width
+    packed_qkv = pack_replayssm_rows(
+        mixed_qkv, query_start_loc, packed_width, offsets, uniform=uniform
+    )
     # CuTe requires every input pointer to be 16-byte aligned. Packing the two
     # gates together and splitting them can leave ``b`` at a small byte offset
     # into the shared allocation when the local head count is not a multiple of
@@ -176,15 +162,19 @@ def run_gdn_replayssm(
     # recurrent no-ops: a=-inf gives zero decay after softplus(a + dt_bias),
     # while zero q/k/v and b give a zero state update. STP has no ragged real
     # rows, so only invalid graph-padding requests can be padded here; their
-    # negative state index skips the kernel CTA.
+    # negative state index skips the kernel CTA. STP requires three zero
+    # input rows after the real token. It returns and commits only that token.
     packed_a = pack_replayssm_rows(
         a,
         query_start_loc,
         packed_width,
         offsets,
         padding_value=0.0 if executed_query_width == 1 else -torch.inf,
+        uniform=uniform,
     )
-    packed_b = pack_replayssm_rows(b, query_start_loc, packed_width, offsets)
+    packed_b = pack_replayssm_rows(
+        b, query_start_loc, packed_width, offsets, uniform=uniform
+    )
     local_k_dim = num_k_heads * head_k_dim
     local_v_dim = num_v_heads * head_v_dim
     q_flat, k_flat, v_flat = packed_qkv.split(
@@ -212,12 +202,16 @@ def run_gdn_replayssm(
     )
 
     if kernel is None:
-        kernel = (
-            _load_gdn_replayssm_stp_kernel()
-            if executed_query_width == 1
-            else _load_gdn_replayssm_mtp_kernel()
-        )
-    common_kwargs = dict(
+        kernel = check_gdn_replayssm_dependencies(executed_query_width, False)
+    if executed_query_width == 1:
+        # STP updates these cursor copies. Every layer must start from the
+        # same pre-step values; model-wide postprocess publishes the update.
+        mode_kwargs = {"prepadded": True}
+        flush_min = GDN_REPLAY_LOGICAL_WINDOW - 1
+    else:
+        mode_kwargs = {"restart_hist_on_flush": False}
+        flush_min = GDN_REPLAY_LOGICAL_WINDOW + 1 - executed_query_width
+    kernel(
         # These are immutable model parameters. CuTe's DLPack bridge rejects
         # tensors whose Parameter wrapper still advertises autograd tracking,
         # even while vLLM executes under inference mode.
@@ -238,23 +232,9 @@ def run_gdn_replayssm(
         g_cache=g_cache,
         hist_len=hist_len,
         cache_base=cache_base,
+        flush_min=flush_min,
+        **mode_kwargs,
     )
-    if executed_query_width == 1:
-        # The STP wrapper self-commits these gathered cursor copies. Do not
-        # scatter them into the pool here: subsequent GDN layers must consume
-        # the same pre-step values. The model-wide postprocess publishes the
-        # equivalent transition once after the target step completes.
-        kernel(
-            **common_kwargs,
-            flush_min=GDN_REPLAY_LOGICAL_WINDOW - 1,
-            prepadded=True,
-        )
-    else:
-        kernel(
-            **common_kwargs,
-            flush_min=GDN_REPLAY_LOGICAL_WINDOW + 1 - executed_query_width,
-            restart_hist_on_flush=False,
-        )
     return output.flatten(0, 1).index_select(0, output_indices.long())
 
 

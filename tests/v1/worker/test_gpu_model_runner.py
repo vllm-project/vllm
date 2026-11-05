@@ -2026,3 +2026,68 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_gdn_intermediate_prefill_rejects_full_graph_dispatch(dist_init, monkeypatch):
+    from vllm.config import CompilationConfig, CUDAGraphMode
+    from vllm.v1.worker.gpu_input_batch import CachedRequestState
+
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "flashinfer_replayssm")
+    monkeypatch.setenv("SGLANG_GDN_WY_STRIDED_QKV", "1")
+    config = VllmConfig(
+        model_config=ModelConfig(model="Qwen/Qwen3.5-0.8B", dtype="bfloat16"),
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1,
+            max_num_batched_tokens=128,
+            max_model_len=128,
+            is_encoder_decoder=False,
+        ),
+        cache_config=CacheConfig(
+            use_replayssm=True,
+            replayssm_buffer_len=16,
+            mamba_cache_dtype="bfloat16",
+            mamba_ssm_cache_dtype="bfloat16",
+            mamba_cache_mode="none",
+            enable_prefix_caching=False,
+        ),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            cudagraph_capture_sizes=[1],
+            max_cudagraph_capture_size=1,
+        ),
+    )
+    with set_current_vllm_config(config):
+        runner = GPUModelRunner(config, torch.device(DEVICE_TYPE))
+    runner.cudagraph_dispatcher.initialize_cudagraph_keys(
+        CUDAGraphMode.FULL_DECODE_ONLY, uniform_decode_query_len=1
+    )
+    # A one-token intermediate chunk has a decode shape but needs prefill.
+    # Final prompt tails with prior state and ordinary decode retain FULL.
+    for computed, expected in (
+        (64, CUDAGraphMode.NONE),
+        (67, CUDAGraphMode.FULL),
+        (68, CUDAGraphMode.FULL),
+    ):
+        runner.input_batch.add_request(
+            CachedRequestState(
+                req_id="gdn",
+                prompt_token_ids=[1] * 68,
+                mm_features=[],
+                sampling_params=SamplingParams(temperature=0),
+                generator=None,
+                block_ids=tuple(
+                    [] for _ in runner.input_batch.block_table.block_tables
+                ),
+                num_computed_tokens=computed,
+                output_token_ids=[],
+            )
+        )
+        runner.input_batch.refresh_metadata()
+        mode, *_ = runner._determine_batch_execution_and_padding(
+            num_tokens=1,
+            num_reqs=1,
+            num_scheduled_tokens_np=np.array([1]),
+            max_num_scheduled_tokens=1,
+        )
+        assert mode == expected
+        runner.input_batch.remove_request("gdn")
