@@ -299,6 +299,7 @@ from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
 )
+from vllm.v1.attention.ops.shardq import allocate_shardq_buffers, shard_q, unshard_out
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -462,6 +463,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         topk_indices_buffer: torch.Tensor | None = None,
         index_group_builder: "SparseMLAIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
+        shardq_eligible: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
@@ -597,6 +599,27 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             **extra_impl_args,
         )
         self.impl = impl  # type: ignore[assignment]
+        # ShardQ (see vllm.v1.attention.ops.shardq), if the impl supports it.
+        self.use_shardq = shardq_eligible and getattr(impl, "use_shardq", False)
+        if self.use_shardq:
+            vllm_config = get_current_vllm_config()
+            dtype = vllm_config.model_config.dtype
+            fp8_query = (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.impl.supports_quant_query_input
+            )
+            allocate_shardq_buffers(
+                vllm_config,
+                self.num_heads,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                self.kv_lora_rank,
+                current_platform.fp8_dtype() if fp8_query else dtype,
+                dtype,
+            )
+            # The indexer follows the split (skip-topk layers have none).
+            indexer_op = getattr(indexer, "indexer_op", None)
+            if indexer_op is not None:
+                indexer_op.k_cache.use_shardq = True
         index_group = getattr(impl, "index_group", None)
         self.hisparse_cache = (
             index_group.cache(cast(Any, impl).index_group_index)
@@ -668,6 +691,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHINFER_MLA_SPARSE_SM120",
                 "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
+                "ROCM_AITER_MLA_SPARSE",
             ):
                 from vllm.v1.attention.backends.mla.compressor_utils import (
                     _COMPRESSED_SLOT_MAPPING_KERNEL,
@@ -1114,6 +1138,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
+            shardq = getattr(attn_metadata, "shardq", None)
+            mqa_metadata = attn_metadata
             if self.impl.dcp_world_size > 1:
                 assert self.dcp_manager is not None
                 if self.use_pcp:
@@ -1128,11 +1154,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     if not qrep_decode:
                         assert self.dcp_manager.query_gather is not None
                         mqa_q = self.dcp_manager.query_gather(mqa_q)
+            if shardq is not None:
+                decode_q, mqa_q = shard_q(mqa_q, shardq)
+                decode_out = None
+                if decode_q.shape[0]:
+                    # Decode tokens attend head-sharded.
+                    decode_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+                        decode_q, kv_cache, attn_metadata, self
+                    )
+                mqa_metadata = shardq.attn_metadata
 
             # call decode attn
             if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
-            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
+            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, mqa_metadata, self)  # type: ignore[attr-defined]
+            if shardq is not None:
+                attn_out = unshard_out(attn_out, shardq, decode_out)
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -1215,6 +1252,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _use_sparse_mha(self, attn_metadata: "MLACommonMetadata") -> bool:
         if self.hisparse_cache is not None:
+            return False
+        # ShardQ steps' top-k are compact per rank and run through forward_mqa.
+        if getattr(attn_metadata, "shardq", None) is not None:
             return False
         prefill = attn_metadata.prefill
         if prefill is None:
