@@ -69,7 +69,7 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
 from vllm.utils.math_utils import cdiv, next_power_of_2
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import aux_stream, set_random_seed
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
     is_workspace_manager_initialized,
@@ -1755,6 +1755,176 @@ def test_moe_layer_no_parallel(
         use_gate=test_config.use_gate,
         use_routed_input_transform=test_config.use_routed_input_transform,
     )
+
+
+def _make_moe_layer_with_gate_and_shared_experts(
+    m: int, n: int, k: int, monkeypatch
+) -> tuple[VllmConfig, MoERunner, MoETestData, torch.nn.Module]:
+    """A single-GPU layer that holds its gate and overlaps its shared experts
+    on the aux stream."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires CUDA or ROCm streams.")
+    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
+    monkeypatch.setenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0")
+    set_random_seed(7)
+
+    compilation_config = CompilationConfig()
+    compilation_config.pass_config.fuse_allreduce_rms = False
+    vllm_config = VllmConfig(
+        parallel_config=ParallelConfig(), compilation_config=compilation_config
+    )
+    _set_vllm_config(vllm_config, 1, rank=0, local_rank=0)
+
+    device = torch.accelerator.current_accelerator()
+    if not is_workspace_manager_initialized():
+        init_workspace_manager(device)
+
+    in_dtype = torch.bfloat16
+    test_data = setup_moe_test_data(
+        m=m,
+        k=k,
+        n=n,
+        num_experts=8,
+        in_dtype=in_dtype,
+        use_shared_experts=True,
+        use_gate=True,
+        use_routed_input_transform=False,
+        backend=None,
+        device=device,
+    )
+    shared_experts = create_shared_experts_from_config(
+        test_data.shared_experts_config, in_dtype, device=device
+    )
+    assert shared_experts is not None
+    with set_current_vllm_config(vllm_config):
+        moe_layer = make_fused_moe_layer(
+            quantization=None,
+            use_ep=False,
+            hidden_size=k,
+            intermediate_size=n,
+            in_dtype=in_dtype,
+            tp_size=1,
+            ep_size=1,
+            dp_size=1,
+            w1=test_data.w1,
+            w2=test_data.w2,
+            top_k=2,
+            global_num_experts=8,
+            shared_experts=shared_experts,
+            gate=test_data.gate,
+        )
+    return vllm_config, moe_layer, test_data, shared_experts
+
+
+def _forward_moe_layer(
+    moe_layer: MoERunner,
+    vllm_config: VllmConfig,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+) -> torch.Tensor:
+    with set_forward_context(None, vllm_config, num_tokens=hidden_states.shape[0]):
+        return moe_layer(hidden_states, router_logits)
+
+
+@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
+def test_moe_layer_gate_before_shared_experts_fork(m: int, n: int, k: int, monkeypatch):
+    """On ROCm the gate launches before the shared experts fork onto the aux
+    stream, elsewhere after it, both eagerly and under CUDA graph capture."""
+    vllm_config, moe_layer, test_data, shared_experts = (
+        _make_moe_layer_with_gate_and_shared_experts(m, n, k, monkeypatch)
+    )
+    assert moe_layer._gate_before_shared_experts == current_platform.is_rocm()
+
+    assert test_data.gate is not None
+    shared_experts_stream = aux_stream()
+
+    # (module, launched on the aux stream), in launch order.
+    launches: list[tuple[str, bool]] = []
+
+    def record(name: str) -> Callable:
+        def hook(module: torch.nn.Module, args: tuple) -> None:
+            on_aux = torch.cuda.current_stream() == shared_experts_stream
+            launches.append((name, on_aux))
+
+        return hook
+
+    test_data.gate.register_forward_pre_hook(record("gate"))
+    shared_experts.register_forward_pre_hook(record("shared_experts"))
+
+    # Run both orders on every platform; the flag is the only way to reach the
+    # gate-after-fork order on ROCm.
+    for gate_first in (False, True):
+        moe_layer._gate_before_shared_experts = gate_first
+        expected = [("gate", False), ("shared_experts", True)]
+        if not gate_first:
+            expected.reverse()
+
+        launches.clear()
+        _forward_moe_layer(
+            moe_layer, vllm_config, test_data.hidden_states, test_data.router_logits
+        )
+        assert launches == expected
+
+        torch.accelerator.synchronize()
+        launches.clear()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            _forward_moe_layer(
+                moe_layer,
+                vllm_config,
+                test_data.hidden_states,
+                test_data.router_logits,
+            )
+        assert launches == expected
+        del graph
+
+
+@pytest.mark.parametrize("m, n, k", SHAPE_COMBOS)
+def test_moe_layer_gate_before_shared_experts_fork_is_bitwise(
+    m: int, n: int, k: int, monkeypatch
+):
+    """Running the gate before the shared experts fork changes only the launch
+    order: eager outputs and CUDA graph replays are bitwise identical to those
+    with the gate after the fork."""
+    vllm_config, moe_layer, test_data, _ = _make_moe_layer_with_gate_and_shared_experts(
+        m, n, k, monkeypatch
+    )
+    router_logits = test_data.router_logits
+    inputs = [test_data.hidden_states * scale for scale in (1.0, -0.5, 2.0)]
+    static_hidden_states = inputs[0].clone()
+
+    eager: dict[bool, list[torch.Tensor]] = {}
+    replayed: dict[bool, list[torch.Tensor]] = {}
+    for gate_first in (False, True):
+        moe_layer._gate_before_shared_experts = gate_first
+        eager[gate_first] = [
+            _forward_moe_layer(moe_layer, vllm_config, x, router_logits).clone()
+            for x in inputs
+        ]
+
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured_output = _forward_moe_layer(
+                moe_layer, vllm_config, static_hidden_states, router_logits
+            )
+        replayed[gate_first] = []
+        for x in inputs:
+            static_hidden_states.copy_(x)
+            graph.replay()
+            replayed[gate_first].append(captured_output.clone())
+        torch.accelerator.synchronize()
+        del graph
+
+    atol = rtol = 7.6e-2 if k >= 2048 else 3.5e-2
+    for i in range(len(inputs)):
+        assert torch.equal(eager[True][i], eager[False][i])
+        assert torch.equal(replayed[True][i], replayed[False][i])
+        # The replays follow their inputs.
+        torch.testing.assert_close(
+            replayed[True][i], eager[True][i], atol=atol, rtol=rtol
+        )
 
 
 def _test_body_config(test_config: MoETestConfig, cpu_group, **kwargs):

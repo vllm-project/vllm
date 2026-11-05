@@ -291,6 +291,13 @@ class MoERunner(MoERunnerInterface):
                 mk_can_overlap_shared_experts=can_overlap,
             )
 
+        # Whether the gate runs before the shared experts fork onto the aux
+        # stream, rather than after it to overlap with them. HIP graphs keep a
+        # fork's first captured branch (the shared experts) on the parent
+        # queue, so on ROCm a gate captured after the fork starts late on
+        # another queue and competes with the shared experts' first GEMM.
+        self._gate_before_shared_experts = current_platform.is_rocm()
+
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
@@ -362,6 +369,17 @@ class MoERunner(MoERunnerInterface):
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
         return self.routed_experts.quant_method
+
+    def _apply_gate(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.gate is not None
+        if self._fse_fuse_gate:
+            if self._combined_gate_weight is None:
+                self.process_weights_after_loading()
+            return dispatch_unquantized_gemm()(
+                self, hidden_states, self._combined_gate_weight, None
+            )
+        router_logits, _ = self.gate(hidden_states)
+        return router_logits
 
     def apply_routed_input_transform(
         self,
@@ -897,6 +915,11 @@ class MoERunner(MoERunnerInterface):
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
+        # On ROCm the Runner's gate runs before the shared experts fork (see
+        # `_gate_before_shared_experts`).
+        if self.gate is not None and self._gate_before_shared_experts:
+            router_logits = self._apply_gate(hidden_states)
+
         # If using multi-stream overlap for shared experts, we must launch it
         # before routed expert dispatch.
         shared_experts_overlapping = False
@@ -906,17 +929,10 @@ class MoERunner(MoERunnerInterface):
             )
 
         # If the Runner holds the gate, apply it after the stream sync,
-        # so it can run overlapped with the
+        # so it can run overlapped with the shared experts.
         # NOTE: in future PR, MoE runner will always hold the gate.
-        if self.gate is not None:
-            if self._fse_fuse_gate:
-                if self._combined_gate_weight is None:
-                    self.process_weights_after_loading()
-                router_logits = dispatch_unquantized_gemm()(
-                    self, hidden_states, self._combined_gate_weight, None
-                )
-            else:
-                router_logits, _ = self.gate(hidden_states)
+        if self.gate is not None and not self._gate_before_shared_experts:
+            router_logits = self._apply_gate(hidden_states)
 
         with self._sequence_parallel_context():
             # TODO(bnell): parts of the dispatch/combine steps will go away once
