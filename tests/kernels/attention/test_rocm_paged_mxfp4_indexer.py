@@ -22,6 +22,9 @@ if not current_platform.is_rocm():
 
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v41.amd.rocm import (
+    _compute_global_topk_ragged_indices_and_indptr_old,
+    _mxfp4_decode_row_lens,
+    _pack_topk_ragged_from_lens,
     rocm_mxfp4_indexer_k_store,
     rocm_mxfp4_indexer_q_quant,
 )
@@ -334,7 +337,26 @@ def _run_layers(
         assert bool((out[num_rows : num_rows + pad] == -1).all())
         assert bool((out[num_rows + pad :] == 7).all())
 
-    _forward_context(monkeypatch, metadata(2))
+    def assert_packs_from_row_lens(out, md, ratio):
+        n = md.num_decode_tokens
+        if n == 0:
+            return
+        args = (
+            torch.arange(n, dtype=torch.int32, device=DEVICE),
+            md.decode.block_table,
+            case.cache[ratio].shape[1],
+            torch.ones(n, dtype=torch.bool, device=DEVICE),
+        )
+        row_lens = _mxfp4_decode_row_lens({"indexer": md}, "indexer")
+        got = _pack_topk_ragged_from_lens(out[:n], row_lens, *args)
+        assert got is not None
+        want = _compute_global_topk_ragged_indices_and_indptr_old(out[:n], *args)
+        nnz = int(want[1][-1])
+        assert torch.equal(got[1], want[1]) and torch.equal(got[2], want[2])
+        assert torch.equal(got[0][:nnz], want[0][:nnz])
+
+    dense = metadata(2)
+    _forward_context(monkeypatch, dense)
     out = topk_buffer()
     ops.rocm_mxfp4_sparse_attn_indexer(
         hidden,
@@ -354,6 +376,7 @@ def _run_layers(
         keys = case.keys(2, req, end)
         _assert_topk(out[i], _scores(q_ref[i], weights[i], keys), k)
     assert_tail(out)
+    assert_packs_from_row_lens(out, dense, 2)
 
     source = metadata(1)
     _forward_context(monkeypatch, source)
@@ -387,6 +410,7 @@ def _run_layers(
             mask[block * CAND_BLOCK : (block + 1) * CAND_BLOCK] = True
         allowed.append(torch.where(mask, scores, float("-inf")))
     assert_tail(out)
+    assert_packs_from_row_lens(out, source, 1)
 
     pa = ops._aiter()
     build = pa.build_candidate_gather
@@ -424,6 +448,7 @@ def _run_layers(
             for i in range(num_rows):
                 _assert_topk(out[i], allowed[i], k)
             assert_tail(out)
+            assert_packs_from_row_lens(out, consumer, 1)
         if gather:
             launches = len(consumer.gather_launches) + (consumer.decode is not None)
             assert len(builds) == launches

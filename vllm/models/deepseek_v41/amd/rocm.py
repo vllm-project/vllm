@@ -54,6 +54,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.rocm_paged_mxfp4_indexer import (
+    RocmMxfp4IndexerMetadata,
+)
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadata,
@@ -308,6 +311,15 @@ def _pack_topk_ragged_from_lens(
         num_warps=8,
     )
     return global_topk_ragged, topk_indptr, topk_lens
+
+
+def _mxfp4_decode_row_lens(
+    attn_metadata: Any, indexer_prefix: str | None
+) -> torch.Tensor | None:
+    metadata = attn_metadata.get(indexer_prefix)
+    if not isinstance(metadata, RocmMxfp4IndexerMetadata):
+        return None
+    return metadata.decode_row_lens
 
 
 def compute_global_topk_ragged_indices_and_indptr(
@@ -1225,6 +1237,21 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             self.rope_head_dim,
         )
 
+    @functools.cached_property
+    def _index_k_cache_prefix(self) -> str | None:
+        assert self._index_source_prefix is not None
+        assert self.topk_indices_buffer is not None
+        indexer = self._static_forward_context[self._index_source_prefix].indexer
+        topk = self.topk_indices_buffer.shape[1]
+        pool = self.candidate_topk_blocks
+        if (
+            indexer is None
+            or indexer.topk_tokens != topk
+            or (pool > 0 and topk > (pool - 1) * self.candidate_block_size + 1)
+        ):
+            return None
+        return indexer.k_cache.prefix
+
     def _decode_topk_ragged(
         self,
         swa_metadata: DeepseekV41ROCMAiterSparseSWAMetadata,
@@ -1257,6 +1284,9 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             attn_metadata.block_table[:num_decodes],
             attn_metadata.block_size // self.compress_ratio,
             swa_metadata.is_valid_token[:num_decode_tokens],
+            row_lens=_mxfp4_decode_row_lens(
+                get_forward_context().attn_metadata, self._index_k_cache_prefix
+            ),
         )
         source._topk_ragged_cache[self.compress_ratio] = built
         return built
