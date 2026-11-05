@@ -11,9 +11,11 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_key_concat_kv_cache_insert,
     fused_mla_kv_concat,
     fused_mla_kv_concat_quant_fp8,
+    fused_mla_kv_pack_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_concat_mla_kv_quant_fp8
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Kimi-K3 fused MLA requires CUDA"
@@ -308,3 +310,25 @@ def test_decode_epilogue_row_split_boundary(num_tokens: int) -> None:
     torch.testing.assert_close(
         _cache_rows(cache, slots), torch.cat((kv_c, k_pe), dim=-1)
     )
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability_family(100)
+        and has_flashinfer_concat_mla_kv_quant_fp8()
+    ),
+    reason="needs FlashInfer's concat_mla_kv_quant_fp8 on SM10x",
+)
+@pytest.mark.parametrize("num_tokens", [1, 257, 2048])
+@pytest.mark.parametrize("num_heads", [3, 12, 24])
+@torch.inference_mode()
+def test_context_kv_pack_flashinfer_route_is_byte_exact(
+    num_tokens: int, num_heads: int
+) -> None:
+    kv_nope = _randn(num_tokens, num_heads, 256)
+    _, k_pe, _ = _strided_context_inputs(num_tokens, num_heads, torch.bfloat16, False)
+    k_nope, v = kv_nope.split((128, 128), dim=-1)
+    k_expected, v_expected = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+    k, v_out = fused_mla_kv_pack_quant_fp8(kv_nope, k_pe, nope_dim=128)
+    assert torch.equal(k.view(torch.uint8), k_expected.view(torch.uint8))
+    assert torch.equal(v_out.view(torch.uint8), v_expected.view(torch.uint8))
