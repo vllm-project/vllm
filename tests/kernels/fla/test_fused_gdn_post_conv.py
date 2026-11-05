@@ -308,6 +308,18 @@ def test_fused_post_conv_int64_token_offset():
             torch.bfloat16,
             id="ratio4-tp4-max-fp32",
         ),
+        # More requests leave fewer idle SMs, so the CUDA kernel splits V less.
+        pytest.param(
+            2, 1, (9, 9, 4, 2), torch.float32, torch.bfloat16, id="ratio2-4reqs"
+        ),
+        pytest.param(
+            2,
+            1,
+            (9,) * 14 + (3, 0),
+            torch.bfloat16,
+            torch.float32,
+            id="ratio2-16reqs-ragged",
+        ),
     ],
 )
 @pytest.mark.parametrize("output_gate_activation", ["silu", "sigmoid"])
