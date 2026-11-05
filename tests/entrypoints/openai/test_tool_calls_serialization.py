@@ -15,9 +15,18 @@ models because:
      "ValueError: Unexpected tool call id ...".
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.tool_call_validation import (
+    validate_chat_tool_call_ids,
+    validate_responses_tool_call_ids,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.exceptions import VLLMValidationError
+from vllm.renderers.online_renderer import OnlineRenderer
 
 
 def _make_tool_call(tc_id: str, name: str, args: str) -> dict:
@@ -108,6 +117,51 @@ def test_tool_calls_list_passthrough():
     assistant_msg = req.messages[1]
     assert isinstance(assistant_msg, dict)
     assert isinstance(assistant_msg.get("tool_calls"), list)
+
+
+@pytest.mark.parametrize("result_id", [None, "", "call_unknown"])
+def test_orphan_chat_tool_result_is_rejected(result_id):
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "call_known"}]},
+        {"role": "tool", "tool_call_id": result_id},
+    ]
+    with pytest.raises(VLLMValidationError, match="tool_call_id"):
+        validate_chat_tool_call_ids(messages)
+
+
+def test_parallel_chat_tool_results_are_accepted():
+    validate_chat_tool_call_ids(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_1"}, {"id": "call_2"}],
+            },
+            {"role": "tool", "tool_call_id": "call_2"},
+            {"role": "tool", "tool_call_id": "call_1"},
+        ]
+    )
+
+
+def test_responses_result_can_use_stored_prior_call():
+    validate_responses_tool_call_ids(
+        previous_outputs=[{"type": "function_call", "call_id": "call_old"}],
+        input_items=[
+            {"type": "function_call_output", "call_id": "call_old"},
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_renderer_rejects_orphan_result_before_preprocessing():
+    renderer = OnlineRenderer.__new__(OnlineRenderer)
+    renderer.renderer = SimpleNamespace(tokenizer=None)
+    renderer.parser = None
+    request = _make_request(
+        [{"role": "tool", "tool_call_id": "call_missing", "content": "bad"}]
+    )
+    result = await renderer.render_chat(request)
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "tool_call_id"
 
 
 def test_messages_without_tool_calls_unaffected():

@@ -49,7 +49,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.serve.engine.protocol import PromptTokenUsageInfo, UsageInfo
+from vllm.entrypoints.serve.engine.protocol import (
+    ErrorResponse,
+    PromptTokenUsageInfo,
+    UsageInfo,
+)
 from vllm.entrypoints.serve.exception_handling.error_response import (
     create_error_response,
 )
@@ -1988,6 +1992,30 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+@pytest.mark.asyncio
+async def test_messages_rejects_orphan_tool_use_id_before_generation():
+    handler = AnthropicServingMessages.__new__(AnthropicServingMessages)
+    request = _make_request(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_missing",
+                        "content": "orphan",
+                    }
+                ],
+            }
+        ]
+    )
+
+    result = await handler.create_messages(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "tool_use_id"
 
 
 # ======================================================================

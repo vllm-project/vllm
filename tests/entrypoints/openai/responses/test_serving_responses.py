@@ -748,6 +748,27 @@ async def test_online_renderer_returns_typed_error_for_bad_harmony_call_referenc
 
 
 @pytest.mark.asyncio
+async def test_online_renderer_rejects_orphan_function_call_output():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    request = ResponsesRequest(
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": "call_missing",
+                "output": "orphaned",
+            }
+        ],
+        tools=[],
+    )
+
+    result = await renderer.render_responses(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "call_id"
+
+
+@pytest.mark.asyncio
 async def test_online_renderer_preserves_missing_harmony_builtin_tool_behavior(
     monkeypatch: pytest.MonkeyPatch,
 ):
