@@ -238,6 +238,12 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
     if backend is AttentionBackendEnum.FLASHMLA_MEGA_ATTN_DSV41:
+        # FlashMLA mega attention reads the grouped ``wo_a`` weight directly
+        # from its fused quantized output. LoRA wraps that layer after model
+        # construction, so use the split-KV path whose grouped projection
+        # explicitly applies the adapter delta.
+        if vllm_config.lora_config is not None:
+            return DeepseekV4FlashMLAAttention
         return DeepseekV4MegaAttnAttention
     if backend in (
         AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -254,7 +260,9 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     # implementation itself stores. It declines topologies it cannot serve
     # (non-SM100, TP that leaves fewer than WV_GROUP_SIZE heads per wo_a
     # group, a build without the kernel), which then fall through to FlashMLA.
-    if DeepseekV4MegaAttnAttention.is_available_for(vllm_config):
+    if vllm_config.lora_config is None and DeepseekV4MegaAttnAttention.is_available_for(
+        vllm_config
+    ):
         return DeepseekV4MegaAttnAttention
     return DeepseekV4FlashMLAAttention
 
@@ -296,6 +304,12 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     collective, so every TP rank must take the same decision here.
     """
     if not (use_sequence_parallel and envs.VLLM_ENABLE_GEMM_RS):
+        return False
+    if vllm_config.lora_config is not None:
+        # The fused kernel reads wo_b's base weight and has no LoRA epilogue.
+        logger.warning_once(
+            "DeepSeek-V4.1 GEMM-RS is disabled because LoRA is enabled."
+        )
         return False
 
     # The kernel module pulls in cute_dsl, so import it only once opted in.
@@ -869,6 +883,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
+            and vllm_config.lora_config is None
         ):
             assert self.layers[cut].attn.compress_ratio <= 1
             # The last KV source writes every row's KV, then replays.
@@ -985,9 +1000,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         lookback_token_ids: torch.Tensor | None = None,
         decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # A specialized decode step embeds from the executor's copy of the
+        # table, which writes the first layer's hc streams too.
+        embedding = (
+            decode_step.executor.embedding
+            if decode_step is not None and not self.use_sequence_parallel
+            else None
+        )
+        streams: torch.Tensor | None = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif embedding is not None and embedding.accepts(input_ids):
+                hidden_states, streams = embedding(input_ids)
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
@@ -1082,7 +1107,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if decode_step is not None:
             return decode_step.run(
-                hidden_states, positions, input_ids, engram_hashes, engram_mask
+                hidden_states,
+                positions,
+                input_ids,
+                engram_hashes,
+                engram_mask,
+                streams=streams,
             )
 
         residual, post_mix, res_mix = None, None, None
@@ -1405,6 +1435,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name_mapped = None
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1430,7 +1461,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
-                    loaded_params.add(name_mapped)
+                    if name_mapped is not None:
+                        loaded_params.add(name_mapped)
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
@@ -1678,7 +1710,9 @@ class DeepseekV41LLMForCausalLM(
         self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config, self.lm_head
         )
-        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(
+            self.config.vocab_size, self.specialized_decode.all_gather
+        )
         return self.specialized_decode
 
     def get_model_state_cls(self):
