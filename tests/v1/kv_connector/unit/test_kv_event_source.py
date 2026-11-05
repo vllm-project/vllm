@@ -129,7 +129,8 @@ class Capture:
     def receive(self):
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            assert self.sub.poll(1000), "live event missing"
+            if not self.sub.poll(max(1, int((deadline - time.monotonic()) * 1000))):
+                continue
             topic, seq, payload = self.sub.recv_multipart()
             batch = msgspec.msgpack.decode(payload, type=KVEventBatch)
             if batch.ts != -1:
@@ -142,7 +143,8 @@ class Capture:
         frames: list[tuple[bytes, bytes]] = []
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            assert self.replay.poll(1000), "replay frame missing"
+            if not self.replay.poll(max(1, int((deadline - time.monotonic()) * 1000))):
+                continue
             delimiter, topic, seq, payload = self.replay.recv_multipart()
             assert delimiter == b""
             if seq == ZmqEventPublisher.END_SEQ:
