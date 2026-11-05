@@ -4569,7 +4569,7 @@ def test_recv_failure_waits_for_sibling_transfer(recv_worker, sibling_state):
 @pytest.mark.parametrize("collect_in_step", [False, True])
 def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_step):
     worker = recv_worker
-    worker._early_finished_recving = set()
+    worker._early_recved = []
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "PROC"
     assert worker.poll_finished_recving() == set()
@@ -4579,6 +4579,27 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_
     assert worker.poll_finished_recving() == {"request"}
     assert worker.poll_finished_recving() == set()
     assert worker.get_transfer_results().finished_recving == set()
+
+
+@pytest.mark.cpu_test
+def test_early_recv_waits_for_post_processing(recv_worker, monkeypatch):
+    """A request aborted before it runs frees its blocks once reported, so a
+    pull is reported only after its post-processing has run on the device."""
+    worker = recv_worker
+    worker._early_recved = []
+    worker._recving_metadata["request"].region_blocks_to_zero = ([7],)
+    worker._zero_region_blocks = MagicMock()
+    event = MagicMock()
+    event.query.return_value = False
+    monkeypatch.setattr(torch, "Event", lambda: event)
+    worker._recving_transfers["request"] = [101]
+    worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    assert worker.poll_finished_recving() == set()
+    event.record.assert_called_once()
+    assert worker.has_pending_recving()
+    event.query.return_value = True
+    assert worker.poll_finished_recving() == {"request"}
+    assert not worker.has_pending_recving()
 
 
 @pytest.mark.cpu_test
@@ -4595,7 +4616,7 @@ def test_early_recv_rejects_pipeline_parallel():
 @pytest.mark.cpu_test
 def test_early_recv_leaves_failures_to_the_step(recv_worker):
     worker = recv_worker
-    worker._early_finished_recving = set()
+    worker._early_recved = []
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "ERR"
     worker.nixl_wrapper.release_xfer_handle.side_effect = [

@@ -438,10 +438,10 @@ class KVConnectorBase_V1(ABC):
         """Pop receives that completed successfully since the last poll.
 
         Called on the worker thread before scheduling, including between RPCs
-        with mp. Returned requests must have KV in place and post-processing
-        queued on the current stream. Report each load at most once, never
-        again through `get_transfer_results()`. Failed receives stay on the
-        regular path.
+        with mp. Returned requests must have all writes to their KV complete,
+        since an aborted request's blocks are freed once it is reported.
+        Report each load at most once, never again through
+        `get_transfer_results()`. Failed receives stay on the regular path.
         """
         return set()
 

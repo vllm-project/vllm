@@ -6,6 +6,7 @@ import time
 from typing import TYPE_CHECKING
 
 import numpy as np
+import torch
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorTransferResults
@@ -37,7 +38,9 @@ _KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
 
-    _early_finished_recving: set[str] | None = None
+    # With early receive: successful receives held for the next poll, each
+    # batch with the event that ends its post-processing, if it had any.
+    _early_recved: list[tuple[torch.Event | None, set[str]]] | None = None
 
     def __init__(
         self,
@@ -56,30 +59,43 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             )
         super().__init__(vllm_config, engine_id, kv_cache_config)
         if self.kv_transfer_config.enable_early_recv:
-            self._early_finished_recving = set()
+            self._early_recved = []
         # Registration generation of each remote engine's loaded agent.
         self._remote_registration_generations: dict[EngineId, int] = {}
 
+    def _finish_recved(
+        self, done_recving: set[str], failed_recv_reqs: set[str]
+    ) -> bool:
+        post_processed = super()._finish_recved(done_recving, failed_recv_reqs)
+        succeeded = done_recving - failed_recv_reqs
+        if self._early_recved is not None and succeeded:
+            # Hold post-processed receives until the device has run it: a poll,
+            # unlike the step output, does not wait for the stream, and an
+            # aborted request's blocks are freed once it is reported.
+            event = None
+            if post_processed:
+                event = torch.Event()
+                event.record()
+            self._early_recved.append((event, succeeded))
+        return post_processed
+
     def get_transfer_results(self) -> KVConnectorTransferResults:
         results = super().get_transfer_results()
-        if self._early_finished_recving is not None:
-            # Report through the next poll, ahead of the step output.
-            successful = results.finished_recving - results.failed_recving
-            self._early_finished_recving.update(successful)
-            results.finished_recving.difference_update(successful)
+        if self._early_recved is not None:
+            # _finish_recved() held the successful ones for the next poll.
+            results.finished_recving.intersection_update(results.failed_recving)
         return results
 
     def has_pending_recving(self) -> bool:
-        return self._early_finished_recving is not None and (
-            bool(self._early_finished_recving)
+        return self._early_recved is not None and (
+            bool(self._early_recved)
             or any(r not in self._recv_failures for r in self._recving_transfers)
         )
 
     def poll_finished_recving(self) -> set[str]:
         if not self.has_pending_recving():
             return set()
-        assert self._early_finished_recving is not None
-        finished, self._early_finished_recving = self._early_finished_recving, set()
+        assert self._early_recved is not None
         # Failed requests keep their handles for normal collection, which
         # retries releasing them once per step.
         healthy = [r for r in self._recving_transfers if r not in self._recv_failures]
@@ -88,10 +104,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Put back what is still in progress.
         self._recving_transfers.update(transfers)
         self._recv_failures.update(failed)
-        done -= failed
-        if done:
+        if done := done - failed:
             self._finish_recved(done, set())
-        return finished | done
+        finished = set[str]()
+        held = []
+        for event, req_ids in self._early_recved:
+            if event is None or event.query():
+                finished |= req_ids
+            else:
+                held.append((event, req_ids))
+        self._early_recved = held
+        return finished
 
     def start_load_kv(self, metadata: NixlConnectorMetadata):
         """Start loading by triggering non-blocking nixl_xfer.

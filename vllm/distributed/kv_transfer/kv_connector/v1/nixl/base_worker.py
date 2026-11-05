@@ -3285,12 +3285,16 @@ class NixlBaseConnectorWorker:
 
     def _finish_recved(
         self, done_recving: set[str], failed_recv_reqs: set[str]
-    ) -> None:
-        """Notify the producers and post-process the KV of finished receives."""
+    ) -> bool:
+        """Notify the producers and post-process the KV of finished receives.
+
+        Returns whether post-processing was queued on the current stream.
+        """
         assert self.transfer_topo is not None
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
         direct_device_recving = set[str]()
+        zeroed_regions = False
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -3319,6 +3323,7 @@ class NixlBaseConnectorWorker:
                 # P/D group positions differ. Use the actual region read plan,
                 # including any local allocation padding the read did not cover.
                 self._zero_region_blocks(meta.region_blocks_to_zero)
+                zeroed_regions |= any(meta.region_blocks_to_zero)
                 continue
 
             # Post processing for heteroblocksize/layout, and for blocks the
@@ -3370,6 +3375,11 @@ class NixlBaseConnectorWorker:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
         self._sync_device_after_direct_recv(direct_device_recving)
+        return bool(
+            zeroed_regions
+            or block_ids_for_blocksize_post_process
+            or block_ids_for_heterogeneous_attn_post_process
+        )
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         """Compatibility wrapper for the legacy completion API."""
