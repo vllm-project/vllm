@@ -1666,16 +1666,23 @@ class MiniMaxM3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        attn_input: torch.Tensor | QuantizedActivation
+        hidden_states, residual = self.forward_input_norm(hidden_states, residual)
+        return self.forward_after_input_norm(positions, hidden_states, residual)
+
+    def forward_input_norm(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
+        """All-reduce (when deferred) + input RMSNorm + residual add."""
         if residual is None:
             residual = hidden_states
-            attn_input = self.input_layernorm(hidden_states)
-        elif self.fuse_input_allreduce and not self.fuse_input_norm_mxfp8:
-            attn_input, residual = fused_allreduce_gemma_rms_norm(
+            return self.input_layernorm(hidden_states), residual
+        if self.fuse_input_allreduce and not self.fuse_input_norm_mxfp8:
+            return fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        elif self.fuse_input_norm_mxfp8:
+        if self.fuse_input_norm_mxfp8:
             if self.fuse_input_allreduce:
                 # The MXFP8 norm has no all-reduce variant.
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
@@ -1685,14 +1692,21 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 self.input_layernorm.weight,
                 self.input_layernorm.variance_epsilon,
             )
-            attn_input = QuantizedActivation(
+            return QuantizedActivation(
                 x_q, x_scale, hidden_states.dtype, hidden_states.shape, kMxfp8Dynamic
-            )
-        else:
-            attn_input, residual = self.input_layernorm(hidden_states, residual)
+            ), residual
+        return self.input_layernorm(hidden_states, residual)
+
+    def forward_after_input_norm(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Attention + post-attention norm + FFN."""
         hidden_states = self.self_attn(
             positions=positions,
-            hidden_states=attn_input,
+            hidden_states=hidden_states,
         )
 
         ffn = self.block_sparse_moe if self.is_moe_layer else self.mlp
@@ -1854,9 +1868,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # Leave each FFN output un-reduced and fuse its all-reduce into the next
         # norm. PP ships hidden states across stages, and the mono and
         # specialized decode kernels expect reduced layer outputs.
+        # Mono decode only activates at TP4 without DP or EP; skip deferral
+        # only when it would actually run, not just when the env var is set.
+        mono_would_activate = (
+            mono_envs.MONO_ENABLE
+            and vllm_config.parallel_config.tensor_parallel_size == 4
+            and vllm_config.parallel_config.data_parallel_size == 1
+            and not vllm_config.parallel_config.enable_expert_parallel
+        )
         defer_ffn_all_reduce = (
             vllm_config.parallel_config.pipeline_parallel_size == 1
-            and not mono_envs.MONO_ENABLE
+            and not mono_would_activate
             and self.specialized_decode_config is None
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1920,28 +1942,16 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 ),
             )
 
-    def _aux_needs_reduce(self, layer_idx: int) -> bool:
-        """Whether the hidden states captured at ``layer_idx`` are still a
-        per-rank partial sum."""
-        return (
-            self.start_layer < layer_idx <= self.end_layer
-            and self.layers[layer_idx - 1].ffn_all_reduce_deferred
-        )
-
-    def _maybe_add_hidden_state(
+    def _maybe_capture_aux(
         self,
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> list[torch.Tensor]:
-        if layer_idx in self.aux_hidden_state_layers and self._aux_needs_reduce(
-            layer_idx
-        ):
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        return super()._maybe_add_hidden_state(
-            aux_hidden_states, layer_idx, hidden_states, residual
-        )
+        residual: torch.Tensor,
+    ) -> None:
+        """Capture ``residual`` for EAGLE3 after the norm already completed any
+        deferred all-reduce.  Cloned because the norm may update it in place."""
+        if layer_idx in self.aux_hidden_state_layers:
+            aux_hidden_states.append(residual.clone())
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1986,9 +1996,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         layers = self.layers[self.start_layer : self.end_layer]
         if decode is None:
             for idx, layer in enumerate(layers, start=self.start_layer):
-                hidden_states, residual = layer(positions, hidden_states, residual)
-                self._maybe_add_hidden_state(
-                    aux_hidden_states, idx + 1, hidden_states, residual
+                hidden_states, residual = layer.forward_input_norm(
+                    hidden_states, residual
+                )
+                self._maybe_capture_aux(aux_hidden_states, idx, residual)
+                hidden_states, residual = layer.forward_after_input_norm(
+                    positions, hidden_states, residual
                 )
         else:
             step = decode.plan(positions, intermediate_tensors)
@@ -2016,11 +2029,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             )
 
         if self.fuse_final_norm_allreduce:
-            hidden_states, _ = fused_allreduce_gemma_rms_norm(
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
                 hidden_states, residual, self.norm
             )
         else:
-            hidden_states, _ = self.norm(hidden_states, residual)
+            hidden_states, residual = self.norm(hidden_states, residual)
+        if self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(residual.clone())
 
         aux_hidden_states = remote_aux + aux_hidden_states
         if len(aux_hidden_states) > 0:
