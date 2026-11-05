@@ -137,6 +137,10 @@ def _model_with_w2_bias(monkeypatch, tp_rank: int) -> tuple[GptOssModel, torch.T
         monkeypatch.setattr(gpt_oss, name, lambda: group)
     monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.config.get_tensor_model_parallel_rank",
+        lambda: tp_rank,
+    )
     monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
 
     experts = _TestExperts("w2_bias", (2, 3), tp_rank=tp_rank)
