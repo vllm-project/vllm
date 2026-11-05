@@ -33,7 +33,7 @@ holds. vLLM sizes memory and CUDA graphs for it once, at startup.
 | `SpecResources` field | Meaning |
 | --- | --- |
 | `max_candidates: int` | Rows per request, the root included. Must equal `num_speculative_tokens + 1`; the scheduler reserves this many KV slots per decoding request. |
-| `capture_shapes: tuple[PlanShape, ...]` | The target-forward shapes to capture. `PlanShape(n)` is `n` rows for every request. `PlanShape(None)` is a variable-length decode graph that takes 1 to `max_candidates` rows per request. |
+| `capture_shapes: tuple[PlanShape, ...]` | The target-forward shapes to capture. `PlanShape(n)` is `n` rows for every request. |
 | `max_branching: int = 1` | 1 for chains. Above 1, plans may branch. |
 
 The default is a chain of up to K drafts: `max_candidates` is K + 1, with one

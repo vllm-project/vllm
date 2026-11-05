@@ -28,12 +28,10 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import PlanKind
 class PlanShape:
     """One target-forward shape the runner captures as a CUDA graph.
 
-    ``uniform_count`` rows per request when set (a chain's K + 1, or a fixed tree
-    width). None asks for a variable-length decode graph that takes any mix of
-    1..max_candidates rows per request.
+    ``uniform_count`` rows per request (a chain's K + 1, or a fixed tree width).
     """
 
-    uniform_count: int | None
+    uniform_count: int
 
 
 @dataclass(frozen=True)
@@ -69,8 +67,8 @@ class SpecResources:
         bad = [
             shape.uniform_count
             for shape in self.capture_shapes
-            if shape.uniform_count is not None
-            and not 1 <= shape.uniform_count <= self.max_candidates
+            if not isinstance(shape.uniform_count, int)
+            or not 1 <= shape.uniform_count <= self.max_candidates
         ]
         if bad:
             raise ValueError(
@@ -85,18 +83,7 @@ class SpecResources:
     @property
     def uniform_counts(self) -> list[int]:
         """The uniform rows per request of the listed shapes, ascending."""
-        return sorted(
-            {
-                s.uniform_count
-                for s in self.capture_shapes
-                if s.uniform_count is not None
-            }
-        )
-
-    @property
-    def varlen(self) -> bool:
-        """Whether a variable-length decode graph is listed."""
-        return any(s.uniform_count is None for s in self.capture_shapes)
+        return sorted({s.uniform_count for s in self.capture_shapes})
 
 
 @dataclass(frozen=True)

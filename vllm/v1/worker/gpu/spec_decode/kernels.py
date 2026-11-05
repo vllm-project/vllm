@@ -381,10 +381,7 @@ class KernelRegistry:
         path = path.expand(num_reqs, rows).contiguous()
         for shape in ctx.capture_shapes:
             count = torch.full(
-                (num_reqs,),
-                shape.uniform_count or rows,
-                dtype=torch.int32,
-                device=ctx.device,
+                (num_reqs,), shape.uniform_count, dtype=torch.int32, device=ctx.device
             )
             step = CommitStep(
                 result=AcceptResult(

@@ -155,11 +155,14 @@ def test_valid_plan_and_resources():
     assert VerifyPlan(parent=_t(_PARENT), count=None, is_chain=True).tokens is None
     assert not _plan(_PARENT, [4]).is_chain
     resources = SpecResources(
-        max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(None), PlanShape(1))
+        max_candidates=4, capture_shapes=(PlanShape(4), PlanShape(1), PlanShape(4))
     )
     assert resources.max_branching == 1
     assert resources.uniform_counts == [1, 4]
-    assert resources.varlen
+    # A shape is a row count; graphs of mixed rows are adaptive verification's.
+    for bad in (0, 5, None):
+        with pytest.raises(ValueError, match="outside"):
+            SpecResources(max_candidates=4, capture_shapes=(PlanShape(bad),))
 
 
 # --- Plan layout ------------------------------------------------------------

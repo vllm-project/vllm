@@ -158,8 +158,8 @@ class SpeculatorConfig:
         it. The engine core may lower it to what the model verifies
         (`adapt_resources`). The default is a chain of up to K drafts
         (``max_candidates`` K + 1). Its decode graphs are the uniform K + 1
-        shape, or one uniform shape per K of a Dynamic SD schedule, plus the
-        variable-length shape under adaptive verification.
+        shape, or one uniform shape per K of a Dynamic SD schedule (adaptive
+        verification captures its variable-length graphs itself).
         """
         from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
 
@@ -169,10 +169,6 @@ class SpeculatorConfig:
         else:
             counts = {k + 1}
         shapes = tuple(PlanShape(c) for c in sorted(counts))
-        if self.spec_config.enable_adaptive_verification:
-            # The target replays the variable-length graph; the drafter's own
-            # graphs keep the uniform shape.
-            shapes += (PlanShape(None),)
         return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
 
     def adapt_resources(

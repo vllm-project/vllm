@@ -347,7 +347,7 @@ class _TreeConfig(SpeculatorConfig):
     def resources(self, max_num_seqs):
         return SpecResources(
             max_candidates=4,
-            capture_shapes=(PlanShape(4), PlanShape(None)),
+            capture_shapes=(PlanShape(4),),
             max_branching=2,
         )
 
@@ -439,7 +439,7 @@ def _attn_layer(name, layout="paged_token"):
     )
 
 
-SHAPES = (PlanShape(4), PlanShape(None))
+SHAPES = (PlanShape(4),)
 
 
 def _ctx(plan_kind="tree", shapes=SHAPES):
@@ -580,7 +580,7 @@ def test_bind_commit_capture():
     registry.bind(_ctx("none"), layers)
     assert layers[0].module.spec_verify_kernel is None
 
-    shapes = (PlanShape(4), PlanShape(2), PlanShape(None))
+    shapes = (PlanShape(4), PlanShape(2))
     ctx = _ctx("tree", shapes)
     verify.binds.clear()
     registry.bind(ctx, layers)
@@ -599,7 +599,6 @@ def test_bind_commit_capture():
         assert [step.count.tolist() for step in kernel.steps] == [
             [4, 4, 4],
             [2, 2, 2],
-            [4, 4, 4],  # varlen: up to max_candidates rows
         ]
         for step in kernel.steps:
             assert step.num_reqs == ctx.max_num_reqs
