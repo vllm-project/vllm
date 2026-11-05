@@ -289,19 +289,20 @@ def get_visible_memory_node(assigned_node_ids: list[int] | None = None) -> list[
 
 
 def get_worker_memory_nodes(assigned_node_ids: list[int] | None) -> list[int]:
-    """Like get_visible_memory_node, but falls back to all visible nodes when
-    none of the assigned nodes exists."""
+    """get_visible_memory_node for a CPU worker. Raises a clear error when
+    none of the NUMA nodes assigned to the worker exists on this host."""
     nodes = get_visible_memory_node(assigned_node_ids)
-    if nodes or assigned_node_ids is None:
-        return nodes
-    visible_nodes = get_visible_memory_node()
-    logger.warning_once(
-        "NUMA nodes %s assigned to this data-parallel rank do not exist on this "
-        "host; falling back to the visible nodes %s.",
-        tuple(assigned_node_ids),
-        tuple(visible_nodes),
-    )
-    return visible_nodes
+    if not nodes:
+        raise ValueError(
+            f"None of the NUMA nodes {assigned_node_ids} assigned to this CPU "
+            f"worker is available; this process can use NUMA nodes "
+            f"{get_memory_affinity()}. Each CPU worker on a host needs its own "
+            "NUMA node, so the data-parallel ranks on this host times "
+            "tensor_parallel_size times pipeline_parallel_size must not exceed "
+            "the host's NUMA nodes. To share NUMA nodes for debugging, set "
+            "VLLM_CPU_SIM_MULTI_NUMA=1 with VLLM_CPU_OMP_THREADS_BIND=auto."
+        )
+    return nodes
 
 
 @cache
