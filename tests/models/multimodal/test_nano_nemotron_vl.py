@@ -29,6 +29,7 @@ from vllm.multimodal.parse import (
     VideoProcessorItems,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.processors import nano_nemotron_vl as nemotron_processors
 from vllm.transformers_utils.processors.nano_nemotron_vl import (
     DynamicResolutionImageTiler,
     NanoNemotronVLProcessor,
@@ -258,6 +259,33 @@ def _make_processor(**kwargs) -> NanoNemotronVLProcessor:
     )
 
 
+@pytest.mark.parametrize(
+    ("device_normalize", "cvcuda_available", "device_resize", "expected"),
+    [
+        (True, True, None, True),  # on by default
+        (True, True, False, False),  # opted out
+        (True, False, None, False),  # not CUDA, or no CV-CUDA
+        (False, True, None, False),  # normalizing on the CPU
+    ],
+)
+def test_nemotron_device_resize_is_on_by_default_where_it_can_run(
+    device_normalize: bool,
+    cvcuda_available: bool,
+    device_resize: bool | None,
+    expected: bool,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        nemotron_processors, "_cvcuda_available", lambda: cvcuda_available
+    )
+    kwargs = MultiModalConfig(
+        mm_device_do_normalize=device_normalize
+    ).merge_mm_processor_kwargs({})
+    if device_resize is not None:
+        kwargs["device_resize"] = device_resize
+    assert _make_processor(**kwargs).device_resize is expected
+
+
 def _preprocess(processor: NanoNemotronVLProcessor, modality: str, sources: list):
     if modality == "image":
         images = [Image.fromarray(source) for source in sources]
@@ -284,7 +312,9 @@ def test_nemotron_processor_device_resize_sends_source_pixels(
         mm_device_do_normalize=True
     ).merge_mm_processor_kwargs({})
     sources = _sources(modality)
-    text, inputs = _preprocess(_make_processor(**device_kwargs), modality, sources)
+    text, inputs = _preprocess(
+        _make_processor(**device_kwargs, device_resize=False), modality, sources
+    )
     raw_text, raw_inputs = _preprocess(
         _make_processor(**device_kwargs, device_resize=True), modality, sources
     )

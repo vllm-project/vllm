@@ -7,11 +7,12 @@
 #     LICENSE is in root directory.
 # --------------------------------------------------------
 
+import importlib.util
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 from typing import Any, TypeVar
 
 import einops
@@ -22,6 +23,7 @@ import torch
 from PIL import Image
 from transformers import BatchFeature, PreTrainedConfig, TensorType
 
+from vllm.logger import init_logger
 from vllm.model_executor.models.parakeet import ParakeetExtractor
 from vllm.multimodal.inputs import AudioItem
 from vllm.multimodal.processing.processor import PromptUpdateDetails, cached_encode
@@ -30,6 +32,8 @@ from vllm.platforms import current_platform
 from vllm.tokenizers.hf import HfTokenizer
 
 from .internvl import calculate_internvl_targets, get_internvl_target_ratios
+
+logger = init_logger(__name__)
 
 _T = TypeVar("_T")
 
@@ -90,6 +94,13 @@ def _bicubic_resize_and_normalize(
     if norm_mean is not None and norm_std is not None:
         tensor = (tensor - norm_mean) / norm_std
     return tensor.to(dtype=dtype).contiguous()
+
+
+@cache
+def _cvcuda_available() -> bool:
+    # find_spec, not import: importing CV-CUDA in every API server costs
+    # ~0.3 s and ~130 MB each.
+    return current_platform.is_cuda() and importlib.util.find_spec("cvcuda") is not None
 
 
 def cvcuda_bicubic_resize(
@@ -660,13 +671,22 @@ class BaseNanoNemotronVLProcessor(ABC):
         max_model_len: int,
         max_num_tiles: int | None = None,
         do_cpu_normalize: bool = True,
-        device_resize: bool = False,
+        device_resize: bool | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
 
         if device_resize and do_cpu_normalize:
             raise ValueError("device_resize requires mm_device_do_normalize=True")
+        if device_resize is None:
+            # On wherever it can run; device_resize=False opts out.
+            device_resize = not do_cpu_normalize and _cvcuda_available()
+            if device_resize:
+                logger.info_once(
+                    "Resizing Nemotron VL images and video frames on the GPU with "
+                    "CV-CUDA. To resize on the CPU, set "
+                    "--mm-processor-kwargs '{\"device_resize\": false}'."
+                )
         # With device_resize, dynamic-resolution images and video frames are
         # sent to the model as decoded uint8 RGB at their source resolution and
         # resized on its device with CV-CUDA (`cvcuda_bicubic_resize`).
@@ -876,7 +896,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         use_audio_in_video: bool = False,
         do_rescale: bool = True,
         do_normalize: bool = True,
-        device_resize: bool = False,
+        device_resize: bool | None = None,
     ) -> None:
         if do_rescale != do_normalize:
             raise ValueError(

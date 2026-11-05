@@ -112,11 +112,13 @@ GPU-side fusion is controlled by `multimodal_config.mm_device_do_normalize`:
 
 #### Resizing on the Device (Nemotron VL)
 
-With `mm_device_do_normalize`, images and video frames are still resized on the CPU, in `uint8`. Nemotron VL models (`NemotronH_Nano_VL_V2` and the Nemotron Omni architectures above) can move the resize to the GPU with [CV-CUDA](https://github.com/CVCUDA/CV-CUDA):
+With `mm_device_do_normalize`, most models still resize images and video frames on the CPU, in `uint8`. Nemotron VL models (`NemotronH_Nano_VL_V2` and the Nemotron Omni architectures above) resize them on the GPU with [CV-CUDA](https://github.com/CVCUDA/CV-CUDA) by default, on CUDA when CV-CUDA is installed (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).
+
+The API server then sends the decoded `uint8` pixels at their source resolution. On the GPU, CV-CUDA resizes them (bicubic, antialiased, `uint8` in and out) and reformats them to NCHW; `FusedMMInputNorm` then casts, rescales and normalizes them exactly as it does for the CPU path. This covers dynamic-resolution images and video frames. CV-CUDA's workspace and buffers are included in the startup memory profile.
+
+To resize on the CPU instead:
 
 ```bash
 vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4 \
-    --trust-remote-code --mm-processor-kwargs '{"device_resize": true}'
+    --trust-remote-code --mm-processor-kwargs '{"device_resize": false}'
 ```
-
-The API server then sends the decoded `uint8` pixels at their source resolution. On the GPU, CV-CUDA resizes them (bicubic, antialiased, `uint8` in and out) and reformats them to NCHW; `FusedMMInputNorm` then casts, rescales and normalizes them exactly as it does for the CPU path. This covers dynamic-resolution images and video frames, and requires `mm_device_do_normalize` and CV-CUDA (`cvcuda-cu13` or `cvcuda-cu12`, installed with CUDA builds).
