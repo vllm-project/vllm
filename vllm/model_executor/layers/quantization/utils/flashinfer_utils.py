@@ -559,6 +559,20 @@ def _shuffle_mxfp8_moe_weights(
     )
 
 
+def _interleave_mxfp8_moe_scales(scale: torch.Tensor, rows: int) -> torch.Tensor:
+    """Lay out per-expert MXFP8 block scales as FlashInfer CUTLASS reads them.
+
+    This is the 128x4 interleave of
+    ``mxfp8_quantize(..., is_sf_swizzled_layout=True)``, with rows padded to 128
+    and scale columns to 4.
+    """
+    from flashinfer.quantization.fp4_quantization import block_scale_interleave
+
+    num_experts = scale.shape[0]
+    interleaved = block_scale_interleave(scale.reshape(num_experts, rows, -1))
+    return interleaved.reshape(num_experts, round_up(rows, 128), -1)
+
+
 def prepare_fp8_moe_layer_for_fi(
     layer: torch.nn.Module,
     w13: torch.Tensor,
@@ -622,6 +636,18 @@ def prepare_fp8_moe_layer_for_fi(
             w13, w2, w13_scale, w2_scale, is_gated
         )
         return w13, w2, w13_scale, w2_scale
+
+    if is_mxfp8:
+        w13_scale = w13_scale.reshape(*w13.shape[:2], -1)
+        if layer.moe_config.is_act_and_mul:
+            w13 = swap_w13_to_w31(w13)
+            w13_scale = swap_w13_to_w31(w13_scale)
+        return (
+            w13,
+            w2,
+            _interleave_mxfp8_moe_scales(w13_scale, w13.shape[1]),
+            _interleave_mxfp8_moe_scales(w2_scale, w2.shape[1]),
+        )
 
     # Some FI MoE kernels require internal alignment of 16
     # for the gate-up proj. Pad the weights to respect this.

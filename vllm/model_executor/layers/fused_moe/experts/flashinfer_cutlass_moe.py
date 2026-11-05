@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -83,11 +84,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
         assert quant_config.weight_quant_dtype in (
             "mxfp4",
+            "mxfp8",
             "nvfp4",
             torch.float8_e4m3fn,
             None,
         ), (
-            "Only mxfp4, nvfp4, fp8, bfloat16 and"
+            "Only mxfp4, mxfp8, nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
         self.device = moe_config.device
@@ -101,7 +103,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
-        self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        # MX formats are also block-quantized, but take their own path.
+        self.use_deepseek_fp8_block_scale = (
+            quant_config.is_block_quantized and not quant_config.is_mx_quantized
+        )
 
         def _per_expert(value: float | None) -> torch.Tensor | None:
             if value is None:
@@ -117,10 +122,8 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
         self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
 
-        if (
-            quant_config.weight_quant_dtype == "mxfp4"
-            and quant_config.quant_dtype == "mxfp8"
-        ):
+        # MXFP8 activations, with MXFP4 or (MXFP8 W8A8) MXFP8 weights.
+        if quant_config.quant_dtype == "mxfp8":
             self.fake_input_scale = torch.ones(
                 self.num_experts,
                 device=self.device,
@@ -184,6 +187,10 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                     (kNvfp4Static, kNvfp4Dynamic),
                 ]
                 and p.has_device_capability(100)
+            )
+            or (
+                scheme == (kMxfp8Static, kMxfp8Dynamic)
+                and p.is_device_capability_family(100)
             )
         )
 
@@ -353,6 +360,21 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 ]
                 a1q_scale = None
                 use_w4_group_scaling = True
+
+        # MXFP8 W8A8. prepare_fp8_moe_layer_for_fi interleaves the weight
+        # scales; the prepare step quantizes the input with swizzled scales.
+        elif self.weight_quant_dtype == "mxfp8":
+            assert self.w1_scale is not None and self.w2_scale is not None
+            assert self.fake_input_scale is not None
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
+            quant_scales = [
+                self.w1_scale.view(torch.int32),
+                self.fake_input_scale,
+                self.w2_scale.view(torch.int32),
+                self.fake_input_scale,
+            ]
+            use_mxfp8_act_scaling = True
 
         elif self.use_deepseek_fp8_block_scale:
             # FP8 block-scale path: provide block-scale weights, omit a1q_scale

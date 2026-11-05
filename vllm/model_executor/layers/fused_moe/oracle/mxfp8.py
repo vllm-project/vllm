@@ -28,6 +28,7 @@ _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.AITER_MXFP8,
     Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.TRITON_MXFP8,
+    Fp8MoeBackend.FLASHINFER_CUTLASS,
     Fp8MoeBackend.EMULATION,
 )
 
@@ -39,6 +40,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "aiter": Fp8MoeBackend.AITER_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
     "humming": Fp8MoeBackend.HUMMING,
+    "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
 }
 
 

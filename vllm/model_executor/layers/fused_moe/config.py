@@ -344,6 +344,13 @@ class FusedMoEQuantConfig:
         )
 
     @property
+    def is_mx_quantized(self) -> bool:
+        return any(
+            dtype in ("mxfp4", "mxfp6_e3m2", "mxfp6_e2m3", "mxfp8")
+            for dtype in (self._a1.dtype, self._w1.dtype)
+        )
+
+    @property
     def a1_scale(self) -> torch.Tensor | None:
         assert self._a1.scale is None or isinstance(self._a1.scale, torch.Tensor)
         return self._a1.scale

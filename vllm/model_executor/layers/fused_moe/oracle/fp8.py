@@ -823,7 +823,8 @@ def make_fp8_moe_quant_config(
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             block_shape=block_shape,
-            is_scale_swizzled=False,
+            # FlashInfer CUTLASS takes swizzled activation scales.
+            is_scale_swizzled=fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS,
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
@@ -871,6 +872,7 @@ def make_fp8_moe_kernel(
             moe_config.in_dtype
             if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
             and moe_quant_config.is_block_quantized
+            and not moe_quant_config.is_mx_quantized
             else None
         ),
     )
