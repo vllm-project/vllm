@@ -396,6 +396,9 @@ def get_fake_process_mamba_fn(
         mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
         copy_bufs: mamba_utils.MambaCopyBuffers,
         align_ctx: mamba_utils.MambaSpecDecodeGPUContext | None = None,
+        num_computed_tokens_gpu: torch.Tensor | None = None,
+        query_start_loc_gpu: torch.Tensor | None = None,
+        num_accepted_tokens_gpu: torch.Tensor | None = None,
     ):
         nonlocal copy_info
         copy_info = None
@@ -410,6 +413,9 @@ def get_fake_process_mamba_fn(
             mamba_state_copy_funcs,
             copy_bufs,
             align_ctx,
+            num_computed_tokens_gpu=num_computed_tokens_gpu,
+            query_start_loc_gpu=query_start_loc_gpu,
+            num_accepted_tokens_gpu=num_accepted_tokens_gpu,
         )
         if cur_step_action is not None:
             if align_ctx is not None:
