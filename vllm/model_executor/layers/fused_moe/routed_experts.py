@@ -231,10 +231,7 @@ class RoutedExperts(PluggableLayer):
 
         registered = set(self._parameters)
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        # Parameters that may hold expert padding, for `padding_fill_params`:
-        # per-element ones. Per-expert scalars ((E,), (E, 1), (E, 2): per-tensor
-        # and global scales, static input scales a checkpoint may omit) and
-        # metadata like `weight_shape` cannot.
+        # Per-element quant params; per-expert scalars ((E,), (E, <=2)) aren't padded.
         self._padding_fill_names = [
             name
             for name, p in self._parameters.items()
@@ -249,42 +246,21 @@ class RoutedExperts(PluggableLayer):
 
         self.lora_base_layer_prefix = ""
 
-    def has_padding(self) -> bool:
-        """Whether the expert parameters are larger than the checkpoint
-        tensors loaded into them, leaving padding the loaders do not write.
-
-        Valid at cold start before post-load processing only: some of it pads
-        just the runtime copy and writes the padded size into ``moe_config``.
-        The source used today is ``moe_config``: a hidden or per-partition
-        intermediate size rounded up past its unpadded value (e.g. by
-        ``maybe_roundup_sizes``, or a model overriding
-        ``intermediate_size_per_partition_unpadded`` after construction), or
-        block-aligned TP sharding. It is not the only possible one: a layer
-        padded another way should extend this check, and reuses the same fill.
-        """
-        config = self.moe_config
-        hidden = config.hidden_dim
-        intermediate = config.intermediate_size_per_partition
-        return bool(
-            hidden > (config.hidden_dim_unpadded or hidden)
-            or intermediate
-            > (config.intermediate_size_per_partition_unpadded or intermediate)
-            or config.tp_shard_with_padding
-        )
-
     def padding_fill_params(self) -> list[tuple[str, float]]:
-        """(parameter name, padding value) pairs a direct reload refills whole
-        before the loaders rewrite the checkpoint region: if `has_padding`,
-        the quant method's per-element parameters. Weights get 0,
-        ones-initialized scales (``padding_value`` attribute) get 1. Direct
-        reload reads this once, at cold start before post-load processing."""
-        if not self.has_padding():
+        """(name, value) a direct reload refills; read at cold start, before PWAL."""
+        c = self.moe_config
+        inter = c.intermediate_size_per_partition
+        padded = (
+            c.hidden_dim > (c.hidden_dim_unpadded or c.hidden_dim)
+            or inter > (c.intermediate_size_per_partition_unpadded or inter)
+            or c.tp_shard_with_padding
+        )
+        if not padded:
             return []
-        params = ((n, self._parameters.get(n)) for n in self._padding_fill_names)
         return [
-            (name, getattr(p, "padding_value", 0))
-            for name, p in params
-            if p is not None
+            (n, getattr(self._parameters[n], "padding_value", 0))
+            for n in self._padding_fill_names
+            if self._parameters.get(n) is not None
         ]
 
     # TODO(bnell): Temporary hack. Get rid of this.

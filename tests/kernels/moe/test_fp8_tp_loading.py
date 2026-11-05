@@ -314,11 +314,7 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
 
 @pytest.mark.parametrize("static", [False, True])
 def test_direct_reload_after_dummy_start_resets_padding(monkeypatch, static):
-    """After a cold start that ran no loader (``load_format=dummy``), a direct
-    reload resets the padding of a padded layer, as decided at cold start:
-    zero weights, unit block scales. Per-expert scalars (per-tensor weight
-    scales, static input scales a checkpoint may omit) and parameters not made
-    by the quant method (the gate's correction bias) are left alone."""
+    """After a dummy start, begin resets padding: 0 weights, 1 block scales."""
     from vllm.model_executor.model_loader.reload.direct import (
         begin_direct_reload,
         record_checkpoint_layout,

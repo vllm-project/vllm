@@ -11,12 +11,7 @@ no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent, and
-every checkpoint tensor loaded into a parameter a module lists in
-``padding_fill_params()`` at cold start: ``begin`` refills those whole (weights
-with 0, ones-initialized scales with 1), erasing the checkpoint region too.
-Today only padded MoE layers list parameters (`RoutedExperts.has_padding`,
-decided from ``moe_config``; other padding sources can reuse the same hook and
-fill).
+of every ``padding_fill_params()`` parameter, which ``begin`` refills whole.
 """
 
 from collections.abc import Iterator
@@ -128,9 +123,7 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
             storage = t.untyped_storage().data_ptr()
             t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
-    # Before post-load processing, which may pad only the runtime copy and
-    # record that in the layer's config: refilled by every `begin`. By name, so
-    # a parameter post-load processing drops is neither kept alive nor filled.
+    # Before PWAL, which may pad moe_config; by name, so a dropped param isn't kept.
     model._ckpt_padding_fill = [
         (module, name, value)
         for module in model.modules()
@@ -224,9 +217,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
-    # Reset the padding the loaders skip (PWAL left its output there; after a
-    # dummy cold start it holds random values). Erases the data region too:
-    # every checkpoint tensor loaded into these must be resent.
+    # Reset padding the loaders skip; erases the checkpoint region, so all is resent.
     for module, name, value in model._ckpt_padding_fill:
         t = module._parameters.get(name)
         if t is not None and _owned(model, t):

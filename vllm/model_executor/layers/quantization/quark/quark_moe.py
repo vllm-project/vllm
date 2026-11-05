@@ -1776,8 +1776,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             ),
             requires_grad=False,
         )
-        set_weight_attrs(w2_weight_scale, {**extra_weight_attrs, "padding_value": 1})
-        set_weight_attrs(w13_weight_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
