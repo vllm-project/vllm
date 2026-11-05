@@ -8054,8 +8054,13 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
 
 
-@pytest.mark.parametrize("outcome,promoted_blocks", [("received", 6), ("failed", 10)])
-def test_parked_reservation_tracks_load_outcome(outcome, promoted_blocks):
+@pytest.mark.parametrize("sliding_window", [None, 64])
+@pytest.mark.parametrize(
+    "outcome,promoted_blocks", [("received", 6), ("failed", 10), ("invalid", 6)]
+)
+def test_parked_reservation_tracks_load_outcome(
+    sliding_window, outcome, promoted_blocks
+):
     """A stale cached reservation would silently change async load admission, and
     the count only moves at promotion: a failed load gives up its blocks there."""
 
@@ -8064,8 +8069,26 @@ def test_parked_reservation_tracks_load_outcome(outcome, promoted_blocks):
         assert parked == {r: scheduler._request_remaining_blocks(r) for r in parked}
         assert scheduler._parked_reserved_blocks == sum(parked.values())
 
+    def report(sched_output, **connector_output):
+        scheduler.update_from_output(
+            sched_output,
+            dataclasses.replace(
+                EMPTY_MODEL_RUNNER_OUTPUT,
+                kv_connector_output=KVConnectorOutput(**connector_output),
+            ),
+        )
+        assert_cache_fresh()
+
     scheduler = create_scheduler(
-        use_kv_connector=mock_kv(matched_tokens=64, is_async=True)
+        use_kv_connector=mock_kv(matched_tokens=64, is_async=True),
+        kv_cache_spec=sliding_window
+        and SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=sliding_window,
+        ),
     )
     scheduler.recompute_kv_load_failures = True
     [request] = create_requests(num_requests=1, num_tokens=160)
@@ -8074,17 +8097,16 @@ def test_parked_reservation_tracks_load_outcome(outcome, promoted_blocks):
     assert scheduler._parked_reservations == {request: 6}
 
     ids = {request.request_id}
-    scheduler.update_from_output(
+    if outcome == "invalid":
+        (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+        report(output, invalid_block_ids={block_ids[1]})
+        assert request.num_computed_tokens == 16
+        output = scheduler.schedule()
+    report(
         output,
-        dataclasses.replace(
-            EMPTY_MODEL_RUNNER_OUTPUT,
-            kv_connector_output=KVConnectorOutput(
-                finished_recving=ids,
-                failed_recving=ids if outcome == "failed" else set(),
-            ),
-        ),
+        finished_recving=ids,
+        failed_recving=ids if outcome == "failed" else set(),
     )
-    assert_cache_fresh()
 
     # Promote without scheduling, so the refreshed reservation stays observable.
     scheduler.connector.get_num_new_matched_tokens = Mock(return_value=(0, False))
