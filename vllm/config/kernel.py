@@ -290,6 +290,12 @@ class KernelConfig:
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
+    enable_rocm_aiter_gemm_warmup: bool = False
+    """If True, run a dummy forward at every AITER tuned-GEMM token bucket up to
+    `max_num_batched_tokens` during kernel warmup on ROCm, so AITER builds those
+    kernels at startup instead of stalling the first requests that hit each
+    bucket. Costs one dummy forward per bucket (164 at 8192 tokens)."""
+
     # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
     # to the shared JIT warmup infrastructure.
     # https://github.com/vllm-project/vllm/pull/47451
@@ -365,9 +371,9 @@ class KernelConfig:
 
     Explicit values raise RuntimeError when their constraints are not met.
 
-    On SM100 decode without DCP, persistent (including auto selecting it)
-    reads BF16 logits directly and widens scores inside the kernel, avoiding
-    a full FP32 logits copy. Cooperative still requires FP32 logits.
+    On SM100 decode without DCP, cooperative and persistent (including auto
+    selecting them) read BF16 logits directly and widen scores inside the
+    kernel, avoiding a full FP32 logits copy.
     """
 
     linear_backend: LinearBackend = "auto"
@@ -460,6 +466,7 @@ class KernelConfig:
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "enable_rocm_segmented_attn_autotune",
+            "enable_rocm_aiter_gemm_warmup",
             "ir_op_priority",  # handled separately below
         }
         if self.linear_backend_per_quant is None:
