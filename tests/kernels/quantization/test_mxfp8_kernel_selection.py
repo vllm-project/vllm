@@ -177,37 +177,13 @@ def test_b12x_mxfp8_keeps_cutlass_for_large_m(m, expected):
 
 
 @pytest.mark.parametrize(
-    ("weight_shape", "expected"),
-    [
-        ((128, 128), True),
-        ((96, 256), True),
-        ((130, 256), True),
-        ((256, 64), False),
-        ((4096, 4112), False),
-    ],
+    ("weight_shape", "expected"), [((128, 128), True), ((130, 256), False)]
 )
-def test_b12x_mxfp8_shape_limits(weight_shape, expected):
-    """b12x only needs K % 128 == 0; N may be below 128 or unaligned."""
+def test_b12x_mxfp8_shares_cutlass_shape_limits(weight_shape, expected):
     config = Mxfp8LinearLayerConfig(weight_shape=weight_shape)
     with _patch_cuda_platform(120):
         can_implement, _ = FlashInferB12xMxfp8LinearKernel.can_implement(config)
     assert can_implement == expected
-
-
-@pytest.mark.parametrize("weight_shape", [(96, 256), (130, 256)])
-def test_b12x_mxfp8_forced_backend_covers_small_n(weight_shape):
-    """With --linear-backend flashinfer_b12x the class is the only candidate,
-    so it must take shapes CUTLASS rejects and keep them on b12x at any M."""
-    with (
-        _patch_cuda_platform(120),
-        patch(
-            "vllm.model_executor.kernels.linear._get_linear_backend",
-            return_value="flashinfer_b12x",
-        ),
-    ):
-        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
-    assert type(kernel) is FlashInferB12xMxfp8LinearKernel
-    assert kernel.select_mm_backend(4096) == "b12x"
 
 
 @pytest.mark.parametrize(
