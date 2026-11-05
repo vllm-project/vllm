@@ -79,7 +79,7 @@ from vllm.v1.metrics.stats import (
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
-from vllm.v1.spec_decode.resources import BudgetView
+from vllm.v1.spec_decode.resources import BudgetView, SpecResources
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -100,6 +100,7 @@ class Scheduler(SchedulerInterface):
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
+        spec_resources: SpecResources | None = None,
     ) -> None:
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -344,9 +345,10 @@ class Scheduler(SchedulerInterface):
                     f"({self.num_spec_tokens + 1}): KV slots and the runner's "
                     "buffers are sized from num_speculative_tokens."
                 )
-            # Declared; the engine core lowers it to what the model's layers
-            # verify (EngineCore._set_spec_resources). KV slots stay declared.
-            self.spec_resources = resources
+            # The engine core's adaptation of a branching speculator's resources
+            # to the model's layers, else the declared ones. KV slots stay
+            # declared.
+            self.spec_resources = spec_resources or resources
             # As on main, not under a Dynamic SD schedule.
             self.pads_new_decode_rows = (
                 not speculative_config.uses_dynamic_speculative_decoding()

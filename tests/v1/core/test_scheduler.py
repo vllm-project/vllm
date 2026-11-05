@@ -9082,3 +9082,21 @@ def test_scheduler_keeps_static_spec_blocks(case):
             assert supports_dynamic_spec_blocks(scheduler.vllm_config, True) == (
                 k is not None
             )
+
+
+def test_scheduler_takes_effective_spec_resources():
+    """The engine core passes a branching speculator's effective resources at
+    construction; without them the scheduler runs with the declared ones."""
+    from functools import partial
+
+    from vllm.v1.spec_decode.resources import SpecResources
+
+    declared = create_scheduler(num_speculative_tokens=3, use_v2_model_runner=True)
+    assert declared.spec_resources == SpecResources(capture_rows=(4,))
+    effective = SpecResources(capture_rows=(2,))
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        use_v2_model_runner=True,
+        scheduler_cls=partial(Scheduler, spec_resources=effective),  # type: ignore[arg-type]
+    )
+    assert scheduler.spec_resources is effective

@@ -400,6 +400,35 @@ def test_resolve_spec_resources(config, caps, want, logged, caplog):
     assert all(why in line for why, line in zip(logged, lines))
 
 
+@pytest.mark.parametrize("tree", [False, True], ids=["chain", "tree"])
+def test_engine_core_adapts_only_branching_resources(tree):
+    """A chain runs as declared with no handshake (each worker checks it
+    against its layers); a branching speculator's resources are adapted to the
+    workers' layers, sent to them, and kept for the scheduler."""
+    from vllm.v1.engine.core import EngineCore
+
+    config = _TreeConfig() if tree else _speculative_config().speculator_config
+    core = object.__new__(EngineCore)
+    calls = []
+
+    def collective_rpc(method, args=()):
+        calls.append(method)
+        return [_CHAIN] if method == "get_spec_capabilities" else None
+
+    core.model_executor = SimpleNamespace(collective_rpc=collective_rpc)
+    core._set_spec_resources(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(speculator_config=config),
+            scheduler_config=SimpleNamespace(max_num_seqs=8),
+        )
+    )
+    if not tree:
+        assert calls == [] and core.spec_resources is None
+        return
+    assert calls == ["get_spec_capabilities", "set_spec_resources"]
+    assert core.spec_resources == replace(config.resources(8), max_branching=1)
+
+
 def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     """PP ranks hold different layers: rank 0 the trees, rank 1 a SWA layer."""
     reduced = reduce_spec_capabilities([_TREE, _CHAIN])

@@ -189,6 +189,11 @@ class EngineCore:
             kv_cache_config, vllm_config
         )
 
+        # Only a speculator that branches has effective resources to pass; a
+        # scheduler class that runs one must take them.
+        scheduler_kwargs: dict[str, Any] = {}
+        if self.spec_resources is not None:
+            scheduler_kwargs["spec_resources"] = self.spec_resources
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -197,18 +202,8 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            **scheduler_kwargs,
         )
-        if self.spec_resources is not None:
-            from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
-
-            if isinstance(self.scheduler, V1Scheduler):
-                self.scheduler.spec_resources = self.spec_resources
-            else:
-                logger.info(
-                    "Scheduler %s does not take the effective spec decode "
-                    "resources; it keeps the declared ones.",
-                    type(self.scheduler).__name__,
-                )
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -271,12 +266,19 @@ class EngineCore:
         enable_envs_cache()
 
     def _set_spec_resources(self, vllm_config: VllmConfig) -> None:
-        """Lower the speculator's declared resources to what the model's layers
-        verify on every rank (pipeline ranks hold different layers) and run
-        every worker with them. Before capture; memory stays sized for the
-        declared resources, which the effective ones never exceed."""
+        """Lower a branching speculator's declared resources to what the model's
+        layers verify on every rank (pipeline ranks hold different layers) and
+        run every worker with them. Before capture; memory stays sized for the
+        declared resources, which the effective ones never exceed. A chain runs
+        as declared, which each worker checks against its own layers."""
         speculative_config = vllm_config.speculative_config
         if speculative_config is None:
+            return
+        speculator_config = speculative_config.speculator_config
+        declared = speculator_config.resources(
+            vllm_config.scheduler_config.max_num_seqs
+        )
+        if declared.max_branching == 1:
             return
         capabilities = [
             caps
@@ -289,11 +291,8 @@ class EngineCore:
             resolve_spec_resources,
         )
 
-        speculator_config = speculative_config.speculator_config
         self.spec_resources = resolve_spec_resources(
-            speculator_config,
-            speculator_config.resources(vllm_config.scheduler_config.max_num_seqs),
-            capabilities,
+            speculator_config, declared, capabilities
         )
         self.model_executor.collective_rpc(
             "set_spec_resources", args=(self.spec_resources,)

@@ -165,6 +165,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     maybe_create_adaptive_verification_manager,
     resolve_adaptive_cudagraph_mode,
 )
+from vllm.v1.worker.gpu.spec_decode.capabilities import validate_effective_resources
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -892,7 +893,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 self.aux_output_connector.initialize_output_storage(kv_cache_config)
         if self.spec_round is not None:
-            self.spec_round.resolve_capabilities(self)
+            caps = self.spec_round.resolve_capabilities(self)
+            declared = self.spec_round.resources
+            if declared.max_branching == 1:
+                # A chain runs as declared; the engine core sets a branching
+                # speculator's resources (set_spec_resources).
+                validate_effective_resources(declared, declared, caps)
+                self.set_spec_resources(declared)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
