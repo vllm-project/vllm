@@ -24,6 +24,7 @@ from vllm.config import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -37,6 +38,32 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+
+
+@pytest.mark.parametrize("eligible,expected_bound", [(True, 8), (False, None)])
+def test_prompt_tail_keeps_decode_graph_bound(monkeypatch, eligible, expected_bound):
+    """A decode-eligible prompt tail must not lose its varlen graph bound."""
+    runner = Mock(
+        lora_config=None,
+        aux_output_connector=None,
+        encoder_cache=None,
+        pcp_manager=None,
+        is_encoder_decoder=False,
+    )
+    runner.gather_batch_req_state.return_value = (
+        SimpleNamespace(num_tokens=8, has_prefill=True, decode_graph_eligible=eligible),
+        None,
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.num_scheduled_tokens = {"request": 8}
+    scheduler_output.total_num_scheduled_tokens = 8
+    dispatch = Mock(side_effect=RuntimeError("stop before forward"))
+    monkeypatch.setattr(model_runner_module, "dispatch_cg_and_sync_dp", dispatch)
+
+    with pytest.raises(RuntimeError, match="stop before forward"):
+        GPUModelRunner.execute_model(runner, scheduler_output)
+
+    assert dispatch.call_args.kwargs["max_query_len"] == expected_bound
 
 
 def test_non_last_pp_rank_uses_global_batch_for_sample_feedback(monkeypatch):

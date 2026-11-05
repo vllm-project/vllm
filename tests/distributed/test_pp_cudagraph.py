@@ -15,7 +15,7 @@ from ..utils import (
 @pytest.mark.parametrize(
     "PP_SIZE, MODEL_NAME",
     [
-        (2, "JackFram/llama-160m"),
+        (2, "vllm-project/llama-160m"),
     ],
 )
 @pytest.mark.parametrize(

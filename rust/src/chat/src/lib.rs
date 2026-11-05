@@ -65,7 +65,6 @@ mod stream;
 use std::collections::HashMap;
 
 use tracing::warn;
-use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
@@ -98,12 +97,12 @@ pub struct ChatRequestProcessor {
 static OUTPUT_GRAMMAR_SKIPPED_ONCE: Once = Once::new();
 
 impl ChatRequestProcessor {
-    /// Create a processor with multimodal support using the effective model
-    /// dtype reported by the engine.
-    fn new(backend: DynChatBackend, model_dtype: ModelDtype, max_model_len: u32) -> Self {
+    /// Create a processor using the effective model dtype and context length
+    /// reported by the engine. Multimodal inputs need the model dtype.
+    fn new(backend: DynChatBackend, model_dtype: Option<ModelDtype>, max_model_len: u32) -> Self {
         Self {
             backend,
-            model_dtype: Some(model_dtype),
+            model_dtype,
             max_model_len: Some(max_model_len as usize),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
@@ -359,18 +358,15 @@ impl ChatLlm {
     /// Create a new chat facade from a text-generation facade plus a chat
     /// backend.
     pub fn new(text: TextLlm, backend: DynChatBackend) -> Self {
-        let model_dtype = text.engine_core_client().model_dtype();
-        let max_model_len = text.engine_core_client().max_model_len();
+        let info = text.llm().info();
+        let processor = ChatRequestProcessor::new(backend, info.model_dtype, info.max_model_len);
 
-        Self {
-            text,
-            processor: ChatRequestProcessor::new(backend, model_dtype, max_model_len),
-        }
+        Self { text, processor }
     }
 
     /// Convenience constructor for one shared backend object that implements
     /// both text and chat responsibilities.
-    pub fn from_shared_backend(llm: Llm, backend: DynChatTextBackend) -> Self {
+    pub fn from_shared_backend(llm: impl Llm, backend: DynChatTextBackend) -> Self {
         let text = TextLlm::new(llm, backend.clone());
         Self::new(text, backend)
     }
@@ -442,12 +438,6 @@ impl ChatLlm {
         self.text.model_id()
     }
 
-    /// Expose the underlying engine-core client for low-level utility/admin
-    /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.text.engine_core_client()
-    }
-
     /// Whether the loaded backend has a registered multimodal processor.
     pub fn supports_multimodal(&self) -> bool {
         self.processor.backend.multimodal_model_info().is_some()
@@ -482,11 +472,17 @@ impl ChatLlm {
             prompt_text,
         } = self.processor.prepare(request, self.text.request_processor()).await?;
         let request_id = text_request.request_id.clone();
-        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
+        let prepared = self.text.request_processor().prepare(text_request)?;
+        let sampling = prepared.effective_sampling();
+        let decoded_stream =
+            self.text.generate_prepared(prepared).await?.map_err(Error::from).boxed();
 
         let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
+        Ok(
+            ChatEventStream::new(request_id, sampling, structured_stream)
+                .with_prompt_text(prompt_text),
+        )
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

@@ -272,7 +272,7 @@ def _apply_moe_activation_masked(
             "SWIGLUOAI_UNINTERLEAVE requires clamp_limit"
         )
     elif activation == MoEActivation.SWIGLUSTEP:
-        masked_clamp_limit = 7.0
+        masked_clamp_limit = 7.0 if config.clamp_limit is None else config.clamp_limit
 
     torch.ops._C.masked_moe_activation(
         output,
@@ -390,7 +390,8 @@ def apply_moe_activation(
     elif activation == MoEActivation.SWIGLUSTEP:
         from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
-        swiglustep_and_mul_triton(output, input)
+        limit = 7.0 if config.clamp_limit is None else config.clamp_limit
+        swiglustep_and_mul_triton(output, input, limit=limit)
 
     # Activations without gated multiplication
     elif activation == MoEActivation.SILU_NO_MUL:
