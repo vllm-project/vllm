@@ -1506,43 +1506,19 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
 
         assert (output is None) != (output_mxfp8 is None)
         if self._plain_fp8_kv:
-            # aiter's store epilogue (inverse RoPE, MXFP8) only reads the
-            # packed record, so the rows go through the standalone passes.
-            rows = output
-            if output_mxfp8 is not None:
-                rows = torch.empty(
-                    (q.shape[0], self.n_local_heads, self.head_dim),
-                    dtype=torch.bfloat16,
-                    device=q.device,
-                )
             _plain_fp8_sparse_mla(
                 self,
                 q,
-                rows,
+                output,
                 swa_k_cache,
                 swa_indices,
                 swa_indptr,
                 compressed_k_cache,
                 topk_indices,
                 topk_indptr,
+                positions=positions,
+                output_mxfp8=output_mxfp8,
             )
-            if output_mxfp8 is not None:
-                assert positions is not None
-                rocm_inverse_rope_mxfp8_rows(
-                    rows,
-                    positions,
-                    self.rotary_emb.cos_sin_cache,
-                    self.rope_head_dim,
-                    output_mxfp8[0],
-                    output_mxfp8[1],
-                )
-            elif positions is not None:
-                rocm_inverse_rope_rows_(
-                    rows[:, : self.n_local_heads, :],
-                    positions,
-                    self.rotary_emb.cos_sin_cache,
-                    self.rope_head_dim,
-                )
             return
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the

@@ -176,19 +176,22 @@ def _register_plain_fp8_kv_scales(layer: torch.nn.Module, use_aiter: bool) -> No
 def _plain_fp8_sparse_mla(
     layer: Any,
     q: torch.Tensor,
-    output: torch.Tensor,
+    output: torch.Tensor | None,
     swa_k_cache: torch.Tensor,
     swa_indices: torch.Tensor,
     swa_indptr: torch.Tensor,
     compressed_k_cache: torch.Tensor | None,
     topk_indices: torch.Tensor | None,
     topk_indptr: torch.Tensor | None,
+    positions: torch.Tensor | None = None,
+    output_mxfp8: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> None:
     """Sparse MLA through aiter on per-tensor fp8 rows, with fp8 dots. RoPE
     lives inside the 512-wide row, so it runs the rope-free geometry. Both
-    caches share the one KV scale."""
+    caches share one KV scale. The store can apply inverse RoPE and MXFP8."""
     from vllm._aiter_ops import rocm_aiter_ops
 
+    assert output_mxfp8 is None or positions is not None
     rocm_aiter_ops.triton_sparse_mla_fwd(
         q,
         swa_k_cache,
@@ -204,6 +207,14 @@ def _plain_fp8_sparse_mla(
         extra_kv_buffer=compressed_k_cache,
         extra_kv_indptr=topk_indptr,
         extra_kv_indices=topk_indices,
+        # The ragged builders remove padding from each live index range.
+        has_invalid=False,
+        dot_precision="fp8",
+        inv_rope_positions=positions,
+        inv_rope_cos_sin_cache=(
+            None if positions is None else layer.rotary_emb.cos_sin_cache
+        ),
+        out_mxfp8=output_mxfp8,
     )
 
 
@@ -1907,7 +1918,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         from vllm._aiter_ops import rocm_aiter_ops
 
         if self._plain_fp8_kv:
-            # aiter's inverse-RoPE store only reads the packed record.
             _plain_fp8_sparse_mla(
                 self,
                 q,
@@ -1918,14 +1928,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 compressed_k_cache,
                 topk_indices,
                 topk_indptr,
+                positions=positions,
             )
-            if positions is not None:
-                rocm_inverse_rope_rows_(
-                    output[:, : self.n_local_heads, :],
-                    positions,
-                    self.rotary_emb.cos_sin_cache,
-                    self.rope_head_dim,
-                )
             return
         # Both fp8 caches are read in place: the SWA window as the main segment,
         # the top-k compressed tokens as the extra one. With positions the

@@ -573,8 +573,19 @@ def test_deepseek_v41_forward_mqa_mxfp8_matches_reference(
 
 
 @pytest.mark.parametrize("output", ["bf16", "mxfp8"])
+@pytest.mark.parametrize(
+    "cache_dtype, q_dtype",
+    [
+        ("fp8_ds_mla", torch.bfloat16),
+        ("fp8_e4m3", torch.bfloat16),
+        ("fp8_e4m3", torch.float8_e4m3fn),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [1, 256])
 @torch.inference_mode()
-def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> None:
+def test_sparse_mla_store_epilogue_matches_standalone_passes(
+    output: str, cache_dtype: str, q_dtype: torch.dtype, num_tokens: int
+) -> None:
     """The inverse RoPE (and MXFP8 quantization) aiter applies in its store
     matches running the kernel without it and then the standalone passes it
     replaces: rocm_inverse_rope_rows_ / rocm_inverse_rope_mxfp8_rows."""
@@ -593,9 +604,28 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> Non
         pytest.skip("the aiter sparse MLA kernel is gfx950-only")
     device = torch.device("cuda")
     set_random_seed(0)
-    num_tokens, num_heads, head_dim, rope_dim, block_size = 10, 64, 512, 64, 64
+    num_heads, head_dim, rope_dim, block_size = 64, 512, 64, 64
+    kv_scale = torch.tensor([0.01], dtype=torch.float32, device=device)
+    q_scale = torch.tensor([0.01], dtype=torch.float32, device=device)
 
-    def fp8_ds_mla_cache(num_rows: int) -> torch.Tensor:
+    def make_kv_cache(num_rows: int) -> torch.Tensor:
+        if cache_dtype == "fp8_e4m3":
+            values = (
+                torch.randn(
+                    num_rows // block_size,
+                    block_size,
+                    head_dim,
+                    dtype=torch.float32,
+                    device=device,
+                )
+                * 0.5
+            )
+            limits = torch.finfo(torch.float8_e4m3fn)
+            return (
+                (values / kv_scale)
+                .clamp(limits.min, limits.max)
+                .to(torch.float8_e4m3fn)
+            )
         cache = torch.zeros(
             (num_rows // block_size, block_size, 584), dtype=torch.uint8, device=device
         )
@@ -614,10 +644,12 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> Non
         indptr = torch.arange(0, (num_tokens + 1) * keys_per_row, keys_per_row)
         return indptr.to(device, torch.int32), indices.int()
 
-    swa_cache, compressed_cache = fp8_ds_mla_cache(256), fp8_ds_mla_cache(128)
+    swa_cache, compressed_cache = make_kv_cache(256), make_kv_cache(128)
     swa_indptr, swa_indices = ragged(32, 256)
     topk_indptr, topk_indices = ragged(48, 128)
     q = (torch.randn(num_tokens, num_heads, head_dim, device=device) * 0.5).bfloat16()
+    if q_dtype == torch.float8_e4m3fn:
+        q = (q.float() / q_scale).to(q_dtype)
     sink = torch.randn(num_heads, device=device)
     positions = torch.randint(0, 4096, (num_tokens,), device=device)
     inv_freq = 1.0 / 10000 ** (
@@ -627,6 +659,15 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> Non
     cos_sin_cache = torch.cat([freqs.cos(), freqs.sin()], dim=-1)
 
     def sparse_mla(o, rotate: bool, out_mxfp8=None) -> None:
+        plain_kwargs = {}
+        if cache_dtype == "fp8_e4m3":
+            plain_kwargs = {
+                "qk_rope_head_dim": 0,
+                "q_scale": q_scale,
+                "kv_scale": kv_scale,
+                "has_invalid": False,
+                "dot_precision": "fp8",
+            }
         rocm_aiter_ops.triton_sparse_mla_fwd(
             q,
             swa_cache,
@@ -641,15 +682,16 @@ def test_sparse_mla_store_epilogue_matches_standalone_passes(output: str) -> Non
             inv_rope_positions=positions if rotate else None,
             inv_rope_cos_sin_cache=cos_sin_cache if rotate else None,
             out_mxfp8=out_mxfp8,
+            **plain_kwargs,
         )
 
-    unrotated = torch.empty_like(q)
+    unrotated = torch.empty(q.shape, dtype=torch.bfloat16, device=device)
     sparse_mla(unrotated, rotate=False)
     expected = unrotated.clone()
     rocm_inverse_rope_rows_(expected, positions, cos_sin_cache, rope_dim)
 
     if output == "bf16":
-        fused = torch.empty_like(q)
+        fused = torch.empty_like(unrotated)
         sparse_mla(fused, rotate=True)
         torch.testing.assert_close(fused, expected)
         return
