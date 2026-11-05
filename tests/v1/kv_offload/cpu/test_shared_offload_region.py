@@ -689,6 +689,50 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     assert not any(os.path.exists(path) for path, _, _ in segments)
 
 
+def test_segment_creation_failure_removes_partial_segments(iid, monkeypatch):
+    """A failed segment truncate must close its fd and remove every pathname."""
+    monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    real_ftruncate = os.ftruncate
+    real_open = os.open
+    opened_fds: list[int] = []
+
+    def track_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened_fds.append(fd)
+        return fd
+
+    def fail_first_ftruncate(fd, length):
+        if len(opened_fds) == 2 and fd == opened_fds[1]:
+            raise OSError(errno.EFBIG, "simulated segment size failure")
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(region_module.os, "open", track_open)
+    monkeypatch.setattr(region_module.os, "ftruncate", fail_first_ftruncate)
+
+    with pytest.raises(OSError, match="simulated segment size failure"):
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=2,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            num_segments=2,
+            unlink_owner=True,
+        )
+
+    assert len(opened_fds) == 2
+    for fd in opened_fds:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+    assert not any(
+        os.path.exists(path)
+        for path in (
+            f"/dev/shm/vllm_offload_{iid}.mmap",
+            f"/dev/shm/vllm_offload_{iid}.mmap.1",
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Multi-worker race — concurrent construction
 # ---------------------------------------------------------------------------
