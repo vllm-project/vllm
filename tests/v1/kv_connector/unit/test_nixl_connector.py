@@ -2131,6 +2131,7 @@ def test_kv_connector_stats_failure_grouping():
     stats.record_failed_notification()
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
+    stats.record_declined_expired_read()
     assert not stats.is_empty()
 
     # No successful transfers: latency stats are zero but the failure
@@ -2140,6 +2141,7 @@ def test_kv_connector_stats_failure_grouping():
     assert reduced["Num failed transfers"] == 3
     assert reduced["Num KV expired reqs"] == 1
     assert reduced["Num notifs after expiry"] == 1
+    assert reduced["Num declined expired reads"] == 1
 
 
 def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
@@ -2185,6 +2187,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     stats.record_failed_notification()
     stats.record_kv_expired_req()
     stats.record_notification_after_expiry()
+    stats.record_declined_expired_read()
     prom.observe(stats.data, engine_idx=0)
 
     def counter_value(name: str) -> float:
@@ -2197,6 +2200,7 @@ def test_nixl_prom_metrics_group_handshake_with_transfer_failures():
     assert counter_value("vllm:nixl_num_failed_transfers_total") == 3.0
     assert counter_value("vllm:nixl_num_kv_expired_reqs_total") == 1.0
     assert counter_value("vllm:nixl_num_notifications_after_expiry_total") == 1.0
+    assert counter_value("vllm:nixl_num_declined_expired_reads_total") == 1.0
 
 
 @patch(
@@ -2543,6 +2547,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
 def recv_worker():
     """Receive lifecycle state without distributed or device initialization."""
     worker = object.__new__(NixlConnectorWorker)
+    worker._remote_leases = {}
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.block_size_ratio.return_value = 1
     worker.transfer_topo.get_engine_info.return_value = SimpleNamespace(
@@ -3718,10 +3723,11 @@ class TestPeerReplacement:
         metadata = self._request("old")
         if expired:
             metadata.reqs_to_recv["old-req"].remote.blocks_expiry_time = 0.0
-            self.worker._bidirectional_kv_xfer_enabled = True
         with (
             patch.object(self.worker.xfer_stats, "record_failed_transfer") as failure,
-            patch.object(self.worker.xfer_stats, "record_kv_expired_req") as expiry,
+            patch.object(
+                self.worker.xfer_stats, "record_declined_expired_read"
+            ) as expiry,
         ):
             self.worker.start_load_kv(metadata)
             result = self.worker.get_transfer_results()

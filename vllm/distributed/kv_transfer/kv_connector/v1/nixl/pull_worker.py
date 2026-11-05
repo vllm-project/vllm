@@ -9,6 +9,7 @@ import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds, EngineId
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    _KV_BLOCKS_EXPIRY_SAFETY_MARGIN,
     NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -28,10 +29,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Slack (seconds) subtracted from D's exported block-expiry deadline on the turn-2
-# readback, absorbing clock-offset error and read latency.
-_KV_BLOCKS_EXPIRY_SAFETY_MARGIN = 5.0
-
 
 class NixlPullConnectorWorker(NixlBaseConnectorWorker):
     """Pull-specific (READ) worker logic."""
@@ -50,6 +47,13 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         """Start loading by triggering non-blocking nixl_xfer.
         We check for these trnxs to complete in each step().
         """
+        # Send heartbeats to P-side engines to keep KV blocks alive while
+        # requests sit in the D scheduler WAITING queue. This runs first so
+        # that every rank keeps its lease model (replicated-PCP ranks > 0
+        # return early below yet still gate their reads) and so that a round
+        # shipped in the same step as a read is credited before the gate.
+        self._send_heartbeats(metadata)
+
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids, self._physical_blocks_per_logical_kv_block
@@ -120,19 +124,46 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     )
                 self._reqs_to_send[req_id] = expiration_time
 
-        # Send heartbeats to P-side engines to keep KV blocks alive while
-        # requests sit in the D scheduler WAITING queue.
-        self._send_heartbeats(metadata)
+    def _remote_lease_deadline(self, meta: ReqMeta) -> float | None:
+        """Instant (our perf_counter) until which the remote keeps this request's
+        blocks, or None when it cannot be told.
 
-    def _is_turn2_read_expired(self, meta: ReqMeta) -> bool:
-        """Whether D's cached blocks for this turn-2 readback have (nearly) expired."""
+        Starts from the deadline the remote exported in ``kv_transfer_params``,
+        rebased with the handshake clock offset. Heartbeats we sent for the
+        request renew the lease on the remote, and ``_record_heartbeat_sent``
+        keeps an exact model of those renewals (a lease that lapsed between two
+        heartbeats keeps the deadline it ran out at). Without a model (no
+        heartbeat went out, or the remote exported no renewal amount) the
+        initial deadline stands: never guess.
+        """
         assert meta.remote is not None
-        blocks_expiry_time = meta.remote.blocks_expiry_time
-        # Deadline may be absent (router may not forward it) -> read as usual.
-        if blocks_expiry_time is None or not meta.local_physical_block_ids:
+        expiry = meta.remote.blocks_expiry_time
+        if expiry is None:
+            return None
+        clock_offset = self._engine_clock_offset.get(meta.remote.engine_id)
+        if clock_offset is None:
+            return None
+        deadline = expiry - clock_offset
+        model = self._remote_leases.get((meta.remote.engine_id, meta.remote.request_id))
+        if model is None:
+            return deadline
+        return max(deadline, model.deadline)
+
+    def _is_remote_read_expired(self, meta: ReqMeta) -> bool:
+        """Whether the remote's lease on this request's blocks has (nearly) run out.
+
+        P exports the deadline of the lease it grants when a prefill finishes (D
+        exports its turn-2 TTL). Past it the remote has released the blocks and
+        reused them, so the read would load other requests' KV and SSM state
+        without any transport error.
+        """
+        # A full local prefix hit issues no read at all. The deadline may be
+        # absent (older peer, or a router that drops it): read as before.
+        if not meta.local_physical_block_ids:
             return False
-        clock_offset = self._engine_clock_offset[meta.remote.engine_id]
-        deadline = blocks_expiry_time - clock_offset
+        deadline = self._remote_lease_deadline(meta)
+        if deadline is None:
+            return False
         return time.perf_counter() + _KV_BLOCKS_EXPIRY_SAFETY_MARGIN >= deadline
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
@@ -153,23 +184,39 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Also re-handshakes queued requests that outlived invalid-peer cleanup.
             self._background_nixl_handshake(req_id, engine_id, meta)
             return
-        # Update last activity from this remote. Mind that cleanup is done on main
-        # thread (this one), so we don't race on this structure.
-        self._engine_last_active[engine_id] = time.perf_counter()
-
-        if self._bidirectional_kv_xfer_enabled and self._is_turn2_read_expired(meta):
-            logger.warning(
-                "Declining expired remote read for %s from engine %s.",
-                req_id,
+        lease_key = (engine_id, meta.remote.request_id)
+        if self._is_remote_read_expired(meta):
+            self._remote_leases.pop(lease_key, None)
+            # One warning per remote engine explains the condition; every
+            # occurrence is counted (Num declined expired reads) and logged at
+            # debug level, as a stalled router can produce these continuously.
+            logger.warning_once(
+                "Declining remote KV reads from engine %s whose lease ran out "
+                "before the read (router held the request longer than "
+                "kv_lease_duration?); kv_load_failure_policy applies. Counted "
+                "in vllm:nixl_num_declined_expired_reads.",
                 engine_id,
             )
-            self.xfer_stats.record_kv_expired_req()
-            # KV expiry is reported separately from transport failures, so only
-            # the state cleanup side of _handle_failed_transfer runs here.
+            logger.debug(
+                "Declined expired remote read for %s (remote %s on engine %s)",
+                req_id,
+                meta.remote.request_id,
+                engine_id,
+            )
+            self.xfer_stats.record_declined_expired_read()
+            # Reported separately from transport failures, so only the state
+            # cleanup side of _handle_failed_transfer runs here.
             self._handle_failed_transfer(
                 req_id, None, self._recv_failures, record_failed_transfer=False
             )
             return
+        # The read goes ahead; the scheduler stops heartbeating this request
+        # once it completes.
+        self._remote_leases.pop(lease_key, None)
+
+        # Update last activity from this remote. Mind that cleanup is done on main
+        # thread (this one), so we don't race on this structure.
+        self._engine_last_active[engine_id] = time.perf_counter()
 
         if any(len(group) > 0 for group in meta.local_block_ids):
             # The scheduler waits for finished_recving from *every* worker.

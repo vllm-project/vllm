@@ -42,6 +42,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             "num_failed_handshakes": [],
             "num_kv_expired_reqs": [],
             "num_notifications_after_expiry": [],
+            "num_declined_expired_reads": [],
         }
 
     def record_transfer(self, res: "nixlXferTelemetry | None"):
@@ -73,6 +74,10 @@ class NixlKVConnectorStats(KVConnectorStats):
         """Record a completion notification that arrived after its request expired."""
         self.data["num_notifications_after_expiry"].append(1)
 
+    def record_declined_expired_read(self):
+        """Record a remote read declined because the remote's lease ran out."""
+        self.data["num_declined_expired_reads"].append(1)
+
     def clone_and_reset(self) -> "NixlKVConnectorStats":
         old = copy.copy(self)
         self.reset()
@@ -87,6 +92,7 @@ class NixlKVConnectorStats(KVConnectorStats):
             and len(self.data["num_failed_handshakes"]) == 0
             and len(self.data["num_kv_expired_reqs"]) == 0
             and len(self.data["num_notifications_after_expiry"]) == 0
+            and len(self.data["num_declined_expired_reads"]) == 0
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
@@ -104,13 +110,16 @@ class NixlKVConnectorStats(KVConnectorStats):
         # lower-transport-layer events, while KV expiry is reported separately
         # as it is an actionable autoscaler signal rather than a transport
         # issue. Notifications arriving after expiry are surfaced too, as the
-        # reader may have consumed KV blocks that were already reused.
+        # reader may have consumed KV blocks that were already reused. Declined
+        # reads are the consumer-side view of expiry: requests that reached the
+        # reader only after the remote lease had run out.
         failure_counts = {
             "Num failed transfers": len(self.data["num_failed_transfers"])
             + len(self.data["num_failed_handshakes"])
             + len(self.data["num_failed_notifications"]),
             "Num KV expired reqs": len(self.data["num_kv_expired_reqs"]),
             "Num notifs after expiry": len(self.data["num_notifications_after_expiry"]),
+            "Num declined expired reads": len(self.data["num_declined_expired_reads"]),
         }
         if self.num_successful_transfers == 0:
             # Timing / throughput stats only cover successful transfers. If
@@ -284,6 +293,18 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             counter_nixl_num_notifications_after_expiry, self.per_engine_labelvalues
         )
 
+        counter_nixl_num_declined_expired_reads = self._counter_cls(
+            name="vllm:nixl_num_declined_expired_reads",
+            documentation="Number of remote KV reads declined because the remote "
+            "had released the blocks (lease expired) before the read. Each one "
+            "is a request that follows kv_load_failure_policy. NOTE: This metric "
+            "is tracked on the reading (consumer) instance.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_declined_expired_reads = create_metric_per_engine(
+            counter_nixl_num_declined_expired_reads, self.per_engine_labelvalues
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(
             [
@@ -307,6 +328,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 self.counter_nixl_num_failed_notifications,
                 self.counter_nixl_num_kv_expired_reqs,
                 self.counter_nixl_num_notifications_after_expiry,
+                self.counter_nixl_num_declined_expired_reads,
             ],
             [
                 # Transfer, handshake and notification failures are grouped:
@@ -321,6 +343,7 @@ class NixlPromMetrics(KVConnectorPromMetrics):
                 ("num_failed_notifications",),
                 ("num_kv_expired_reqs",),
                 ("num_notifications_after_expiry",),
+                ("num_declined_expired_reads",),
             ],
         ):
             for counter_item_key in counter_item_keys:
