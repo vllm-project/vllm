@@ -6,6 +6,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
+if not current_platform.is_cuda_alike():
+    pytest.skip(
+        "Imports vllm.platforms.rocm, whose module init requires a CUDA or "
+        "ROCm torch build; not importable on XPU/CPU/TPU.",
+        allow_module_level=True,
+    )
+
 from vllm.models.deepseek_v4.amd.rocm import (
     DeepseekV4ROCMAiterMLASparseMetadataBuilder,
     DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
