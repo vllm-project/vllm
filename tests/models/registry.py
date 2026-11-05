@@ -537,6 +537,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
     ),
+    "RicursiveForCausalLM": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview",
+        extras={"nvfp4": "ricursiveAI/Ripple-65B-Preview-NVFP4"},
+    ),
     "Rnj1ForCausalLM": _HfExamplesInfo(
         "EssentialAI/rnj-1-instruct",
         is_available_online=False,
@@ -901,6 +905,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
+    "UnlimitedOCR2TextForCausalLM": _HfExamplesInfo("baidu/Unlimited-OCR-2"),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
     ),
@@ -1545,6 +1550,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DFlash2BeamDraftModel": _HfExamplesInfo(
         "reflection/Beam-1.0-501B-A23B-NVFP4",
         speculative_model="reflection/Beam-1.0-501B-A23B-DFlash2",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
+    "DFlash2RicursiveDraftModel": _HfExamplesInfo(
+        "ricursiveAI/Ripple-65B-Preview-NVFP4",
+        speculative_model="ricursiveAI/Ripple-65B-Preview-DFlash2",
         is_available_online=False,
         use_original_num_layers=True,
     ),
