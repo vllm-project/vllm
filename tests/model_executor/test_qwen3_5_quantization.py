@@ -4,6 +4,40 @@
 from unittest.mock import Mock, patch
 
 
+def test_qwen3_5_attention_receives_scheduler_limit():
+    from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
+
+    mock_hf_config = Mock()
+    mock_hf_config.model_type = "qwen3_5_moe_text"
+    mock_hf_config.layer_scale = False
+
+    mock_vllm_config = Mock()
+    mock_vllm_config.model_config.hf_text_config = mock_hf_config
+    mock_vllm_config.cache_config.mamba_cache_mode = "align"
+    mock_vllm_config.parallel_config.use_sequence_parallel_moe = False
+    mock_vllm_config.parallel_config.pipeline_parallel_size = 1
+    mock_vllm_config.scheduler_config.max_num_seqs = 256
+
+    with (
+        patch(
+            "vllm.model_executor.models.qwen3_5.Qwen3NextAttention"
+        ) as mock_attention,
+        patch("vllm.model_executor.models.qwen3_5.Qwen3NextSparseMoeBlock"),
+        patch("vllm.model_executor.models.qwen3_5.Qwen3_5RMSNorm"),
+        patch(
+            "vllm.model_executor.models.qwen3_5.extract_layer_index",
+            return_value=0,
+        ),
+    ):
+        Qwen3_5DecoderLayer(
+            vllm_config=mock_vllm_config,
+            layer_type="full_attention",
+            prefix="model.layers.0",
+        )
+
+    assert mock_attention.call_args.kwargs["max_num_seqs"] == 256
+
+
 def test_qwen3_5_lm_head_receives_quant_config():
     from vllm.model_executor.models.qwen3_5 import Qwen3_5ForCausalLMBase
 
