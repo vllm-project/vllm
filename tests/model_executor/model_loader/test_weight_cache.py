@@ -351,8 +351,6 @@ def test_ipc_cache_cold_start_and_warm_restart(
     so they never hit the daemon's file by design; reuse is proven against
     the file the earlier in-process engines wrote.
     """
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     if case.check_flashinfer_cache:
@@ -498,8 +496,6 @@ def test_ipc_cache_cold_start_and_warm_restart_tp2_ep(vllm_runner, tmp_path):
 def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
     """A mirror daemon adopts the source's autotune cache over D2D, skips
     re-tuning, and serves outputs identical to the default-loader baseline."""
-    if not current_platform.is_cuda_alike():
-        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
     if not current_platform.is_device_capability_family(100):
         pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     from vllm.utils.flashinfer import has_flashinfer
