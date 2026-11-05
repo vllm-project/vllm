@@ -106,6 +106,10 @@ The speculator reads its options from
 `speculative_config.method` is the built-in method its config is based on
 (`"eagle3"`), so vLLM treats it like that built-in speculator.
 
+A speculator that keeps per-request state can override `BaseSpeculator`'s
+no-op request hooks: `add_request`, `on_requests_finished`,
+`on_requests_preempted` and `shutdown`.
+
 ## `--speculative-config` schema
 
 Use `--speculative-config` to pass speculative decoding settings as a JSON
