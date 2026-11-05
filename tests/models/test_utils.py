@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import replace
-
 import pytest
 import regex as re
 import torch
@@ -470,19 +468,6 @@ def test_weights_mapper_literal_rules_compile_to_regex():
     assert mapper.map_name("w.s") == "root.w.t"
     assert mapper.map_name("w.s.s2") == "root.w.s.s2"
     assert mapper.map_name("a.drop.b") is None
-
-
-def test_weights_mapper_prefix_rules_survive_or_and_replace():
-    mapper = WeightsMapper(
-        orig_to_new_regex={re.compile(r"^x"): "y"},
-        orig_to_new_prefix={"model.vision_": r"v\1", "drop.": None},
-    ) | WeightsMapper(orig_to_new_prefix={"lm_head.": "llm.lm_head."})
-
-    assert replace(mapper, orig_to_new_stacked={}).prefix_rules() == {
-        "model.vision_": r"v\1",
-        "drop.": None,
-        "lm_head.": "llm.lm_head.",
-    }
 
 
 def test_weights_mapper_stream_transforms_run_in_list_order_with_renames():

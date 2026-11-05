@@ -129,16 +129,6 @@ class WeightsMapper:
             },
         )
 
-    def prefix_rules(self) -> dict[str, str | None]:
-        """Recover the literal `orig_to_new_prefix` rules from `orig_to_new_regex`."""
-        return {
-            re.sub(r"\\(.)", r"\1", pattern.pattern.removeprefix(r"\A")): (
-                new if new is None else new.replace("\\\\", "\\")
-            )
-            for pattern, new in self.orig_to_new_regex.items()
-            if pattern.pattern.startswith(r"\A")
-        }
-
     def map_name(self, key: str) -> str | None:
         """Map a weight name; returns ``None`` if the weight should be ignored."""
         result = self._map_name_with_shard(key)

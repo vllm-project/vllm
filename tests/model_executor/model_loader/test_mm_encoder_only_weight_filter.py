@@ -120,10 +120,6 @@ def test_resolve_returns_module_prefixes_without_hf_hardcode():
     """No global Qwen HF nest list — just vLLM module prefixes."""
     prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
     assert prefixes == ("language_model.",)
-    # With Qwen mapper, still module prefixes (keys classified via mapper).
-    assert resolve_mm_encoder_only_lm_prefixes(
-        ["language_model"], weights_mapper=_qwen25_mapper()
-    ) == ("language_model.",)
 
 
 def test_resolve_empty_language_model_names_fail_closed():
@@ -131,17 +127,6 @@ def test_resolve_empty_language_model_names_fail_closed():
     assert resolve_mm_encoder_only_lm_prefixes(None) is None
     assert resolve_mm_encoder_only_lm_prefixes([]) is None
     assert resolve_mm_encoder_only_lm_prefixes(()) is None
-
-
-def test_resolve_skips_filter_for_shared_hf_root():
-    """Shared HF root (Molmo-shaped mapper) → fail-closed, not magic name list."""
-    assert (
-        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
-        is None
-    )
-    # Without a mapper, identity layout: module prefix is returned as-is.
-    assert resolve_mm_encoder_only_lm_prefixes(["model"]) == ("model.",)
-    assert resolve_mm_encoder_only_lm_prefixes(["model."]) == ("model.",)
 
 
 def test_resolve_keeps_llm_prefix_without_model_broadening():
@@ -167,9 +152,7 @@ def test_qwen3_nested_index_skips_lm_keeps_visual():
                 "model.visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(
-            ["language_model"], weights_mapper=_qwen3_mapper()
-        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
             files,
@@ -201,9 +184,7 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
                 "visual.blocks.0.weight": "model-00002-of-000002.safetensors",
             },
         )
-        prefixes = resolve_mm_encoder_only_lm_prefixes(
-            ["language_model"], weights_mapper=_qwen25_mapper()
-        )
+        prefixes = resolve_mm_encoder_only_lm_prefixes(["language_model"])
         assert prefixes is not None
         kept = filter_mm_encoder_only_safetensors_files(
             files,
@@ -215,12 +196,8 @@ def test_qwen25_flat_index_skips_lm_keeps_visual():
         assert kept == [files[1]]
 
 
-def test_molmo_shaped_index_not_filtered_when_deny_disabled():
-    """Shared-root LM attr → resolve None; callers leave the file list alone."""
-    assert (
-        resolve_mm_encoder_only_lm_prefixes(["model"], weights_mapper=_molmo_mapper())
-        is None
-    )
+def test_molmo_shaped_index_not_filtered_for_shared_hf_root():
+    """A non-LM key under the LM prefix's HF root keeps every shard."""
     with tempfile.TemporaryDirectory() as folder:
         files = [
             os.path.join(folder, "vision.safetensors"),
@@ -241,3 +218,11 @@ def test_molmo_shaped_index_not_filtered_when_deny_disabled():
             files, folder, SAFE_WEIGHTS_INDEX_NAME, ("model.",)
         )
         assert if_applied_naively == []
+        kept = filter_mm_encoder_only_safetensors_files(
+            files,
+            folder,
+            SAFE_WEIGHTS_INDEX_NAME,
+            ("model.",),
+            weights_mapper=_molmo_mapper(),
+        )
+        assert kept == files
