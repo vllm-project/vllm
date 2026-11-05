@@ -94,39 +94,6 @@ class MarlinScalarType<vllm::kBFloat16.id()> {
 #endif
 };
 
-template <>
-class MarlinScalarType<vllm::kFE4M3fn.id()> {
- public:
-  using scalar_t = __nv_fp8_e4m3;
-  using scalar_t2 = __nv_fp8x2_e4m3;
-  using scalar_t4 = __nv_fp8x4_e4m3;
-  using scalar_32bit_t = __nv_fp8x4_e4m3;
-
-  using FragA = Vec<__nv_fp8x4_e4m3, 4>;
-  using FragB = Vec<__nv_fp8x4_e4m3, 2>;
-  using FragC = Vec<float, 4>;
-  using FragZP = Vec<__nv_fp8x2_e4m3, 4>;
-
-  static __host__ __device__
-      float2 inline num22float2(const __nv_fp8x2_e4m3 x) {
-    return (float2)x;
-  }
-};
-
-template <>
-class MarlinScalarType<vllm::kS8.id()> {
- public:
-  using scalar_t = int8_t;
-  using scalar_t2 = int16_t;
-  using scalar_t4 = int32_t;
-  using scalar_32bit_t = int32_t;
-
-  using FragA = Vec<int32_t, 4>;
-  using FragB = Vec<int32_t, 2>;
-  using FragC = Vec<float, 4>;
-  using FragZP = Vec<int16_t, 4>;
-};
-
 template <typename scalar_t>
 class MarlinScalarType2 {};
 
@@ -136,13 +103,6 @@ class MarlinScalarType2<half> : public MarlinScalarType<vllm::kFloat16.id()> {};
 template <>
 class MarlinScalarType2<nv_bfloat16>
     : public MarlinScalarType<vllm::kBFloat16.id()> {};
-
-template <>
-class MarlinScalarType2<__nv_fp8_e4m3>
-    : public MarlinScalarType<vllm::kFE4M3fn.id()> {};
-
-template <>
-class MarlinScalarType2<int8_t> : public MarlinScalarType<vllm::kS8.id()> {};
 
 }  // namespace MARLIN_NAMESPACE_NAME
 
