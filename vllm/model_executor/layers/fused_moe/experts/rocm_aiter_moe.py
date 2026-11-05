@@ -437,6 +437,8 @@ def rocm_aiter_fused_experts(
             if rocm_aiter_ops.is_fused_moe_situv2_gate_up_interleaved()
             else GateMode.SEPARATED.value
         )
+    elif activation == MoEActivation.RELU2_NO_MUL:
+        gate_mode = GateMode.SEPARATED.value
     elif gate_mode_override is not None:
         gate_mode = gate_mode_override
     elif activation_interleave is not None:
