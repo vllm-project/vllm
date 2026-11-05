@@ -1586,6 +1586,9 @@ def test_decode_index_topk_correctness(
     max_decode_query_len: int,
     num_padded_reqs: int,
 ):
+    # A local generator, so the inputs don't depend on the RNG state that
+    # earlier tests in the shard leave behind.
+    gen = torch.Generator(device="cuda").manual_seed(0)
     topk = 6
     init_blocks = 0
     local_blocks = 1
@@ -1607,14 +1610,28 @@ def test_decode_index_topk_correctness(
     num_pages = active_batch * max_blocks
 
     active_block_table = torch.randperm(
-        num_pages, device="cuda", dtype=torch.int32
+        num_pages, device="cuda", dtype=torch.int32, generator=gen
     ).reshape(active_batch, max_blocks)
     block_table = torch.zeros(batch, max_blocks, device="cuda", dtype=torch.int32)
     block_table[:active_batch] = active_block_table
-    idx_q = torch.randn(
-        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    # bf16-representable values make the kernel's TF32 dot exact, so near-tied
+    # blocks rank the same as in the FP32 reference.
+    idx_q = (
+        torch.randn(
+            batch * decode_query_len,
+            num_idx_heads,
+            head_dim,
+            device="cuda",
+            generator=gen,
+        )
+        .bfloat16()
+        .float()
     )
-    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda")
+    index_kv_cache = (
+        torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda", generator=gen)
+        .bfloat16()
+        .float()
+    )
 
     actual = minimax_m3_index_decode(
         idx_q,
