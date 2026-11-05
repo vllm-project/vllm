@@ -6,6 +6,8 @@ Efficient memory usage is crucial for working with large language models. Quanti
 
 > **Note:** When using the Flash Attention 3 backend with FP8 KV cache, attention operations are also performed in the quantized (FP8) domain. In this configuration, queries are quantized to FP8 in addition to keys and values.
 
+> **Note:** On ROCm, the `ROCM_AITER_FA` backend can run prefill attention in FP8 on gfx942 for head size 256, with an FP8 KV cache and `--attention-config '{"use_prefill_query_quantization": true}'`. Queries and new keys and values get one dynamic scale per tensor per call, so results are not batch invariant.
+
 ### Supported FP8 KV-Cache Quantization Schemes
 
 vLLM supports two main quantization strategies for the FP8 KV-cache:
