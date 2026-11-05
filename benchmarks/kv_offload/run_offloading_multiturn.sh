@@ -30,7 +30,8 @@
 # gets a fresh server. Results from earlier runs in the same RESULTS_DIR are
 # included in the summary table.
 #
-# Requires guidellm (tested with 0.8.1; pip install guidellm).
+# Run inside the vLLM virtualenv (so `vllm` and `python` resolve to it).
+# Requires guidellm (tested with 0.8.1; uv pip install guidellm).
 #
 # Note: until #57422 lands, the cpu_fs configuration leaves its CPU tier
 # (CPU_BYTES) in /dev/shm/vllm_offload_<engine_id>.mmap after the server stops.
@@ -64,7 +65,8 @@ READY_TIMEOUT=${READY_TIMEOUT:-1800}
 STOP_TIMEOUT=${STOP_TIMEOUT:-180}
 RESULTS_DIR=${RESULTS_DIR:-"offloading_multiturn_$(date +%Y%m%d_%H%M%S)"}
 
-command -v guidellm >/dev/null || { echo "guidellm not found (pip install guidellm)" >&2; exit 1; }
+command -v guidellm >/dev/null || { echo "guidellm not found (uv pip install guidellm)" >&2; exit 1; }
+command -v python >/dev/null || { echo "python not found; run inside the vLLM virtualenv" >&2; exit 1; }
 mkdir -p "$RESULTS_DIR"
 
 # Check every configuration before the first run starts.
@@ -181,6 +183,13 @@ start_server() {
     done
 }
 
+# A failed scrape leaves no file, so the summary reports N/A instead of 0.
+scrape_metrics() {
+    curl -sf --max-time 30 "$1/metrics" > "$2" && return 0
+    rm -f "$2"
+    echo "Could not read $1/metrics; offloading counters will be N/A" >&2
+}
+
 run_guidellm() {
     local target=$1 streams=$2 out=$3 prefix_count
     prefix_count=${PREFIX_COUNT:-$(( 4 * streams > 256 ? 4 * streams : 256 ))}
@@ -210,21 +219,21 @@ for cfg in $CONFIGS; do
             start_server "$cfg" "${run}_server.log"
             target="http://127.0.0.1:$PORT"
         fi
-        curl -sf "$target/metrics" > "${run}_metrics_before.txt" || true
+        scrape_metrics "$target" "${run}_metrics_before.txt"
         run_guidellm "$target" "$streams" "${run}.json"
-        curl -sf "$target/metrics" > "${run}_metrics_after.txt" || true
+        scrape_metrics "$target" "${run}_metrics_after.txt"
         [ -n "$TARGET" ] || cleanup
     done
 done
 
-python3 - "$RESULTS_DIR" <<'EOF'
+python - "$RESULTS_DIR" <<'EOF'
 import glob, json, os, sys
 
 def counters(path):
-    """Sum of the offloading byte counters in a /metrics snapshot."""
-    out = {"cpu_to_gpu": 0.0, "secondary_read": 0.0}
+    """Sum of the offloading byte counters in a /metrics snapshot, or None."""
     if not os.path.exists(path):
-        return out
+        return None
+    out = {"cpu_to_gpu": 0.0, "secondary_read": 0.0}
     with open(path) as f:
         lines = f.readlines()
     for line in lines:
@@ -243,7 +252,11 @@ for path in sorted(glob.glob(os.path.join(sys.argv[1], "*_c*.json")), key=os.pat
     name = os.path.basename(path)[: -len(".json")]
     before = counters(path[: -len(".json")] + "_metrics_before.txt")
     after = counters(path[: -len(".json")] + "_metrics_after.txt")
-    delta = {k: (after[k] - before[k]) / 1e9 for k in after}
+    keys = ("cpu_to_gpu", "secondary_read")
+    if before is None or after is None:
+        delta = {k: None for k in keys}
+    else:
+        delta = {k: (after[k] - before[k]) / 1e9 for k in keys}
     for bench in report.get("benchmarks", []):
         m = bench["metrics"]
         ttft = m["time_to_first_token_ms"]["successful"]
@@ -263,7 +276,10 @@ header = ("run", "total tok/s", "TTFT mean s", "TTFT p50 s", "TTFT p95 s", "ok",
           "CPU->GPU GB", "secondary read GB")
 print("| " + " | ".join(header) + " |")
 print("|" + "---|" * len(header))
+def gb(value):
+    return "N/A" if value is None else f"{value:.1f}"
+
 for r in rows:
     print(f"| {r[0]} | {r[1]:,.0f} | {r[2]:.2f} | {r[3]:.2f} | {r[4]:.2f} | {r[5]} | {r[6]} "
-          f"| {r[7]:.1f} | {r[8]:.1f} |")
+          f"| {gb(r[7])} | {gb(r[8])} |")
 EOF
