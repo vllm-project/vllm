@@ -419,6 +419,7 @@ def init_kv_cache(
                 vllm_config,
                 forward_context,
                 block_tables,
+                allocate=allocate,
             )
         else:
             kv_caches = allocate_kv_cache(
@@ -443,21 +444,11 @@ def bind_kv_caches(
     """Bind per-layer KV cache views to the attention layers."""
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
-    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
-    # decoder layer, so a layer name carries two integers (layer + module index).
-    num_attn_module = (
-        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
-    )
     bindable_caches = map_kv_caches_to_kernel_blocks(
         {name: cache for name, cache in kv_caches.items() if name in forward_context},
         attn_groups,
     )
-    bind_kv_cache_to_layers(
-        bindable_caches,
-        forward_context,
-        num_attn_module,
-        kv_cache_groups=kv_cache_config.kv_cache_groups,
-    )
+    bind_kv_cache_to_layers(bindable_caches, forward_context)
     return kv_caches
 
 
@@ -499,6 +490,12 @@ def build_attn_metadata(
     req_idx: np.ndarray | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
+    if rswa_prefix_lens is not None and rswa_prefix_lens.shape[0] < num_reqs:
+        # FULL graphs include inactive padded requests. Their prompt lengths
+        # must be zero, just like the padded sequence lengths and slot mapping.
+        rswa_prefix_lens = torch.nn.functional.pad(
+            rswa_prefix_lens, (0, num_reqs - rswa_prefix_lens.shape[0])
+        )
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
     if dcp_local_seq_lens_cpu_upper_bound is not None:
