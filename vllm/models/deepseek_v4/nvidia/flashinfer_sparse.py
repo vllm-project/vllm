@@ -18,7 +18,6 @@ from vllm.models.deepseek_v4.common.ops import (
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
-    deep_gemm_fp8_o_proj,
     maybe_dequant_wo_a,
     rope_quant_attn_out,
     rope_quant_unsupported_reason,
@@ -48,7 +47,7 @@ _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
 
 
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
+def get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     workspace = _flashinfer_dsv4_workspace_by_device.get(device)
     if workspace is None:
         workspace = torch.zeros(
@@ -60,7 +59,7 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     return workspace
 
 
-def _packed_block_span(pool: torch.Tensor) -> int:
+def packed_block_span(pool: torch.Tensor) -> int:
     """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
     block_size for unpacked KV, larger when packed (#44577). Raises if not
     token-aligned."""
@@ -79,7 +78,7 @@ def _packed_block_span(pool: torch.Tensor) -> int:
 _SPARSE_MLA_SUPPORTED_Q_HEADS = (8, 16, 32, 64, 128)
 
 
-def _pad_to_supported_q_heads(num_heads: int) -> int:
+def pad_to_supported_q_heads(num_heads: int) -> int:
     for supported in _SPARSE_MLA_SUPPORTED_Q_HEADS:
         if num_heads <= supported:
             return supported
@@ -89,7 +88,7 @@ def _pad_to_supported_q_heads(num_heads: int) -> int:
     )
 
 
-def _required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int:
+def required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int:
     """Return the SM120 DSV4 SWA specialization needed by this model."""
     if not vllm_config.attention_config.use_non_causal:
         return window_size
@@ -208,17 +207,15 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(
         self, o: torch.Tensor | QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -227,6 +224,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
@@ -238,7 +236,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         maybe_dequant_wo_a(self.wo_a)
         # __init__ chose RopeQuant against the FP8 wo_a before loading.
-        self._fuse_rope_quant &= rope_quant_unsupported_reason(self) is None
+        self._fuse_rope_quant &= self.wo_a.weight.dtype == torch.float8_e4m3fn
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
@@ -248,7 +246,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # since every call passes the real per-request seq_lens. The one
         # exception is a draft block running past max_model_len, whose clamped
         # positions it does not reproduce; that only costs those drafts.
-        reason = rope_quant_unsupported_reason(self)
+        reason = rope_quant_unsupported_reason(self, vllm_config)
         self._fuse_rope_quant = reason is None
         if reason is None:
             logger.info_once(
@@ -459,8 +457,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             cache_key = f"{cache_key}:{num_rows}"
         cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
         if cached_sparse is None:
-            swa_block_span = _packed_block_span(swa_k_cache)
-            compressed_block_span = _packed_block_span(compressed_kv_cache)
+            swa_block_span = packed_block_span(swa_k_cache)
+            compressed_block_span = packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -560,7 +558,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             padded_query[:, : query.shape[1], :] = query
             query = padded_query
 
-        workspace = _get_flashinfer_dsv4_workspace(q.device)
+        workspace = get_flashinfer_dsv4_workspace(q.device)
         query_start_loc = swa_metadata.query_start_loc
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         assert query_start_loc is not None and query_start_loc_cpu is not None
@@ -631,7 +629,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @staticmethod
     def _get_workspace(device: torch.device) -> torch.Tensor:
-        return _get_flashinfer_dsv4_workspace(device)
+        return get_flashinfer_dsv4_workspace(device)
 
     @staticmethod
     def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -643,18 +641,16 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         maybe_dequant_wo_a(self.wo_a)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        return deep_gemm_fp8_o_proj(
+        z = self.wo_a.grouped_forward(
             o,
             positions,
             self.rotary_emb.cos_sin_cache,
-            self.wo_a,
-            self.wo_b,
             n_groups=self.n_local_groups,
             heads_per_group=self.n_local_heads // self.n_local_groups,
             nope_dim=self.nope_head_dim,
@@ -663,12 +659,13 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             einsum_recipe=self._einsum_recipe,
             tma_aligned_scales=self._tma_aligned_scales,
         )
+        return self.wo_b(z.flatten(1))
 
     def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
         super().__init__(vllm_config, *args, **kwargs)
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
-        required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
+        required_topk = required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires a FlashInfer "

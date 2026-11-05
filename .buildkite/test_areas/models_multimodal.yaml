@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Standard) 1: qwen2"
   key: multi-modal-models-standard-1-qwen2
+  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
   source_file_dependencies:
@@ -17,6 +18,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Standard) 1: qwen2"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 65
       depends_on:
@@ -38,6 +40,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Standard) 2: qwen3 + gemma"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55
@@ -47,6 +50,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 3: llava + qwen2_vl"
   device: h200_35gb
   key: multi-modal-models-standard-3-llava-qwen2-vl
+  automatic_shard: true
   timeout_in_minutes: 40
   source_file_dependencies:
   - vllm/
@@ -57,12 +61,24 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl"
       dind: false
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
+
+- label: ":nvidia: (H200 MIG 35GB) Unlimited-OCR-2"
+  device: h200_35gb
+  key: unlimited-ocr2-generation
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/
+  - examples/generate/multimodal/vision_language_multi_image_offline.py
+  - tests/models/multimodal/generation/test_unlimited_ocr.py
+  commands:
+    - pytest -v -s models/multimodal/generation/test_unlimited_ocr.py -m core_model
 
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb
@@ -74,7 +90,20 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal
   commands:
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+    - >-
+      pytest -v -s
+      models/multimodal
+      -m core_model
+      --ignore models/multimodal/generation/test_common.py
+      --ignore models/multimodal/generation/test_ultravox.py
+      --ignore models/multimodal/generation/test_unlimited_ocr.py
+      --ignore models/multimodal/generation/test_qwen2_5_vl.py
+      --ignore models/multimodal/generation/test_qwen2_vl.py
+      --ignore models/multimodal/generation/test_whisper.py
+      --ignore models/multimodal/generation/test_mm_prefix_lm.py
+      --ignore models/multimodal/generation/test_memory_leak.py
+      --ignore models/multimodal/generation/test_vit_cudagraph.py
+      --ignore models/multimodal/processing
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - pytest -v -s models/multimodal/generation/test_whisper.py -m core_model
@@ -100,7 +129,11 @@ steps:
   - tests/models/registry.py
   device: cpu-medium
   commands:
-    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - >-
+      pytest -v -s
+      models/multimodal/processing
+      --ignore models/multimodal/processing/test_tensor_schema.py
+      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
 - label: ":nvidia: (H200 MIG 18GB) Multimodal Processor"
@@ -128,6 +161,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) Multimodal Accuracy Eval (Small Models)"
   device: h200_35gb
   key: multi-modal-accuracy-eval-small-models
+  automatic_shard: true
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -138,6 +172,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Multimodal Accuracy Eval (Small Models)"
       dind: false
       device: mi355_dpx
@@ -151,20 +186,30 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 1)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
+  automatic_shard: true
   optional: true
+  env:
+    # Engines in a shard can start after other tests touched CUDA in the
+    # pytest process, so never fork them.
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-    - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+    - >-
+      pytest -v -s
+      models/multimodal/generation
+      -m 'not core_model'
+      --ignore models/multimodal/generation/test_common.py
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 1)"
       dind: false
       device: mi355_dpx
@@ -172,7 +217,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (PPL)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
   optional: true
@@ -191,7 +236,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 2)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 2)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
   automatic_shard: true
@@ -212,9 +257,10 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 35GB) Multimodal Models (Extended Generation 3)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 3)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
+  automatic_shard: true
   optional: true
   source_file_dependencies:
   - vllm/
@@ -226,15 +272,17 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) Multimodal Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
+  automatic_shard: true
   optional: true
-  device: h200_18gb
+  device: h200_35gb
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
@@ -245,6 +293,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Extended Pooling)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 75
       depends_on:
