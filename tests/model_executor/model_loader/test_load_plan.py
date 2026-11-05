@@ -400,6 +400,14 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
     return make, {"layer.weight": (shape, dtype)}
 
 
+def _meta_temporary(param, loaded):
+    """A temporary on the incoming tensor's device, which is meta while
+    planning: copying it into the parameter must not abort the plan."""
+    tmp = torch.zeros(loaded.shape, dtype=loaded.dtype, device=loaded.device)
+    tmp.copy_(loaded)
+    param.copy_(tmp)
+
+
 @pytest.mark.parametrize(
     "loader,reason",
     [
@@ -409,8 +417,21 @@ def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
         (lambda p, w: p.__setitem__(slice(None), w), "without Tensor.copy_"),
         (lambda p, w: p.copy_(w).mul_(2), "reads the destination"),  # composed
         (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
+        (lambda p, w: torch.add(w, 0, out=p), "without Tensor.copy_ (add.out)"),
+        (lambda p, w: (w.to("cpu").float().numpy(), p.copy_(w)), "reads tensor values"),
+        (_meta_temporary, "mixes a meta temporary with a real tensor"),
     ],
-    ids=["arith", "cast-roundtrip", "value-read", "setitem", "composed", "expand"],
+    ids=[
+        "arith",
+        "cast-roundtrip",
+        "value-read",
+        "setitem",
+        "composed",
+        "expand",
+        "out",
+        "numpy",
+        "meta-temporary",
+    ],
 )
 def test_fallbacks(loader, reason):
     make, shapes = _single(loader)
@@ -479,7 +500,7 @@ def test_reading_the_destination_falls_back(loader):
 
 def _mirror_conv1d(mirror, param, loaded):
     param.copy_(loaded)
-    if not param.is_meta:  # the planner used to see meta stand-ins
+    if not param.is_meta:  # as Kimi-K3's kda.py guards its decode copies
         mirror.copy_(loaded.view(2, 2).t())
 
 
@@ -632,6 +653,49 @@ def test_layout_change_is_undone_and_falls_back():
     plan = _plan(model, shapes)  # also checks the layout was restored
     reason = plan.entries["layer.weight"].reason or ""
     assert "changes module state (layer.weight)" in reason
+
+
+@pytest.mark.parametrize("change", ["buffer-attr", "requires-grad", "cpu-attr"])
+def test_tensor_state_change_is_undone_and_falls_back(change):
+    """State set on a persistent buffer, a parameter's ``requires_grad`` and
+    a CPU tensor held as a module attribute are restored after planning, and
+    the name that set them falls back."""
+
+    def loader(model, param, loaded):
+        param.copy_(loaded)
+        if change == "buffer-attr":
+            model.layer.buf.tag = "set"
+        elif change == "requires-grad":
+            param.requires_grad_(True)
+        else:
+            model.layer.scratch.add_(1)
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        model.layer.weight = _param(4, loader=lambda p, w: loader(model, p, w))
+        model.layer.register_buffer("buf", torch.zeros(4, dtype=BF16))
+        model.layer.scratch = torch.zeros(2)
+        return model
+
+    shapes = {"layer.weight": ((4,), BF16)}
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    # undo what the cold start's loader did, so planning has a change to see
+    model.layer.buf.__dict__.pop("tag", None)
+    model.layer.weight.requires_grad_(False)
+    model.layer.scratch.zero_()
+    start_reload(model)
+    plan = _plan(model, shapes)
+    changed = {
+        "buffer-attr": "layer.buf.tag",
+        "requires-grad": "layer.weight",
+        "cpu-attr": "layer.scratch",
+    }[change]
+    reason = plan.entries["layer.weight"].reason or ""
+    assert f"changes module state ({changed})" in reason
+    assert not hasattr(model.layer.buf, "tag")
+    assert not model.layer.weight.requires_grad
+    assert model.layer.scratch.tolist() == [0, 0]
 
 
 class _Paired(_Toy):

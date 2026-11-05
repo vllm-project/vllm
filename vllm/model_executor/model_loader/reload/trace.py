@@ -43,6 +43,7 @@ _VALUE_READS = frozenset(
     {
         torch.Tensor.item,
         torch.Tensor.tolist,
+        torch.Tensor.numpy,
         torch.Tensor.__bool__,
         torch.Tensor.__int__,
         torch.Tensor.__float__,

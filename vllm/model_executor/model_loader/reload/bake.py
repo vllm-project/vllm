@@ -23,7 +23,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 from vllm.logger import init_logger
 
-from .direct import _loadable_tensors
+from .direct import loadable_tensors
 from .trace import TraceSink, TraceTensor
 
 if TYPE_CHECKING:
@@ -55,7 +55,7 @@ class Targets:
     def __init__(self, model: torch.nn.Module):
         self.by_storage: dict[int, Target] = {}
         self.by_name: dict[tuple[str, str], Target] = {}
-        for name, t in _loadable_tensors(model):
+        for name, t in loadable_tensors(model):
             if hasattr(t, "_ckpt"):
                 module, _, key = name.rpartition(".")
                 target = Target(module, key, t, t.storage_offset() * t.dtype.itemsize)
@@ -141,13 +141,32 @@ class _PlanSink(TraceSink):
         """Mark the names fallbacks and run ``func`` on meta copies of its
         arguments, so it writes no real tensor; tensor results become traces
         of the first name, with no geometry."""
-        if _mutates_first_arg(func) and not isinstance(args[0], TraceTensor):
+        if _writes_a_real_tensor(func, args, kwargs):  # in place, or out=
             reason = f"writes it without Tensor.copy_ ({func.__name__})"
             self.wrote.update(t._name for t in traces)
         else:
             reason = f"applies {func.__name__} to it"
         for t in traces:
             self.mark(t._name, reason)
+        first = traces[0]
+
+        def trace(o: torch.Tensor) -> TraceTensor:
+            return TraceTensor(first._name, o.shape, o.dtype, self, None, reason)
+
+        return self.on_meta(func, args, kwargs, first._name, trace)
+
+    def on_meta(
+        self,
+        func: Any,
+        args: tuple,
+        kwargs: dict,
+        name: str,
+        wrap: Callable[[torch.Tensor], torch.Tensor] = lambda o: o,
+    ) -> Any:
+        """Run ``func`` on meta copies of its tensor arguments, so it writes
+        no real tensor. An in-place result is the original argument; other
+        tensor results go through ``wrap``. If ``func`` fails on meta, ``name``
+        stops the bake."""
 
         def to_meta(a: Any) -> Any:
             if isinstance(a, TraceTensor):
@@ -163,33 +182,33 @@ class _PlanSink(TraceSink):
             out = func(*meta_args, **meta_kwargs)
         except Exception as e:  # no meta kernel, a shape error, ...
             # the error stays out of the reason, which groups the report
-            logger.debug(
-                "load plan: %s on %s fails on meta: %r",
-                func.__name__,
-                traces[0]._name,
-                e,
-            )
-            self.stops.setdefault(traces[0]._name, f"{func.__name__} fails on meta")
+            logger.debug("load plan: %s on %s fails on meta: %r", func, name, e)
+            self.stops.setdefault(name, f"{func.__name__} fails on meta")
             raise _BakeStopped from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
-        first = traces[0]
 
-        def wrap(o: Any) -> Any:
+        def back(o: Any) -> Any:
             if not isinstance(o, torch.Tensor):
                 return o
-            if id(o) in originals:  # in place: return the original argument
-                return originals[id(o)]
-            return TraceTensor(first._name, o.shape, o.dtype, self, None, reason)
+            return originals[id(o)] if id(o) in originals else wrap(o)
 
-        return pytree.tree_map(wrap, out)
+        return pytree.tree_map(back, out)
 
 
-def _mutates_first_arg(func: Any) -> bool:
+def _writes_a_real_tensor(func: Any, args: tuple, kwargs: dict) -> bool:
+    """Whether ``func`` writes an argument that is not a trace (in place or
+    through ``out=``)."""
     schema = getattr(func, "_schema", None)
-    if schema is None or not schema.arguments:
-        return False
-    alias = schema.arguments[0].alias_info
-    return alias is not None and alias.is_write
+    for i, arg in enumerate(getattr(schema, "arguments", ())):
+        if arg.alias_info is None or not arg.alias_info.is_write:
+            continue
+        value = args[i] if i < len(args) else kwargs.get(arg.name)
+        leaves = pytree.tree_leaves(value)
+        if any(isinstance(t, torch.Tensor) for t in leaves) and not any(
+            isinstance(t, TraceTensor) for t in leaves
+        ):
+            return True
+    return False
 
 
 # Ops on a target that read only its metadata.
@@ -223,7 +242,12 @@ class _TargetGuard(TorchDispatchMode):
     ``param.copy_(fn(param))``, a check such as ``torch.equal(param, x)``, or
     a mirror copied from ``param``. Reads that bypass the dispatcher
     (``tolist()`` or ``numpy()`` of a CPU tensor, a raw kernel launch) go
-    unseen."""
+    unseen.
+
+    An op mixing a meta temporary (one a loader made on the incoming
+    tensor's device) with a real tensor runs on meta instead and makes the
+    name that last wrote the temporary (or the name being loaded) a
+    fallback."""
 
     def __init__(self, sink: _PlanSink):
         super().__init__()
@@ -232,6 +256,21 @@ class _TargetGuard(TorchDispatchMode):
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
         packet = func.overloadpacket
+        leaves = [
+            a
+            for a in pytree.arg_tree_leaves(*args, **kwargs)
+            if isinstance(a, torch.Tensor)
+        ]
+        if any(isinstance(a, TraceTensor) for a in leaves):
+            return func(*args, **kwargs)  # the trace's own handler
+        meta = [a for a in leaves if a.is_meta]
+        if meta and len(meta) < len(leaves):
+            sink = self.sink
+            key = meta[0].untyped_storage()._cdata
+            name = sink.last_writer.get(key) or sink.current
+            if name is not None:
+                sink.mark(name, f"mixes a meta temporary with a real tensor ({packet})")
+                return sink.on_meta(func, args, kwargs, name)
         if not func.is_view and packet not in _METADATA_OPS:
             # copy_(target, x) and friends write the target but read only x
             read = args[1:] if packet in _CONSTANT_WRITES else args
@@ -239,8 +278,6 @@ class _TargetGuard(TorchDispatchMode):
         return func(*args, **kwargs)
 
     def _check_reads(self, packet: Any, leaves: list) -> None:
-        if any(isinstance(a, TraceTensor) for a in leaves):
-            return  # the trace's own handler marks its name
         for a in leaves:
             key = _storage_key(a) if isinstance(a, torch.Tensor) else None
             if key is not None and key in self.sink.targets.by_storage:
@@ -254,20 +291,21 @@ class _TargetGuard(TorchDispatchMode):
 
 
 class _Snapshot:
-    """Module and parameter attributes, CPU tensors among them, and where each
-    parameter and persistent buffer points, compared and restored after a
-    bake: a loader that changes such state will not run on the direct path,
-    and planning must leave none behind. Target bytes are not saved; the
-    update rewrites them."""
+    """Module, parameter and persistent buffer attributes, CPU tensors among
+    them, and where each parameter and persistent buffer points (and whether
+    it requires grad), compared and restored after a bake: a loader that
+    changes such state will not run on the direct path, and planning must
+    leave none behind. Target bytes are not saved; the update rewrites
+    them."""
 
     def __init__(self, model: torch.nn.Module):
         self.dicts: list[tuple[str, dict, dict[str, _Value]]] = []
         for module_name, module in model.named_modules():
             self._add(module_name, module.__dict__)
-            for p_name, p in module._parameters.items():
-                if p is not None:
-                    self._add(f"{module_name}.{p_name}", p.__dict__)
-        self.layouts = [(name, t, t.data) for name, t in _loadable_tensors(model)]
+        self.layouts: list[tuple[str, torch.Tensor, torch.Tensor, tuple]] = []
+        for name, t in loadable_tensors(model):
+            self._add(name, t.__dict__)
+            self.layouts.append((name, t, t.data, _where(t)))
 
     def _add(self, label: str, d: dict) -> None:
         self.dicts.append((label, d, {k: _Value(v) for k, v in d.items()}))
@@ -283,16 +321,17 @@ class _Snapshot:
                 if k not in d or not value.holds(d[k]):
                     changed.append(f"{label}.{k}")
                     d[k] = value.restore()
-        for name, t, data in self.layouts:  # e.g. `param.data = ...`
-            if _where(t) != _where(data):
+        for name, t, data, where in self.layouts:  # e.g. `param.data = ...`
+            if _where(t) != where:
                 changed.append(name)
                 t.data = data
+                t.requires_grad_(where[-1])
         return changed
 
 
 def _where(t: torch.Tensor) -> tuple:
     storage = t.untyped_storage()._cdata
-    return storage, t.storage_offset(), t.shape, t.stride(), t.dtype
+    return storage, t.storage_offset(), t.shape, t.stride(), t.dtype, t.requires_grad
 
 
 class _Value:
