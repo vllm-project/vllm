@@ -396,11 +396,9 @@ class MistralParser(ParserEngine):
             or any_so_non_supported_active
             or response_format_non_supported_active
         ):
-            request = super().adjust_request(request)
-            if request.tools and request.tool_choice != "none":
-                # Keep special tokens so the [TOOL_CALLS] marker
-                # survives for tool detection.
-                request.skip_special_tokens = False
+            # MistralTokenizer keeps the parser's special tokens when skipping.
+            if not is_mistral_tokenizer(self.model_tokenizer):
+                request = super().adjust_request(request)
             # Inject a guided JSON schema for pre-v11 required/named tool choice
             # so the model emits a well-formed bare JSON array instead of
             # rambling. tool_choice forces a tool call, so a json_object /

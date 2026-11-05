@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import mmap
 import subprocess
 import sys
@@ -2178,3 +2179,94 @@ def test_kv_cache_groups_tp_replicas(specs, tp_size, dcp_size, expected):
     """Replicas are the gcd of each layer's tp_size // max_tp_shards."""
     groups = [KVCacheGroupSpec([f"l.{i}"], spec) for i, spec in enumerate(specs)]
     assert kv_cache_groups_tp_replicas(groups, tp_size, dcp_size) == expected
+
+
+def test_shrink_kv_cache_configs_keeps_tensors_and_checks_fit():
+    """Shrinking to the measured block count lowers `num_blocks` and the
+    tensors' sizes; their placements keep describing the reserved capacity.
+    A count too small for `max_model_len` is rejected."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+    assert config.num_blocks == 16
+    tensors_before = copy.deepcopy(config.kv_cache_tensors)
+
+    kv_cache_planning.shrink_kv_cache_configs(
+        vllm_config, [config, scheduler_config], 10
+    )
+    assert config.num_blocks == 10
+    assert scheduler_config.num_blocks == 10
+    assert config.kv_cache_tensors == [
+        replace(tensor, size=tensor.size * 10 // 16) for tensor in tensors_before
+    ]
+
+    # 4 blocks are needed for max_model_len plus the null block.
+    with pytest.raises(ValueError, match="max seq len"):
+        kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 4)
+    kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 5)
+    assert config.num_blocks == 5
+
+
+def test_finalize_extensible_kv_cache_keeps_measured_count():
+    """The smallest count measured across ranks becomes every config's
+    num_blocks, not rounded to granules."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    capacity = 1000
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    measured = [
+        CompilationTimes(0.0, 0.0, num_kv_blocks=num_blocks)
+        for num_blocks in (999, 997)
+    ]
+    assert (
+        kv_cache_planning.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured
+        )
+        == 997
+    )
+    assert config.num_blocks == scheduler_config.num_blocks == 997
+    assert vllm_config.cache_config.num_gpu_blocks == 997
+
+
+def test_shrink_kv_cache_configs_leaves_host_resident_tensors():
+    """HiSparse's host pool is sized by its own block count, not the device
+    pool's, so the measured shrink leaves host-resident tensors as is."""
+    spec = new_kv_cache_spec()
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * 16
+    )
+    host_tensor = KVCacheTensor(
+        size=16 * 3000,
+        layers=["host.0"],
+        layer_stride=16 * 3000,
+        block_stride=3000,
+        host_resident=True,
+    )
+    config.kv_cache_tensors.insert(0, host_tensor)
+
+    kv_cache_planning.shrink_kv_cache_configs(vllm_config, [config], 10)
+    assert config.num_blocks == 10
+    assert config.kv_cache_tensors[0] == host_tensor
+    assert config.kv_cache_tensors[1].size == 2 * spec.page_size_bytes * 10

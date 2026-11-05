@@ -82,7 +82,10 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED; on ROCm,
+    ROCM_AITER_FA and ROCM_AITER_FLYDSL_FP8. ROCM_AITER_FLYDSL_FP8 is opt-in
+    (gfx950, bf16 models): it quantizes Q/K/V to FP8 per tensor at runtime and
+    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -125,6 +128,16 @@ class AttentionConfig:
     candidate pool instead, with fp32 logits, and keeps the masked dense walk
     for steps whose contexts are too short for the pool to pay; it is not
     enabled by default there."""
+
+    indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
+    """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
+    sparse-attention indexer. "auto" (default) picks the model's default:
+    "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100, "float32" otherwise.
+    "float32" reduces the head-weighted scores in FP32 and feeds them to the
+    top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
+    in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
+    logits directly, while other top-k kernels read an FP32 copy. The sparse
+    MQA-logits path (`indexer_sparse_logits`) always emits BF16."""
 
     indexer_tp_shard_min_rows: int = Field(default=65536, ge=1)
     """Minimum total prefill rows for the sparse-attention indexer to split
@@ -219,6 +232,14 @@ class AttentionConfig:
         if self.indexer_kv_dtype == "auto":
             return default
         return self.indexer_kv_dtype
+
+    def resolve_indexer_logits_dtype(
+        self, default: Literal["float32", "bfloat16"]
+    ) -> Literal["float32", "bfloat16"]:
+        """Resolve `indexer_logits_dtype`, substituting `default` for "auto"."""
+        if self.indexer_logits_dtype == "auto":
+            return default
+        return self.indexer_logits_dtype
 
     def compute_hash(self) -> str:
         """Provide a hash that uniquely identifies all the configs
