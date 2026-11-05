@@ -8,10 +8,12 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch.multiprocessing as mp
 
 from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
 from vllm.v1.worker.startup_plan import (
@@ -311,6 +313,8 @@ def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Enable the startup plan, isolated under a tmp cache root."""
     monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "1")
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    single_rank = SimpleNamespace(world_size=1)
+    monkeypatch.setattr(startup_plan, "get_world_group", lambda: single_rank)
     with patch.object(startup_plan, "current_platform", _plan_platform()):
         yield
 
@@ -347,6 +351,33 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def _apply_plan_on_rank(rank: int, world_size: int, port: int):
+    from vllm.distributed.parallel_state import init_distributed_environment
+
+    init_distributed_environment(
+        world_size, rank, f"tcp://127.0.0.1:{port}", rank, backend="gloo"
+    )
+    # All ranks can apply; then rank 1 lacks free memory; then it has no plan.
+    workers = [
+        _plan_worker(),
+        _plan_worker(free_memory=(60 if rank == 1 else 78) * GiB_bytes),
+        _plan_worker(config_hash="zzz999" if rank == 1 else "abc123"),
+    ]
+    with patch.object(startup_plan, "current_platform", _plan_platform()):
+        for worker in workers:
+            maybe_apply_startup_plan(worker)
+    applied = [w.cache_config.kv_cache_memory_bytes for w in workers]
+    assert applied == [50 * GiB_bytes, None, None], f"rank {rank}: {applied}"
+
+
+def test_startup_plan_applies_on_every_rank_or_none(plan_env):
+    """Applying a plan skips the CUDA-graph estimate pass, whose captures run
+    collectives. A rank therefore applies its plan only if every rank can."""
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
+    world_size = 2
+    mp.spawn(_apply_plan_on_rank, args=(world_size, get_open_port()), nprocs=world_size)
 
 
 def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):

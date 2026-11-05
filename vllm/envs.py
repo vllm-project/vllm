@@ -2069,8 +2069,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # saves the memory-profiling result (the suggested --kv-cache-memory value
     # and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
     # keyed by a hardware+config fingerprint, and later boots auto-apply it
-    # -- skipping memory profiling -- when the fingerprint matches and
-    # current free memory >= the recorded baseline.
+    # -- skipping memory profiling -- when, on every rank, the fingerprint
+    # matches and current free memory >= the recorded baseline.
     # See vllm/v1/worker/startup_plan.py.
     "VLLM_ENABLE_STARTUP_PLAN": lambda: bool(
         int(os.getenv("VLLM_ENABLE_STARTUP_PLAN", "0"))
