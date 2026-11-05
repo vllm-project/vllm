@@ -546,6 +546,7 @@ class EngineCoreReadyResponse:
     effective_attention_block_size: int | None = None
     vllm_config: dict | None = None
     prefix_hash_config: PrefixHashConfig | None = None
+    cache_config_info: dict[str, str] | None = None
     config_hash: str | None = None
     enable_expert_parallel: bool = False
 
@@ -594,6 +595,7 @@ ready_response = EngineCoreReadyResponse(
         "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
         "speculative_config": None,
     },
+    cache_config_info={"block_size": "16", "mamba_block_size": "None"},
     config_hash="0123456789",
     enable_expert_parallel=True,
 )

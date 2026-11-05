@@ -2123,6 +2123,7 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
             config_hash=self._config_hash(),
             enable_expert_parallel=parallel_config.enable_expert_parallel,
         )
