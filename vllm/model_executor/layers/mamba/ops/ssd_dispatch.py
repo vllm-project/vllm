@@ -59,7 +59,7 @@ class TritonSSDBackend(MambaSSDBackend):
 
     @property
     def name(self) -> str:
-        return "cpu" if current_platform.is_cpu() else "triton"
+        return "triton"
 
     def __call__(
         self,
@@ -173,10 +173,65 @@ class FlashInferSSDBackend(MambaSSDBackend):
         return final_states, checkpoint_states
 
 
+class CPUSSDBackend(MambaSSDBackend):
+    def __init__(self):
+        from .cpu.mamba_ssm import _mamba_chunk_scan_combined_fwd_cpu
+
+        self._kernel = _mamba_chunk_scan_combined_fwd_cpu
+
+    @property
+    def name(self) -> str:
+        return "cpu"
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        dt: torch.Tensor,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        C: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        out: torch.Tensor,
+        state_dtype: torch.dtype,
+        D: torch.Tensor | None = None,
+        dt_bias: torch.Tensor | None = None,
+        initial_states: torch.Tensor | None = None,
+        dt_softplus: bool = False,
+        seq_idx: torch.Tensor | None = None,
+        checkpoint_chunk_indices: torch.Tensor | None = None,
+        chunk_size: int | None = None,
+        cu_chunk_seqlens: torch.Tensor | None = None,
+        last_chunk_indices: torch.Tensor | None = None,
+        checkpoint_token_indices: torch.Tensor | None = None,
+        checkpoint_states: torch.Tensor | None = None,
+        final_states_out: torch.Tensor | None = None,
+        final_state_indices: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        assert checkpoint_chunk_indices is None, (
+            "The CPU SSD kernel cannot export prefill checkpoints."
+        )
+        final_states = self._kernel(
+            x,
+            dt,
+            A,
+            B,
+            C,
+            chunk_size,
+            out,
+            D=D,
+            dt_bias=dt_bias,
+            initial_states=initial_states,
+            cu_seqlens=cu_seqlens,
+            dt_softplus=dt_softplus,
+            state_dtype=state_dtype,
+        )
+        return final_states, None
+
+
 _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSDBackend]] = {
     MambaBackendEnum.TRITON: TritonSSDBackend,
     MambaBackendEnum.FLASHINFER: FlashInferSSDBackend,
-    MambaBackendEnum.CPU: TritonSSDBackend,
+    MambaBackendEnum.CPU: CPUSSDBackend,
 }
 
 
@@ -212,6 +267,8 @@ def initialize_mamba_ssd_backend(
             "Set --mamba-prefill-backend to require a particular prefill backend."
         )
         backend = MambaBackendEnum.TRITON
+    if backend == MambaBackendEnum.TRITON and current_platform.is_cpu():
+        backend = MambaBackendEnum.CPU
     backend_cls = _BACKEND_REGISTRY[backend]
     if not isinstance(_mamba_ssd_backend, backend_cls):
         _mamba_ssd_backend = backend_cls()
