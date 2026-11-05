@@ -290,7 +290,8 @@ def _bake(
     """Trace ``load_weights`` over every name, in one pass. A name that stops
     the loader (a value read, an op that fails on meta) unwinds the model's
     ``load_weights``; it falls back, and ``load_weights`` is called again
-    with the names after it, on the same sink, so nothing is replayed.
+    with the names after it, on the same sink. Loaders handle each name as it
+    arrives, so nothing is replayed.
     Module state a loader sets stays: it is what that loader would leave on
     the ``load_weights`` path."""
     sink = _PlanSink(targets)
