@@ -43,6 +43,17 @@ def unsupported_multipleOf_schemas():
         {"type": "integer", "multipleOf": 7, "minimum": 0},
         {"type": "integer", "multipleOf": 7, "exclusiveMaximum": 100},
         {"type": "integer", "multipleOf": 7, "minimum": 0, "maximum": 20},
+        {"type": "integer", "multipleOf": 3, "allOf": [{"type": "integer"}]},
+        {"type": "integer", "multipleOf": 3, "anyOf": [{"type": "integer"}]},
+        {"type": "integer", "multipleOf": 3, "oneOf": [{"type": "integer"}]},
+        {"type": "integer", "multipleOf": 3, "enum": [4, 6]},
+        {"type": "integer", "multipleOf": 3, "const": 4},
+        {
+            "type": "integer",
+            "multipleOf": 3,
+            "$ref": "#/$defs/i",
+            "$defs": {"i": {"type": "integer"}},
+        },
     ]
 
 
@@ -54,6 +65,8 @@ def supported_integer_multipleOf_schemas():
         {"type": "integer", "multipleOf": 2.0},
         {"Even": {"type": "integer", "multipleOf": 2}},
         {"type": ["integer", "null"], "multipleOf": 3},
+        {"type": "integer", "multipleOf": 3, "title": "t", "format": "int64"},
+        {"anyOf": [{"type": "integer", "multipleOf": 3}, {"type": "string"}]},
     ]
 
 
@@ -488,6 +501,7 @@ class TestIsGrammarAcceptString:
         assert grammar_accepts({"type": "integer", "multipleOf": 2.5}, "7")
         assert grammar_accepts({"type": "integer", "multipleOf": 1025}, "5")
         assert grammar_accepts({"type": "integer", "multipleOf": 7, "minimum": 0}, "8")
+        assert grammar_accepts({"type": "integer", "multipleOf": 3, "enum": [4]}, "4")
 
     class TestPR42904Support:
         def test_property_names_constrains_keys(self, property_names_schema):

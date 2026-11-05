@@ -347,19 +347,34 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     )
 
 
+# Keys that can sit next to integer multipleOf without xgrammar dropping it.
+_INTEGER_MULTIPLE_OF_KEYS = frozenset(
+    [
+        "type",
+        "multipleOf",
+        "title",
+        "description",
+        "default",
+        "examples",
+        "format",
+        "$comment",
+    ]
+)
+
+
 def _xgrammar_enforces_integer_multiple_of(schema: dict[str, Any]) -> bool:
     """Return whether xgrammar (pinned 0.2.8) enforces integer multipleOf.
 
-    It only does so for integer values in [1, 1024] without any
-    minimum/maximum bound; otherwise it ignores multipleOf with a warning."""
+    It only does so for integer values in [1, 1024] on a node whose other keys
+    are annotations. Bounds, enum, const, $ref or allOf/anyOf/oneOf on the
+    same node make it ignore multipleOf."""
     multiple_of = schema.get("multipleOf")
     if isinstance(multiple_of, bool) or not isinstance(multiple_of, int | float):
         return False
-    if not (1 <= multiple_of <= 1024 and float(multiple_of).is_integer()):
-        return False
-    return not any(
-        key in schema
-        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    return (
+        1 <= multiple_of <= 1024
+        and float(multiple_of).is_integer()
+        and schema.keys() <= _INTEGER_MULTIPLE_OF_KEYS
     )
 
 
