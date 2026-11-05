@@ -255,8 +255,6 @@ class SimpleCPUOffloadScheduler:
 
         # Store metadata
         self._lazy_mode = lazy_offload
-        # Lazy mode: use a cursor to track the last scanned block in the GPU free queue.
-        self._cursor: KVCacheBlock | None = None
         if self._lazy_mode:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
@@ -651,9 +649,9 @@ class SimpleCPUOffloadScheduler:
         list[str],
         list[dict[BlockHashWithGroupId, BlockStoreMeta]] | None,
     ]:
-        """Single-pass cursor walk: offload cached GPU blocks near eviction.
+        """Offload cached GPU blocks near eviction.
 
-        Walks the GPU free queue from the cursor, counting blocks that are
+        Walks the GPU free queue from its head, counting blocks that are
         free-or-offloaded (safe for the allocator to evict). Stops when
         target_free blocks are covered or CPU capacity is reached.
         """
@@ -665,18 +663,12 @@ class SimpleCPUOffloadScheduler:
         cpu_pool = self.cpu_block_pool
         num_cpu_free = cpu_pool.get_num_free_blocks()
 
-        # Validate cursor: stale if block was removed from free queue.
-        if self._cursor is not None and self._cursor.ref_cnt > 0:
-            self._cursor = None
-
         gpu_ids: list[int] = []
-        last_visited = self._cursor
 
-        for covered, node in enumerate(free_queue.iter_blocks_after(self._cursor)):
+        for covered, node in enumerate(free_queue.iter_blocks_after(None)):
             if covered >= self._target_free or len(gpu_ids) >= num_cpu_free:
                 break
 
-            last_visited = node
             bhash = node.block_hash
 
             if (
@@ -685,8 +677,6 @@ class SimpleCPUOffloadScheduler:
                 and cpu_pool.cached_block_hash_to_block.get_one_block(bhash) is None
             ):
                 gpu_ids.append(node.block_id)
-
-        self._cursor = last_visited
 
         # Batch-allocate CPU blocks.
         if gpu_ids:
@@ -1005,7 +995,7 @@ class SimpleCPUOffloadScheduler:
                             )
                         )
                         meta_by_hash[block_hash] = BlockStoreMeta(
-                            token_ids=list(request.all_token_ids[hash_start:hash_end]),
+                            token_ids=request.all_token_ids[hash_start:hash_end],
                             parent_block_hash=(
                                 None
                                 if hash_idx == 0
@@ -1244,10 +1234,12 @@ class SimpleCPUOffloadScheduler:
                         )
                     )
 
-        # Free CPU and GPU blocks' ref counts to turn them into prefix cache
+        # Free CPU and GPU blocks' ref counts to turn them into prefix cache.
+        # Lazy stores come from the GPU eviction end; return them there.
         self.cpu_block_pool.free_blocks(cpu_blocks)
         self._gpu_block_pool.free_blocks(
-            self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
+            evict_first=self._lazy_mode,
         )
 
     def _release_transfer_refs(self, transfer: TransferMeta) -> None:
@@ -1519,7 +1511,6 @@ class SimpleCPUOffloadScheduler:
             for event_idx, count in self._store_event_pending_counts.items()
             if event_idx in self._abandoned_store_event_to_blocks
         }
-        self._cursor = None
         # Seed the fresh counters with outcomes since the last drain so a
         # mid-interval reset() does not drop them from the next report.
         undrained = BoundaryStoreStats(
