@@ -26,6 +26,23 @@ vllm serve <model> --enable-scale-out
 - [Responses Render API](renderer.md) (`/v1/responses/render`)
     - Render a self-contained Responses request
 
+## gRPC Render Service
+
+The Rust frontend also serves a `vllm.Render` gRPC service, defined in
+[`rust/proto/render.proto`](../../../rust/proto/render.proto). Enable it with
+`--grpc-port` on `vllm-rs render`, or on `vllm serve` with
+`VLLM_USE_RUST_FRONTEND=1`, where it runs next to `vllm.Inference` and
+`vllm.Control`.
+
+`Render.RenderChat` renders a chat request into prompt token IDs, plus the
+settings that rendering decides: the effective structured-output constraint
+(the request's, or the grammar a tool-call or reasoning parser built around
+it), the engine reasoning gate, and the preprocessed media of image, video and
+audio parts. Copy them into your own `vllm.GenerateRequest` with your sampling
+parameters. Set `omit_media_kwargs` to get only media hashes and placeholder
+ranges, like `"mm_payload": "none"`. LoRA adapter names are accepted as the
+chat request's `model`.
+
 ## Get Responses prompt token IDs
 
 Use `/v1/responses/render` to get prompt token IDs before choosing a model

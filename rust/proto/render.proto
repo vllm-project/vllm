@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+syntax = "proto3";
+package vllm;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+import "inference.proto";
+
+// Engine-free chat rendering, the gRPC counterpart of the HTTP render API.
+//
+// A client renders a chat request with RenderChat, builds its own
+// GenerateRequest from the RenderChatResponse fields, and runs it with
+// Inference.Generate.
+service Render {
+  // Renders a chat request into prompt token IDs plus the generation settings
+  // that rendering decides.
+  rpc RenderChat (RenderChatRequest) returns (RenderChatResponse) {}
+}
+
+// ======================================================================================
+// Render
+// ======================================================================================
+
+message RenderChatRequest {
+  ChatRequest chat = 1;
+  // Leave `kwargs` unset in `RenderChatResponse.media`, keeping the hashes and
+  // placeholder ranges. For callers that only route on the prompt layout, such
+  // as cache-aware routers; such media cannot be sent to Inference.Generate.
+  bool omit_media_kwargs = 2;
+}
+
+// Copy each field into the GenerateRequest sent to Inference.Generate.
+message RenderChatResponse {
+  // The rendered prompt, already truncated. Send as `token_ids`.
+  repeated uint32 prompt_token_ids = 1;
+  // The effective structured-output constraint: the chat request's
+  // `structured_output`, or the output grammar the tool-call parser built
+  // around it. Unset means unconstrained. Send as `decoding.structured_output`.
+  StructuredOutput structured_output = 2;
+  // Send as `engine_reasoning_gate`.
+  EngineReasoningGate engine_reasoning_gate = 3;
+  // Preprocessed media items, ordered by their placeholder ranges in
+  // `prompt_token_ids`. Send as `media`.
+  repeated MediaItem media = 4;
+}
+
+// ======================================================================================
+// Chat request
+// ======================================================================================
+
+message ChatRequest {
+  repeated ChatMessage messages = 1;
+  // Request-level tools the model may call. Developer messages may declare
+  // more.
+  repeated ChatTool tools = 2;
+  // Omitted means "auto" when tools are present.
+  ChatToolChoice tool_choice = 3;
+  // Defaults to true when omitted.
+  optional bool parallel_tool_calls = 4;
+  GenerationPromptMode generation_prompt_mode = 5;
+  // Add tokenizer special tokens (e.g. BOS) on top of the chat template.
+  bool add_special_tokens = 6;
+  // Per-request Jinja chat template override.
+  optional string chat_template = 7;
+  // Additional keyword arguments passed to the chat template.
+  google.protobuf.Struct chat_template_kwargs = 8;
+  // Model-specific reasoning effort, such as "low" or "high".
+  optional string reasoning_effort = 9;
+  // Served model name. Empty means the default model.
+  string model = 10;
+  // Structured-output constraint on the answer. The tool-call parser composes
+  // it into its output grammar; see `RenderChatResponse.structured_output`.
+  StructuredOutput structured_output = 11;
+  // Omitted means no truncation.
+  PromptTruncation truncation = 12;
+}
+
+// How rendering ends after the existing chat history.
+enum GenerationPromptMode {
+  // Same as GENERATION_PROMPT_MODE_START_NEW_ASSISTANT.
+  GENERATION_PROMPT_MODE_UNSPECIFIED = 0;
+  // Append a generation prompt for a new assistant turn.
+  GENERATION_PROMPT_MODE_START_NEW_ASSISTANT = 1;
+  // Leave the final assistant message open so generation continues it.
+  GENERATION_PROMPT_MODE_CONTINUE_FINAL_ASSISTANT = 2;
+  // Render the history without a trailing generation prompt.
+  GENERATION_PROMPT_MODE_NO_GENERATION_PROMPT = 3;
+}
+
+message PromptTruncation {
+  enum Side {
+    // Same as SIDE_LEFT.
+    SIDE_UNSPECIFIED = 0;
+    // Keep the last tokens, discarding the prompt prefix.
+    SIDE_LEFT = 1;
+    // Keep the first tokens, discarding the prompt suffix.
+    SIDE_RIGHT = 2;
+  }
+
+  oneof limit {
+    // Keep at most this many prompt tokens.
+    uint64 max_tokens = 1;
+    // Keep `max_model_len - 1` tokens, as HTTP `truncate_prompt_tokens = -1`.
+    google.protobuf.Empty input_budget = 2;
+  }
+  Side side = 3;
+}
+
+message ChatMessage {
+  message System {
+    ChatContent content = 1;
+  }
+
+  message Developer {
+    ChatContent content = 1;
+    // Message-scoped tools.
+    repeated ChatTool tools = 2;
+  }
+
+  message User {
+    ChatContent content = 1;
+  }
+
+  // A previous assistant turn, as content blocks in the order the model
+  // produced them.
+  message Assistant {
+    repeated AssistantContentBlock blocks = 1;
+  }
+
+  message Tool {
+    ChatContent content = 1;
+    // ID of the tool call this message responds to.
+    string tool_call_id = 2;
+  }
+
+  // A role outside the standard set, passed to the chat template unchanged.
+  message Custom {
+    string role = 1;
+    ChatContent content = 2;
+  }
+
+  oneof message {
+    System system = 1;
+    Developer developer = 2;
+    User user = 3;
+    Assistant assistant = 4;
+    Tool tool = 5;
+    Custom custom = 6;
+  }
+}
+
+message ChatContent {
+  oneof content {
+    string text = 1;
+    ChatContentParts parts = 2;
+  }
+}
+
+message ChatContentParts {
+  repeated ChatContentPart parts = 1;
+}
+
+message ChatContentPart {
+  oneof part {
+    string text = 1;
+    ChatImageUrl image_url = 2;
+    ChatMediaUrl video_url = 3;
+    ChatMediaUrl audio_url = 4;
+    ChatInputAudio input_audio = 5;
+  }
+}
+
+message AssistantContentBlock {
+  oneof block {
+    // Visible answer text.
+    string text = 1;
+    // Reasoning text.
+    string reasoning = 2;
+    ChatToolCall tool_call = 3;
+  }
+}
+
+enum ImageDetail {
+  // Omitted: the model's default.
+  IMAGE_DETAIL_UNSPECIFIED = 0;
+  IMAGE_DETAIL_AUTO = 1;
+  IMAGE_DETAIL_LOW = 2;
+  IMAGE_DETAIL_HIGH = 3;
+}
+
+message ChatImageUrl {
+  // http(s) or data URL.
+  string url = 1;
+  ImageDetail detail = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
+}
+
+message ChatMediaUrl {
+  // http(s) or data URL.
+  string url = 1;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 2;
+}
+
+message ChatInputAudio {
+  // Base64-encoded audio bytes.
+  string data = 1;
+  // Audio format, such as "wav" or "mp3".
+  optional string format = 2;
+  // Caller-assigned item ID, used in place of the content hash for caching.
+  optional string uuid = 3;
+}
+
+message ChatTool {
+  // Function name.
+  string name = 1;
+  optional string description = 2;
+  // JSON schema of the function arguments, encoded as a JSON string so that
+  // the rendered prompt keeps the schema's key order.
+  string parameters_json = 3;
+  // Whether to enforce the schema on the generated arguments.
+  optional bool strict = 4;
+  // Whether the schema is loaded on demand via tool search.
+  optional bool defer_loading = 5;
+}
+
+message ChatToolCall {
+  string id = 1;
+  // Function name.
+  string name = 2;
+  // Function arguments as a JSON string.
+  string arguments = 3;
+}
+
+message ChatToolChoice {
+  enum Mode {
+    MODE_UNSPECIFIED = 0;  // Same as AUTO
+    MODE_AUTO = 1;
+    MODE_NONE = 2;
+    MODE_REQUIRED = 3;
+  }
+
+  oneof choice {
+    Mode mode = 1;
+    // Force a call to the named function.
+    string function_name = 2;
+  }
+}

@@ -130,6 +130,10 @@ pub struct RenderArgs {
     /// HTTP bind port.
     #[arg(long, default_value_t = 8000)]
     port: u16,
+    /// TCP port for the gRPC Render service, bound on the HTTP host. When not
+    /// set, no gRPC server is started.
+    #[arg(long)]
+    grpc_port: Option<u16>,
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
@@ -247,6 +251,7 @@ impl RenderArgs {
             max_n_sequences: self.max_n_sequences.unwrap_or(DEFAULT_MAX_N_SEQUENCES),
             host: self.host,
             port: self.port,
+            grpc_port: self.grpc_port,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,

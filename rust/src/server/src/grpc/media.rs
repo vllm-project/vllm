@@ -88,6 +88,41 @@ fn feature_from_proto(item: pb::MediaItem) -> Result<MmFeatureSpec, Status> {
     })
 }
 
+/// Convert one prepared feature into the preprocessed-media form accepted by
+/// [`from_proto`]. Without `include_kwargs`, the processed tensors are left
+/// out and only the hash and placeholder range remain.
+pub(super) fn feature_to_proto(
+    feature: MmFeatureSpec,
+    include_kwargs: bool,
+) -> Result<pb::MediaItem, Status> {
+    let kwargs = match feature.data.filter(|_| include_kwargs) {
+        Some(data) => Some(crate::mm_wire::encode_kwargs(&data).map_err(Status::internal)?),
+        None => None,
+    };
+    let is_embed = match &feature.mm_position.is_embed {
+        Some(mask) => crate::mm_wire::mask_to_bools(mask).map_err(Status::internal)?,
+        None => Vec::new(),
+    };
+    Ok(pb::MediaItem {
+        modality: match feature.modality {
+            MmModality::Image => pb::Modality::Image,
+            MmModality::Video => pb::Modality::Video,
+            MmModality::Audio => pb::Modality::Audio,
+        } as i32,
+        source: Some(pb::media_item::Source::Features(
+            pb::PreprocessedMediaFeatures {
+                kwargs,
+                identifier: feature.identifier,
+                offset: feature.mm_position.offset as u64,
+                length: feature.mm_position.length as u64,
+                mm_hash: feature.mm_hash,
+                is_embed,
+            },
+        )),
+        ..Default::default()
+    })
+}
+
 fn mixed_media_error() -> Status {
     Status::invalid_argument("raw media and preprocessed media features cannot be mixed")
 }

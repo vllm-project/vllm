@@ -55,6 +55,8 @@ fn render_args_build_config_without_tls() {
         "Qwen/Qwen2.5-0.5B",
         "--port",
         "8080",
+        "--grpc-port",
+        "50051",
         "--dtype",
         "float16",
         "--lora-modules",
@@ -96,6 +98,7 @@ fn render_args_build_config_without_tls() {
     assert_eq!(config.hf_config, None);
     assert_eq!(config.host, "127.0.0.1");
     assert_eq!(config.port, 8080);
+    assert_eq!(config.grpc_port, Some(50051));
     assert_eq!(config.dtype, RenderDtype::Fixed(ModelDtype::Float16));
     assert_eq!(config.lora_modules[0].name, "adapter-a");
     assert!(!config.language_model_only);

@@ -9,7 +9,8 @@ use tonic_health::server::HealthReporter;
 use tracing::{debug, info, warn};
 use vllm_llm::Llm;
 
-use super::{ControlGrpcService, InferenceGrpcService};
+use super::{ControlGrpcService, InferenceGrpcService, RenderGrpcService};
+use crate::state::AppState;
 
 /// Health service for liveness probes. It reports `NOT_SERVING` only after an
 /// engine failure: pause, sleep, weight updates, and orderly shutdown leave it
@@ -53,6 +54,7 @@ impl HealthMonitor {
     pub async fn register(reporter: HealthReporter, mut engine: EngineHealth) -> Self {
         let ready = *engine.readiness.borrow_and_update();
         reporter.set_serving::<ControlGrpcService>().await;
+        reporter.set_serving::<RenderGrpcService<AppState>>().await;
         reporter.set_service_status(LIVENESS_SERVICE, ServingStatus::Serving).await;
         set_readiness(&reporter, ready).await;
         Self {
@@ -101,6 +103,7 @@ impl HealthMonitor {
     async fn run(mut self, shutdown: CancellationToken, withdrawn: &CancellationToken) {
         let inference_service = InferenceGrpcService::NAME;
         let control_service = ControlGrpcService::NAME;
+        let render_service = RenderGrpcService::<AppState>::NAME;
         let status = ServingStatus::NotServing;
         let mut readiness_open = true;
         let engine_failed = loop {
@@ -145,8 +148,9 @@ impl HealthMonitor {
         let reporter = &mut self.reporter;
         set_readiness(reporter, false).await;
         reporter.set_not_serving::<ControlGrpcService>().await;
-        // Both gRPC services use the same engine client, so overall server health
-        // mirrors their shared engine health.
+        reporter.set_not_serving::<RenderGrpcService<AppState>>().await;
+        // The gRPC services are served alongside the same engine client, so overall
+        // server health mirrors its engine health.
         reporter.set_service_status("", status).await;
 
         if engine_failed {
@@ -162,6 +166,7 @@ impl HealthMonitor {
 
         reporter.clear_service_status(inference_service).await;
         reporter.clear_service_status(control_service).await;
+        reporter.clear_service_status(render_service).await;
         reporter.clear_service_status("").await;
         reporter.clear_service_status(LIVENESS_SERVICE).await;
         reporter.clear_service_status(READINESS_SERVICE).await;
