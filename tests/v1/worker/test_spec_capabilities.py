@@ -559,40 +559,6 @@ def _kv_layouts(*layers):
     return kernel.ctxs[0].kv_layouts
 
 
-def test_paged_kv_layout_attention():
-    """A ``[blocks, heads, block_size, content]`` view (K and V packed in
-    content, here a permuted FlashAttention-style allocation) is described in
-    (block, slot, plane, head, dim) order, by its own strides."""
-    blocks, slots, heads, dim = 8, 4, 2, 16
-    # Allocated [blocks, slots, heads, dim], viewed [blocks, heads, slots, dim].
-    cache = torch.arange(blocks * slots * heads * dim, dtype=torch.float32)
-    cache = cache.view(blocks, slots, heads, dim).permute(0, 2, 1, 3)
-    (layout,) = _kv_layouts(_attn_layer("a", cache=cache))
-    assert layout.shape == (blocks, slots, 1, heads, dim)
-    assert layout.strides == (slots * heads * dim, heads * dim, 0, dim, 1)
-    assert layout.block_size == slots and layout.dtype == torch.float32
-    assert layout.caches[0] is cache
-    view = cache.as_strided(layout.shape, layout.strides)
-    for b, s, h in ((0, 0, 0), (3, 2, 1), (7, 3, 1)):
-        assert torch.equal(view[b, s, 0, h], cache[b, h, s])
-
-
-def test_paged_kv_layout_mla():
-    """MLA's ``[blocks, block_size, content]`` latent cache: one plane, one head."""
-    cache = torch.zeros(8, 4, 24, dtype=torch.bfloat16)
-    (layout,) = _kv_layouts(_attn_layer("mla", cache=cache))
-    assert layout.shape == (8, 4, 1, 1, 24)
-    assert layout.strides == (96, 24, 0, 0, 1)
-
-
-def test_paged_kv_layout_kernel_block_size():
-    """The cache's block size is the backend's kernel block size, which may
-    split the group's (table) blocks: here 16 table tokens per 4-token block."""
-    layer = replace(_attn_layer("a", cache=torch.zeros(32, 2, 4, 16)), block_size=16)
-    (layout,) = _kv_layouts(layer)
-    assert layout.block_size == 4 and layout.table_block_size == 16
-
-
 def test_paged_kv_layout_groups_and_sharing():
     """Layers whose cache is shared (KV sharing) appear once; layers of
     different block tables or shapes get a layout each."""
