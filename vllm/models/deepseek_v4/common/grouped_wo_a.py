@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Grouped ``wo_a`` output projection for DeepSeek-V4.1."""
+"""Grouped ``wo_a`` output projection for DeepSeek-V4."""
 
 import torch
 
 from vllm.distributed.utils import divide
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.models.deepseek_v41.common.ops import fused_inv_rope_fp8_quant
+from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+    fused_inv_rope_fp8_quant,
+)
 
 
 class DeepseekV4GroupedWoA(ColumnParallelLinear):
