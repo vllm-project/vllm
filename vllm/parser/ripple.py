@@ -95,6 +95,9 @@ def ripple_config() -> ParserEngineConfig:
             ),
         },
         arg_converter=_ripple_arg_converter,
+        # Streaming cannot retract text it already sent, so keep the
+        # non-streaming content the same.
+        strip_content_whitespace_with_tools=False,
     )
 
 

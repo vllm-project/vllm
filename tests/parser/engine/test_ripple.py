@@ -67,6 +67,13 @@ CASES = {
         ["Paris", "Rome"],
     ),
     "truncated_reasoning": ("<think>\nStill thinking", "Still thinking", "", []),
+    # Text before a tool call keeps its whitespace in both parse paths.
+    "extra_newline_before_tool_content": (
+        "<think>\nNeed the tool.\n</think>\n\nChecking now." + _call("Paris"),
+        "Need the tool.",
+        "\nChecking now.",
+        ["Paris"],
+    ),
 }
 
 
