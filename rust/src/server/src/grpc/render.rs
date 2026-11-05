@@ -135,9 +135,20 @@ async fn render_chat(
         .text_request;
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
     let text_request = prepared.text_request;
-    let media = (prepared.generate_request.mm_features.into_iter().flatten())
+    let media: Vec<pb::MediaItem> = (prepared.generate_request.mm_features.into_iter().flatten())
         .map(|feature| media::feature_to_proto(feature, !omit_media_kwargs))
         .try_collect()?;
+    // Fail here rather than in Inference.Generate, which rejects the same media.
+    media::check_inline_kwargs_size(
+        media
+            .iter()
+            .filter_map(|item| match &item.source {
+                Some(pb::media_item::Source::Features(feature)) => feature.kwargs.as_ref(),
+                _ => None,
+            })
+            .map(Vec::len)
+            .sum(),
+    )?;
 
     // A parser-built output grammar replaces the request's constraint. Echo an
     // unchanged constraint as sent, so a JSON schema keeps its exact text.
@@ -307,7 +318,13 @@ fn assistant_block_from_proto(
         Some(Block::ToolCall(call)) => AssistantContentBlock::ToolCall(AssistantToolCall {
             id: call.id,
             name: call.name,
-            arguments: call.arguments,
+            // Like the HTTP chat route and Python, a call without arguments
+            // renders as an empty object.
+            arguments: if call.arguments.is_empty() {
+                "{}".to_string()
+            } else {
+                call.arguments
+            },
         }),
         None => {
             return Err(Status::invalid_argument(
@@ -390,11 +407,44 @@ fn tools_from_proto(tools: Vec<pb::ChatTool>) -> Result<Vec<ChatTool>, Status> {
 // Errors
 // ========================================================================================
 
+/// Media that cannot be fetched or preprocessed is the request's fault, as in
+/// the HTTP render route.
 fn chat_error_to_status(error: vllm_chat::Error) -> Status {
     let message = error.to_report_string();
-    if error.is_request_validation_error() {
+    if error.is_request_validation_error() || matches!(error, vllm_chat::Error::Multimodal(_)) {
         Status::invalid_argument(message)
+    } else if error.is_unavailable() {
+        Status::unavailable(message)
     } else {
         Status::internal(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_call_without_arguments_renders_as_empty_object() {
+        let block = pb::AssistantContentBlock {
+            block: Some(pb::assistant_content_block::Block::ToolCall(
+                pb::ChatToolCall {
+                    id: "call_1".to_string(),
+                    name: "now".to_string(),
+                    arguments: String::new(),
+                },
+            )),
+        };
+        let AssistantContentBlock::ToolCall(call) = assistant_block_from_proto(block).unwrap()
+        else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn media_errors_are_invalid_argument() {
+        let status = chat_error_to_status(vllm_chat::Error::Multimodal("fetch failed".into()));
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 }

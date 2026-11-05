@@ -42,7 +42,10 @@ message RenderChatResponse {
   // Send as `engine_reasoning_gate`.
   EngineReasoningGate engine_reasoning_gate = 3;
   // Preprocessed media items, ordered by their placeholder ranges in
-  // `prompt_token_ids`. Send as `media`.
+  // `prompt_token_ids`. Send as `media`. Their inline kwargs total at most
+  // 16 MiB, the most Inference.Generate accepts; larger media fail with
+  // RESOURCE_EXHAUSTED. Such responses exceed the 4 MiB default receive limit
+  // of many gRPC clients.
   repeated MediaItem media = 4;
 }
 
