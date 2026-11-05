@@ -179,6 +179,7 @@ def deepep_v2_moe_impl(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         a1_scale=test_tensors.rank_token_scales,
         a2_scale=test_tensors.intermediate_scales,
     )

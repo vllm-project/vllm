@@ -223,6 +223,7 @@ def test_batched_mm(
             "BLOCK_SIZE_K": 16 if dtype.itemsize > 1 else fp8_block_k,
         },
         per_act_token_quant=per_act_token_quant,
+        per_out_ch_quant=per_act_token_quant,
         block_shape=block_shape,
     )
 
@@ -298,6 +299,7 @@ def test_batched_mm_per_tensor_weight_per_token_act(scale_shape: str):
         False,
         config={"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 16, "BLOCK_SIZE_K": 32},
         per_act_token_quant=True,
+        per_out_ch_quant=False,
     )
 
     ref_output = native_batched_masked_quant_matmul(
