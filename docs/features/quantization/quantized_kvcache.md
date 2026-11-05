@@ -183,3 +183,17 @@ if __name__ == "__main__":
 ```
 
 For more detailed and up-to-date examples, see the [`llm-compressor` official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples/quantization_kv_cache).
+
+## Measuring the Quality Impact of a Quantized KV Cache
+
+`benchmarks/benchmark_kv_cache_kl.py` scores the same teacher-forced token sequence with the `auto` KV cache and with each requested `--kv-cache-dtype`, and reports the KL divergence from the `auto` next-token distribution (over the reference top-20 tokens, a lower bound), the perplexity change and the top-1 agreement:
+
+```bash
+python benchmarks/benchmark_kv_cache_kl.py --model Qwen/Qwen3-4B \
+    --kv-cache-dtypes int4_per_token_head turboquant_4bit_nc \
+    --text-file docs/benchmarking/cli.md \
+    --num-tokens 8192 --max-num-batched-tokens 16
+```
+
+!!! note
+    Keep `--max-num-batched-tokens` small. Backends whose prefill attends the raw K/V of the tokens being prefilled (for example TurboQuant) do not read the quantized cache for those tokens, so scoring one long prompt in a single prefill under-reports their error. Tokens inside one scheduling chunk still attend to each other unquantized in such backends, so compare dtypes at the same chunk size.
