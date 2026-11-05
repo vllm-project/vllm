@@ -40,7 +40,6 @@ from vllm.v1.worker.gpu.spec_decode.capabilities import (
     layer_spec_limits,
     resolve_spec_resources,
 )
-from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,
     GDNSpecRows,
@@ -107,6 +106,7 @@ class ToyKernel(SpecKernel):
         self.kinds = frozenset(kinds)
         self.declines = frozenset(declines)
         self.binds: list[list[str]] = []
+        self.ctxs: list[KernelContext] = []
         self.steps: list[CommitStep] = []
 
     def supports(self, layer):
@@ -114,6 +114,7 @@ class ToyKernel(SpecKernel):
 
     def bind(self, ctx, layers):
         self.binds.append([layer.name for layer in layers])
+        self.ctxs.append(ctx)
 
     def verify(self, rows):
         raise AssertionError("not called on CPU")
@@ -131,10 +132,24 @@ class Provider:
         return self._kernels
 
 
+def _kv_provided() -> KernelRegistry:
+    """A plugin's KV compaction: what every attention layer needs for trees."""
+    return KernelRegistry([Provider({KV_COMMIT: ToyKernel()})])
+
+
 def _provided() -> KernelRegistry:
-    """A plugin's recurrent tree verify: verify and state commit kernels."""
+    """A plugin's KV compaction and recurrent tree verify: verify and state
+    commit kernels."""
     return KernelRegistry(
-        [Provider({GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel()})]
+        [
+            Provider(
+                {
+                    GDN_VERIFY: ToyKernel(),
+                    STATE_COMMIT: ToyKernel(),
+                    KV_COMMIT: ToyKernel(),
+                }
+            )
+        ]
     )
 
 
@@ -225,12 +240,23 @@ def test_plan_kind_rules(case):
                 f"{layer_cls.__name__}, 3 layers: declares no spec_layer_variant"
             ]
     attn_groups, layers = model()
-    kernels = _provided() if provided else None
+    kernels = _provided() if provided else _kv_provided()
     caps = SpecCapabilities.from_limits(
         layer_spec_limits(attn_groups, layers, state_mode, kernels)
     )
     assert caps.plan_kind == plan_kind
     assert [limit.reason for limit in caps.limits] == reasons
+
+
+def test_no_kv_commit_verifies_chains():
+    """Without a provider of the KV commit, attention layers verify chains:
+    vLLM keeps no compaction kernel, so a tree speculator lowers at startup."""
+    attn_groups, layers = _model(*_LLAMA)
+    caps = SpecCapabilities.from_limits(layer_spec_limits(attn_groups, layers, "slots"))
+    assert caps.plan_kind == "chain"
+    assert [limit.reason for limit in caps.limits] == [
+        "attn:full_attention, 4 layers: no layout:paged_token/commit kernel"
+    ]
 
 
 _LOWERED = ": keeps verify rows in chain order"
@@ -414,9 +440,20 @@ def _mamba_layer(name, variant="gdn", state_mode="slots"):
     return SpecLayerSpec(name, kind, _module(), "mamba_state")
 
 
-def _attn_layer(name, layout="paged_token"):
+_TABLE = torch.zeros(3, 4, dtype=torch.int32)
+
+
+def _attn_layer(name, layout="paged_token", cache=None):
+    module = _module()
+    module.kv_cache = torch.zeros(8, 2, 4, 16) if cache is None else cache
     return SpecLayerSpec(
-        name, SpecLayerKind("attn", "full_attention"), _module(), layout
+        name,
+        SpecLayerKind("attn", "full_attention"),
+        module,
+        layout,
+        block_table=_TABLE,
+        block_size=4,
+        num_blocks=module.kv_cache.shape[0],
     )
 
 
@@ -434,13 +471,11 @@ def _ctx(plan_kind="tree", shapes=SHAPES):
 
 
 def test_registry_lookup(caplog):
-    """The reference is the KV commit; providers overlay it key by key, a later
-    provider wins a key, each override is logged once, and an unknown op is
-    refused."""
+    """Nothing is in tree; providers give kernels key by key, a later provider
+    wins a key, each is logged once, and an unknown op is refused."""
     registry = KernelRegistry()
-    for key in (GDN_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT):
+    for key in (GDN_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT, KV_COMMIT):
         assert registry.get(key) is None
-    assert isinstance(registry.get(KV_COMMIT), KvCompactor)
 
     first, second = ToyKernel(), ToyKernel()
     provider = Provider({GDN_VERIFY: first, SHORT_CONV_VERIFY: ToyKernel()})
@@ -448,7 +483,7 @@ def test_registry_lookup(caplog):
         partial = KernelRegistry([provider])
         KernelRegistry([provider])
     assert partial.get(GDN_VERIFY) is first
-    assert isinstance(partial.get(KV_COMMIT), KvCompactor)
+    assert partial.get(KV_COMMIT) is None
     lines = [r.getMessage() for r in caplog.records if provider.name in r.getMessage()]
     assert len(lines) == 2
     assert "mamba:gdn@slots/verify" in lines[0]
@@ -468,7 +503,13 @@ def test_registry_lookup(caplog):
         pytest.param(
             {}, _mamba_layer("m"), "chain", "no mamba:gdn@slots/verify", id="gdn"
         ),
-        pytest.param({}, _attn_layer("a"), "tree", None, id="attn"),
+        # No provider of the KV commit: the layer verifies chains.
+        pytest.param(
+            {}, _attn_layer("a"), "chain", "no layout:paged_token/commit", id="attn"
+        ),
+        pytest.param(
+            {KV_COMMIT: ToyKernel()}, _attn_layer("a"), "tree", None, id="attn-kv"
+        ),
         # A cache not paged by slot keeps its own commit: nothing to need.
         pytest.param({}, _attn_layer("ring", layout=""), "tree", None, id="ring"),
         pytest.param(
@@ -545,6 +586,8 @@ def test_bind_commit_capture():
     registry.bind(ctx, layers)
     assert verify.binds == state.binds == [["m.0", "m.1"]]
     assert kv.binds == [["a.0"]]
+    assert [len(c.kv_layouts) for c in kv.ctxs] == [1]
+    assert not any(c.kv_layouts for c in state.ctxs + verify.ctxs)
     assert all(layer.module.spec_verify_kernel is verify for layer in layers[:2])
     step = CommitStep(result=None, num_reqs=2, rows=None, seq_lens=None)
     registry.commit(step)
@@ -568,6 +611,86 @@ def test_bind_commit_capture():
     stale.module.spec_verify_kernel = "stale"
     KernelRegistry([Provider({STATE_COMMIT: ToyKernel()})]).bind(_ctx(), [stale])
     assert stale.module.spec_verify_kernel is None
+
+
+def _kv_layouts(*layers):
+    kernel = ToyKernel()
+    KernelRegistry([Provider({KV_COMMIT: kernel})]).bind(_ctx(), list(layers))
+    return kernel.ctxs[0].kv_layouts
+
+
+def test_paged_kv_layout_attention():
+    """A ``[blocks, heads, block_size, content]`` view (K and V packed in
+    content, here a permuted FlashAttention-style allocation) is described in
+    (block, slot, plane, head, dim) order, by its own strides."""
+    blocks, slots, heads, dim = 8, 4, 2, 16
+    # Allocated [blocks, slots, heads, dim], viewed [blocks, heads, slots, dim].
+    cache = torch.arange(blocks * slots * heads * dim, dtype=torch.float32)
+    cache = cache.view(blocks, slots, heads, dim).permute(0, 2, 1, 3)
+    (layout,) = _kv_layouts(_attn_layer("a", cache=cache))
+    assert layout.shape == (blocks, slots, 1, heads, dim)
+    assert layout.strides == (slots * heads * dim, heads * dim, 0, dim, 1)
+    assert layout.block_size == slots and layout.dtype == torch.float32
+    assert layout.caches[0] is cache
+    view = cache.as_strided(layout.shape, layout.strides)
+    for b, s, h in ((0, 0, 0), (3, 2, 1), (7, 3, 1)):
+        assert torch.equal(view[b, s, 0, h], cache[b, h, s])
+
+
+def test_paged_kv_layout_mla():
+    """MLA's ``[blocks, block_size, content]`` latent cache: one plane, one head."""
+    cache = torch.zeros(8, 4, 24, dtype=torch.bfloat16)
+    (layout,) = _kv_layouts(_attn_layer("mla", cache=cache))
+    assert layout.shape == (8, 4, 1, 1, 24)
+    assert layout.strides == (96, 24, 0, 0, 1)
+
+
+def test_paged_kv_layout_kernel_block_size():
+    """The cache's block size is the backend's kernel block size, which may
+    split the group's (table) blocks: here 16 table tokens per 4-token block."""
+    layer = replace(_attn_layer("a", cache=torch.zeros(32, 2, 4, 16)), block_size=16)
+    (layout,) = _kv_layouts(layer)
+    assert layout.block_size == 4 and layout.table_block_size == 16
+
+
+def test_paged_kv_layout_groups_and_sharing():
+    """Layers whose cache is shared (KV sharing) appear once; layers of
+    different block tables or shapes get a layout each."""
+    shared = torch.zeros(8, 2, 4, 16)
+    a, b = _attn_layer("a", cache=shared), _attn_layer("b", cache=shared)
+    c = _attn_layer("c")
+    other_table = replace(
+        _attn_layer("d"), block_table=torch.zeros(3, 4, dtype=torch.int32)
+    )
+    mla = _attn_layer("mla", cache=torch.zeros(8, 4, 24))
+    layouts = _kv_layouts(a, b, c, other_table, mla)
+    assert [len(layout.caches) for layout in layouts] == [2, 1, 1]
+    assert layouts[0].caches[0] is shared
+
+
+@pytest.mark.parametrize(
+    "layer, match",
+    [
+        pytest.param(
+            _attn_layer("a", cache=torch.zeros(8, 2, 4, 2, 16)), "no paged KV", id="5d"
+        ),
+        pytest.param(
+            replace(_attn_layer("a"), num_blocks=7), "no paged KV", id="num-blocks"
+        ),
+        pytest.param(
+            _attn_layer("a", cache=torch.zeros(8, 2, 16, 4).transpose(2, 3)),
+            "strided",
+            id="strided-dim",
+        ),
+        pytest.param(
+            replace(_attn_layer("a"), block_table=None), "int32", id="no-table"
+        ),
+    ],
+)
+def test_paged_kv_layout_refuses_at_bind(layer, match):
+    """A cache the descriptor cannot describe fails at bind, before any step."""
+    with pytest.raises(ValueError, match=match):
+        _kv_layouts(layer)
 
 
 @pytest.mark.parametrize("plan_kind", ["chain", "tree"])

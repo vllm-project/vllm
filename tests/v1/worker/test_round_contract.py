@@ -26,11 +26,8 @@ from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
-from vllm.v1.worker.gpu.spec_decode.commit import (
-    KvCompactor,
-    accepted_rows,
-    kv_cache_layout,
-)
+from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
+from vllm.v1.worker.gpu.spec_decode.commit import accepted_rows
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     CommitStep,
     KernelContext,
@@ -484,11 +481,16 @@ def _kernel_context():
     )
 
 
-@requires_kernels
+def _reference_kernels():
+    """The test plugin's reference kernels: vLLM keeps no KV compaction."""
+    reference = pytest.importorskip("vllm_add_test_speculators.reference")
+    return KernelRegistry([reference.ReferenceKernels()])
+
+
 @pytest.mark.parametrize("kind", list(_CACHES))
 def test_kv_compaction_moves_the_path(kind):
     """The KV of each accepted path row lands in the chain slot of its path
-    index, in every cache layout."""
+    index, in every cache layout, through the layouts vLLM describes."""
     gen = np.random.default_rng(300)
     table_block, kernel_block, num_table_blocks, max_rows = 8, 4, 24, 7
     num_kernel_blocks = num_table_blocks * table_block // kernel_block
@@ -509,16 +511,17 @@ def test_kv_compaction_moves_the_path(kind):
         _cache(kind, num_kernel_blocks, kernel_block, heads, dim, torch.bfloat16)
         for _ in range(2)
     ]
-    table = _t(tables)  # the compactor keeps its pointer
+    table = _t(tables)
     before = [cache.clone() for cache in caches]
-    compactor = KvCompactor()
-    compactor.bind(
+    registry = _reference_kernels()
+    registry.bind(
         _kernel_context(),
         [
             SpecLayerSpec(
                 f"l{i}",
-                kind=None,  # type: ignore[arg-type]
+                kind=SpecLayerKind("attn", "full_attention"),
                 module=_module(kv_cache=cache),
+                layout="paged_token",
                 block_table=table,
                 block_size=table_block,
                 num_blocks=num_kernel_blocks,
@@ -527,7 +530,7 @@ def test_kv_compaction_moves_the_path(kind):
         ],
     )
     sampled = torch.zeros(num_reqs, max_rows, dtype=torch.int64, device=DEVICE)
-    compactor.commit(
+    registry.commit(
         CommitStep(
             AcceptResult(_t(path), _t(path_len), sampled),
             num_reqs,
@@ -581,7 +584,7 @@ def _runner(specs, modules, kernel_block_size, num_blocks):
 
 
 @pytest.mark.parametrize("case", ["hybrid_group_blocks", "ring_shared_hidden"])
-def test_kv_compactor_binds_the_layers_it_moves(case):
+def test_kv_commit_binds_the_layers_it_moves(case):
     """A hybrid model's attention group blocks are larger than the layer's spec
     says: the cache is allocated, and the block table kept, in the group's. The
     DSv4 ring (not paged by slot) keeps its own commit, a layer sharing another's
@@ -609,36 +612,20 @@ def test_kv_compactor_binds_the_layers_it_moves(case):
         runner = _runner(specs, modules, 16, 4)
 
     layers = spec_kernel_layers(runner)
-    registry = KernelRegistry()
+    registry = _reference_kernels()
     registry.bind(_kernel_context(), layers)
     compactor = registry.get(("layout:paged_token", "commit"))
 
-    assert isinstance(compactor, KvCompactor)
-    [(layout, *_, table_sizes)] = compactor.launches
+    [layout] = compactor.layouts
     if case == "hybrid_group_blocks":
         assert layout.block_size == kernel_block
-        assert table_sizes.tolist() == [group_block]
+        assert layout.table_block_size == group_block
     else:
         assert [(layer.name, layer.layout) for layer in layers] == [
             ("attn", "paged_token"),
             ("ring", ""),
         ]
-
-
-@pytest.mark.parametrize(
-    "cache, match",
-    [
-        (torch.zeros(3, 4, 5, 6), "layout"),
-        (torch.zeros(8, 2, 4, 16, dtype=torch.float64), "copy"),
-        # K/V-split views: [2, blocks, ...] and [blocks, 2, ...] read the same
-        # when there are 2 blocks, and vLLM does not give layers either.
-        (torch.zeros(2, 8, 4, 2, 16), "layout"),
-        (torch.zeros(8, 2, 4, 2, 16), "layout"),
-    ],
-)
-def test_kv_cache_layout_refuses_what_it_cannot_read(cache, match):
-    with pytest.raises(NotImplementedError, match=match):
-        kv_cache_layout(cache, num_blocks=8)
+        assert layout.caches == (cache,)
 
 
 class _StaticSpec:

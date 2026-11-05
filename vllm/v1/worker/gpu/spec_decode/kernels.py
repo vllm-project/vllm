@@ -9,7 +9,7 @@ of keys; a later provider wins a key, and a layer missing a kernel verifies chai
 
 import functools
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 
 import torch
@@ -59,6 +59,95 @@ class SpecLayerSpec:
     """At bind: blocks of the backend's kernel block size in the layer's cache."""
 
 
+PAGED_KV_COMMIT: KernelKey = ("layout:paged_token", "commit")
+
+
+@dataclass(frozen=True)
+class PagedKVLayout:
+    """Where the KV caches of one KV cache group keep each token, for a
+    ``layout:paged_token`` commit kernel. Element ``(block, slot, plane, head,
+    dim)`` of a cache sits ``sum(index * stride)`` elements past the cache's
+    first element; ``dim`` is contiguous. The caches vLLM binds keep K and V
+    packed in one row (``[K | V]`` content, or MLA's latent), so ``num_planes``
+    is 1 and ``head_dim`` spans the packed row.
+
+    Token ``t`` of a request (by its position) lives in kernel block
+    ``block_table[b, t // table_block_size] * table_block_size + t %
+    table_block_size``, split by ``block_size`` into block and slot.
+    """
+
+    caches: tuple[torch.Tensor, ...]
+    """One per distinct cache: layers sharing a cache (KV sharing) appear once."""
+    shape: tuple[int, int, int, int, int]
+    """``(num_blocks, block_size, num_planes, num_heads, head_dim)``, per cache."""
+    strides: tuple[int, int, int, int, int]
+    """In elements, in the order of ``shape``; ``strides[4] == 1``."""
+    dtype: torch.dtype
+    block_table: torch.Tensor
+    """``[max_num_reqs, max_blocks]`` int32: the group's block table, as the
+    forward reads it."""
+    table_block_size: int
+    """Tokens per block of ``block_table`` (the group's block size)."""
+
+    @property
+    def block_size(self) -> int:
+        """Tokens per block of the caches: the backend's kernel block size,
+        which may divide ``table_block_size``."""
+        return self.shape[1]
+
+
+def paged_kv_layout_of(
+    cache: torch.Tensor, num_blocks: int
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """``(shape, strides)`` of a layer's KV cache view in
+    :class:`PagedKVLayout` order. Reads ``[blocks, heads, block_size, content]``
+    (attention, K and V packed in ``content``) and ``[blocks, block_size,
+    content]`` (MLA) views; raises ``ValueError`` for anything else."""
+    shape, stride = tuple(cache.shape), cache.stride()
+    if cache.dim() == 4 and shape[0] == num_blocks:
+        blocks, heads, slots, dim = shape
+        strides = (stride[0], stride[2], 0, stride[1], stride[3])
+        return (blocks, slots, 1, heads, dim), strides
+    if cache.dim() == 3 and shape[0] == num_blocks:
+        blocks, slots, dim = shape
+        return (blocks, slots, 1, 1, dim), (stride[0], stride[1], 0, 0, stride[2])
+    raise ValueError(
+        f"no paged KV layout for a KV cache view of shape {shape} and strides "
+        f"{stride} ({num_blocks} kernel blocks expected first)"
+    )
+
+
+def paged_kv_layouts(layers: Sequence[SpecLayerSpec]) -> tuple[PagedKVLayout, ...]:
+    """The :class:`PagedKVLayout` of each KV cache group of ``layers``. Raises
+    ``ValueError`` at bind for a cache it cannot describe."""
+    # (block table, table block size, shape, strides, dtype) -> caches by data_ptr
+    groups: dict[tuple, dict[int, torch.Tensor]] = {}
+    tables: dict[int, torch.Tensor] = {}
+    for layer in layers:
+        cache, table = layer.module.kv_cache, layer.block_table
+        if table is None or table.dtype != torch.int32:
+            raise ValueError(f"{layer.name}: a paged KV commit needs an int32 table")
+        shape, strides = paged_kv_layout_of(cache, layer.num_blocks)
+        if strides[4] != 1:
+            raise ValueError(f"{layer.name}: the KV cache's head dim is strided")
+        tables[table.data_ptr()] = table
+        key = (table.data_ptr(), layer.block_size, shape, strides, cache.dtype)
+        groups.setdefault(key, {}).setdefault(cache.data_ptr(), cache)
+    layouts = []
+    for (table_ptr, table_block_size, shape, strides, dtype), caches in groups.items():
+        layouts.append(
+            PagedKVLayout(
+                caches=tuple(caches.values()),
+                shape=shape,
+                strides=strides,
+                dtype=dtype,
+                block_table=tables[table_ptr],
+                table_block_size=table_block_size,
+            )
+        )
+    return tuple(layouts)
+
+
 @dataclass(frozen=True)
 class KernelContext:
     """What every kernel is bound with, once per worker before capture."""
@@ -71,6 +160,9 @@ class KernelContext:
     """Verify rows per request, the root included."""
     capture_rows: tuple[int, ...]
     """Rows per request of each decode CUDA graph."""
+    kv_layouts: tuple[PagedKVLayout, ...] = ()
+    """For the ``layout:paged_token`` commit kernel: the layouts of the layers
+    it commits. Empty for every other kernel."""
 
 
 @dataclass(frozen=True)
@@ -160,18 +252,13 @@ class SpecKernelProvider(Protocol):
 
 
 class KernelRegistry:
-    """The in-tree kernels overlaid by ``providers`` in order: a later
-    provider wins a key, and each override is logged once. Built once per
-    worker and bound once, before capture."""
+    """The kernels of ``providers``, in order: a later provider wins a key,
+    and each override is logged once. Built once per worker and bound once,
+    before capture."""
 
     def __init__(self, providers: Iterable[SpecKernelProvider] = ()):
-        from vllm.v1.worker.gpu.spec_decode.commit import KvCompactor
-
-        # In tree: the attention KV commit only. Recurrent layers verify trees
-        # only with a provider's verify and state commit kernels.
-        self._kernels: dict[KernelKey, SpecKernel] = {
-            ("layout:paged_token", "commit"): KvCompactor()
-        }
+        # Nothing in tree: a layer verifies trees only with a provider's kernels.
+        self._kernels: dict[KernelKey, SpecKernel] = {}
         for provider in providers:
             for key, kernel in provider.kernels().items():
                 if key[1] not in get_args(Op):
@@ -254,7 +341,7 @@ class KernelRegistry:
         commits = plan_kind_rank(ctx.plan_kind) > plan_kind_rank("chain")
         # One kernel may serve several keys: bind it once to its unique layers
         # and commit with it if any of its ops is a commit.
-        served: dict[int, tuple[SpecKernel, set[Op], dict[str, SpecLayerSpec]]] = {}
+        served: dict[int, tuple[SpecKernel, dict[KernelKey, list[SpecLayerSpec]]]] = {}
         for layer in layers:
             if layer.kind.family == "mamba":
                 layer.module.spec_verify_kernel = None
@@ -264,17 +351,19 @@ class KernelRegistry:
                 kernel = self.kernel_for(key, layer)
                 if kernel is None or ctx.plan_kind not in kernel.supports(layer):
                     continue
-                _, ops, served_layers = served.setdefault(
-                    id(kernel), (kernel, set(), {})
-                )
-                ops.add(key[1])
-                served_layers[layer.name] = layer
+                _, by_key = served.setdefault(id(kernel), (kernel, {}))
+                by_key.setdefault(key, []).append(layer)
                 if key[1] == "verify":
                     layer.module.spec_verify_kernel = kernel
         self._commits = []
-        for kernel, ops, served_layers in served.values():
-            kernel.bind(ctx, list(served_layers.values()))
-            if "commit" in ops:
+        for kernel, by_key in served.values():
+            unique = {layer.name: layer for keyed in by_key.values() for layer in keyed}
+            kernel_ctx = ctx
+            if PAGED_KV_COMMIT in by_key:
+                layouts = paged_kv_layouts(by_key[PAGED_KV_COMMIT])
+                kernel_ctx = replace(ctx, kv_layouts=layouts)
+            kernel.bind(kernel_ctx, list(unique.values()))
+            if any(op == "commit" for _, op in by_key):
                 self._commits.append(kernel)
 
     def commit(self, step: CommitStep) -> None:

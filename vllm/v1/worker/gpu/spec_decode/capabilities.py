@@ -115,8 +115,8 @@ def layer_spec_limits(
     kernels: "KernelRegistry | None" = None,
 ) -> list[SpecLimit]:
     """The plan kind caps of the target's layers (:func:`spec_layers`), one per
-    (layer kind, reason) with its layer count. ``kernels`` defaults to the
-    in-tree kernels.
+    (layer kind, reason) with its layer count. ``kernels`` defaults to none:
+    then every layer that needs one verifies chains.
     """
     from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.worker.gpu.spec_decode.kernels import KernelRegistry, SpecLayerSpec

@@ -63,8 +63,8 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
-    # Qualified names of `(vllm_config) -> SpecKernelProvider` factories that
-    # overlay the in-tree spec kernels in order (spec_decode/kernels.py).
+    # Qualified names of `(vllm_config) -> SpecKernelProvider` factories, in
+    # order: a later one wins a key (spec_decode/kernels.py).
     spec_kernel_providers: ClassVar[tuple[str, ...]] = ()
 
     # --- SpeculativeConfig setup ---
