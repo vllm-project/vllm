@@ -29,6 +29,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -211,6 +212,42 @@ def _replicate_config_supports_group_ids(
     if hasattr(replicate_config_cls, "group_ids"):
         return True
     return hasattr(replicate_config, "group_ids")
+
+
+def _resolve_cache_prefix(vllm_config: VllmConfig) -> str:
+    """Return the configured cache_prefix, deriving one for "auto".
+
+    "auto" namespaces keys by build and model identity, so a new image or
+    model revision does not read KV written by a different deployment.
+    Ranks and Store payload format are already part of the key.
+    """
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    prefix = str(extra_config.get("cache_prefix", ""))
+    if prefix != "auto":
+        return prefix
+    # Default dev identities do not change with the code, so reject them.
+    image_tag = envs.VLLM_IMAGE_TAG.strip()
+    build_commit = envs.VLLM_BUILD_COMMIT.strip()
+    build = (image_tag if image_tag != "local/vllm-openai:dev" else "") or (
+        build_commit if build_commit != "unknown" else ""
+    )
+    if not build:
+        raise ValueError(
+            "MooncakeStore cache_prefix='auto' requires VLLM_IMAGE_TAG or "
+            "VLLM_BUILD_COMMIT to identify the deployed code."
+        )
+    model_config = vllm_config.model_config
+    prefix = "auto-" + hash_factors(
+        {
+            "build": build,
+            "model": model_config.compute_hash(),
+            "hf_commit": getattr(model_config.hf_config, "_commit_hash", None),
+            "cache": vllm_config.cache_config.compute_hash(),
+        }
+    )
+    logger.info("MooncakeStore resolved cache_prefix: %s", prefix)
+    return prefix
 
 
 def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
@@ -1499,6 +1536,8 @@ class MooncakeStoreWorker:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
+        # Resolve before connecting so a missing build identity fails fast.
+        cache_prefix = _resolve_cache_prefix(vllm_config)
         try:
             from mooncake.store import (  # type: ignore
                 MooncakeDistributedStore,
@@ -1518,10 +1557,13 @@ class MooncakeStoreWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        # Workers are laid out as PP x PCP x TP, TP innermost.
+        self.pp_rank = (
+            parallel_config.rank // (self.tp_size * self.pcp_size)
+        ) % self.pp_size
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
@@ -1675,11 +1717,7 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
-            cache_prefix=str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix", ""
-                )
-            ),
+            cache_prefix=cache_prefix,
             store_namespace=store_namespace,
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
