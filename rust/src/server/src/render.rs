@@ -20,6 +20,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_text::TextRequestProcessor;
 use vllm_text::backend::hf::{HfOverrides, ModelSource};
 
+use crate::model_names::ServedModelNames;
 use crate::{
     DEFAULT_REQUEST_BODY_LIMIT_BYTES, GRPC_KEEPALIVE_INTERVAL, GRPC_KEEPALIVE_TIMEOUT,
     HttpListenerMode, LoraModulePath, ReasoningEffort, TlsConfig, grpc,
@@ -36,8 +37,14 @@ pub struct RenderConfig {
     pub tokenizer: Option<ModelSource>,
     /// Source of `config.json` and `generation_config.json`, or `None` for `model`.
     pub hf_config: Option<ModelSource>,
+    /// Load no tokenizer and serve token IDs only (`--skip-tokenizer-init`).
+    pub skip_tokenizer_init: bool,
     pub hf_overrides: HfOverrides,
     pub served_model_name: Vec<String>,
+    /// Accept any requested model name (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
+    pub skip_model_name_validation: bool,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub max_n_sequences: i64,
     pub host: String,
     pub port: u16,
     /// Port for the gRPC Render service on `host`; `None` disables gRPC.
@@ -128,10 +135,12 @@ impl RenderDtype {
 
 pub(crate) struct RenderState {
     pub(crate) model: String,
-    pub(crate) served_model_names: Vec<String>,
+    pub(crate) served_model_names: ServedModelNames,
     /// Unlike `text.max_model_len()` this stays `None` when unset,
     /// so model cards advertise `null` instead of the `u32::MAX`.
     pub(crate) max_model_len: Option<u32>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`).
+    pub(crate) max_n_sequences: i64,
     pub(crate) text: TextRequestProcessor,
     pub(crate) chat: ChatRequestProcessor,
     pub(crate) lora_modules: Vec<LoraModulePath>,
@@ -139,11 +148,9 @@ pub(crate) struct RenderState {
 
 impl RenderState {
     /// Served model names followed by LoRA adapter names.
-    pub(crate) fn model_names(&self) -> Vec<String> {
-        (self.served_model_names.iter())
-            .chain(self.lora_modules.iter().map(|module| &module.name))
-            .cloned()
-            .collect()
+    pub(crate) fn model_names(&self) -> ServedModelNames {
+        (self.served_model_names.clone())
+            .with_names(self.lora_modules.iter().map(|module| module.name.clone()))
     }
 }
 
@@ -154,6 +161,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
             generation_config: Default::default(),
             renderer: config.renderer,
@@ -167,8 +175,11 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
     )
     .await
     .context("failed to load renderer/tokenizer backends")?;
-    let served_model_names =
-        crate::effective_served_model_names(&config.model, &config.served_model_name);
+    let served_model_names = ServedModelNames::new(crate::effective_served_model_names(
+        &config.model,
+        &config.served_model_name,
+    ))
+    .with_accept_any(config.skip_model_name_validation);
     // Only multimodal preprocessing reads the dtype, so text-only models never
     // fail on an unusual config dtype.
     let model_dtype = loaded
@@ -206,6 +217,7 @@ async fn build_state(config: &RenderConfig) -> Result<Arc<RenderState>> {
         model: config.model.clone(),
         served_model_names,
         max_model_len: config.max_model_len,
+        max_n_sequences: config.max_n_sequences,
         text,
         chat,
         lora_modules: config.lora_modules.clone(),
@@ -344,8 +356,11 @@ mod tests {
                 revision: None,
                 tokenizer: None,
                 hf_config: None,
+                skip_tokenizer_init: false,
                 hf_overrides: Default::default(),
                 served_model_name: Vec::new(),
+                skip_model_name_validation: false,
+                max_n_sequences: crate::DEFAULT_MAX_N_SEQUENCES,
                 host: "127.0.0.1".to_string(),
                 port: 8000,
                 grpc_port: None,

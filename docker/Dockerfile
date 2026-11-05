@@ -93,11 +93,6 @@ ARG UV_KEYRING_PROVIDER=${PIP_KEYRING_PROVIDER}
 # Flag enables built-in KV-connector dependency libs into docker images
 ARG INSTALL_KV_CONNECTORS=false
 
-# Flag builds NIXL, including its NIXL EP extension for the installed PyTorch,
-# from source and installs it in place of the nixl packages from the KV-connector
-# requirements
-ARG BUILD_NIXL=false
-
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
 FROM ${BUILD_BASE_IMAGE} AS base
@@ -498,8 +493,9 @@ WORKDIR /workspace
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
+COPY tools/ep_kernels/patches /tmp/patches
 # Defaults moved here from tools/ep_kernels/install_python_libraries.sh for centralized version management
-ARG DEEPEP_COMMIT_HASH=d4f41e4e93
+ARG DEEPEP_COMMIT_HASH=a56d6156febcd9976e55adc85b5155bfac9f28f8
 ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
@@ -567,24 +563,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         printf '%s\n' disabled > "${TRITON_WORKSPACE}/dist/build-state"; \
         (cd "${TRITON_WORKSPACE}/dist" \
             && sha256sum build-state > wheel.sha256); \
-    fi
-
-# Build NIXL and its NIXL EP extension against the PyTorch installed here when
-# requested. The wheels are installed by the final image, which has no compiler.
-ARG BUILD_NIXL
-COPY tools/build_nixl_with_torch215_for_rubin.py /tmp/build_nixl_for_rubin.py
-RUN --mount=type=bind,source=requirements,target=/tmp/vllm-requirements,ro \
-    set -eux; \
-    NIXL_WORKSPACE=/tmp/nixl_workspace; \
-    mkdir -p "${NIXL_WORKSPACE}/dist"; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        dnf install -y --setopt=install_weak_deps=False autoconf automake libtool; \
-        dnf clean all; \
-        rm -rf /var/cache/dnf; \
-        NIXL_REQUIREMENTS_FILE=/tmp/vllm-requirements/kv_connectors.txt \
-        WHEELS_CACHE_HOME="${NIXL_WORKSPACE}/dist" \
-        MAX_JOBS="${max_jobs:-}" \
-            python3 /tmp/build_nixl_for_rubin.py --skip-system-deps --build-only; \
     fi
 #################### EXTENSIONS BUILD IMAGE ####################
 
@@ -731,7 +709,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 tools/use_existing_torch.py --prefix \
         && cat torch_lib_versions.txt >> requirements/test/cuda.in \
-        && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+        && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
@@ -987,7 +965,7 @@ RUN set -eux; \
 # From versions.json: .openai_server_extras.timm, .openai_server_extras.runai_model_streamer,
 # .openai_server_extras.gguf (NVFP4 GGUF checkpoints, e.g. RecursiveSI/flint-nvfp4-gguf)
 ARG TIMM_VERSION=">=1.0.17"
-ARG RUNAI_MODEL_STREAMER_VERSION=">=0.15.7"
+ARG RUNAI_MODEL_STREAMER_VERSION=">=0.17.1"
 ARG GGUF_VERSION=">=0.19.0"
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system accelerate 'modelscope<1.38' \
@@ -1106,7 +1084,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 tools/use_existing_torch.py --prefix \
             && cat torch_lib_versions.txt >> requirements/test/cuda.in \
-            && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+            && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \
@@ -1115,7 +1093,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             echo "Installing dev requirements..." \
             && if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
                 echo "Recompiling test requirements for arm64..." \
-                && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
+                && uv pip compile --generate-hashes requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
                 --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
             fi \
             && uv pip install --system -r requirements/dev.txt \
@@ -1309,25 +1287,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     && rm -f \
         /tmp/install_triton_from_source.sh \
         /tmp/triton-source-wheel.sha256
-
-# Install source-built NIXL last, replacing the nixl packages installed above, so
-# the image has a NIXL EP build for its PyTorch version. There is no GPU driver
-# at build time, so check for the extension instead of importing it.
-ARG BUILD_NIXL
-RUN --mount=type=cache,target=/opt/uv/cache \
-    --mount=type=bind,from=extensions-build,source=/tmp/nixl_workspace/dist,target=/tmp/nixl-dist,ro \
-    set -eu; \
-    if [ "${BUILD_NIXL}" = "true" ]; then \
-        ls /tmp/nixl-dist/*.whl; \
-        uv pip uninstall --system nixl nixl-cu12 nixl-cu13; \
-        uv pip install --system --no-deps /tmp/nixl-dist/*.whl; \
-        python3 -c "import glob, importlib.util as u, os, torch; \
-            spec = u.find_spec('nixl_ep_cu' + os.environ['CUDA_VERSION'].split('.')[0]); \
-            mm = ''.join(torch.__version__.split('.')[:2]); \
-            ext = glob.glob(os.path.join(spec.submodule_search_locations[0], 'nixl_ep_cpp_torch' + mm + '.*')) if spec else []; \
-            assert ext, 'NIXL EP has no build for torch ' + torch.__version__; \
-            print('NIXL EP extension:', ext[0])"; \
-    fi
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 ENV VLLM_BUILD_COMMIT=${VLLM_BUILD_COMMIT:-unknown} \

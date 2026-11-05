@@ -19,6 +19,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -44,12 +47,21 @@ ShardId: TypeAlias = str | int | tuple[int, ...]
 ShardIds: TypeAlias = ShardId | list[ShardId]
 """One shard, or a list of shards the same weight is loaded into in turn."""
 
+WeightsTransformFn: TypeAlias = Callable[
+    [Iterable[tuple[str, torch.Tensor]]], Iterable[tuple[str, torch.Tensor]]
+]
+"""A lazy transform over a raw checkpoint ``(name, tensor)`` stream, passing
+unrecognized tensors through unchanged."""
+
 
 @dataclass
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
 
-    If a key maps to a value of `None`, the corresponding weight is ignored."""
+    If a key maps to a value of `None`, the corresponding weight is ignored.
+
+    ``weights_transforms`` rewrite the raw weight stream in list order before
+    any name mapping."""
 
     orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
@@ -59,6 +71,7 @@ class WeightsMapper:
     )
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
+    weights_transforms: list[WeightsTransformFn] = field(default_factory=list)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
@@ -75,6 +88,7 @@ class WeightsMapper:
             },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+            weights_transforms=[*self.weights_transforms, *other.weights_transforms],
         )
 
     def map_name(self, key: str) -> str | None:
@@ -147,6 +161,8 @@ class WeightsMapper:
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
+        for transform in self.weights_transforms:
+            weights = transform(weights)
         for name, data in weights:
             result = self._map_name_with_shard(name)
             if result is None:
@@ -196,6 +212,7 @@ class WeightsMapper:
             orig_to_new_stacked={},
             orig_to_new_prefix=remove_none(self.orig_to_new_prefix),
             orig_to_new_suffix=remove_none(self.orig_to_new_suffix),
+            weights_transforms=[],
         )
 
 
@@ -490,7 +507,10 @@ class AutoWeightsLoader:
 
     def _check_skipped_aliases(self, autoloaded_weights: set[str]) -> None:
         """Guard against skipping an alias whose canonical name never loads."""
-        if not self._loaded_params_are_complete:
+        if (
+            not self._loaded_params_are_complete
+            or not is_mtp_completeness_check_enabled()
+        ):
             return
         for alias, canonical in self._skipped_aliases.items():
             if canonical not in autoloaded_weights:
@@ -937,24 +957,17 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-def spec_decode_needs_target_embed(
-    vllm_config: VllmConfig, *, include_mtp: bool = False
-) -> bool:
-    """Whether the last PP rank needs the target input embedding.
-
-    MTP targets opt in when their drafter supports sharing this embedding.
-    """
+def spec_decode_needs_target_embed(vllm_config: VllmConfig) -> bool:
+    """Whether the last PP rank needs the target input embedding, for a
+    hidden-state drafter that may reuse it (see `maybe_share_target_embed`)."""
     from vllm.distributed.parallel_state import get_pp_group
 
     speculative_config = vllm_config.speculative_config
-    if speculative_config is None:
-        return False
-    if speculative_config.method not in (
-        "eagle",
-        "eagle3",
-        "dflash",
-        "dspark",
-    ) and not (include_mtp and speculative_config.method == "mtp"):
+    if (
+        speculative_config is None
+        or not speculative_config.uses_target_hidden_states
+        or not speculative_config.draft_model_config.may_use_target_embed
+    ):
         return False
     pp = get_pp_group()
     return pp.world_size > 1 and pp.is_last_rank
@@ -1029,7 +1042,93 @@ def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     )
 
 
-def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
+def compute_skip_topk_layers(config: "PreTrainedConfig") -> set[int]:
+    """Backbone layers that reuse the top-k of the closest preceding indexer
+    layer instead of building their own indexer."""
+    if not hasattr(config, "index_topk"):
+        return set()
+
+    num_hidden_layers = config.num_hidden_layers
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None:
+        if len(indexer_types) != num_hidden_layers:
+            raise ValueError(
+                "indexer_types must contain one entry per hidden layer: "
+                f"expected {num_hidden_layers}, got {len(indexer_types)}."
+            )
+        invalid_types = sorted(set(indexer_types) - {"full", "shared"})
+        if invalid_types:
+            raise ValueError(
+                f"indexer_types only supports 'full' and 'shared', got {invalid_types}."
+            )
+        return {
+            layer_idx
+            for layer_idx, indexer_type in enumerate(indexer_types)
+            if indexer_type == "shared"
+        }
+
+    freq = getattr(config, "index_topk_freq", 1)
+    if not isinstance(freq, int) or freq <= 0:
+        raise ValueError(f"index_topk_freq must be a positive integer, got {freq!r}.")
+    pattern = getattr(config, "index_topk_pattern", None)
+    offset = getattr(config, "index_skip_topk_offset", 2)
+    skip_layers: set[int] = set()
+    for layer_idx in range(num_hidden_layers):
+        if pattern is None:
+            if max(layer_idx - offset + 1, 0) % freq != 0:
+                skip_layers.add(layer_idx)
+        elif 0 <= layer_idx < len(pattern) and pattern[layer_idx] == "S":
+            skip_layers.add(layer_idx)
+    return skip_layers
+
+
+def pp_splits_layer_sharing(
+    num_hidden_layers: int, users: Iterable[int], consumers: set[int]
+) -> bool:
+    """Whether a later PP stage's first ``users`` layer is one of ``consumers``,
+    which read state an earlier layer wrote in the same forward pass."""
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.distributed.utils import get_pp_indices
+
+    users = sorted(users)
+    pp_size = get_pp_group().world_size
+    for rank in range(1, pp_size):
+        start, _ = get_pp_indices(num_hidden_layers, rank, pp_size)
+        if next((layer for layer in users if layer >= start), None) in consumers:
+            return True
+    return False
+
+
+def pp_topk_buffers(
+    config: "PreTrainedConfig",
+    topk_indices_buffer: torch.Tensor,
+    topk_layers: Iterable[int],
+) -> dict[str, torch.Tensor]:
+    """The shared top-k, if a later PP stage starts on a layer that reuses it."""
+    topk_layers = set(topk_layers)
+    skip_layers = compute_skip_topk_layers(config) & topk_layers
+    if pp_splits_layer_sharing(config.num_hidden_layers, topk_layers, skip_layers):
+        return {"topk_indices": topk_indices_buffer}
+    return {}
+
+
+def copy_pp_buffers(
+    intermediate_tensors: IntermediateTensors, buffers: Mapping[str, torch.Tensor]
+) -> None:
+    """Copy cross-layer state received from the previous PP stage into place."""
+    for key, buffer in buffers.items():
+        tensor = intermediate_tensors[key]
+        buffer[: tensor.shape[0]].copy_(tensor)
+
+
+def make_empty_intermediate_tensors_factory(
+    keys: list[str],
+    hidden_size: int,
+    buffers: Mapping[str, torch.Tensor] | None = None,
+):
+    """``buffers`` are token-major cross-layer state sent along with ``keys``."""
+    buffers = buffers or {}
+
     def make_empty_intermediate_tensors(
         batch_size: int,
         dtype: torch.dtype,
@@ -1039,6 +1138,12 @@ def make_empty_intermediate_tensors_factory(keys: list[str], hidden_size: int):
             {
                 key: torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
                 for key in keys
+            }
+            | {
+                key: torch.zeros(
+                    (batch_size, *buffer.shape[1:]), dtype=buffer.dtype, device=device
+                )
+                for key, buffer in buffers.items()
             }
         )
 

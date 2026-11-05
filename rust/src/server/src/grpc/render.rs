@@ -4,6 +4,7 @@
 //! gRPC `Render` service: engine-free chat render and derender, the gRPC
 //! counterpart of the HTTP render API.
 
+use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -59,7 +60,7 @@ impl RenderContext for AppState {
 
     async fn is_served_model(&self, model: &str) -> bool {
         let resolution = self.resolve_model_with_loras(Some(model)).await;
-        resolution.model_names.iter().any(|name| name == model)
+        resolution.model_names.accepts(Some(model))
     }
 }
 
@@ -73,7 +74,7 @@ impl RenderContext for RenderState {
     }
 
     async fn is_served_model(&self, model: &str) -> bool {
-        self.model_names().iter().any(|name| name == model)
+        self.model_names().accepts(Some(model))
     }
 }
 
@@ -162,11 +163,12 @@ async fn render_chat(
     let chat_request = to_chat_request(chat)?;
     let structured_outputs = chat_request.sampling_params.structured_outputs.clone();
 
-    let (text_request, _) = state
+    let text_request = state
         .chat_processor()
-        .prepare(chat_request, state.text_processor())
+        .prepare(chat_request, NonZeroU32::MIN, state.text_processor())
         .await
-        .map_err(chat_error_to_status)?;
+        .map_err(chat_error_to_status)?
+        .text_request;
     let prepared = state.text_processor().prepare(text_request).map_err(text_error_to_status)?;
     let text_request = prepared.text_request;
     let media = (prepared.generate_request.mm_features.into_iter().flatten())
@@ -657,6 +659,7 @@ fn to_chat_request(chat: pb::ChatRequest) -> Result<ChatRequest, Status> {
         // Derender sets the decode options; render does not decode.
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
+        return_prompt_text: false,
         prompt_truncation: chat.truncation.map(truncation_from_proto).transpose()?,
         priority: 0,
         documents: None,
