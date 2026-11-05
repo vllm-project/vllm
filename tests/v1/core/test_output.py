@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+import gc
+
 import torch
 
 from vllm.multimodal.inputs import (
@@ -144,3 +147,15 @@ def test_strip_covered_mm_data_shm_address_item() -> None:
     stripped = strip_covered_mm_data([feature], num_computed_tokens=250)
 
     assert stripped[0].data is address_item
+
+
+def test_unpickled_long_lists_are_untracked() -> None:
+    """Workers receive these by pickle (deepcopy takes the same __setstate__
+    path); long lists come back hidden from the cyclic GC, short ones (the
+    common per-step case) are left alone."""
+    long, short = list(range(1000)), [1, 2]
+    new = _create_new_requests_data(None)
+    new.block_ids = (long, short)
+    new = copy.deepcopy(new)
+    assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
+    assert new.block_ids[0] == long

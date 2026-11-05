@@ -97,7 +97,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
       "Tensor! b_q_weight, Tensor? b_bias_or_none,"
-      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor! workspace,"
       "Tensor sorted_token_ids,"
@@ -151,7 +151,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
+      "routed_scaling_factor, Tensor bias, int scoring_func, Tensor? "
+      "is_padding=None) -> (Tensor, "
       "Tensor)");
 #endif
 }

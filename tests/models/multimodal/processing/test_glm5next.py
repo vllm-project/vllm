@@ -158,14 +158,16 @@ def test_glm5_raw_video_timestamps_follow_sampled_frames():
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs={},
     )
-    item = raw["mm_kwargs"]["video"][0].get_data()
+    video_item = raw["mm_kwargs"]["video"][0]
+    assert video_item is not None
+    item = video_item.get_data()
     grid = item["video_grid_thw"]
     timestamps = item["timestamps"]
-    grid_t = int(grid.reshape(-1)[0] if hasattr(grid, "reshape") else grid[0])
-    if hasattr(timestamps, "reshape"):
-        timestamp_count = int(timestamps.reshape(-1).numel())
+    grid_t = int(grid.reshape(-1)[0] if isinstance(grid, torch.Tensor) else grid[0])
+    if isinstance(timestamps, torch.Tensor):
+        timestamp_count = timestamps.numel()
     else:
-        flat = []
+        flat: list[object] = []
         for entry in timestamps:
             flat.extend(entry if isinstance(entry, list) else [entry])
         timestamp_count = len(flat)

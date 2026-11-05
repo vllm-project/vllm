@@ -245,7 +245,7 @@ async fn generate_streams_outputs() {
                 assert!(request.request_id.starts_with("req-delta-"));
                 assert_ne!(request.request_id, "req-delta");
                 assert_eq!(request.client_index, 7);
-                assert_eq!(request.prompt_token_ids, Some(vec![11, 22]));
+                assert_eq!(request.prompt_token_ids, Some(vec![11, 22].into()));
 
                 send_outputs(
                     push,
@@ -438,8 +438,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     assert_eq!(
         weight_versions,
         [
-            None,
-            None,
+            Some(vec![span("v7", 0, 1)]),
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );

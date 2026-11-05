@@ -82,4 +82,4 @@ th:not(:first-child) {
 | beam-search | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 !!! note
-    For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on feature support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/) documentation.

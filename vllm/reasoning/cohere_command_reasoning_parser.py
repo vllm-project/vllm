@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, ClassVar
 
 from vllm.reasoning import ReasoningParser
+from vllm.v1.token_buffer import rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -35,21 +36,12 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return "<|END_THINKING|>"
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        chatbot = self.chatbot_token_id
-        start = self.start_token_id
-        end = self.end_token_id
-        has_end_token = False
-
-        for i in reversed(range(len(input_ids))):
-            tid = input_ids[i]
-            if tid == start:
-                return has_end_token
-            if tid == chatbot:
-                return False
-            if tid == end:
-                has_end_token = True
-
-        return has_end_token
+        # Reasoning ended if an end token follows the newest start token,
+        # unless a chatbot token comes after that start.
+        i = rfind_tokens(input_ids, (self.start_token_id, self.chatbot_token_id))
+        if i >= 0 and input_ids[i] == self.chatbot_token_id:
+            return False
+        return rfind_tokens(input_ids, (self.end_token_id,), start=i + 1) >= 0
 
 
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
