@@ -34,6 +34,37 @@ def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
     return Path(root) / f"{config_hash}-rank{rank}.bin"
 
 
+def weights_key(vllm_config) -> str:
+    """Hash of the settings that shape post-processed weights.
+
+    compute_hash() is not stable across processes for some configs (seen with
+    dflash), so the key is built from model, quantization and parallel layout."""
+    import hashlib
+
+    m, p, s = vllm_config.model_config, vllm_config.parallel_config, None
+    spec = vllm_config.speculative_config
+    if spec is not None:
+        s = [
+            getattr(spec, k, None)
+            for k in ("method", "model", "num_speculative_tokens")
+        ]
+    parts = [
+        m.model,
+        m.revision,
+        str(m.dtype),
+        m.quantization,
+        m.hf_overrides,
+        getattr(vllm_config.cache_config, "cache_dtype", None),
+        p.tensor_parallel_size,
+        p.pipeline_parallel_size,
+        getattr(p, "enable_expert_parallel", None),
+        s,
+        torch.__version__,
+        _MAGIC,
+    ]
+    return hashlib.sha256(repr(parts).encode()).hexdigest()[:10]
+
+
 def _round_up(n: int) -> int:
     return (n + _ALIGN - 1) // _ALIGN * _ALIGN
 
@@ -287,7 +318,7 @@ def install(worker_cls) -> None:
         root = os.environ.get("VLLM_WEIGHT_SNAPSHOT_DIR")
         if not root or kwargs.get("load_dummy_weights"):
             return orig(self, *args, **kwargs)
-        path = snapshot_path(root, self.vllm_config.compute_hash(), self.rank)
+        path = snapshot_path(root, weights_key(self.vllm_config), self.rank)
         restore = path.exists()
         if restore and takes_dummy:
             kwargs["load_dummy_weights"] = True

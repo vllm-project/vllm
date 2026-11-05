@@ -699,7 +699,9 @@ class Worker(WorkerBase):
         from vllm.device_allocator import weight_snapshot
 
         return weight_snapshot.snapshot_path(
-            envs.VLLM_WEIGHT_SNAPSHOT_DIR, self.vllm_config.compute_hash(), self.rank
+            envs.VLLM_WEIGHT_SNAPSHOT_DIR,
+            weight_snapshot.weights_key(self.vllm_config),
+            self.rank,
         )
 
     def _weight_snapshot_roots(self) -> dict[str, nn.Module]:
