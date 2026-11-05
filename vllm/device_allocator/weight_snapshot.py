@@ -15,6 +15,7 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import regex as re
 import torch
 from torch import nn
 
@@ -24,8 +25,9 @@ logger = init_logger(__name__)
 
 _ALIGN = 4096
 _CHUNK = 256 << 20
-_MAGIC = "vllm-weight-snapshot-v2"
+_MAGIC = "vllm-weight-snapshot-v3"
 _SCALARS = (bool, int, float)
+_DEPTH = 6
 
 
 def snapshot_path(root: str, config_hash: str, rank: int) -> Path:
@@ -36,22 +38,29 @@ def _round_up(n: int) -> int:
     return (n + _ALIGN - 1) // _ALIGN * _ALIGN
 
 
-def _walk(value, key: str, depth: int) -> Iterator[tuple[str, object]]:
-    """Yield (key, tensor or scalar) found in an attribute value."""
+def _walk(value, key: str, depth: int, seen: set[int]) -> Iterator[tuple[str, object]]:
+    """Yield (key, tensor or scalar) found in an attribute value.
+
+    Non-module objects are followed several levels deep (e.g. MoE quant descriptors
+    hold per-expert scales); each object is visited once to cut cycles."""
     if isinstance(value, (torch.Tensor, *_SCALARS)):
         yield key, value
-    elif depth == 0:
         return
-    elif isinstance(value, (list, tuple)):
+    if depth == 0 or isinstance(value, (nn.Module, type, str, bytes)):
+        return
+    if id(value) in seen:
+        return
+    seen.add(id(value))
+    if isinstance(value, (list, tuple)):
         for i, v in enumerate(value):
-            yield from _walk(v, f"{key}[{i}]", depth - 1)
+            yield from _walk(v, f"{key}[{i}]", depth - 1, seen)
     elif isinstance(value, dict):
         for k, v in value.items():
             if isinstance(k, (str, int)):
-                yield from _walk(v, f"{key}[{k!r}]", depth - 1)
-    elif hasattr(value, "__dict__") and not isinstance(value, (nn.Module, type)):
+                yield from _walk(v, f"{key}[{k!r}]", depth - 1, seen)
+    elif hasattr(value, "__dict__"):
         for k, v in vars(value).items():
-            yield from _walk(v, f"{key}.{k}", depth - 1)
+            yield from _walk(v, f"{key}.{k}", depth - 1, seen)
 
 
 def collect_state(
@@ -62,13 +71,14 @@ def collect_state(
     tensors: list[tuple[str, torch.Tensor]] = []
     scalars: dict[str, object] = {}
     seen: set[tuple] = set()
+    visited: set[int] = set()
     for root_name, root in roots.items():
         for mod_name, module in root.named_modules():
             for attr, value in vars(module).items():
                 if attr in ("_modules", "training") or attr.startswith("__"):
                     continue
                 base = f"{root_name}/{mod_name}/{attr}"
-                for key, v in _walk(value, base, depth=2):
+                for key, v in _walk(value, base, _DEPTH, visited):
                     if isinstance(v, torch.Tensor):
                         if not (v.is_cuda or v.is_pinned()) or v.numel() == 0:
                             continue
@@ -182,6 +192,8 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     finally:
         os.close(fd)
     _restore_scalars(roots, header.get("scalars", {}), scalars)
+    if os.environ.get("VLLM_WEIGHT_SNAPSHOT_AUDIT"):
+        _audit(roots, tensors)
     total = sum(t.nbytes for _, t in tensors)
     elapsed = time.perf_counter() - t0
     logger.info(
@@ -193,15 +205,62 @@ def restore(roots: dict[str, nn.Module], path: Path) -> None:
     )
 
 
+def _audit(roots, tensors) -> None:
+    """Log live CUDA tensors whose storage the snapshot does not cover."""
+    import gc
+
+    covered = {t.untyped_storage().data_ptr() for _, t in tensors}
+    seen, missed = set(), []
+    for obj in gc.get_objects():
+        if isinstance(obj, torch.Tensor) and obj.is_cuda and obj.numel():
+            ptr = obj.untyped_storage().data_ptr()
+            if ptr in covered or ptr in seen:
+                continue
+            seen.add(ptr)
+            owners = [type(r).__name__ for r in gc.get_referrers(obj)][:4]
+            missed.append(
+                (obj.untyped_storage().nbytes(), obj.dtype, tuple(obj.shape), owners)
+            )
+    missed.sort(key=lambda m: -m[0])
+    logger.warning(
+        "Weight snapshot audit: %d uncovered CUDA storages, %.2f GiB",
+        len(missed),
+        sum(m[0] for m in missed) / 2**30,
+    )
+    for m in missed[:40]:
+        logger.warning("  uncovered %.1f MiB %s %s via %s", m[0] / 2**20, *m[1:])
+
+
+_TOKEN = re.compile(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+|'[^']*')\]")
+
+
+def _set_path(obj, path: str, value) -> None:
+    """Set a scalar at an attribute/index path such as a.b[0]['k']."""
+    steps = [(m[1], m[2]) for m in _TOKEN.finditer("." + path)]
+    for i, (attr, idx) in enumerate(steps):
+        last = i == len(steps) - 1
+        if attr is not None:
+            if last:
+                setattr(obj, attr, value)
+            else:
+                obj = getattr(obj, attr)
+        else:
+            k = idx[1:-1] if idx.startswith("'") else int(idx)
+            if last:
+                obj[k] = value
+            else:
+                obj = obj[k]
+
+
 def _restore_scalars(roots, saved: dict, now: dict) -> None:
     """Data-dependent scalars (e.g. global scales) come from the real weights."""
     changed = [k for k, v in saved.items() if k in now and now[k] != v]
     for key in changed:
-        root_name, mod_name, attr = key.split("/", 2)
-        if "." in attr or "[" in attr:
-            logger.warning("Weight snapshot: nested scalar %s not restored", key)
-            continue
-        setattr(roots[root_name].get_submodule(mod_name), attr, saved[key])
+        root_name, mod_name, path = key.split("/", 2)
+        try:
+            _set_path(roots[root_name].get_submodule(mod_name), path, saved[key])
+        except (AttributeError, IndexError, KeyError, TypeError) as e:
+            logger.warning("Weight snapshot: scalar %s not restored (%s)", key, e)
     if changed:
         logger.info("Weight snapshot: restored %d data-dependent scalars", len(changed))
 
