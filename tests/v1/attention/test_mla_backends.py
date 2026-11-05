@@ -353,6 +353,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.is_aiter_triton_fp8_bmm_enabled = False
     layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
+    layer.dcp_manager = None
     layer.quant_config = None
     layer.layer_name = "test"
     layer.act_dtype = torch.float32
