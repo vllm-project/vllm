@@ -249,7 +249,26 @@ class SiluAndMulWithClamp(CustomOp):
         self.op(out, x, self.swiglu_limit, self.alpha, self.beta)
         return out
 
+    def _aiter_applies(self, x: torch.Tensor) -> bool:
+        """Whether AITER's fused kernel computes this configuration."""
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_enabled():
+            return False
+        if self.alpha != 1.0 or self.beta != 0.0:
+            return False
+        return rocm_aiter_ops.clamp_act_mul_supported(x.shape[-1] // 2)
+
     def forward_hip(self, x: torch.Tensor) -> torch.Tensor:
+        if self._aiter_applies(x):
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            # AITER keeps the clamp, SiLU and product in FP32 and rounds only
+            # the output, so it has none of the _C path's intermediate rounding.
+            out = rocm_aiter_ops.clamp_act_mul(
+                x.reshape(-1, x.shape[-1]), self.swiglu_limit
+            )
+            return out.view(*x.shape[:-1], out.shape[-1])
         # Limit the ROCm _C path to the default case to avoid the
         # precision loss MiniMax saw without fp32 intermediates.
         if self.alpha == 1.0 and self.beta == 0.0:
