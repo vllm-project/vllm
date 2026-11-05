@@ -462,10 +462,9 @@ Example (OpenAI-compatible completions request):
 
 ## Huge pages for `SimpleCPUOffloadConnector`
 
-`SimpleCPUOffloadConnector` uses one host mapping per worker rank for its CPU
-KV caches. By default it uses ordinary pages. Set `cpu_hugepage_block_size` to
-`"2MB"` or `"1GB"` in `kv_connector_extra_config` to use explicit Linux HugeTLB
-pages:
+With `kv_offload_backend="cpu"`, set `cpu_hugepage_block_size` to `"2MB"` or
+`"1GB"` in `kv_connector_extra_config` to back the CPU KV caches with Linux
+HugeTLB pages (Linux 5.14 or newer):
 
 ```json
 {
@@ -478,23 +477,14 @@ pages:
 }
 ```
 
-Reserve enough HugeTLB pages on the host for every rank, rounding each rank's
-resolved cache size up to a whole page. The byte budget is an upper bound;
-an explicit `num_cpu_blocks` or cross-worker block alignment can reduce the
-allocated size. Containers also need a matching hugetlb allowance
-(for example, Kubernetes `hugepages-1Gi` resources). Allocation fails at startup
-if the pool or container limit is too small; it does not fall back to ordinary
-pages. Populating HugeTLB pages requires Linux 5.14 or newer.
+Reserve enough pages on the host for every rank, rounding each rank's cache
+size up to a whole page. Containers also need a matching hugetlb allowance, for
+example Kubernetes `hugepages-1Gi`. If the pool or the limit is too small,
+startup fails; there is no fallback to ordinary pages.
 
-The mapping inherits the worker's NUMA memory policy, including policies set
-by an external launcher. Use vLLM's `--numa-bind` or `--numa-bind-nodes` options
-to control placement. The mapping is excluded from forked child processes and
-pinned in chunks of at most 1 GiB. Registration boundaries must align with both
-KV blocks and backing pages. If a layout cannot meet both constraints with
-1 GiB HugeTLB pages, use 2 MiB pages instead.
-When explicit HugeTLB pages are disabled, `THP_MEM_ALLOC_ENABLE=1` requests
-transparent huge pages with `MADV_HUGEPAGE`; the kernel decides whether to
-provide them. These settings apply to the CPU backend.
+Without this key, the caches use ordinary pages, and `THP_MEM_ALLOC_ENABLE=1`
+requests transparent huge pages. In both cases, the memory follows the worker's
+NUMA policy, for example from `--numa-bind`.
 
 ## Explicit pool sizing for `SimpleCPUOffloadConnector`
 

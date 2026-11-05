@@ -29,8 +29,6 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 logger = init_logger(__name__)
 
-HOST_REGISTER_CHUNK_BYTES = 256 * 2**30
-
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.index_group import HiSparseMLAIndexGroup
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -336,10 +334,7 @@ def allocate_hisparse_host_pools(
     pinned: list[torch.Tensor] = []
     try:
         for start, end in host_registration_ranges(
-            tensor_sizes,
-            num_blocks,
-            num_blocks * host_block_stride,
-            HOST_REGISTER_CHUNK_BYTES,
+            tensor_sizes, num_blocks, num_blocks * host_block_stride
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)

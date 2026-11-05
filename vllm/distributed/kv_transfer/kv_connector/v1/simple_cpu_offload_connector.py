@@ -145,8 +145,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
-        # "1GB"/"2MB": back the CPU buffer with explicit HugeTLB pages. The
-        # key matches OffloadingConnector's hugetlbfs option.
         cpu_hugepage_size = parse_hugepage_size(
             extra_config.get("cpu_hugepage_block_size")
         )
@@ -160,6 +158,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_capacity_bytes > 0.'
                 )
+            if cpu_hugepage_size is not None:
+                raise ValueError(
+                    'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
+                )
         else:
             ignored = [k for k in _DISK_ONLY_KEYS if k in extra_config]
             if ignored:
@@ -169,10 +171,6 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                     ", ".join(ignored),
                 )
             disk_path = None
-        if disk_mode and cpu_hugepage_size is not None:
-            raise ValueError(
-                'cpu_hugepage_block_size applies only to kv_offload_backend="cpu".'
-            )
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None

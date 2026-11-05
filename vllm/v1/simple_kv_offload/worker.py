@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
-import time
+import mmap
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,7 +17,7 @@ from vllm.utils.host_memory import (
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
-from vllm.v1.simple_kv_offload.host_buffer import HostBuffer
+from vllm.v1.simple_kv_offload.host_buffer import alloc_host_buffer
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -56,7 +56,6 @@ class SimpleCPUOffloadWorker:
         self.use_page_cache = use_page_cache
         self.disk_mode = kv_offload_backend == "disk"
         self.cpu_hugepage_size = cpu_hugepage_size
-        self._host_buffer: HostBuffer | None = None
 
         self.gpu_kv_caches: dict[str, torch.Tensor] | None = None
         self.cpu_kv_caches: dict[str, torch.Tensor] | None = None
@@ -247,9 +246,7 @@ class SimpleCPUOffloadWorker:
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
 
-        self.cpu_kv_caches = self._alloc_cpu_caches(
-            unique_gpu_caches, device, pin_memory
-        )
+        self.cpu_kv_caches = self._alloc_cpu_caches(unique_gpu_caches, pin_memory)
 
         self._backend = DmaCopyBackend()
         self._backend.init(
@@ -261,56 +258,37 @@ class SimpleCPUOffloadWorker:
         )
 
     def _alloc_cpu_caches(
-        self,
-        unique_gpu_caches: dict[str, torch.Tensor],
-        device: torch.device,
-        pin_memory: bool,
+        self, unique_gpu_caches: dict[str, torch.Tensor], pin_memory: bool
     ) -> dict[str, torch.Tensor]:
         """Carve per-layer caches out of one mapping, pinned in bounded chunks."""
         layer_bytes = [
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
-
-        start = time.perf_counter()
-        buf = HostBuffer(sum(layer_bytes), self.cpu_hugepage_size)
-        populated = time.perf_counter()
-        self._host_buffer = buf
+        buf = alloc_host_buffer(sum(layer_bytes), self.cpu_hugepage_size)
 
         cpu_kv_caches = {}
         offset = 0
         for size, (name, gpu_tensor) in zip(layer_bytes, unique_gpu_caches.items()):
             cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            view = buf.tensor[offset : offset + size].view(gpu_tensor.dtype)
+            view = buf[offset : offset + size].view(gpu_tensor.dtype)
             cpu_kv_caches[name] = view.view(cpu_shape)
             offset += size
         if pin_memory:
             registered = []
             try:
-                for offset, end in host_registration_ranges(
+                for start, end in host_registration_ranges(
                     layer_bytes,
                     self.num_cpu_blocks,
                     buf.nbytes,
-                    page_size=buf.page_size,
+                    page_size=self.cpu_hugepage_size or mmap.PAGESIZE,
                 ):
-                    if offset:
-                        time.sleep(0)
-                    tensor = buf.tensor[offset:end]
+                    tensor = buf[start:end]
                     pin_tensor(tensor)
                     registered.append(tensor)
             except Exception:
                 for tensor in reversed(registered):
                     unpin_tensor(tensor)
                 raise
-        pinned = time.perf_counter()
-        logger.info(
-            "SimpleCPUOffloadWorker [CPU]: %.2f GiB on %d KiB pages for %s, "
-            "populate %.2fs, pin %.2fs",
-            buf.nbytes / (1024**3),
-            buf.page_size >> 10,
-            device,
-            populated - start,
-            pinned - populated,
-        )
         return cpu_kv_caches
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:

@@ -7,6 +7,8 @@ import mmap
 
 import torch
 
+HOST_REGISTER_CHUNK_BYTES = 256 << 30
+
 
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Register one CPU range, bypassing the caching host allocator's rounding."""
@@ -28,7 +30,7 @@ def host_registration_ranges(
     tensor_sizes: list[int],
     num_blocks: int,
     total_size: int,
-    max_chunk_bytes: int = 1 << 30,
+    max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
     *,
     page_size: int = mmap.PAGESIZE,
 ) -> tuple[tuple[int, int], ...]:

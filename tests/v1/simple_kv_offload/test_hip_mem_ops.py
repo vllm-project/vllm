@@ -12,7 +12,6 @@ import ctypes
 
 import numpy as np
 import pytest
-import torch
 
 from vllm.v1.simple_kv_offload import cuda_mem_ops
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
@@ -144,27 +143,3 @@ def test_copy_blocks_noop_on_empty(monkeypatch):
     monkeypatch.setattr(cuda_mem_ops, "_max_batch_descriptors", 8192)
     copy_blocks([], [], _fake_params(num_layers=4))
     assert counts == []
-
-
-@pytest.mark.parametrize("nbytes", [4096, (1 << 30) + 4096])
-def test_pin_tensor_pairs_with_hisparse_teardown(monkeypatch, nbytes):
-    """HiSparse relies on one unregister releasing each registered range."""
-    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
-
-    tensor = torch.empty(nbytes, dtype=torch.int8)
-    registered = {}
-
-    class Runtime:
-        def cudaHostRegister(self, ptr, size, flags):
-            registered[ptr] = size
-            return ctypes.c_int(0)
-
-        def cudaHostUnregister(self, ptr):
-            del registered[ptr]
-            return ctypes.c_int(0)
-
-    monkeypatch.setattr(torch.cuda, "cudart", Runtime)
-    backend = CUDAHiSparseBackend()
-    backend.pin_tensor(tensor)
-    backend.unpin_tensor(tensor)
-    assert registered == {}

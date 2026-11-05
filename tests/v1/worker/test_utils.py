@@ -337,9 +337,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with(
-        [24, 40], 4, 4 * page, hisparse_runtime_module.HOST_REGISTER_CHUNK_BYTES
-    )
+    registration_ranges.assert_called_once_with([24, 40], 4, 4 * page)
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
         for tensor in pinned
