@@ -8,7 +8,9 @@ import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, FunctionCall, ToolCall
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.jamba_tool_parser import JambaToolParser
@@ -368,3 +370,213 @@ def test_extract_tool_calls_streaming_partial_args_with_name_delta(jamba_tool_pa
                 streamed_arguments += arguments
 
     assert json.loads(streamed_arguments) == {"city": "Dallas", "state": "TX"}
+
+
+def test_extract_tool_calls_streaming_single_delta(jamba_tool_parser):
+    """Tool calls arriving whole in the first delta must not be dropped.
+
+    This happens e.g. with async scheduling or stream_interval > 1, where a
+    single streamed delta can contain the entire tool call message.
+    Previously the "starting a new tool" branch recorded the new state and
+    returned without emitting anything.
+    """
+    model_output = """<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>"""  # noqa: E501
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, [model_output], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
+
+
+def test_extract_tool_calls_streaming_single_delta_with_empty_tail(jamba_tool_parser):
+    """A whole message followed by one empty delta must emit every tool."""
+    model_output = """<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>"""  # noqa: E501
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, [model_output, ""], assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
+
+
+def test_extract_tool_calls_streaming_two_coarse_deltas(jamba_tool_parser):
+    """Tool calls completed inside a coarse delta must all be emitted."""
+    deltas = [
+        # the start marker plus an incomplete first tool call
+        '<tool_calls>[\n    {"name": "get_current_weather", "arg',
+        # completes the first tool call and carries the whole second one
+        'uments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>',  # noqa: E501
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
+
+
+def test_extract_tool_calls_streaming_partial_call_then_coarse_delta(
+    jamba_tool_parser,
+):
+    """A partially streamed call completed by a coarse delta must be
+    flushed together with the calls the coarse delta completes.
+
+    The deltas below stream nothing from the first call yet, then send
+    its name with the arguments still incomplete; the last delta closes
+    the first call and carries two complete calls, so it must flush the
+    first call's arguments and batch-emit the two new calls in one
+    update.
+    """
+    deltas = [
+        '<tool_calls>[\n    {"name": "get_current_weather", "arg',
+        'uments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"',
+        '}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}},\n    {"name": "send_email", "arguments": {"to": "a@example.com", "subject": "hi"}}\n]</tool_calls>',  # noqa: E501
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+        "send_email",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[2].function.arguments) == {
+        "to": "a@example.com",
+        "subject": "hi",
+    }
+
+
+def test_extract_tool_calls_streaming_three_coarse_deltas(jamba_tool_parser):
+    """A tool completed before the last one must be emitted in full."""
+    deltas = [
+        '<tool_calls>[\n    {"name": "get_current_weather", "arg',
+        'uments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},'
+        '\n    {"name"',
+        ': "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>',  # noqa: E501
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        jamba_tool_parser, deltas, assert_one_tool_per_delta=False
+    )
+
+    assert [call.function.name for call in reconstructor.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert json.loads(reconstructor.tool_calls[0].function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
+    assert json.loads(reconstructor.tool_calls[1].function.arguments) == {
+        "city": "Orlando",
+        "state": "FL",
+        "unit": "fahrenheit",
+    }
+
+
+def _collect_streaming_deltas(tool_parser, deltas):
+    """Drive the parser manually and collect every DeltaMessage."""
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    messages = []
+    previous_text, previous_token_ids = "", []
+    for delta in deltas:
+        tokens = tool_parser.model_tokenizer.tokenize(delta)
+        token_delta = [
+            tool_parser.vocab.get(token)
+            for token in tokens
+            if token in tool_parser.vocab
+        ]
+        current_text = previous_text + delta
+        current_token_ids = previous_token_ids + token_delta
+        message = tool_parser.extract_tool_calls_streaming(
+            previous_text,
+            current_text,
+            delta,
+            previous_token_ids,
+            current_token_ids,
+            token_delta,
+            request,
+        )
+        if message is not None:
+            messages.append(message)
+        previous_text, previous_token_ids = current_text, current_token_ids
+    return messages
+
+
+def test_extract_tool_calls_streaming_no_empty_tool_call_deltas(jamba_tool_parser):
+    """A delta with nothing new to send must yield None, not a chunk.
+
+    After a whole message was streamed in one delta, a trailing empty
+    delta used to emit a DeltaToolCall whose only content was an empty
+    arguments string -- a meaningless chunk for the client.
+    """
+    model_output = """<tool_calls>[\n    {"name": "get_current_weather", "arguments": {"city": "Dallas", "state": "TX", "unit": "fahrenheit"}},\n    {"name": "get_current_weather", "arguments": {"city": "Orlando", "state": "FL", "unit": "fahrenheit"}}\n]</tool_calls>"""  # noqa: E501
+
+    messages = _collect_streaming_deltas(jamba_tool_parser, [model_output, ""])
+
+    assert messages
+    for message in messages:
+        assert message.content is not None or message.tool_calls, (
+            "streaming must not emit empty DeltaMessages"
+        )
+        for tool_call in message.tool_calls or []:
+            function = tool_call.function
+            assert function is not None, (
+                "tool call deltas must include a function delta"
+            )
+            assert function.name or function.arguments, (
+                "tool call deltas must carry a name or an argument diff"
+            )
