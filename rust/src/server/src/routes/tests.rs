@@ -1181,11 +1181,24 @@ async fn test_dev_mode_app_with_ready(
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
+    let answers_readiness = ready_response.enable_sleep_mode;
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
         engine_id,
         ready_response,
-        |_dealer, _push| boxed_test_future(async {}),
+        move |dealer, push| {
+            boxed_test_future(async move {
+                // With sleep mode, the client asks for readiness at connect.
+                if answers_readiness {
+                    let utility = recv_engine_message(dealer).await;
+                    let payload = decode_value(&utility[1]).expect("decode utility payload");
+                    let array = payload.as_array().expect("utility payload array");
+                    assert_eq!(array[2], Value::from("is_inference_ready"));
+                    let call_id = array[1].as_u64().expect("call id");
+                    send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+                }
+            })
+        },
     ));
 
     let client = EngineCoreClient::connect(
@@ -8923,8 +8936,8 @@ async fn pause_route_rejects_invalid_mode() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "BadRequestError");
-    assert_eq!(json["error"]["param"], "mode");
+    assert_eq!(json["error"]["type"], "Bad Request");
+    assert_eq!(json["error"]["param"], "query.mode");
     engine_task.abort_and_join().await;
 }
 
@@ -10325,6 +10338,54 @@ async fn world_size_route_accepts_python_spelled_bool_query_value() {
         serde_json::from_slice::<serde_json::Value>(&body).expect("decode json"),
         json!({ "world_size": 6 })
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dev_routes_reject_invalid_query_with_json_error() {
+    let ready = EngineCoreReadyResponse {
+        enable_sleep_mode: true,
+        ..default_ready_response()
+    };
+    let (app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+    let cases = [
+        ("GET", "/get_world_size?include_dp=maybe"),
+        ("GET", "/server_info?config_format=yaml"),
+        ("POST", "/reset_prefix_cache?reset_external=maybe"),
+        ("POST", "/sleep?level=3"),
+        ("POST", "/pause?mode=abort&clear_cache=maybe"),
+        ("POST", "/checkpoint/prepare?mode=banana"),
+    ];
+    let mut bodies = Vec::new();
+    for (method, uri) in cases {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json",
+            "{uri}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode json error");
+        bodies.push(format!("{uri}: {body}"));
+    }
+    expect_test::expect![[r#"
+        /get_world_size?include_dp=maybe: {"error":{"message":"Failed to deserialize query string: include_dp: invalid boolean value `maybe`","type":"Bad Request","param":"query.include_dp","code":400}}
+        /server_info?config_format=yaml: {"error":{"message":"Failed to deserialize query string: config_format: unknown variant `yaml`, expected `text` or `json`","type":"Bad Request","param":"query.config_format","code":400}}
+        /reset_prefix_cache?reset_external=maybe: {"error":{"message":"Failed to deserialize query string: reset_external: invalid boolean value `maybe`","type":"Bad Request","param":"query.reset_external","code":400}}
+        /sleep?level=3: {"error":{"message":"Failed to deserialize query string: level: invalid sleep level `3`; expected one of: 0, 1, 2","type":"Bad Request","param":"query.level","code":400}}
+        /pause?mode=abort&clear_cache=maybe: {"error":{"message":"Failed to deserialize query string: clear_cache: invalid boolean value `maybe`","type":"Bad Request","param":"query.clear_cache","code":400}}
+        /checkpoint/prepare?mode=banana: {"error":{"message":"Failed to deserialize query string: mode: invalid pause mode `banana`; expected one of: abort, wait, keep","type":"Bad Request","param":"query.mode","code":400}}"#]].assert_eq(&bodies.join("\n"));
 }
 
 // ========================= Profiler route tests =========================
