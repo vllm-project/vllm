@@ -459,6 +459,75 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
         assert output.shape[1] == vision_model.out_hidden_size
 
 
+class MixedDtypeMRopeVisionModel(SimpleMRopeVisionModel):
+    """An fp32 patch embedding in front of a bf16 tower, so the first
+    parameter's dtype differs from the output dtype."""
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.spatial_merge_size = 2
+        self.out_hidden_size = 64
+        self.dtype = torch.bfloat16
+        self.patch_embed = torch.nn.Linear(768, 768, dtype=torch.float32)
+        self.linear = torch.nn.Linear(768, self.out_hidden_size, dtype=torch.bfloat16)
+
+    def forward(self, pixel_values: torch.Tensor, grid_thw_list: list[list[int]]):
+        hidden = self.patch_embed(pixel_values.float()).to(torch.bfloat16)
+        return super().forward(hidden, grid_thw_list)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_run_dp_sharded_mrope_vision_model_mixed_dtype():
+    world_size = 2
+    mp.spawn(
+        run_dp_sharded_mrope_vision_model_mixed_dtype_worker,
+        args=(world_size, get_open_port()),
+        nprocs=world_size,
+    )
+
+
+def run_dp_sharded_mrope_vision_model_mixed_dtype_worker(
+    local_rank: int, world_size: int, master_port: int
+):
+    """A rank without images must gather in the output dtype, not in the
+    dtype of the model's first parameter."""
+    set_random_seed(0)
+    device = f"{current_platform.device_type}:{local_rank}"
+    torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": str(master_port),
+        }
+    )
+
+    init_distributed_environment()
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
+
+    # A single image, so rank 1 runs no images and only pads.
+    grid_thw_list = [[1, 4, 4]]
+    pixel_values = torch.randn(math.prod(grid_thw_list[0]), 768)
+    vision_model = MixedDtypeMRopeVisionModel()
+
+    with torch.inference_mode():
+        direct_output = vision_model(pixel_values, grid_thw_list)
+        (sharded_output,) = run_dp_sharded_mrope_vision_model(
+            vision_model,
+            pixel_values,
+            grid_thw_list,
+            rope_type="rope_3d",
+        )
+
+    assert sharded_output.dtype == torch.bfloat16
+    torch.testing.assert_close(sharded_output, direct_output)
+
+
 @pytest.mark.parametrize("spatial_merge_size", [2, 4])
 def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
     """Test SimpleMRopeVisionModel with different spatial merge sizes."""
