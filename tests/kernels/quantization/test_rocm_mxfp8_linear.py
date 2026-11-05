@@ -60,6 +60,10 @@ M31_TP4_SHAPES = [
     ("shared_gate_up", 1536, 6144),
     ("shared_down", 6144, 768),
 ]
+M31_TP2_SHAPES = [
+    ("tp2_fused_qkv", 4992, 6144),
+    ("tp2_dense_gate_up", 12288, 6144),
+]
 
 
 def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
@@ -119,11 +123,34 @@ def _make_layer(n: int, k: int, device: str) -> torch.nn.Module:
                 256: (128, 64, 256, 8, 3),
             },
         ),
+        (
+            4992,
+            6144,
+            {
+                16: None,
+                32: (32, 32, 512, 2, 3),
+                64: (64, 32, 512, 2, 3),
+                128: (64, 64, 512, 4, 2),
+                192: None,
+                256: (64, 64, 256, 4, 2),
+            },
+        ),
+        (
+            12288,
+            6144,
+            {
+                16: None,
+                32: (32, 16, 512, 2, 2),
+                64: (64, 64, 512, 4, 2),
+                192: (64, 64, 256, 4, 2),
+                256: (64, 64, 512, 4, 2),
+            },
+        ),
     ],
 )
-def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, tiles):
+def test_rocm_mxfp8_linear_selects_m31_tiles(n, k, tiles):
     """The gfx950 tuning is shape-scoped: each tile covers M up to its key
-    (and past the previous key); M beyond 256 uses the generic selection."""
+    (and past the previous key); None, and M beyond 256, use the generic selection."""
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
     from vllm.platforms.rocm import on_gfx950
 
@@ -132,9 +159,12 @@ def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, tiles):
     lo = 1
     for max_m, tile in tiles.items():
         for num_tokens in (lo, max_m):
-            assert rocm_native._select_cfg(num_tokens, n, k) == tile
+            if tile is None:
+                assert rocm_native._select_m31_cfg(num_tokens, n, k) is None
+            else:
+                assert rocm_native._select_cfg(num_tokens, n, k) == tile
         lo = max_m + 1
-    assert rocm_native._select_m31_tp4_cfg(257, n, k) is None
+    assert rocm_native._select_m31_cfg(257, n, k) is None
 
 
 @pytest.mark.parametrize(
@@ -147,12 +177,14 @@ def test_rocm_mxfp8_linear_selects_m31_tp4_tiles(n, k, tiles):
         (6144, 768),
         (6144, 6144),
         (6144, 3072),
+        (4992, 6144),
+        (12288, 6144),
     ],
 )
-def test_rocm_mxfp8_linear_m31_tp4_tiles_are_valid(n, k):
+def test_rocm_mxfp8_linear_m31_tiles_are_valid(n, k):
     from vllm.model_executor.kernels.linear.mxfp8 import rocm_native
 
-    for _, tile in rocm_native._M31_TP4_TILES[(n, k)]:
+    for _, tile in rocm_native._M31_TILES[(n, k)]:
         if tile is not None:
             assert k % tile[2] == 0, "the K loop is unmasked"
 
@@ -174,9 +206,11 @@ def test_rocm_mxfp8_linear_preserves_non_cdna4_tiles(monkeypatch, n, k, fallback
 
 
 @pytest.mark.parametrize(
-    "name,n,k", V41_ATTN_SHAPES + M31_TP4_SHAPES, ids=lambda v: str(v)
+    "name,n,k",
+    V41_ATTN_SHAPES + M31_TP4_SHAPES + M31_TP2_SHAPES,
+    ids=lambda v: str(v),
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 128, 1024])
+@pytest.mark.parametrize("num_tokens", [1, 2, 7, 8, 16, 31, 32, 48, 96, 128, 256, 1024])
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_matches_dequant_reference(name, n, k, num_tokens):
     """Output is finite and matches an exact MXFP8 GEMM of the same inputs.
