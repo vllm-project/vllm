@@ -86,9 +86,24 @@ pub async fn completions(
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
+    }
+    // Without a tokenizer, string-form logprobs would key every candidate by
+    // the same empty token string. The token-ID form needs no tokenizer.
+    if !state.chat.text().has_tokenizer()
+        && prepared.options.requested_logprobs.is_some()
+        && !prepared
+            .options
+            .return_tokens_as_token_ids
+            .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
+    {
+        return text_submit_error(
+            "invalid completion request",
+            vllm_text::Error::TokenizerUnavailable,
+        )
+        .into_response();
     }
     let request_span = tracing::info_span!(
         "completions",

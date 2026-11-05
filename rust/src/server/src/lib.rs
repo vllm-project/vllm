@@ -41,6 +41,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 pub use render::{RenderConfig, serve_render};
 pub use routes::openai::utils::types::ReasoningEffort;
+use thiserror_ext::AsReport as _;
 use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
@@ -52,7 +53,7 @@ pub use vllm_chat::{
     ChatTemplateContentFormatOption, GenerationConfigMode, ParserSelection, RendererSelection,
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
-use vllm_llm::Llm;
+use vllm_llm::EngineCoreLlm;
 pub use vllm_metrics::CustomHistogramBuckets;
 use vllm_metrics::METRICS;
 use vllm_text::TextLlm;
@@ -97,6 +98,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             revision: config.revision.clone(),
             tokenizer: config.tokenizer.clone(),
             hf_config: config.hf_config.clone(),
+            skip_tokenizer_init: config.skip_tokenizer_init,
             hf_overrides: config.hf_overrides.clone(),
             generation_config: config.generation_config,
             renderer: config.renderer,
@@ -135,7 +137,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to connect to engine core")?;
     let server_info = ServerInfoSnapshot::new(config, &client);
 
-    let llm = Llm::new(client)
+    let llm = EngineCoreLlm::new(client)
         .with_log_stats(config.log_stats_interval.filter(|_| !config.disable_log_stats))
         .with_request_id_randomization(!config.disable_request_id_randomization)
         .with_stream_interval(config.stream_interval);
@@ -259,7 +261,7 @@ where
             .transpose()
             .context("invalid gRPC TLS configuration")?;
         let (health_reporter, health_service) = health_reporter();
-        let engine_health = grpc::EngineHealth::subscribe(state.engine_core_client());
+        let engine_health = grpc::EngineHealth::subscribe(state.llm());
         let health_monitor = grpc::HealthMonitor::register(health_reporter, engine_health).await;
         let control_service = grpc::ControlGrpcService::new(
             grpc::ControlServiceImpl::new(state.clone())
@@ -455,7 +457,7 @@ where
 
         tokio::spawn(async move {
             if let Err(err) = connection.await {
-                trace!(error = %err, "failed to serve connection");
+                trace!(error = %err.as_report(), "failed to serve connection");
             }
         });
     }
