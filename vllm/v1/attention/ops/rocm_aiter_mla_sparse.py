@@ -764,14 +764,6 @@ def paged_mqa_logits_module():
     return None
 
 
-def _per_sequence_context_lens(context_lens: torch.Tensor) -> torch.Tensor:
-    # AITER takes one length per sequence: the last column of a (B, next_n) table.
-    # TODO: remove once AITER accepts (B, next_n) context_lens (ROCm/aiter#6153).
-    if context_lens.dim() == 2 and context_lens.shape[1] > 1:
-        return context_lens[:, -1].contiguous()
-    return context_lens
-
-
 def _accepts_parameters(function: Callable, required: set[str]) -> bool:
     try:
         parameters = inspect.signature(function).parameters
@@ -859,7 +851,7 @@ def rocm_fp8_paged_mqa_logits(
                 kv_cache_fp8,
                 weights,
                 out_logits,
-                _per_sequence_context_lens(context_lens),
+                context_lens,
                 block_tables,
                 max_model_len,
                 ChunkK=256,
@@ -881,7 +873,7 @@ def rocm_fp8_paged_mqa_logits(
             kv_cache_fp8,
             weights,
             out_qk,
-            _per_sequence_context_lens(context_lens),
+            context_lens,
             block_tables,
             max_model_len,
             ChunkQ=heads,
