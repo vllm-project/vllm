@@ -3,10 +3,10 @@
 """Kimi-K3 multimodal model implementation for vLLM."""
 
 import math
-import re
 from collections.abc import Hashable, Iterable
 from typing import TYPE_CHECKING, Any, cast
 
+import regex as re
 import torch
 from torch import nn
 
