@@ -105,7 +105,8 @@ def _profile_scope(name: str) -> AbstractContextManager:
     return torch.profiler.record_function(name)
 
 
-# Maximum activation rows supported by HIP skinny (Python M maps to C++ N_in).
+# Maximum activation rows routed to HIP skinny (Python M maps to C++ N_in),
+# except on gfx1151, which uses MAX_SKINNY_BATCH_SIZE_GFX1151.
 # When K*M exceeds regular LDS capacity, the C++ medium kernel caches the
 # prefix in LDS and reads the remaining activation elements from global memory.
 # On gfx115x the K*M term is dropped entirely: deep-K shapes stage every
@@ -113,8 +114,9 @@ def _profile_scope(name: str) -> AbstractContextManager:
 # multiple of the kernel's row tile does the medium kernel fall back to reading
 # the rows that do not fit from global memory.
 MAX_SKINNY_BATCH_SIZE = 5
-# gfx1151 takes 6..8 rows too: on 15 shapes swept the HIP kernel beat the
-# Triton fallback by 1.5-4.5x there (110-214 GB/s on outputs of 2048 or more).
+# gfx1151 takes 6..8 rows too: in a kernel sweep of 15 shapes the HIP kernel
+# beat the Triton fallback by 1.5-4.5x (110-214 GB/s on outputs of 2048 or
+# more).
 # At 16 rows it is level with Triton, so the cap stays at 8. Only gfx1151 has
 # been run on hardware; the rest of gfx115x keeps 5.
 MAX_SKINNY_BATCH_SIZE_GFX1151 = 8
