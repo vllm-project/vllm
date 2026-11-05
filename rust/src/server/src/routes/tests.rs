@@ -7216,6 +7216,153 @@ async fn completions_echo_stream_decodes_token_id_prompt_chunk() {
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 
+/// With prompt truncation, a token-ID prompt echoes the text of the tokens
+/// the engine receives, like Python's renderer (vllm-project/vllm#61876).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn non_stream_completions_echo_reports_the_truncated_prompt() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).as_deref(),
+                Some(bytes_to_token_ids(b"world").as_slice())
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": bytes_to_token_ids(b"hello world"),
+                        "echo": true,
+                        "truncate_prompt_tokens": 5,
+                        "stream": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["choices"][0]["text"], "worldhi");
+    assert_eq!(json["usage"]["prompt_tokens"], 5);
+}
+
+/// A truncated token-ID prompt streams the decoded tokens that remain; a
+/// text prompt echoes its text as sent, like Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn completions_echo_stream_reports_the_truncated_prompt() {
+    let cases = [
+        (json!(bytes_to_token_ids(b"hello world")), "hello"),
+        (json!("hello world"), "hello world"),
+    ];
+    for (prompt, echoed) in cases {
+        let (app, engine_task) = test_app_with_engine_handle().await;
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "prompt": prompt,
+                            "echo": true,
+                            "truncate_prompt_tokens": 5,
+                            "truncation_side": "right",
+                            "stream": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+        let first_chunk: serde_json::Value =
+            serde_json::from_str(sse_data_payloads(&text)[0]).expect("first chunk json");
+        assert_eq!(first_chunk["choices"][0]["text"], echoed, "{text}");
+    }
+}
+
+/// Chat echoes the last assistant message, which prompt truncation does not
+/// change, so the two combine like in Python.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn chat_completions_echo_stream_with_prompt_truncation() {
+    let (app, engine_task) = test_app_with_backend_and_engine_request_check(
+        Arc::new(FakeChatBackend::new()),
+        |request| {
+            assert_eq!(
+                decode_prompt_token_ids(request).as_ref().map(Vec::len),
+                Some(4)
+            );
+        },
+    )
+    .await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "messages": [
+                            {"role": "user", "content": "hello"},
+                            {"role": "assistant", "content": "Sure, "}
+                        ],
+                        "add_generation_prompt": false,
+                        "continue_final_message": true,
+                        "echo": true,
+                        "truncate_prompt_tokens": 4,
+                        "stream": true
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let contents: Vec<_> = sse_data_payloads(&text)
+        .into_iter()
+        .filter_map(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(contents.concat(), "Sure, hi", "{text}");
+}
+
 /// Like Python, a streamed echo with `logprobs` reports the prompt tokens'
 /// logprobs with the echoed prompt, and the generated tokens' offsets continue
 /// after the reported prompt tokens rather than after the prompt text.
