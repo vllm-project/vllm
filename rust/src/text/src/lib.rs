@@ -12,7 +12,9 @@ use std::mem::take;
 pub use backend::{
     DynTextBackend, GenerationConfigMode, SamplingHints, SamplingLimits, TextBackend,
 };
+pub use beam_search::BeamSearchOutput;
 pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
+use beam_search::{BeamSearchParams, run_beam_search};
 use futures::Stream;
 pub use lower::{
     EffectiveSampling, PreparedTextRequest, lower_sampling_params, lower_text_request,
@@ -32,6 +34,7 @@ use vllm_llm::{GenerateOutputStream, GenerateRequest, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod beam_search;
 mod error;
 mod lower;
 pub mod output;
@@ -313,6 +316,53 @@ impl TextLlm {
         }
 
         Ok(self.llm.generate(generate_request).await?)
+    }
+
+    /// Run beam search for a text request and return the collected beam outputs.
+    ///
+    /// Unlike `generate()`, beam search makes multiple engine calls (one per beam
+    /// per step) and returns fully collected results rather than a stream.
+    pub async fn beam_search(&self, mut request: TextRequest) -> Result<BeamSearchOutput> {
+        request.validate()?;
+
+        let tokenizer = self.processor.backend.tokenizer();
+        let prompt_token_ids = match take(&mut request.prompt) {
+            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
+            Prompt::TokenIds(token_ids) => token_ids,
+        };
+
+        let sampling_hints = self.processor.backend.sampling_hints()?;
+
+        let max_tokens = resolve_max_tokens(
+            request.sampling_params.max_tokens,
+            sampling_hints.default_max_tokens,
+            self.processor.max_model_len,
+            prompt_token_ids.len() as u32,
+        )?;
+
+        let params = BeamSearchParams {
+            request_id: request.request_id,
+            beam_width: request.sampling_params.n.unwrap_or(1),
+            max_tokens,
+            temperature: request
+                .sampling_params
+                .temperature
+                .or(sampling_hints.default_temperature)
+                .unwrap_or(1.0),
+            length_penalty: request.sampling_params.length_penalty.unwrap_or(1.0),
+            ignore_eos: request.sampling_params.ignore_eos,
+            include_stop_str_in_output: request.decode_options.include_stop_str_in_output,
+            eos_token_id: sampling_hints.primary_eos_token_id,
+            extra_eos_token_ids: sampling_hints.extra_eos_token_ids.clone(),
+            lora_request: request.lora_request,
+            cache_salt: request.cache_salt,
+            priority: request.priority,
+            data_parallel_rank: request.data_parallel_rank,
+            arrival_time: request.arrival_time,
+            mm_features: request.mm_features.take(),
+        };
+
+        run_beam_search(&self.llm, prompt_token_ids, params).await
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

@@ -151,6 +151,14 @@ pub struct SamplingParams {
     /// Number of prompt tokens to skip from returned routed-expert data.
     /// `None` returns routing for the whole prompt.
     pub routed_experts_prompt_start: Option<u32>,
+    /// Whether to use beam search instead of sampling.
+    pub use_beam_search: bool,
+    /// Number of beams (completion choices) to generate.
+    /// When `use_beam_search` is true, this is the beam width.
+    pub n: Option<u32>,
+    /// Length penalty for beam search scoring.
+    /// > 1.0 favors longer sequences; < 1.0 penalizes longer sequences.
+    pub length_penalty: Option<f32>,
     /// Additional request parameters for custom extensions.
     ///
     /// Python's `SamplingParams` names this `extra_args`, which clients of the
@@ -193,6 +201,9 @@ impl Default for SamplingParams {
             bad_words_token_ids: None,
             logprob_token_ids: None,
             structured_outputs: None,
+            use_beam_search: false,
+            n: None,
+            length_penalty: None,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
             vllm_xargs: None,

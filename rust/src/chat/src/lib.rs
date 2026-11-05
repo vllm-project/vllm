@@ -34,6 +34,7 @@ pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
 };
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
+pub use parser::unified::UnifiedParserFactory;
 pub use parser::{ParserSelection, ToolStrictLevel, validate_parser_overrides};
 pub use reasoning::EffortValue;
 pub use renderer::hf::ChatTemplateContentFormatOption;
@@ -49,6 +50,9 @@ pub use request::{
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 pub use vllm_llm::FinishReason;
+pub use vllm_parser::unified::{
+    CombinedParser, UnifiedParser, UnifiedParserEvent, UnifiedParserOutput,
+};
 pub use vllm_text::GenerationConfigMode;
 
 mod backend;
@@ -442,6 +446,16 @@ impl ChatLlm {
         self.text.model_id()
     }
 
+    /// Return the tool-call parser selection.
+    pub fn tool_call_parser(&self) -> &ParserSelection {
+        &self.processor.tool_call_parser
+    }
+
+    /// Return the reasoning parser selection.
+    pub fn reasoning_parser(&self) -> &ParserSelection {
+        &self.processor.reasoning_parser
+    }
+
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
@@ -493,6 +507,20 @@ impl ChatLlm {
             ChatEventStream::new(request_id, sampling, structured_stream)
                 .with_prompt_text(prompt_text),
         )
+    }
+
+    /// Render, tokenize, and run beam search for one chat request.
+    ///
+    /// Reuses the same render → finalize → prompt extraction pipeline as
+    /// [`Self::chat`], but calls [`TextLlm::beam_search`] instead of
+    /// [`TextLlm::generate`].
+    pub async fn beam_search_chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<vllm_text::BeamSearchOutput> {
+        let text_request = self.processor.prepare_for_tokenization(request).await?;
+
+        self.text.beam_search(text_request).await.map_err(Error::from)
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

@@ -180,6 +180,9 @@ pub(super) fn prepare_chat_request(
             bad_words_token_ids: None,
             logprob_token_ids,
             structured_outputs,
+            use_beam_search: request.use_beam_search,
+            n: request.n,
+            length_penalty: request.length_penalty,
             skip_reading_prefix_cache: None,
             routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(

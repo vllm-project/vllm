@@ -5,6 +5,7 @@ mod convert;
 mod types;
 mod validate;
 
+use indexmap::IndexMap;
 use std::convert::Infallible;
 use std::result::Result;
 use std::sync::Arc;
@@ -20,12 +21,13 @@ use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
+use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
-    DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
-    TextOutputStreamExt as _, TextRequest,
+    BeamSearchOutput, DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta,
+    TextOutputStream, TextOutputStreamExt as _, TextRequest,
 };
 
 use self::convert::{ResponseOptions, prepare_completion_request};
@@ -113,6 +115,35 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
+
+    if prepared.text_request.sampling_params.use_beam_search {
+        let beam_result = match state
+            .chat
+            .text()
+            .beam_search(prepared.text_request)
+            .instrument(request_span.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return text_submit_error("failed to submit beam search request", error)
+                    .into_response();
+            }
+        };
+
+        let response = collect_beam_search_completion(
+            beam_result,
+            prepared.request_id,
+            prepared.response_model,
+            created,
+            api_server_options,
+            prepared.options,
+            tokenizer.as_ref(),
+        )
+        .await;
+        return Json(response).into_response();
+    }
+
     let text_stream = match state
         .chat
         .text()
@@ -286,6 +317,158 @@ async fn collect_completion(
         kv_transfer_params: collected.kv_transfer_params,
         ec_transfer_params: collected.ec_transfer_params,
     })
+}
+
+fn build_beam_logprobs(
+    beam_logprobs: &[Vec<TokenLogprob>],
+    generated_tokens: &[u32],
+    tokenizer: &dyn Tokenizer,
+) -> Option<LogProbs> {
+    if generated_tokens.is_empty() || beam_logprobs.len() < generated_tokens.len() {
+        return None;
+    }
+    let n = generated_tokens.len();
+    let mut tokens = Vec::with_capacity(n);
+    let mut token_logprobs = Vec::with_capacity(n);
+    let mut top_logprobs = Vec::with_capacity(n);
+    let mut text_offset = Vec::with_capacity(n);
+    let mut offset = 0u32;
+
+    for pos in 0..n {
+        let entries = &beam_logprobs[pos];
+        let token_id = generated_tokens[pos];
+        let selected_logprob = entries.iter().find(|e| e.token_id == token_id).map(|e| e.logprob);
+        let token = tokenizer.decode(&[token_id], false).unwrap_or_default();
+        offset += text_len(&token);
+        tokens.push(token);
+        token_logprobs.push(selected_logprob);
+        text_offset.push(offset);
+        let mut top: IndexMap<String, f32> = IndexMap::with_capacity(entries.len());
+        for entry in entries {
+            let decoded = tokenizer.decode(&[entry.token_id], false).unwrap_or_default();
+            top.insert(
+                if decoded.is_empty() {
+                    format!("token_id:{}", entry.token_id)
+                } else {
+                    decoded
+                },
+                entry.logprob,
+            );
+        }
+        top_logprobs.push(Some(top));
+    }
+
+    Some(LogProbs {
+        tokens,
+        token_logprobs,
+        top_logprobs,
+        text_offset,
+    })
+}
+
+async fn collect_beam_search_completion(
+    beam_result: BeamSearchOutput,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        enable_per_request_metrics,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        echo,
+        requested_logprobs,
+        return_token_ids,
+        ..
+    }: ResponseOptions,
+    tokenizer: &dyn Tokenizer,
+) -> CompletionResponse {
+    let prompt_len = beam_result.prompt_token_ids.len();
+    let output_tokens: usize = beam_result
+        .sequences
+        .iter()
+        .map(|s| s.tokens.len().saturating_sub(prompt_len))
+        .sum();
+    let usage = Usage::from_token_usage(
+        vllm_llm::TokenUsage {
+            prompt_token_count: prompt_len,
+            output_token_count: output_tokens,
+            prompt_cache_usage: vllm_llm::PromptCacheUsage::default(),
+        },
+        enable_prompt_tokens_details,
+        None,
+    );
+    let metrics = PerRequestMetrics::from_request(
+        enable_per_request_metrics,
+        vllm_llm::RequestTimestamps::default(),
+        usage.completion_tokens.unwrap_or(0),
+        None,
+    );
+
+    let prompt_token_ids = return_token_ids.then(|| beam_result.prompt_token_ids.clone());
+
+    let choices: Vec<CompletionChoice> = beam_result
+        .sequences
+        .iter()
+        .enumerate()
+        .map(|(i, seq)| {
+            let generated_tokens = seq.tokens[beam_result.prompt_token_ids.len()..].to_vec();
+            let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
+            let text = match &echo {
+                Some(prompt) => format!("{prompt}{}", decoded),
+                None => decoded,
+            };
+            let openai_finish_reason = seq
+                .finish_reason
+                .as_ref()
+                .map(|fr| completion_finish_reason_to_openai(fr).unwrap_or("error"))
+                .unwrap_or("length");
+            let stop_reason = seq
+                .stop_reason
+                .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
+            let logprobs = requested_logprobs
+                .and_then(|_| build_beam_logprobs(&seq.logprobs, &generated_tokens, tokenizer));
+
+            CompletionChoice {
+                index: i as u32,
+                text,
+                logprobs,
+                finish_reason: Some(openai_finish_reason.to_string()),
+                stop_reason,
+                prompt_logprobs: None,
+                token_ids: return_token_ids.then_some(generated_tokens),
+                prompt_token_ids: prompt_token_ids.clone(),
+                routed_experts: None,
+                weight_versions: None,
+            }
+        })
+        .collect();
+
+    if enable_log_requests {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            num_beams = beam_result.sequences.len(),
+            "beam search completion finished"
+        );
+    }
+
+    CompletionResponse {
+        id: request_id,
+        object: "text_completion".to_string(),
+        created,
+        model: response_model,
+        choices,
+        usage: Some(usage),
+        system_fingerprint: None,
+        kv_transfer_params: beam_result.kv_transfer_params,
+        ec_transfer_params: beam_result.ec_transfer_params,
+        metrics,
+        service_tier: None,
+    }
 }
 
 /// Convert one internal decoded-text stream into OpenAI completions chunks.
