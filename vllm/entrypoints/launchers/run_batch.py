@@ -647,6 +647,7 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
+    raw_body: bytes | None = None
     if (
         isinstance(response, Response)
         and not isinstance(response, StreamingResponse)
@@ -664,18 +665,20 @@ async def run_request(
             and 0 <= data_start < data_end
             and b"null" not in body[data_start:data_end]
         ):
-            output = BatchRequestOutput(
-                id=f"vllm-{random_uuid()}",
-                custom_id=request.custom_id,
-                response=BatchResponseData(request_id=f"vllm-batch-{random_uuid()}"),
-                error=None,
-            )
-            output._raw_body = body
-            return output
-        with contextlib.suppress(pydantic.ValidationError):
-            response = _ALL_RESPONSE_ADAPTER.validate_json(body)
+            raw_body = body
+        else:
+            with contextlib.suppress(pydantic.ValidationError):
+                response = _ALL_RESPONSE_ADAPTER.validate_json(body)
 
-    if isinstance(response, AllResponse):
+    if raw_body is not None:
+        batch_output = BatchRequestOutput(
+            id=f"vllm-{random_uuid()}",
+            custom_id=request.custom_id,
+            response=BatchResponseData(request_id=f"vllm-batch-{random_uuid()}"),
+            error=None,
+        )
+        batch_output._raw_body = raw_body
+    elif isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
