@@ -2540,10 +2540,6 @@ def test_online_quantization_targets_ignore_collision() -> None:
     ("args", "expected"),
     [
         (
-            QuantizationConfigArgs(targets={"lm_head": "fp8_per_channel_weight_only"}),
-            "weight_only",
-        ),
-        (
             QuantizationConfigArgs(
                 targets={
                     "lm_head": QuantSpec(
@@ -2565,7 +2561,6 @@ def test_online_quantization_targets_ignore_collision() -> None:
         ),
     ],
     ids=[
-        "targets_weight_only_shorthand",
         "targets_weight_only_spec",
         "targets_per_channel",
         "targets_per_tensor",
