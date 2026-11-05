@@ -148,10 +148,22 @@ pub(super) fn prepare_chat_request(
         request.vllm_xargs.as_ref(),
     );
 
+    // OpenAI treats `tools: []` like an omitted field: with no tool declared
+    // anywhere, `auto` and `required` have nothing to call and fall back to
+    // `none`. A named choice still fails tool resolution, as no tool matches it.
+    let tool_choice = match request.tool_choice {
+        Some(ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::Required))
+            if request.tools.as_ref().is_some_and(Vec::is_empty)
+                && messages.iter().all(|message| message.declared_tools().is_none()) =>
+        {
+            Some(ToolChoice::Value(ToolChoiceValue::None))
+        }
+        tool_choice => tool_choice,
+    };
     let tool_context = ResolvedToolContext::new(
         &messages,
         convert_tools(request.tools)?,
-        request.tool_choice.as_ref().map(convert_tool_choice).transpose()?,
+        tool_choice.as_ref().map(convert_tool_choice).transpose()?,
         request.parallel_tool_calls.unwrap_or(true),
     )
     .map_err(|error| chat_submit_error("failed to resolve request tools", error))?;
@@ -1606,6 +1618,117 @@ mod tests {
             &ChatToolChoice::Required
         );
         assert!(!prepared.options.is_named_tool_choice);
+    }
+
+    /// Like OpenAI, `tools: []` is an omitted field: no tool reaches the
+    /// renderer, and `auto` and `required` fall back to `none`.
+    #[test]
+    fn prepare_chat_request_treats_empty_tools_as_omitted() {
+        let cases = [
+            None,
+            Some(ToolChoiceValue::None),
+            Some(ToolChoiceValue::Auto),
+            Some(ToolChoiceValue::Required),
+        ];
+        for tool_choice in cases {
+            let request = ChatCompletionRequest {
+                tools: Some(Vec::new()),
+                tool_choice: tool_choice.map(ToolChoice::Value),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            assert!(prepared.chat_request.initial_tools().is_empty());
+            assert_eq!(
+                prepared.chat_request.tool_choice(),
+                &ChatToolChoice::None,
+                "{tool_choice:?}"
+            );
+        }
+    }
+
+    /// Tools declared in a developer message stay available under `tools: []`,
+    /// as they would with `tools` omitted.
+    #[test]
+    fn prepare_chat_request_keeps_developer_tools_with_empty_tools() {
+        for tool_choice in [ToolChoiceValue::Auto, ToolChoiceValue::Required] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    ChatMessage::Developer {
+                        content: MessageContent::Text("Use tools.".to_string()),
+                        tools: Some(vec![Tool {
+                            tool_type: "function".to_string(),
+                            function: Function {
+                                name: "lookup".to_string(),
+                                description: None,
+                                parameters: json!({"type": "object"}),
+                                strict: None,
+                                defer_loading: None,
+                            },
+                            defer_loading: None,
+                        }]),
+                        name: None,
+                    },
+                    ChatMessage::User {
+                        content: MessageContent::Text("hello".to_string()),
+                        name: None,
+                    },
+                ],
+                tools: Some(Vec::new()),
+                tool_choice: Some(ToolChoice::Value(tool_choice)),
+                ..base_request()
+            };
+
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .unwrap_or_else(|error| panic!("{tool_choice:?}: {error:?}"));
+
+            let expected = match tool_choice {
+                ToolChoiceValue::Auto => ChatToolChoice::Auto,
+                _ => ChatToolChoice::Required,
+            };
+            assert_eq!(prepared.chat_request.tool_choice(), &expected);
+        }
+    }
+
+    /// A named tool choice keeps the empty list, so it reports the missing
+    /// function instead of falling back to `none`.
+    #[test]
+    fn prepare_chat_request_rejects_named_tool_choice_with_empty_tools() {
+        let request = ChatCompletionRequest {
+            tools: Some(Vec::new()),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "f".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("no tool matches the named choice");
+
+        expect![[r#"
+            InvalidRequest {
+                message: "tool_choice function `f` was not found in the available tools",
+                param: None,
+            }
+        "#]]
+        .assert_debug_eq(&error);
     }
 
     #[test]

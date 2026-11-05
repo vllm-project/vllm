@@ -7814,31 +7814,52 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
     assert!(text.contains("\"logprobs\":{\"content\":"), "{text}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn chat_rejects_empty_tools_array() {
-    let (mut app, engine_task) = test_app_with_engine_handle().await;
-    let cases = [json!({}), json!({"tool_choice": "none"})];
+/// Like OpenAI and Python, `tools: []` renders like an omitted field, whatever
+/// `tool_choice` says; a named choice still reports the missing function.
+#[tokio::test]
+async fn chat_render_treats_empty_tools_as_omitted() {
+    let mut app = test_render_app();
+    let base = json!({
+        "model": "render-model",
+        "messages": [{"role": "user", "content": "hello"}],
+    });
+    let (status, mut without_tools) =
+        post_json(&mut app, "/v1/chat/completions/render", base.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{without_tools}");
+    without_tools["request_id"].take();
+
+    let cases = [
+        json!({}),
+        json!({"tool_choice": "none"}),
+        json!({"tool_choice": "auto"}),
+        json!({"tool_choice": "required"}),
+    ];
     for extra in cases {
-        let mut body = json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [{"role": "user", "content": "hello"}],
-            "tools": [],
-        });
+        let mut body = base.clone();
+        body["tools"] = json!([]);
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
-        let (status, error) = post_json(&mut app, "/v1/chat/completions", body.clone()).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
-        expect_test::expect![[r#"
-            {
-              "error": {
-                "message": "`tools` must not be an empty array. Either provide at least one tool or omit the field entirely.",
-                "type": "BadRequestError",
-                "param": "tools",
-                "code": 400
-              }
-            }"#]].assert_eq(&serde_json::to_string_pretty(&error).unwrap());
+        let (status, mut rendered) =
+            post_json(&mut app, "/v1/chat/completions/render", body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}: {rendered}");
+        rendered["request_id"].take();
+        assert_eq!(rendered, without_tools, "{body}");
     }
-    engine_task.abort_and_join().await;
+
+    let mut body = base;
+    body["tools"] = json!([]);
+    body["tool_choice"] = json!({"type": "function", "function": {"name": "f"}});
+    let (status, error) = post_json(&mut app, "/v1/chat/completions/render", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    expect_test::expect![[r#"
+        {
+          "error": {
+            "message": "tool_choice function `f` was not found in the available tools",
+            "type": "BadRequestError",
+            "param": null,
+            "code": 400
+          }
+        }"#]]
+    .assert_eq(&serde_json::to_string_pretty(&error).unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
