@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind
 from vllm.v1.worker.gpu.spec_decode.kernels import (
     PAGED_KV_COMMIT,
     CommitStep,
@@ -98,8 +97,8 @@ class ReferenceKVCompactor(SpecKernel):
     def __init__(self) -> None:
         self.layouts: tuple[PagedKVLayout, ...] = ()
 
-    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
-        return frozenset(PLAN_KINDS)
+    def supports(self, layer: SpecLayerSpec) -> bool:
+        return True
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
         self.layouts = ctx.kv_layouts

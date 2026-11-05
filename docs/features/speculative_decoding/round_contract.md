@@ -202,14 +202,14 @@ written as `"<layer kind>/<op>"` in logs:
 The registry holds no kernel in tree. A speculator names provider factories in
 `SpeculatorConfig.spec_kernel_providers` (qualified names); each is constructed
 with `vllm_config`, has a `name`, and returns `{key: SpecKernel}` from
-`kernels()`. Providers apply in order and a later one wins a key. A layer verifies the highest plan kind that every kernel in
-`KernelRegistry.required_keys(layer)` supports; a missing or declining kernel
-means chains.
+`kernels()`. Providers apply in order and a later one wins a key. A layer verifies
+trees when every kernel in `KernelRegistry.required_keys(layer)` supports it; a
+missing or declining kernel means chains.
 
 A `SpecKernel` implements these methods:
 
-- `supports(layer: SpecLayerSpec) -> frozenset[PlanKind]` returns the plan kinds the
-  kernel runs for `layer`. An empty set declines the layer, for example on its state
+- `supports(layer: SpecLayerSpec) -> bool` says whether the kernel runs `layer`, on
+  chains and trees alike. `False` declines the layer, for example on its state
   dtype, head size or conv width. It is called before `bind`.
 - `bind(ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None` is called once
   per worker, before capture, with every layer the kernel runs on. Allocate memory

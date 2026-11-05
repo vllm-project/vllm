@@ -99,18 +99,17 @@ def _model(*groups, backend=_TreeBackend):
 
 
 class ToyKernel(SpecKernel):
-    """Supports ``kinds`` on layers whose name is not in ``declines``; records
-    its binds and commits."""
+    """Runs the layers whose name is not in ``declines``; records its binds
+    and commits."""
 
-    def __init__(self, kinds=("chain", "tree"), declines=()):
-        self.kinds = frozenset(kinds)
+    def __init__(self, declines=()):
         self.declines = frozenset(declines)
         self.binds: list[list[str]] = []
         self.ctxs: list[KernelContext] = []
         self.steps: list[CommitStep] = []
 
     def supports(self, layer):
-        return frozenset() if layer.name in self.declines else self.kinds
+        return layer.name not in self.declines
 
     def bind(self, ctx, layers):
         self.binds.append([layer.name for layer in layers])
@@ -549,21 +548,13 @@ def test_registry_lookup(caplog):
             "ToyKernel declines the layer",
             id="declined",
         ),
-        # Verify takes trees, the state commit chains only: the layer chains.
+        # Verify takes the layer, the state commit declines it: the layer chains.
         pytest.param(
-            {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(kinds={"chain"})},
+            {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(declines={"m"})},
             _mamba_layer("m"),
             "chain",
-            "ToyKernel verifies chain",
-            id="lowest-kind",
-        ),
-        # The layer runs its verify kernel on chains too.
-        pytest.param(
-            {GDN_VERIFY: ToyKernel(kinds={"tree"}), STATE_COMMIT: ToyKernel()},
-            _mamba_layer("m"),
-            "chain",
-            "ToyKernel does not verify chains",
-            id="tree-only-verify",
+            "ToyKernel declines the layer",
+            id="commit-declines",
         ),
     ],
 )
@@ -716,7 +707,7 @@ class _RecordingKernel(SpecKernel):
         self.rows: list = []
 
     def supports(self, layer):
-        return frozenset({"chain", "tree"})
+        return True
 
     def verify(self, rows):
         self.rows.append(rows)

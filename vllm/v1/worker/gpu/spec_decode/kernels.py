@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, get_args
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.spec_decode.resources import PLAN_KINDS, PlanKind, plan_kind_rank
+from vllm.v1.spec_decode.resources import PlanKind
 from vllm.v1.worker.gpu.spec_decode.capabilities import SpecLayerKind
 
 if TYPE_CHECKING:
@@ -229,9 +229,8 @@ class SpecKernel:
     allocations sized by data.
     """
 
-    def supports(self, layer: SpecLayerSpec) -> frozenset[PlanKind]:
-        """The plan kinds this kernel runs for ``layer``; empty declines it.
-        A verify kernel without ``"chain"`` is not used."""
+    def supports(self, layer: SpecLayerSpec) -> bool:
+        """Whether this kernel runs ``layer``, on chains and trees alike."""
         raise NotImplementedError
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
@@ -313,31 +312,22 @@ class KernelRegistry:
         return kernel
 
     def plan_kind(self, layer: SpecLayerSpec) -> tuple[PlanKind, str]:
-        """The highest plan kind that every kernel ``layer`` needs supports for
-        it, and why it is not higher. A layer verifies chains without any."""
-        best: tuple[PlanKind, str] = (PLAN_KINDS[-1], "")
+        """``("tree", "")`` when every kernel ``layer`` needs runs it, else
+        ``"chain"`` and why."""
         for key in self.required_keys(layer):
             kernel = self._kernels.get(key)
             if kernel is None:
-                found: tuple[PlanKind, str] = ("chain", f"no {key_name(key)} kernel")
-            elif not kernel.supports(layer):
-                found = ("chain", f"{type(kernel).__name__} declines the layer")
-            elif key[1] == "verify" and "chain" not in kernel.supports(layer):
-                # The layer runs its verify kernel on chain batches too.
-                found = ("chain", f"{type(kernel).__name__} does not verify chains")
-            else:
-                kind = max(kernel.supports(layer), key=plan_kind_rank)
-                found = (kind, f"{type(kernel).__name__} verifies {kind}")
-            if plan_kind_rank(found[0]) < plan_kind_rank(best[0]):
-                best = found
-        return best
+                return "chain", f"no {key_name(key)} kernel"
+            if not kernel.supports(layer):
+                return "chain", f"{type(kernel).__name__} declines the layer"
+        return "tree", ""
 
     def bind(self, ctx: KernelContext, layers: Sequence[SpecLayerSpec]) -> None:
         """Bind each kernel once, to every layer it runs on. A recurrent layer
         gets its verify kernel as ``spec_verify_kernel`` (None for its own
         kernels), which it runs on chains too. Commit kernels are bound only
         for plans above a chain: a chain commits nothing."""
-        commits = plan_kind_rank(ctx.plan_kind) > plan_kind_rank("chain")
+        commits = ctx.plan_kind != "chain"
         # One kernel may serve several keys: bind it once to its unique layers
         # and commit with it if any of its ops is a commit.
         served: dict[int, tuple[SpecKernel, dict[KernelKey, list[SpecLayerSpec]]]] = {}
@@ -348,7 +338,7 @@ class KernelRegistry:
                 if key[1] == "commit" and not commits:
                     continue
                 kernel = self.kernel_for(key, layer)
-                if kernel is None or ctx.plan_kind not in kernel.supports(layer):
+                if kernel is None:
                     continue
                 _, by_key = served.setdefault(id(kernel), (kernel, {}))
                 by_key.setdefault(key, []).append(layer)
