@@ -230,7 +230,8 @@ without committing it, so the drafter skips those contexts and a few positions
 are not watermarked. In our evaluation, detection with block verification was
 within -1 to +3 percentage points of standard verification.
 `deduplicate_block_contexts_max_history` sets how many verification steps per
-request are remembered (default 8,192, using 4 bytes per remembered context).
+request are remembered, using 4 bytes per remembered context. It defaults to
+`deduplicate_contexts_max_history`, or 8,192 when that is `null`.
 
 Select `dual_key_gumbel` together with probabilistic drafting:
 
