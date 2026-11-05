@@ -90,6 +90,7 @@ tests/quantization/test_int8_moe_oracle.py  # CI jobs disabled pending locked to
 tests/quantization/test_lm_head.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_mixed_precision.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_modelopt.py  # CI jobs disabled pending locked torchao transitive dependencies
+tests/quantization/test_moe_input_hadamard.py  # same CI gap as test_input_hadamard.py: jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_moe_wna16.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_online_mxfp4.py  # CI jobs disabled pending locked torchao transitive dependencies
 tests/quantization/test_online_shared_expert_fusion.py  # CI jobs disabled pending locked torchao transitive dependencies
