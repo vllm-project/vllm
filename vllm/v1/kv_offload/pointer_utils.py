@@ -79,14 +79,21 @@ def resolve_device_pointers(
             continue
         group_block_ids = block_ids[blk_offset : blk_offset + group_size]
         group_block_ids_u64 = group_block_ids.astype(np.uint64)
-        for data_ref in data_refs:
-            tensor = kv_caches.tensors[data_ref.tensor_idx].tensor
-            base_ptr = np.uint64(tensor.data_ptr())
-            row_stride = np.uint64(tensor.stride(0))
-            end_idx = op_idx + group_size
-            ptrs[op_idx:end_idx] = base_ptr + group_block_ids_u64 * row_stride
-            sizes[op_idx:end_idx] = data_ref.page_size_bytes
-            op_idx = end_idx
+        tensors = [kv_caches.tensors[ref.tensor_idx].tensor for ref in data_refs]
+        base_ptrs = np.array([t.data_ptr() for t in tensors], dtype=np.uint64)
+        row_strides = np.array([t.stride(0) for t in tensors], dtype=np.uint64)
+        page_sizes = np.array(
+            [ref.page_size_bytes for ref in data_refs], dtype=np.uint64
+        )
+
+        # Fill all refs at once through (num_refs, group_size) output views
+        shape = (len(data_refs), group_size)
+        end_idx = op_idx + len(data_refs) * group_size
+        group_ptrs = ptrs[op_idx:end_idx].reshape(shape)
+        np.multiply(group_block_ids_u64, row_strides[:, None], out=group_ptrs)
+        group_ptrs += base_ptrs[:, None]
+        sizes[op_idx:end_idx].reshape(shape)[:] = page_sizes[:, None]
+        op_idx = end_idx
         blk_offset += group_size
 
     assert blk_offset == len(block_ids)
