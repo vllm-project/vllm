@@ -38,8 +38,8 @@ else()
   # (vllm-project/DeepGEMM#43), plus the restored FP32 MQA logits and their
   # `logits_dtype` switch (vllm-project/DeepGEMM#46) and the mega_mhc
   # CUDA-graph replay barrier fix (vllm-project/DeepGEMM#48).
-  # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "ae4fd25d036a86042ac4bbfc01e2e0fa5fb362b6")
+  # Targets the PyTorch 2.11 stable ABI (requires PyTorch 2.14+ headers at build time) and CPython 3.10 limited API.
+  set(_DEEPGEMM_UPSTREAM_TAG "82ca617e5879d0efb0aba5b91b1c81852588af6f")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
