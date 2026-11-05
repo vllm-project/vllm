@@ -1272,13 +1272,18 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         prefill_end: int = 0,
     ) -> int:
         if apply_admission_cap:
-            # Steps back only their own tail, so the peak holding is set by
-            # the steps in flight, not by the sequence length: reserve the cap.
+            # Steps back only their own tail, so a long request's peak holding
+            # is set by the steps in flight; a short one never spans more than
+            # its tokens.
             assert self.max_admission_blocks_per_request is not None
             num_held_blocks = sum(
                 not block.is_null for block in self.req_to_blocks.get(request_id, ())
             )
-            return max(self.max_admission_blocks_per_request - num_held_blocks, 0)
+            num_required_blocks = min(
+                cdiv(num_tokens, self.block_size),
+                self.max_admission_blocks_per_request,
+            )
+            return max(num_required_blocks - num_held_blocks, 0)
         return super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,

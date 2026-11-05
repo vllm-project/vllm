@@ -423,6 +423,30 @@ def test_dflash_window_admission_cap_counts_in_flight_tails():
     assert spec.max_admission_blocks_per_request(4, 1000) == 4
 
 
+@pytest.mark.parametrize(("num_tokens", "num_reserved_blocks"), [(5, 2), (200, 12)])
+def test_dflash_window_admission_reserves_at_most_the_request_span(
+    num_tokens, num_reserved_blocks
+):
+    """A short request never holds more drafter blocks than its tokens span, so
+    admission reserves the smaller of that span and the cap."""
+    manager = DFlashSlidingWindowManager(
+        new_dflash_window_spec(),
+        block_pool=BlockPool(
+            num_gpu_blocks=64, enable_caching=False, hash_block_size=4
+        ),
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+        max_admission_blocks_per_request=12,
+    )
+    assert (
+        manager.get_num_blocks_to_allocate(
+            "r", num_tokens, [], 0, 0, num_tokens, apply_admission_cap=True
+        )
+        == num_reserved_blocks
+    )
+
+
 @pytest.mark.parametrize(
     ("num_speculative_tokens", "num_lookahead_tokens", "chunks"),
     [
