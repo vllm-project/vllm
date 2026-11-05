@@ -1467,9 +1467,9 @@ class SupportsTranscription(Protocol):
     ) -> list[DiarizedTranscriptionSegment]:
         """Parse the model-specific diarized transcript format.
 
-        Receives the raw decoded model output, without
-        :meth:`post_process_output` applied. Only models that set
-        ``supports_diarized_transcription`` must override this method.
+        Receives the raw decoded model output, without `post_process_output`
+        applied. Only models that set `supports_diarized_transcription` must
+        override this method.
         """
         raise NotImplementedError
 
