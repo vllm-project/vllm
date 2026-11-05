@@ -693,6 +693,29 @@ def _init_flydsl_sp(
     return quick_reduce._init_flydsl_sp(flydsl_int4, warmup, vllm_config), warmup
 
 
+def test_warm_up_prefers_preload_and_does_not_launch():
+    calls = []
+    fake = SimpleNamespace(
+        preload=lambda: calls.append("preload"),
+        compile=lambda inp, out: calls.append("compile"),
+    )
+
+    QuickAllReduce._warm_up_flydsl(fake, torch.empty(MB, dtype=torch.bfloat16))
+
+    assert calls == ["preload"]
+
+
+def test_warm_up_compiles_on_an_aiter_without_preload():
+    calls = []
+    fake = SimpleNamespace(compile=lambda inp, out: calls.append((inp, out)))
+    warmup = torch.empty(MB, dtype=torch.bfloat16)
+
+    QuickAllReduce._warm_up_flydsl(fake, warmup)
+
+    ((inp, out),) = calls
+    assert inp is warmup and out.shape == warmup.shape
+
+
 def test_sp_init_runs_compile_sp_once_when_the_flag_is_on(monkeypatch):
     fake = _FakeFlyDSLInt4()
 
