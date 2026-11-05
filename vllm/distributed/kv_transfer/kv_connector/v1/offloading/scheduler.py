@@ -33,11 +33,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_utils import eagle_proof_margin
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     MambaSpec,
@@ -169,6 +170,7 @@ class SchedulerOffloadConfig(NamedTuple):
     sync_load_budget_bytes: int = 0
     # KV bytes per token on one worker, summed over the offloaded groups.
     kv_bytes_per_token: int = 0
+    lookup_prefetch_max_chunks: int = 0
 
     @classmethod
     def from_spec(
@@ -326,6 +328,9 @@ class SchedulerOffloadConfig(NamedTuple):
                 _group_kv_bytes_per_block(kv_cache_config.kv_cache_groups[g.group_id])
                 // g.tokens_per_block
                 for g in spec.config.groups
+            ),
+            lookup_prefetch_max_chunks=max(
+                0, int(spec.extra_config.get("lookup_prefetch_max_chunks", 0))
             ),
         )
 
@@ -1354,6 +1359,66 @@ class OffloadingConnectorScheduler:
         self._events_tracker.on_new_request(
             req_context, request, self.config.kv_group_configs
         )
+
+    def prefetch_lookup(self, request: Request, gpu_cache: KVCacheManager) -> None:
+        """Probe complete chunks absent from the current GPU/CPU snapshot."""
+        limit = self.config.lookup_prefetch_max_chunks
+        if limit <= 0 or request.skip_reading_external_kv or not request.block_hashes:
+            return
+        req_status = self._req_status[request.request_id]
+        req_status.update_offload_keys()
+        local_tokens = gpu_cache.get_num_cached_tokens(request)
+        max_tokens = request.get_max_cache_hit_length()
+        if req_status.max_load_tokens is not None:
+            max_tokens = min(max_tokens, local_tokens + req_status.max_load_tokens)
+
+        groups = [
+            (group, state)
+            for group, state in zip(
+                self.config.kv_group_configs, req_status.group_states
+            )
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+            and group.sliding_window_size_in_chunks is None
+            and not group.is_eagle_group
+            and not group.requires_cow_source
+        ]
+        candidates: list[OffloadKey] = []
+        # Walk by position, sharing the budget across full-attention groups.
+        offsets = [local_tokens // group.tokens_per_chunk for group, _ in groups]
+        while groups and len(candidates) < limit:
+            progressed = False
+            for i, (group, group_state) in enumerate(groups):
+                chunk_idx = offsets[i]
+                end = (chunk_idx + 1) * group.tokens_per_chunk
+                if end > max_tokens or chunk_idx >= len(group_state.offload_keys):
+                    continue
+                offsets[i] += 1
+                progressed = True
+                # A later chunk may be cached even when the common prefix ends
+                # earlier. Skip it only if every GPU block in the chunk exists.
+                start = chunk_idx * group.tokens_per_chunk
+                gpu_hit = gpu_cache.prefix_cache_lookup_enabled(request) and all(
+                    gpu_cache.block_pool.get_cached_block(
+                        request.block_hashes[pos // self.config.tokens_per_hash - 1],
+                        [group.group_idx],
+                    )
+                    is not None
+                    for pos in range(
+                        start + group.tokens_per_block,
+                        end + 1,
+                        group.tokens_per_block,
+                    )
+                )
+                if not gpu_hit:
+                    candidates.append(group_state.offload_keys[chunk_idx])
+                    if len(candidates) == limit:
+                        break
+            if not progressed:
+                break
+
+        if candidates:
+            with self._manager_locked():
+                self.manager.prefetch(candidates, req_status.req_context)
 
     def get_num_new_matched_tokens(
         self,

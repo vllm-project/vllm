@@ -17,7 +17,7 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -218,6 +218,10 @@ class FileSystemTierManager(SecondaryTierManager):
         if result is None:
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
+
+    @override
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self._lookup_manager.prefetch(keys, req_context)
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:

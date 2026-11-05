@@ -312,6 +312,14 @@ class ConfigInfo:
 
 
 class OffloadingManager(ABC):
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        """Start non-binding metadata probes without allocating load slots.
+
+        The normal lookup path still determines the load boundary and starts
+        promotion. This hook can adapt to the lookup/commit split in #62932.
+        """
+        return
+
     @property
     def lock(self) -> AbstractContextManager[Any]:
         """Context manager granting exclusive access to this manager's state.

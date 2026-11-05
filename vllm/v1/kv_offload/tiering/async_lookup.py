@@ -18,18 +18,15 @@ There is no explicit lock.  Thread safety is achieved by ownership:
   can arrive on the tiering manager's tier-poll thread instead.  Both hold
   the manager lock, so the accesses stay serialized.
 
-* _lookup_queue is written by the scheduler (flush → put_nowait, one item
-  per step) and read by the background thread (get).  queue.Queue is
-  thread-safe.
+* _lookup_queue is written under the manager lock by flush() or prefetch()
+  and read by the background thread. SimpleQueue is thread-safe.
 
 * _pending_results is written by the background thread (put) and read by
   the scheduler (get_nowait inside drain_results).  queue.SimpleQueue is
   thread-safe by design.
 
-lookup() accumulates new keys in _lookup_batch without touching the queue.
-flush() is called once per step from the tier's on_schedule_end(), posting
-the entire batch as a single queue item so the background thread sees one
-batch per step.
+lookup() accumulates new keys in _lookup_batch. flush() posts the batch once
+per step; prefetch() can submit selected keys earlier.
 Results are drained on the first lookup after each flush, at flush(), and
 after worker shutdown. In-flight lookups with no remaining request references
 are retained until their results are drained, allowing new requests to share
@@ -48,6 +45,9 @@ from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 
 logger = init_logger(__name__)
+
+# Bound speculative batches without limiting scheduler lookups.
+_MAX_PREFETCH_BATCHES = 16
 
 
 class LookupPhase(Enum):
@@ -108,7 +108,7 @@ class AsyncLookupManager(ABC):
         # Scheduler → worker: one full step's batch per item.
         # None is used as a shutdown sentinel.
         self._lookup_queue: queue.SimpleQueue[
-            list[tuple[OffloadKey, ReqContext, int]] | None
+            tuple[list[tuple[OffloadKey, ReqContext, int]], bool] | None
         ] = queue.SimpleQueue()
 
         # Worker → scheduler: completed request-group result batches.
@@ -117,7 +117,8 @@ class AsyncLookupManager(ABC):
         self._pending_results: queue.SimpleQueue[list[tuple[OffloadKey, int, bool]]] = (
             queue.SimpleQueue()
         )
-        self._need_to_drain: bool = False
+        self._results_ready = threading.Event()
+        self._prefetch_slots = threading.BoundedSemaphore(_MAX_PREFETCH_BATCHES)
 
         self._thread = threading.Thread(
             target=self._worker,
@@ -152,9 +153,7 @@ class AsyncLookupManager(ABC):
             None  — result not yet available; retry next step.
 
         """
-        if self._need_to_drain:
-            self.drain_results()
-            self._need_to_drain = False
+        self._drain_ready_results()
         req_id = req_context.req_id
         state = self._lookup_state.get(key)
         if state is None:
@@ -166,6 +165,37 @@ class AsyncLookupManager(ABC):
         self._req_keys.setdefault(req_id, set()).add(key)
         return state.result
 
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> bool:
+        """Submit this request's metadata probes without waiting for a step."""
+        if not keys or not self._prefetch_slots.acquire(blocking=False):
+            return False
+
+        try:
+            for key in keys:
+                self.lookup(key, req_context)
+            selected = set(keys)
+            batch = []
+            remaining = []
+            for entry in self._lookup_batch:
+                key, _, generation = entry
+                if key not in selected:
+                    remaining.append(entry)
+                    continue
+                state = self._lookup_state.get(key)
+                if state is not None and state.generation == generation:
+                    assert state.phase is LookupPhase.PENDING
+                    state.phase = LookupPhase.IN_FLIGHT
+                    batch.append(entry)
+            self._lookup_batch = remaining
+            if not batch:
+                self._prefetch_slots.release()
+                return True
+            self._lookup_queue.put((batch, True))
+            return True
+        except BaseException:
+            self._prefetch_slots.release()
+            raise
+
     def flush(self) -> None:
         """Post this step's accumulated keys to the worker thread.
 
@@ -175,8 +205,7 @@ class AsyncLookupManager(ABC):
         step's drain_results(). Also drains completed lookups when there
         are no new keys to submit.
         """
-        self.drain_results()
-        self._need_to_drain = True
+        self._drain_ready_results()
         batch = self._lookup_batch
         self._lookup_batch = []
         in_flight_batch = []
@@ -188,7 +217,7 @@ class AsyncLookupManager(ABC):
             state.phase = LookupPhase.IN_FLIGHT
             in_flight_batch.append((key, req_context, generation))
         if in_flight_batch:
-            self._lookup_queue.put(in_flight_batch)
+            self._lookup_queue.put((in_flight_batch, False))
 
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
@@ -218,6 +247,11 @@ class AsyncLookupManager(ABC):
                 )
                 state.result = result
                 state.phase = LookupPhase.RESOLVED
+
+    def _drain_ready_results(self) -> None:
+        if self._results_ready.is_set():
+            self._results_ready.clear()
+            self.drain_results()
 
     def mark_miss(self, keys: Collection[OffloadKey]) -> None:
         """Force the cached verdict for ``keys`` to False after a failed load, so
@@ -283,9 +317,10 @@ class AsyncLookupManager(ABC):
 
     def _worker(self) -> None:
         while True:
-            pending = self._lookup_queue.get()
-            if pending is None:
+            item = self._lookup_queue.get()
+            if item is None:
                 break
+            pending, is_prefetch = item
 
             # Group by req_id.
             batches: dict[str, tuple[ReqContext, list[tuple[OffloadKey, int]]]] = {}
@@ -296,6 +331,8 @@ class AsyncLookupManager(ABC):
                 batches[req_id][1].append((key, generation))
 
             if not batches:
+                if is_prefetch:
+                    self._prefetch_slots.release()
                 continue
 
             for req_context, entries in batches.values():
@@ -319,3 +356,7 @@ class AsyncLookupManager(ABC):
                 # group. The list is not modified after it is enqueued.
                 if group_results:
                     self._pending_results.put(group_results)
+                    self._results_ready.set()
+
+            if is_prefetch:
+                self._prefetch_slots.release()

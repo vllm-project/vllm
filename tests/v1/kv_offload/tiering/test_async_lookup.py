@@ -36,9 +36,9 @@ class InMemoryLookupManager(AsyncLookupManager):
     def __init__(self, existing_keys: set[OffloadKey] | None = None):
         super().__init__(tier_type="test")
         self._existing = existing_keys or set()
-        self._results_ready = threading.Event()
+        self._results_posted = threading.Event()
         self._pending_results = _SignalingQueue()
-        self._pending_results.ready = self._results_ready
+        self._pending_results.ready = self._results_posted
         self.batch_lookup_calls = 0
 
     def batch_lookup(
@@ -49,6 +49,66 @@ class InMemoryLookupManager(AsyncLookupManager):
 
 
 class TestAsyncLookupManager:
+    def test_pending_prefetch_is_shared_and_released_on_finish(self):
+        class BlockingLookupManager(InMemoryLookupManager):
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                super().__init__(existing_keys={_key(1)})
+
+            def batch_lookup(self, keys, req_context):
+                self.started.set()
+                assert self.release.wait(timeout=5)
+                return super().batch_lookup(keys, req_context)
+
+        mgr = BlockingLookupManager()
+        first, second = _ctx("first"), _ctx("second")
+        try:
+            assert mgr.prefetch([_key(1)], first)
+            assert mgr.started.wait(timeout=5)
+            assert mgr.lookup(_key(1), second) is None
+            mgr.cleanup(first.req_id)
+            mgr.release.set()
+            assert mgr._results_posted.wait(timeout=5)
+            assert mgr.lookup(_key(1), second) is True
+            assert mgr.batch_lookup_calls == 1
+            mgr.cleanup(second.req_id)
+            assert _key(1) not in mgr._lookup_state
+        finally:
+            mgr.release.set()
+            mgr.shutdown()
+
+    def test_prefetch_submits_and_reuses_result_without_schedule_flush(self):
+        """Admission and normal lookup share one backend probe."""
+        key, ctx = _key(1), _ctx()
+        mgr = InMemoryLookupManager(existing_keys={key})
+        try:
+            assert mgr.prefetch([key], ctx)
+            assert mgr._results_posted.wait(timeout=5)
+            assert mgr.lookup(key, ctx) is True
+            assert mgr.lookup(key, ctx) is True
+            assert mgr.batch_lookup_calls == 1
+        finally:
+            mgr.shutdown()
+
+    def test_prefetch_does_not_flush_unrelated_pending_lookup(self):
+        """Early submission preserves the scheduler's unrelated batch."""
+        mgr = InMemoryLookupManager(existing_keys={_key(1), _key(2)})
+        try:
+            assert mgr.lookup(_key(1), _ctx("scheduled")) is None
+            assert mgr.prefetch([_key(2)], _ctx("admission"))
+            assert mgr._results_posted.wait(timeout=5)
+            assert mgr.lookup(_key(2), _ctx("admission")) is True
+            assert mgr.lookup(_key(1), _ctx("scheduled")) is None
+            assert mgr.batch_lookup_calls == 1
+            mgr.flush()
+            mgr.shutdown()
+            assert mgr.lookup(_key(1), _ctx("scheduled")) is True
+            assert mgr.batch_lookup_calls == 2
+        finally:
+            if mgr._thread.is_alive():
+                mgr.shutdown()
+
     @pytest.mark.parametrize("fail_after", [0, 1])
     def test_iterator_failure_returns_misses_and_preserves_progress(self, fail_after):
         class FailingIteratorLookupManager(AsyncLookupManager):
@@ -92,8 +152,8 @@ class TestAsyncLookupManager:
         assert mgr._lookup_state[_key(1)].phase is LookupPhase.PENDING
         mgr.flush()
         assert mgr._lookup_state[_key(1)].phase is LookupPhase.IN_FLIGHT
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), _ctx()) is True
         assert mgr._lookup_state[_key(1)].phase is LookupPhase.RESOLVED
         mgr.shutdown()
@@ -102,8 +162,8 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager(existing_keys=set())
         assert mgr.lookup(_key(1), _ctx()) is None
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), _ctx()) is False
         mgr.shutdown()
 
@@ -114,8 +174,8 @@ class TestAsyncLookupManager:
         for i in range(1, 5):
             assert mgr.lookup(_key(i), ctx) is None
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), ctx) is True
         assert mgr.lookup(_key(2), ctx) is False
         assert mgr.lookup(_key(3), ctx) is True
@@ -216,8 +276,8 @@ class TestAsyncLookupManager:
         ctx = _ctx("req_a")
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), ctx) is True
         mgr.cleanup("req_a")
         assert _key(1) not in mgr._lookup_state
@@ -230,8 +290,8 @@ class TestAsyncLookupManager:
         mgr.lookup(_key(1), ctx_a)
         mgr.lookup(_key(1), ctx_b)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         # Drain so result is applied
         mgr.lookup(_key(1), ctx_a)
         mgr.cleanup("req_a")
@@ -317,8 +377,8 @@ class TestAsyncLookupManager:
         assert generation != stale_generation
 
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         current_result = mgr._pending_results.get(timeout=5)
         mgr._pending_results.put([(key, stale_generation, True)])
         mgr._pending_results.put(current_result)
@@ -354,8 +414,8 @@ class TestAsyncLookupManager:
         ctx = _ctx("req_a")
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         mgr.lookup(_key(1), ctx)
         mgr.cleanup("nonexistent")
         assert _key(1) in mgr._lookup_state
@@ -369,15 +429,15 @@ class TestAsyncLookupManager:
         # Step 1: lookup key 1, flush
         mgr.lookup(_key(1), ctx)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
 
         # Step 2: lookup keys 2 and 3, flush
         mgr.lookup(_key(2), ctx)
         mgr.lookup(_key(3), ctx)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
 
         # All results should be available
         assert mgr.lookup(_key(1), ctx) is True
@@ -402,8 +462,8 @@ class TestAsyncLookupManager:
         assert mgr.lookup(_key(1), ctx) is None
         mgr.lookup(_key(2), ctx)
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), ctx) is True
 
         # An unknown key must not raise or plant an entry.
@@ -443,8 +503,8 @@ class TestAsyncLookupManager:
         try:
             assert mgr.lookup(_key(1), _ctx("A")) is None
             mgr.flush()
-            mgr._results_ready.wait()
-            mgr._results_ready.clear()
+            mgr._results_posted.wait()
+            mgr._results_posted.clear()
             assert mgr.lookup(_key(1), _ctx("A")) is True
             mgr.cleanup("A")
             assert _key(1) not in mgr._lookup_state
@@ -452,16 +512,16 @@ class TestAsyncLookupManager:
             assert mgr.lookup(_key(1), _ctx("B")) is None
             if flushed:
                 mgr.flush()
-                mgr._results_ready.wait()
-                mgr._results_ready.clear()
+                mgr._results_posted.wait()
+                mgr._results_posted.clear()
             expected = LookupPhase.IN_FLIGHT if flushed else LookupPhase.PENDING
             assert mgr._lookup_state[_key(1)].phase is expected
 
             mgr.mark_miss([_key(1)])
             if not flushed:
                 mgr.flush()
-                mgr._results_ready.wait()
-                mgr._results_ready.clear()
+                mgr._results_posted.wait()
+                mgr._results_posted.clear()
             # B's own probe result is delivered.
             assert mgr.lookup(_key(1), _ctx("B")) is True
         finally:
@@ -480,8 +540,8 @@ class TestAsyncLookupManager:
         # no second result left pending.
         assert mgr.lookup(_key(1), ctx) is None
         mgr.flush()
-        mgr._results_ready.wait()
-        mgr._results_ready.clear()
+        mgr._results_posted.wait()
+        mgr._results_posted.clear()
         assert mgr.lookup(_key(1), ctx) is True  # decided exactly once
         assert mgr._pending_results.empty()
 
@@ -558,8 +618,8 @@ class TestAsyncLookupManager:
             # Resolved: a probe delivered a miss.
             assert mgr.lookup(resolved_key, _ctx("req_c")) is None
             mgr.flush()
-            assert mgr._results_ready.wait(timeout=5)
-            mgr._results_ready.clear()
+            assert mgr._results_posted.wait(timeout=5)
+            mgr._results_posted.clear()
             assert mgr.lookup(resolved_key, _ctx("req_c")) is False
 
             # In flight: the worker is still inside this probe.

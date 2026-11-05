@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock, call
@@ -107,6 +108,59 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+
+
+@pytest.mark.parametrize("limit", [0, 4])
+def test_admission_prefetch_skips_gpu_and_cpu_hits(tmp_path: Path, limit: int):
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": 16 * 1024 * 1024,
+            "lookup_prefetch_max_chunks": limit,
+            "secondary_tiers": [{"type": "fs", "root_dir": str(tmp_path)}],
+        },
+    )
+    scheduler = create_scheduler(config, num_blocks=64)
+    connector = scheduler.connector
+    assert isinstance(connector, OffloadingConnector)
+    manager = connector.connector_scheduler.manager
+    tier = manager.secondary_tiers[0]
+    request = create_request(num_tokens=65, common_prefix_len=16)
+    seed = create_request(num_tokens=17, common_prefix_len=16)
+    try:
+        assert scheduler.kv_cache_manager.allocate_slots(seed, 16) is not None
+        scheduler.kv_cache_manager.cache_blocks(seed, 16)
+        scheduler.kv_cache_manager.free(seed)
+        cpu_key = make_offload_key(request.block_hashes[1], 0)
+        fs_key = make_offload_key(request.block_hashes[2], 0)
+        seed_ctx = ReqContext("cpu-seed")
+        assert manager.primary_tier.prepare_store([cpu_key], seed_ctx) is not None
+        manager.primary_tier.complete_store([cpu_key], seed_ctx)
+        path = Path(tier.file_mapper.get_file_name(fs_key))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+
+        scheduler.add_request(request)
+        if not limit:
+            assert not tier._lookup_manager._lookup_state
+            return
+        assert tier._lookup_manager._results_ready.wait(timeout=5)
+        ctx = connector.connector_scheduler._req_status[request.request_id].req_context
+        with manager.lock:
+            assert tier.lookup(fs_key, ctx) is LookupResult.HIT
+            assert make_offload_key(request.block_hashes[0], 0) not in (
+                tier._lookup_manager._lookup_state
+            )
+            assert cpu_key not in tier._lookup_manager._lookup_state
+            assert manager.primary_tier.lookup(fs_key, ctx) is LookupResult.MISS
+            assert not manager._pending_load_submissions
+            assert not manager._jobs
+            assert manager.lookup(fs_key, ctx) is LookupResult.HIT_PENDING
+            assert len(manager._pending_load_submissions) == 1
+    finally:
+        scheduler.shutdown()
 
 
 def _as_mock(value: object) -> MagicMock:

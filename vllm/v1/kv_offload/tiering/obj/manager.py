@@ -4,7 +4,7 @@
 
 import ctypes
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
@@ -292,6 +292,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         if result is None:
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
+
+    def prefetch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        self._lookup_manager.prefetch(keys, req_context)
 
     def submit_store(self, job_metadata: TransferJob) -> None:
         self._store_jobs[job_metadata.job_id] = job_metadata
