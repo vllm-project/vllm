@@ -2571,7 +2571,7 @@ class EngineCoreProc(EngineCore):
                         [],
                         finish_reason=FinishReason.ABORT,
                         stream_output=(
-                            StreamOutput(request.stream_admission)
+                            StreamOutput(request.stream_admission.closed())
                             if request.stream_admission is not None
                             else None
                         ),

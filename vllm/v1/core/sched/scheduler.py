@@ -2577,12 +2577,17 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             finish_reason = None
+            # The context of the input this output ran on, before stop handling
+            # can apply the next queued input.
+            stream_admission = request.stream_admission
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    if stream_admission is not None:
+                        stream_admission = stream_admission.closed()
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
                     if (
                         prefill_stats is not None
@@ -2622,8 +2627,8 @@ class Scheduler(SchedulerInterface):
                     EngineCoreOutput(
                         request_id=req_id,
                         stream_output=(
-                            StreamOutput(request.stream_admission)
-                            if request.stream_admission is not None
+                            StreamOutput(stream_admission)
+                            if stream_admission is not None
                             else None
                         ),
                         new_token_ids=new_token_ids,
@@ -2689,7 +2694,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
                         stream_output=(
-                            StreamOutput(request.stream_admission)
+                            StreamOutput(request.stream_admission.closed())
                             if request.stream_admission is not None
                             else None
                         ),

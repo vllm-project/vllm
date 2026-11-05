@@ -9547,6 +9547,27 @@ def test_stream_admission_rejects_unsupported_streaming_params(params):
     assert _admit_stream(core).accepted
 
 
+@pytest.mark.parametrize("unsupported", ["structured_outputs", "pooling"])
+def test_stream_admission_refuses_structured_outputs_and_pooling(unsupported):
+    """Admission requires a plain sampling request."""
+    core = _stream_core()
+    invalid = _stream_request()
+    if unsupported == "pooling":
+        invalid.sampling_params = None
+        invalid.pooling_params = PoolingParams(task="embed")
+    else:
+        invalid.sampling_params = SamplingParams(
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+        )
+    free_slots = core.scheduler.stream_admissions.manager.num_free_slots
+    with pytest.raises(ValueError):
+        _admit_stream(core, invalid)
+    assert not core.scheduler.requests
+    assert not core.scheduler.stream_admissions.sessions
+    assert core.scheduler.stream_admissions.manager.num_free_slots == free_slots
+    assert _admit_stream(core).accepted
+
+
 def test_lost_utility_reply_reclaims_admission():
     """A retry keeps the original deadline; abandonment needs no API release."""
     core = _stream_core()
@@ -9562,31 +9583,6 @@ def test_lost_utility_reply_reclaims_admission():
     assert admissions.expiries == {"never_fed": 1}
     assert not scheduler.requests and not admissions.sessions
     assert _admit_stream(core, _stream_request("replacement")).accepted
-
-
-def test_admit_stream_async_routes_stream_to_calling_client():
-    import asyncio
-
-    import msgspec
-
-    from vllm.v1.engine import StreamAdmissionResult
-    from vllm.v1.engine.core_client import AsyncMPClient
-
-    client = object.__new__(AsyncMPClient)
-    client.client_index = 3
-    calls = []
-
-    async def call_utility_async(method, *args):
-        calls.append((method, args))
-        # Without insecure serialization, utility results decode to builtins.
-        return msgspec.to_builtins(StreamAdmissionResult(True, "stream", "never_fed"))
-
-    client.call_utility_async = call_utility_async
-    request = _stream_request()
-    result = asyncio.run(client.admit_stream_async(request))
-    assert result == StreamAdmissionResult(True, "stream", "never_fed")
-    assert calls == [("admit_stream", (request,))]
-    assert request.client_index == 3
 
 
 @pytest.mark.parametrize("change", ["structured", "embeds", "mm_offset", "mm_overrun"])
@@ -9684,33 +9680,24 @@ def test_stream_admission_request_id_conflicts():
     assert "ordinary" not in admissions.sessions
 
 
-@pytest.mark.parametrize("finish", ["terminal", "deadline"])
-def test_final_park_retains_slot_until_terminal_or_deadline(finish):
+def test_stream_closing_input_ends_at_eos_and_retains_slot_until_fence():
+    """A resumable input that closes input ends its session at EOS instead of
+    parking; the retiring session keeps its ID and slot until the fence."""
     core = _stream_core()
     scheduler = core.scheduler
     admissions = scheduler.stream_admissions
     assert _admit_stream(core).accepted
-    chunk = _stream_chunk(core, closed=True)
-    scheduler.add_request(chunk)
-    drain_deadline = admissions.next_deadline()
+    scheduler.add_request(_stream_chunk(core, closed=True))
     step = scheduler.schedule()
     output = _state_output(step)
     output.sampled_token_ids = [[7]]
-    scheduler.update_from_output(step, output)
-    assert (
-        scheduler.requests["stream"].status == RequestStatus.WAITING_FOR_STREAMING_REQ
-    )
-    assert _admit_stream(core).status == "draining"
-    assert admissions.next_deadline() == drain_deadline
+    result = scheduler.update_from_output(step, output)
+    (terminal,) = [o for batch in result.values() for o in batch.outputs]
+    assert terminal.finish_reason == FinishReason.STOP
+    assert terminal.stream_output.context.input_closed
+    assert "stream" not in scheduler.requests
+    assert not admissions.sessions
     manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
-    assert manager.num_free_slots == 1
-    if finish == "terminal":
-        chunk.resumable = False
-        scheduler.add_request(chunk)
-    else:
-        admissions.clock = lambda: drain_deadline
-        admissions.expire()
-        assert admissions.expiries == {"draining": 1}
     # The retiring session still owns its ID and its slot.
     assert _admit_stream(core).reason == "request_id_in_use"
     assert manager.num_free_slots == 1
@@ -9718,6 +9705,7 @@ def test_final_park_retains_slot_until_terminal_or_deadline(finish):
     scheduler.update_from_output(cleanup, _state_output(cleanup))
     assert manager.num_free_slots == 2
     assert not admissions.sessions and not scheduler.state_retirements
+    assert not admissions.expiries
     assert _admit_stream(core, _stream_request("replacement")).accepted
 
 
@@ -9920,14 +9908,14 @@ def test_stream_deadline_inprocess_idle_step_expires_session():
     """An in-process caller has no input-queue timer to expire a parked stream."""
     core = _stream_core()
     assert _admit_stream(core).accepted
-    context = core.scheduler.requests["stream"].stream_admission
     assert not core.scheduler.has_requests()
     core.scheduler.stream_admissions.clock = lambda: 115.0
     outputs, executed = _step_stream_core(core)
     assert not executed
     (output,) = outputs[0].outputs
     assert output.finish_reason == FinishReason.ABORT
-    assert output.stream_output.context == context
+    # The session-ending output closes input; nothing was applied.
+    assert output.stream_output.context == _seq_context(0, True)
     assert output.stream_output.rejection is None
     assert not core.scheduler.requests
     assert core.scheduler.stream_admissions.expiries == {"never_fed": 1}
@@ -10380,7 +10368,8 @@ def test_stream_admission_abort_outputs_keep_admitted_contexts():
             if context is None:
                 assert output.stream_output is None
             else:
-                assert output.stream_output.context == context
+                # A session-ending output closes input; nothing was applied.
+                assert output.stream_output.context == _seq_context(0, True)
                 assert output.stream_output.rejection is None
             assert output.finish_reason == FinishReason.ABORT
             seen.add(output.request_id)
@@ -10867,3 +10856,358 @@ def test_ordinary_stream_invalid_continuation_rejected_through_engine_core(
     good.prompt_token_ids = [4, 5, 6]
     send(good)
     assert scheduler.schedule().num_scheduled_tokens == {"plain": 3}
+
+
+def _seq_context(update_seq, closed=False):
+    from vllm.v1.engine import StreamAdmissionContext
+
+    return StreamAdmissionContext(update_seq=update_seq, input_closed=closed)
+
+
+def _seq_chunk(update_seq, *, closed=False, resumable=True, tokens=(1, 2, 3)):
+    """One numbered input of the admitted stream "stream"; a close when not
+    resumable (its placeholder prompt is ignored)."""
+    payload = _stream_request()
+    payload.prompt_token_ids = list(tokens) if resumable else [0]
+    payload.resumable = resumable
+    payload.stream_admission = _seq_context(update_seq, closed)
+    return Request.from_engine_core_request(payload, None)
+
+
+def _close_chunk(update_seq):
+    return _seq_chunk(update_seq, closed=True, resumable=False)
+
+
+def _install_state_executor(core, sampled=42, *, acknowledge=True, failed=()):
+    """A worker stub: every scheduled request samples `sampled` and the state
+    completion reports `failed` requests."""
+    from contextlib import nullcontext
+
+    def execute(step, **kwargs):
+        output = _state_output(step, acknowledge=acknowledge)
+        output.sampled_token_ids = [[sampled] for _ in output.req_ids]
+        if failed:
+            output.state_completion = dataclasses.replace(
+                output.state_completion, failed_req_ids=frozenset(failed)
+            )
+        return Mock(result=lambda: output)
+
+    core.model_executor = Mock()
+    core.model_executor.execute_model.side_effect = execute
+    core.capture_iteration_details = lambda step: nullcontext()
+    core.log_error_detail = lambda step: nullcontext()
+    core._process_aborts_queue = lambda: None
+    core._attach_iteration_details = lambda *args: None
+    core._weight_version = None
+
+
+def _step_state_core(core, sampled=42, *, acknowledge=True, failed=()):
+    """One EngineCore.step() over `_install_state_executor`."""
+    _install_state_executor(core, sampled, acknowledge=acknowledge, failed=failed)
+    outputs, _ = core.step()
+    return outputs
+
+
+def _stream_outputs(batches, request_id="stream"):
+    return [
+        output
+        for batch in batches.values()
+        for output in batch.outputs
+        if output.request_id == request_id
+    ]
+
+
+def _retired_by_client(batches):
+    return {
+        client: list(batch.retired_streams)
+        for client, batch in batches.items()
+        if batch.retired_streams
+    }
+
+
+def test_admitted_stream_update_seq_follows_applied_input():
+    """An input's context is copied onto the session when it is applied, at
+    once or from the queue, and each output carries the context captured
+    before stop handling applies the next queued input."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(1)
+    core.add_request(_seq_chunk(2))
+    (eos,) = _stream_outputs(_step_state_core(core, 7))
+    assert eos.finish_reason == FinishReason.STOP
+    assert eos.stream_output.context == _seq_context(1)
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(2)
+    (eos,) = _stream_outputs(_step_state_core(core, 7))
+    assert eos.stream_output.context == _seq_context(2)
+    session = core.scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    core.add_request(_seq_chunk(3))
+    (output,) = _stream_outputs(_step_state_core(core, 42))
+    assert output.stream_output.context == _seq_context(3)
+
+
+def test_admitted_stream_rejection_carries_incoming_context():
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    core.add_request(_seq_chunk(2, tokens=()))
+    outputs = _stream_outputs(_step_state_core(core, 42))
+    rejections = [o for o in outputs if o.stream_output.rejection is not None]
+    (rejection,) = rejections
+    assert rejection.stream_output.rejection == "empty_update"
+    assert rejection.stream_output.context == _seq_context(2)
+    (ran,) = [o for o in outputs if o.stream_output.rejection is None]
+    assert ran.stream_output.context == _seq_context(1)
+    assert core.scheduler.requests["stream"].stream_admission == _seq_context(1)
+
+
+@pytest.mark.parametrize("state", ["never_fed", "parked"])
+def test_admitted_stream_close_on_idle_session_has_one_terminal_output(state):
+    """A close with nothing queued ends a parked or never-fed session at once
+    with a terminal STOP output that carries no tokens and the close's seq."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    close_seq = 1
+    if state == "parked":
+        core.add_request(_seq_chunk(1))
+        _step_state_core(core, 7)
+        assert (
+            core.scheduler.requests["stream"].status
+            == RequestStatus.WAITING_FOR_STREAMING_REQ
+        )
+        close_seq = 2
+    core.add_request(_close_chunk(close_seq))
+    assert "stream" not in core.scheduler.requests
+    outputs = []
+    for _ in range(3):
+        outputs += _stream_outputs(_step_state_core(core))
+    (terminal,) = outputs
+    assert terminal.finish_reason == FinishReason.STOP
+    assert terminal.new_token_ids == []
+    assert terminal.stream_output.context == _seq_context(close_seq, True)
+    assert terminal.stream_output.rejection is None
+
+
+def test_admitted_stream_queued_close_drains_accepted_inputs_in_order():
+    """A close queued behind a running input runs every accepted input; the
+    ending output carries the last input's seq and input_closed=True."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    first = _stream_outputs(_step_state_core(core, 42))
+    core.add_request(_seq_chunk(2, tokens=(4, 5)))
+    core.add_request(_close_chunk(3))
+    boundary = _stream_outputs(_step_state_core(core, 7))
+    session = core.scheduler.requests["stream"]
+    assert session.prompt_token_ids == [4, 5]
+    final = _stream_outputs(_step_state_core(core, 7))
+    contexts = [o.stream_output.context for o in first + boundary + final]
+    assert contexts == [_seq_context(1), _seq_context(1), _seq_context(2, True)]
+    assert boundary[0].finish_reason == FinishReason.STOP
+    assert final[0].finish_reason == FinishReason.STOP
+    assert final[0].new_token_ids == [7]
+    assert "stream" not in core.scheduler.requests
+    assert not _stream_outputs(_step_state_core(core))
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_admitted_stream_resumable_closing_input_runs_then_ends(queued):
+    """A resumable input with input_closed=True runs before the session ends.
+    Its outputs without a finish reason carry its context unchanged; an earlier
+    input's EOS output does not close; the closing input's EOS ends the session."""
+    core = _stream_core()
+    assert _admit_stream(core).accepted
+    outputs = []
+    expected = []
+    if queued:
+        core.add_request(_seq_chunk(1))
+        outputs += _stream_outputs(_step_state_core(core, 42))
+        core.add_request(_seq_chunk(2, closed=True))
+        outputs += _stream_outputs(_step_state_core(core, 7))
+        expected += [(None, _seq_context(1)), (FinishReason.STOP, _seq_context(1))]
+        last = 2
+    else:
+        core.add_request(_seq_chunk(1, closed=True))
+        last = 1
+    outputs += _stream_outputs(_step_state_core(core, 42))
+    assert "stream" in core.scheduler.requests
+    outputs += _stream_outputs(_step_state_core(core, 7))
+    expected += [
+        (None, _seq_context(last, True)),
+        (FinishReason.STOP, _seq_context(last, True)),
+    ]
+    assert [(o.finish_reason, o.stream_output.context) for o in outputs] == expected
+    assert "stream" not in core.scheduler.requests
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        "abort",
+        "never_fed_abort",
+        "parked_expiry",
+        "never_fed_expiry",
+        "preemption",
+        "stop_token",
+        "length",
+        "failed_step",
+        "worker_failure",
+        "draining_expiry",
+    ],
+)
+def test_admitted_stream_every_terminal_output_carries_input_closed(cause):
+    """Abort, expiry, preemption, a failed state step and a non-EOS stop all
+    end the session with a finish reason and input_closed=True."""
+    import queue
+
+    from vllm.v1.engine.core import EngineCoreProc
+
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    seq = 0
+    outputs = []
+    if not cause.startswith("never_fed"):
+        seq = 1
+        chunk = _seq_chunk(1, closed=cause == "draining_expiry")
+        if cause == "length":
+            chunk.max_tokens = chunk.sampling_params.max_tokens = 1
+        core.add_request(chunk)
+        if cause == "stop_token":
+            scheduler.requests["stream"].sampling_params.stop_token_ids = [6]
+    if cause in ("abort", "never_fed_abort"):
+        if cause == "abort":
+            outputs += _stream_outputs(_step_state_core(core, 42))
+        proc = object.__new__(EngineCoreProc)
+        proc.output_queue = queue.Queue()
+        proc._send_abort_outputs(
+            scheduler.finish_requests("stream", RequestStatus.FINISHED_ABORTED)
+        )
+        _, batch = proc.output_queue.get_nowait()
+        outputs += batch.outputs
+        expected = FinishReason.ABORT
+    elif cause.endswith("expiry"):
+        if cause == "parked_expiry":
+            outputs += _stream_outputs(_step_state_core(core, 7))
+        elif cause == "draining_expiry":
+            outputs += _stream_outputs(_step_state_core(core, 42))
+            assert scheduler.stream_admissions.sessions["stream"].status == "draining"
+        scheduler.stream_admissions.clock = lambda: 1000.0
+        outputs += _stream_outputs(_step_state_core(core))
+        expected = FinishReason.ABORT
+    elif cause == "preemption":
+        step = scheduler.schedule()
+        request = scheduler.requests["stream"]
+        scheduler.running.remove(request)
+        scheduler._preempt_request(request, 0.0)
+        outputs += _stream_outputs(
+            scheduler.update_from_output(step, _state_output(step))
+        )
+        expected = FinishReason.ERROR
+    elif cause == "failed_step":
+        outputs += _stream_outputs(_step_state_core(core, acknowledge=False))
+        expected = FinishReason.ERROR
+    elif cause == "worker_failure":
+        outputs += _stream_outputs(_step_state_core(core, failed={"stream"}))
+        expected = FinishReason.ERROR
+    elif cause == "stop_token":
+        outputs += _stream_outputs(_step_state_core(core, 6))
+        expected = FinishReason.STOP
+    else:
+        outputs += _stream_outputs(_step_state_core(core, 42))
+        expected = FinishReason.LENGTH
+    assert "stream" not in scheduler.requests
+    *earlier, terminal = outputs
+    # Earlier outputs keep their input's context unchanged, including the EOS
+    # of a non-closing input; only a closing input's context closes input.
+    closing = _seq_context(seq, cause == "draining_expiry")
+    assert [o.stream_output.context for o in earlier] == [closing] * len(earlier)
+    assert terminal.finish_reason == expected
+    assert terminal.stream_output.context == _seq_context(seq, True)
+
+
+def test_stream_retirement_signal_never_scheduled_release_reported_once():
+    """A never-scheduled slot released at once (fence 0) names the stream once,
+    for the client that admitted it, even in a batch with no other output."""
+    core = _stream_core()
+    payload = _stream_request()
+    payload.client_index = 3
+    assert _admit_stream(core, payload).accepted
+    core.abort_requests(["stream"])
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert [r for r in reported if r] == [{3: ["stream"]}]
+
+
+def test_stream_retirement_signal_waits_for_fenced_release():
+    """A scheduled slot is reported only once the worker completion releases
+    it, and an ordinary state request is never reported."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    payload = _stream_request()
+    payload.client_index = 3
+    assert _admit_stream(core, payload).accepted
+    core.add_request(_seq_chunk(1))
+    (ordinary,) = create_requests(num_requests=1, num_tokens=4)
+    ordinary.client_index = 3
+    scheduler.add_request(ordinary)
+    step = scheduler.schedule()
+    assert set(step.num_scheduled_tokens) == {"stream", ordinary.request_id}
+    core.abort_requests(["stream", ordinary.request_id])
+    in_flight = scheduler.update_from_output(step, _state_output(step))
+    assert not _retired_by_client(in_flight)
+    assert scheduler.state_retirements
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert not scheduler.state_retirements
+    assert [r for r in reported if r] == [{3: ["stream"]}]
+
+
+def test_stream_retirement_signal_quarantined_slot_reported_after_release():
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    core.add_request(_seq_chunk(1))
+    _step_state_core(core, 42)
+    core.abort_requests(["stream"])
+    missed = _step_state_core(core, acknowledge=False)
+    assert not _retired_by_client(missed)
+    assert scheduler.state_retirements
+    reported = [_retired_by_client(_step_state_core(core)) for _ in range(3)]
+    assert not scheduler.state_retirements
+    assert [r for r in reported if r] == [{0: ["stream"]}]
+
+
+def test_stream_retirement_only_batch_reaches_output_queue():
+    """A retirement with nothing else to output is put on EngineCoreProc's
+    output queue, for the admitting client, by the ordinary busy-loop steps."""
+    import queue
+    from collections import deque
+
+    from vllm.v1.engine import EngineCoreRequestType
+
+    proc = _pausable_stream_core()
+    payload = _stream_request()
+    payload.client_index = 5
+    assert _admit_stream(proc, payload).accepted
+    _install_state_executor(proc)
+    proc.step_fn = proc.step
+    proc.check_for_draft_tokens = False
+    proc.input_queue = queue.Queue()
+    proc.aborts_queue = queue.Queue()
+    proc._deferred_inputs = deque()
+    proc.process_input_queue_block = False
+    proc.input_queue.put_nowait((EngineCoreRequestType.ABORT, ["stream"]))
+    for _ in range(3):
+        proc._process_input_queue()
+        proc._process_engine_step()
+    batches = []
+    while not proc.output_queue.empty():
+        batches.append(proc.output_queue.get_nowait())
+    retired = [(client, batch) for client, batch in batches if batch.retired_streams]
+    assert [(client, list(b.retired_streams)) for client, b in retired] == [
+        (5, ["stream"])
+    ]
+    ((_, batch),) = retired
+    assert batch.outputs == []

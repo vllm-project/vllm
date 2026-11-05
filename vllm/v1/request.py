@@ -45,6 +45,7 @@ class StreamingUpdate:
     max_tokens: int
     arrival_time: float
     sampling_params: SamplingParams | None
+    stream_admission: StreamAdmissionContext | None = None
 
     @classmethod
     def from_request(cls, request: "Request") -> "StreamingUpdate | None":
@@ -56,6 +57,7 @@ class StreamingUpdate:
             max_tokens=request.max_tokens,
             arrival_time=request.arrival_time,
             sampling_params=request.sampling_params,
+            stream_admission=request.stream_admission,
         )
 
 

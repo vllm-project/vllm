@@ -36,6 +36,22 @@ class RequestError:
 
 
 @dataclass
+class StreamRejection:
+    """An input of an admitted stream that the engine refused.
+
+    Args:
+        input_index: The input's 0-based position in the input stream.
+        reason: Why the engine refused it.
+        error: The request error the engine attached, if any.
+
+    """
+
+    input_index: int
+    reason: str
+    error: RequestError | None = None
+
+
+@dataclass
 class SamplingMask:
     """Per-token sampling support sets aligned with completion token IDs.
 
@@ -163,6 +179,8 @@ class RequestOutput:
             prefix-cache writes for this request.
         kv_transfer_params: The params for remote K/V transfer.
         ec_transfer_params: The params for remote encoder-cache transfer.
+        stream_rejection: The refused input this output reports, for an
+            admitted stream.
 
     """
 
@@ -184,6 +202,7 @@ class RequestOutput:
         prompt_token_id_logprobs: np.ndarray | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         ec_transfer_params: dict[str, Any] | None = None,
+        stream_rejection: StreamRejection | None = None,
         # Forward compatibility, code that uses args added in new release can
         # still run with older versions of vLLM without breaking.
         **kwargs: Any,
@@ -207,10 +226,14 @@ class RequestOutput:
         self.num_cache_creation_tokens = num_cache_creation_tokens
         self.kv_transfer_params = kv_transfer_params
         self.ec_transfer_params = ec_transfer_params
+        # Set on the output reporting a refused input of an admitted stream.
+        self.stream_rejection = stream_rejection
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""
         self.finished |= next_output.finished
+        if self.stream_rejection is None:
+            self.stream_rejection = next_output.stream_rejection
         self.kv_transfer_params = next_output.kv_transfer_params
         self.ec_transfer_params = next_output.ec_transfer_params
 

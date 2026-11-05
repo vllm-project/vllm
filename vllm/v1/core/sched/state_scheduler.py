@@ -80,6 +80,8 @@ class StateScheduler(Scheduler):
         self.state_cleanup_misses: dict[StateSlotHandle, int] = {}
         self.state_step_seq = 0
         self.state_error_outputs: list[tuple[int, EngineCoreOutput]] = []
+        # Released admitted streams not yet reported, by client index.
+        self.retired_streams: dict[int, list[str]] = {}
         additional_config = vllm_config.additional_config
         self.stream_admissions = StreamAdmissions(
             self,
@@ -186,6 +188,8 @@ class StateScheduler(Scheduler):
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
         session.max_tokens = update.max_tokens
+        if update.stream_admission is not None:
+            session.stream_admission = update.stream_admission
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
@@ -211,7 +215,13 @@ class StateScheduler(Scheduler):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         self._complete_state_slots(scheduler_output, model_runner_output)
-        return super().update_from_output(scheduler_output, model_runner_output)
+        outputs = super().update_from_output(scheduler_output, model_runner_output)
+        for client_index, request_ids in self.retired_streams.items():
+            if (eco := outputs.get(client_index)) is None:
+                outputs[client_index] = eco = EngineCoreOutputs()
+            eco.retired_streams = request_ids
+        self.retired_streams = {}
+        return outputs
 
     def _add_queued_outputs(self, outputs: dict[int, list[EngineCoreOutput]]) -> None:
         for client_index, error_output in self.state_error_outputs:
@@ -220,10 +230,15 @@ class StateScheduler(Scheduler):
 
     def _handle_stopped_request(self, request: Request) -> bool:
         # A state stream parks only at EOS; any other stop leaves model state
-        # mid-turn, so the stream ends instead of resuming.
+        # mid-turn, so the stream ends instead of resuming. An input that
+        # closes input ends its session once it has run.
         if (
             request.status != RequestStatus.FINISHED_STOPPED
             or request.stop_reason is not None
+            or (
+                request.stream_admission is not None
+                and request.stream_admission.input_closed
+            )
         ):
             request.resumable = False
         finished = super()._handle_stopped_request(request)
@@ -237,6 +252,20 @@ class StateScheduler(Scheduler):
         if rejection is not None:
             self._queue_state_error(request, rejection)
             return AddRequestDisposition.REJECTED
+        session = self.requests.get(request.request_id)
+        if (
+            request.stream_admission is not None
+            and not request.resumable
+            and session is not None
+            and session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        ):
+            # A close with nothing left to run ends the session at once.
+            session.stream_admission = request.stream_admission
+            for finished in self.finish_requests(
+                request.request_id, RequestStatus.FINISHED_STOPPED
+            ):
+                self._queue_state_error(finished)
+            return AddRequestDisposition.ACCEPTED
         return super().add_request(request)
 
     def _free_blocks(self, request: Request) -> None:
@@ -246,6 +275,9 @@ class StateScheduler(Scheduler):
     def _free_request_blocks(self, request: Request) -> None:
         # Retire the slot before the generic block free; it returns to the
         # pool only once the worker acknowledges its release fence.
+        stream_client = (
+            request.client_index if request.stream_admission is not None else None
+        )
         for name, manager in self.state_managers.items():
             last_step = manager.last_scheduled.pop(request.request_id, 0)
             fence = self.state_step_seq + 1 if last_step else 0
@@ -253,7 +285,7 @@ class StateScheduler(Scheduler):
             if handle is not None:
                 self.state_retirements.append(
                     StateSlotRetirement(
-                        manager, handle, fence, request.request_id, name
+                        manager, handle, fence, request.request_id, name, stream_client
                     )
                 )
         self._drain_state_retirements()
@@ -262,6 +294,7 @@ class StateScheduler(Scheduler):
     def has_finished_requests(self) -> bool:
         return (
             bool(self.state_error_outputs or self.state_retirements)
+            or bool(self.retired_streams)
             or super().has_finished_requests()
         )
 
@@ -274,11 +307,22 @@ class StateScheduler(Scheduler):
         return stats
 
     def _drain_state_retirements(self) -> None:
-        self.state_retirements = [
-            entry
-            for entry in self.state_retirements
-            if not entry.allocator.release(entry.handle, entry.fence_step)
-        ]
+        released = []
+        retiring = []
+        for entry in self.state_retirements:
+            if entry.allocator.release(entry.handle, entry.fence_step):
+                released.append(entry)
+            else:
+                retiring.append(entry)
+        self.state_retirements = retiring
+        # A stream retires once its last state manager releases its slot.
+        still_retiring = {entry.request_id for entry in retiring}
+        for entry in released:
+            if entry.stream_client is None or entry.request_id in still_retiring:
+                continue
+            request_ids = self.retired_streams.setdefault(entry.stream_client, [])
+            if entry.request_id not in request_ids:
+                request_ids.append(entry.request_id)
 
     def _complete_state_slots(
         self, scheduled: SchedulerOutput, output: ModelRunnerOutput
@@ -337,6 +381,12 @@ class StateScheduler(Scheduler):
     def _queue_state_error(
         self, request: Request, rejection: StreamUpdateRejection | None = None
     ) -> None:
+        stream_output = None
+        if rejection is not None:
+            stream_output = StreamOutput(request.stream_admission, rejection)
+        elif request.stream_admission is not None:
+            # Without a rejection, this output ends the session.
+            stream_output = StreamOutput(request.stream_admission.closed())
         self.state_error_outputs.append(
             (
                 request.client_index,
@@ -348,11 +398,7 @@ class StateScheduler(Scheduler):
                         if rejection
                         else request.get_finished_reason()
                     ),
-                    stream_output=(
-                        StreamOutput(request.stream_admission, rejection)
-                        if request.stream_admission is not None or rejection is not None
-                        else None
-                    ),
+                    stream_output=stream_output,
                     events=request.take_events(),
                     trace_headers=request.trace_headers,
                 ),

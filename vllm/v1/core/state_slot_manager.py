@@ -295,3 +295,5 @@ class StateSlotRetirement:
     fence_step: int
     request_id: str
     layer_name: str
+    # The client that admitted the stream, which is told when it retires.
+    stream_client: int | None = None

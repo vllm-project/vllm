@@ -2090,3 +2090,297 @@ def test_weight_version_spans(output_kind: RequestOutputKind, steps, expected):
     final = queue.get_nowait()
     assert final is not None and final.finished
     assert final.outputs[0].weight_versions == [WeightVersionSpan(*s) for s in expected]
+
+
+# Admitted streams: the frontend registers an empty admission, then each
+# numbered input (and the close) through add_request.
+_ADMITTED_ID = "admitted-int"
+
+
+def _admitted_context(update_seq: int, input_closed: bool = False):
+    from vllm.v1.engine import StreamAdmissionContext
+
+    return StreamAdmissionContext(update_seq=update_seq, input_closed=input_closed)
+
+
+def _admitted_request(
+    prompt_token_ids: list[int],
+    update_seq: int | None = None,
+    *,
+    resumable: bool = True,
+    input_closed: bool = False,
+    output_kind: RequestOutputKind = RequestOutputKind.DELTA,
+) -> EngineCoreRequest:
+    request = _make_streaming_input_request(_ADMITTED_ID, prompt_token_ids)
+    request.resumable = resumable
+    request.sampling_params.output_kind = output_kind
+    if update_seq is not None:
+        request.stream_admission = _admitted_context(update_seq, input_closed)
+    return request
+
+
+def _register_admitted_stream(
+    processor: OutputProcessor,
+    inputs: list[tuple[str, list[int]]],
+    output_kind: RequestOutputKind = RequestOutputKind.DELTA,
+) -> StreamingInputOutputCollector:
+    queue = StreamingInputOutputCollector(output_kind, _ADMITTED_ID)
+    processor.add_request(
+        _admitted_request([], output_kind=output_kind), None, queue=queue
+    )
+    for update_seq, (prompt, prompt_token_ids) in enumerate(inputs, 1):
+        processor.add_request(
+            _admitted_request(prompt_token_ids, update_seq, output_kind=output_kind),
+            prompt,
+        )
+    return queue
+
+
+def _register_admitted_close(processor: OutputProcessor, update_seq: int) -> None:
+    processor.add_request(
+        _admitted_request([0], update_seq, resumable=False, input_closed=True), None
+    )
+
+
+def _admitted_output(
+    update_seq: int,
+    new_token_ids: list[int],
+    finish_reason: FinishReason | None = None,
+    *,
+    input_closed: bool = False,
+    rejection: str | None = None,
+    error: RequestError | None = None,
+) -> EngineCoreOutput:
+    from vllm.v1.engine import StreamOutput
+
+    return EngineCoreOutput(
+        request_id=_ADMITTED_ID,
+        new_token_ids=new_token_ids,
+        finish_reason=finish_reason,
+        error=error,
+        stream_output=StreamOutput(
+            _admitted_context(update_seq, input_closed), rejection
+        ),
+    )
+
+
+def _admitted_rejection(update_seq: int, reason: str, error=None) -> EngineCoreOutput:
+    # The engine's shape for a rejected update: an ERROR finish on the
+    # incoming request, correlated by the rejected input's own context.
+    return _admitted_output(
+        update_seq, [], FinishReason.ERROR, rejection=reason, error=error
+    )
+
+
+@pytest.mark.parametrize(
+    "reason,error",
+    [
+        ("empty_update", None),
+        (
+            "engine_paused",
+            RequestError(code="engine_paused", message="paused", retryable=True),
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+def test_admitted_stream_a6_rejected_input_is_non_terminal(reason, error, output_kind):
+    """A6."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(
+        processor, [("one", [1]), ("two", [2, 2])], output_kind
+    )
+    processor.process_outputs([_admitted_output(1, [9])])
+    assert queue.get_nowait() is not None
+
+    processed = processor.process_outputs([_admitted_rejection(2, reason, error)])
+
+    assert processed.reqs_to_abort == []
+    assert processor.has_request(_ADMITTED_ID)
+    output = queue.get_nowait()
+    assert isinstance(output, RequestOutput)
+    assert output.finished is False
+    assert getattr(output, "error", None) is None
+    (completion,) = output.outputs
+    # What the output kind gives for a step with no new tokens.
+    assert completion.token_ids == (
+        [] if output_kind == RequestOutputKind.DELTA else [9]
+    )
+    assert completion.finish_reason is None
+    rejection = output.stream_rejection
+    assert rejection.input_index == 1
+    assert rejection.reason == reason
+    assert rejection.error == error
+
+
+def test_admitted_stream_a6_rejection_is_never_merged():
+    """A6."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(processor, [("one", [1]), ("two", [2])])
+
+    processor.process_outputs(
+        [
+            _admitted_output(1, [9]),
+            _admitted_rejection(2, "empty_update"),
+            _admitted_output(1, [10]),
+        ]
+    )
+
+    first, rejection, last = (queue.get_nowait() for _ in range(3))
+    assert first.outputs[0].token_ids == [9]
+    assert first.stream_rejection is None
+    assert rejection.outputs[0].token_ids == []
+    assert rejection.stream_rejection.input_index == 1
+    assert last.outputs[0].token_ids == [10]
+    assert last.stream_rejection is None
+    assert queue.get_nowait() is None
+
+
+def test_admitted_stream_a7_outputs_match_inputs_by_update_seq():
+    """A7."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(
+        processor, [("one", [11]), ("two", [12, 12]), ("three", [13, 13, 13])]
+    )
+
+    processor.process_outputs([_admitted_output(1, [9], FinishReason.STOP)])
+    first = queue.get_nowait()
+    # Input 2 was rejected, but its rejection arrives after input 3 ran.
+    processor.process_outputs([_admitted_output(3, [8])])
+    third = queue.get_nowait()
+    processor.process_outputs([_admitted_rejection(2, "validation_error")])
+    rejection = queue.get_nowait()
+
+    assert first.finished is False
+    assert (first.prompt, first.prompt_token_ids) == ("one", [11])
+    assert third.finished is False
+    assert (third.prompt, third.prompt_token_ids) == ("three", [13, 13, 13])
+    assert third.stream_rejection is None
+    assert rejection.finished is False
+    assert rejection.stream_rejection.input_index == 1
+    assert rejection.stream_rejection.reason == "validation_error"
+
+
+def test_admitted_stream_a5_ends_on_input_closed_output_not_eos():
+    """A5."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(processor, [("one", [1]), ("two", [2])])
+    _register_admitted_close(processor, 3)
+    assert queue.get_nowait() is None
+    assert processor.has_request(_ADMITTED_ID)
+
+    processor.process_outputs([_admitted_output(1, [7], FinishReason.STOP)])
+    boundary = queue.get_nowait()
+    processor.process_outputs(
+        [_admitted_output(2, [7], FinishReason.STOP, input_closed=True)]
+    )
+    final = queue.get_nowait()
+
+    assert boundary.finished is False
+    assert boundary.outputs[0].finish_reason == "stop"
+    assert final.finished is True
+    assert final.outputs[0].token_ids == [7]
+    assert not processor.has_request(_ADMITTED_ID)
+
+
+def test_admitted_stream_a5_close_of_parked_session_ends_on_terminal_output():
+    """A5."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(processor, [("one", [1])])
+    processor.process_outputs([_admitted_output(1, [7], FinishReason.STOP)])
+    assert queue.get_nowait().finished is False
+
+    _register_admitted_close(processor, 2)
+    assert queue.get_nowait() is None
+    assert processor.has_request(_ADMITTED_ID)
+
+    processed = processor.process_outputs(
+        [_admitted_output(2, [], FinishReason.STOP, input_closed=True)]
+    )
+    final = queue.get_nowait()
+    assert final.finished is True
+    assert final.outputs[0].token_ids == []
+    assert final.outputs[0].finish_reason == "stop"
+    assert processed.reqs_to_abort == []
+    assert not processor.has_request(_ADMITTED_ID)
+
+
+def test_admitted_stream_a9_outputs_after_end_are_ignored():
+    """A9."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _register_admitted_stream(processor, [("one", [1])])
+    _register_admitted_close(processor, 2)
+
+    processor.process_outputs(
+        [_admitted_output(1, [7], FinishReason.STOP, input_closed=True)]
+    )
+    final = queue.get_nowait()
+    assert final.finished is True
+
+    processor.process_outputs(
+        [
+            _admitted_rejection(2, "input_closed"),
+            _admitted_output(2, [5]),
+            _admitted_output(2, [], FinishReason.ABORT, input_closed=True),
+        ]
+    )
+    assert queue.get_nowait() is None
+    assert not processor.has_request(_ADMITTED_ID)
+
+
+@pytest.mark.parametrize("tagged", [False, True])
+def test_unadmitted_stream_a10_rejected_input_ends_session(tagged):
+    """A10."""
+    from vllm.v1.engine import StreamOutput
+
+    processor = OutputProcessor(None, log_stats=False)
+    queue = _add_streaming_request_with_queued_chunk(processor, "plain")
+    error = RequestError(code="validation_error", message="misplaced item")
+    rejection = EngineCoreOutput(
+        request_id="plain",
+        new_token_ids=[],
+        finish_reason=FinishReason.ERROR,
+        # The scheduler's correlated rejection, or the ingress one.
+        stream_output=StreamOutput(None, "validation_error") if tagged else None,
+        error=None if tagged else error,
+    )
+
+    processed = processor.process_outputs([rejection])
+
+    assert not processor.has_request("plain")
+    assert processed.reqs_to_abort == ["plain"]
+    if tagged:
+        output = queue.get_nowait()
+        assert output.finished is True
+        assert output.outputs[0].finish_reason == str(FinishReason.ERROR)
+        assert getattr(output, "stream_rejection", None) is None
+    else:
+        with pytest.raises(VLLMValidationError, match="misplaced item"):
+            queue.get_nowait()
+
+
+def test_admitted_stream_a5_closing_input_ends_only_on_finish_reason():
+    """A5."""
+    processor = OutputProcessor(None, log_stats=False)
+    queue = StreamingInputOutputCollector(RequestOutputKind.DELTA, _ADMITTED_ID)
+    processor.add_request(_admitted_request([]), None, queue=queue)
+    processor.add_request(_admitted_request([1], 1), "one")
+    processor.add_request(_admitted_request([2], 2, input_closed=True), "two")
+
+    processor.process_outputs([_admitted_output(1, [7], FinishReason.STOP)])
+    boundary = queue.get_nowait()
+    # The closing input's outputs carry input_closed=True before it finishes.
+    processor.process_outputs([_admitted_output(2, [5], input_closed=True)])
+    running = queue.get_nowait()
+    processor.process_outputs(
+        [_admitted_output(2, [7], FinishReason.STOP, input_closed=True)]
+    )
+    final = queue.get_nowait()
+
+    assert boundary.finished is False
+    assert running.finished is False
+    assert running.outputs[0].token_ids == [5]
+    assert processor.has_request(_ADMITTED_ID) is False
+    assert final.finished is True
+    assert final.outputs[0].token_ids == [7]

@@ -84,6 +84,38 @@ previous owner. Model failures are reported through the same completion path,
 and a scheduled step without a matching completion fails its request. A cleanup
 that is not acknowledged is retried once; a second miss is a fatal engine error.
 
+### Retirement signal
+
+The engine reports when an admitted stream's slot is back in the free pool.
+When the last state manager releases a stream's retired slot, including a
+never-scheduled slot released at once, the scheduler adds the stream's request
+ID to `EngineCoreOutputs.retired_streams` for the client that admitted it. The
+engine sends that batch even when it carries no other output, and the client
+reads `retired_streams` before it filters out batches without outputs or stats.
+The signal means only that the slot was released; it never exposes
+`StateSlotHandle` or `StateCompletion`, since receiving a completion does not
+imply release (the slot may be quarantined or still short of its fence).
+
+- **R1.** `AsyncLLM.wait_stream_retired(request_id)` returns once the stream
+  admitted under the caller's request ID has retired.
+  `EngineCoreClient.wait_stream_retired_async(request_id)` does the same for an
+  internal request ID.
+- **R2.** The client starts tracking a stream before it sends the admission, so
+  a retirement that arrives before the wait is not lost. A wait that starts
+  while admission is pending keeps waiting until the admission reply arrives.
+  If admission is refused, pending waits raise `StreamAdmissionError`; if the
+  call is cancelled before the admission is sent, they raise `ValueError`.
+  Either way the stream is no longer tracked.
+- **R3.** A retirement is kept until the first wait for it returns. The client
+  keeps at most 1024 retirements that nobody has waited for, dropping the
+  oldest, and a new admission under the same caller request ID drops that ID's
+  unwaited retirement. A wait for a stream that is unknown, already waited for
+  or dropped raises `ValueError` at once.
+- **R4.** Concurrent waits for the same stream all return. Cancelling one wait
+  affects neither the others nor the tracking.
+- **R5.** When the engine dies, including on a second cleanup miss, pending
+  waits raise `EngineDeadError`; they never report a retirement.
+
 ## Stream admission
 
 With persistent state enabled, the engine core exposes the utility method
@@ -92,7 +124,8 @@ atomically reserves a slot and parks an empty resumable request. The request
 must be an empty, resumable sampling request (`n=1`, no stop strings, no
 structured outputs, no transfer connectors). Async frontends call it through
 `EngineCoreClient.admit_stream_async`, which routes the stream's outputs back
-to the calling API server, as for an ordinary request.
+to the calling API server, as for an ordinary request, or through `AsyncLLM`
+(see [Admitted streams in `AsyncLLM`](#admitted-streams-in-asyncllm)).
 
 The request ID names the stream, so the caller must give every session a
 globally unique ID and never reuse it. vLLM's input processor adds a random
@@ -112,25 +145,36 @@ neither allocate a slot nor create a request.
 Input is then sent as ordinary resumable updates for the same request ID with
 `EngineCoreRequest.stream_admission` set to a `StreamAdmissionContext`;
 setting `input_closed=True`, or sending a non-resumable update, closes input.
+Accepted inputs always run in order, including a resumable input that sets
+`input_closed=True`. Only a close that carries no input (a non-resumable
+request) can end a session without running anything: sent while the session is
+parked (including never fed) with no input queued, it ends the session at once
+with a terminal output (finish reason `stop`, no tokens). Otherwise the session
+ends after the last accepted input finishes. An output ends an admitted session
+exactly when it has a finish reason and its context has `input_closed=True`.
+Every session-ending output, whatever the reason, carries such a context: the
+session's current input context, closed (`update_seq=0` if no input was
+applied), except that a close ending a parked session at once carries the
+close's own context. Outputs without a finish reason carry their input's
+context unchanged.
 Inputs must keep the admission's restrictions and carry token IDs only (no
 prompt embeddings); the engine refuses others before preprocessing. Multimodal
 positions are relative to the input's own prompt, since each input replaces it;
 an item that starts outside that prompt, or (for a decoder-only model) does
 not end inside it, is refused as `validation_error`. Rejected
 updates are reported on `EngineCoreOutput.stream_output` without ending the
-session, and leave its slot and deadline unchanged. This holds for
-`EngineCore` and `EngineCoreClient` consumers. The output processor that
-`AsyncLLM` and `LLMEngine` use does not read `stream_output` yet: it treats the
-rejection's `ERROR` finish as the end of the request and aborts it, which ends
-the session and frees its slot. An admitted session holds
+session, and leave its slot and deadline unchanged. Each input's
+`StreamAdmissionContext.update_seq` numbers it within the stream; every output
+of an admitted stream carries the context of the input it ran on, and a
+rejection carries the rejected input's. An admitted session holds
 its slot from admission, so its inputs drain ahead of queued requests that
 still need a slot, including under `PAUSED_NEW`. An
 engine without persistent state refuses any update that carries
 `stream_admission` as a validation error.
 
 The engine expires sessions on its own monotonic clock, including while idle,
-and aborts expired sessions with an error output. Configure the deadlines with
-`--additional-config`:
+and aborts expired sessions with a terminal output (finish reason `abort`).
+Configure the deadlines with `--additional-config`:
 
 ```bash
 vllm serve <model> \
@@ -144,6 +188,86 @@ vllm serve <model> \
 | `draining_timeout` | `40.0` | Seconds a stream may take to finish after input closes. |
 
 Timeouts must be finite and positive.
+
+## Admitted streams in `AsyncLLM`
+
+`AsyncLLM.generate()` and `AsyncLLM.add_request()` admit a streaming-input
+request when called with `stream_admission=True` and an async generator of
+`StreamingInput` as the prompt. The engine must have persistent state, and the
+sampling parameters must meet both the streaming-input and the admission
+restrictions; otherwise the call raises `VLLMValidationError`, which also
+carries the engine's message for any failure of the `admit_stream` utility.
+`LLMEngine` has no streaming input, so it has no admitted streams.
+
+The frontend sends three kinds of request for one stream, all under the internal
+request ID that input processing assigns:
+
+| Request | Prompt | `resumable` | `stream_admission` |
+| --- | --- | --- | --- |
+| Admission | empty | `True` | none |
+| Input *k* (*k* ≥ 1) | the item's prompt | `True` | `update_seq=k` |
+| Close | ignored placeholder | `False` | `update_seq` = last input + 1, `input_closed=True` |
+
+The engine stores the context of the input a session is running on. It copies
+an input's context onto the session whenever it applies that input, either at
+once to a parked session or later from the session's queue, and it captures the
+context for an output before stop handling can apply the next queued input. An
+admitted session with no input applied
+carries `update_seq=0`. A rejection carries the rejected request's own context.
+
+- **A1. Admission.** The frontend registers the stream's output state with no
+  input applied, then sends the admission. It reads nothing from the generator
+  until admission succeeds.
+- **A2. Caller request ID.** The frontend reserves the caller's request ID
+  from the start of the call until the stream has retired, or until admission
+  is refused or cancelled before it was sent. A call that finds the ID reserved
+  is refused as `request_id_in_use` without reaching the engine. The internal
+  ID carries vLLM's random suffix, so a caller may reuse its ID once the
+  earlier stream has retired. Waits already pending stay bound to the earlier
+  stream; a wait that starts after the new call begins, even before its
+  admission is sent, follows the new stream. With `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION` set, the internal ID is
+  the caller's, and the engine's rule applies: never reuse it.
+- **A3. Refusal and cancellation.** A refusal raises `StreamAdmissionError`
+  from the call, carrying the `StreamAdmissionResult` (served as HTTP 409 for
+  `request_id_in_use` and 503 otherwise); the output state is removed and the
+  engine has allocated nothing. If the call is cancelled while
+  admission is pending, the frontend still collects the admission reply in the
+  background and, if the stream was admitted, aborts it.
+- **A4. Inputs.** Each generator item is sent as the next input. An item that
+  fails frontend validation or preprocessing ends the stream as for other
+  streaming input (the call raises, and the session is aborted) and is not
+  numbered.
+- **A5. Close.** When the generator ends, the frontend sends the close. The
+  engine ends the session after its accepted inputs, or at once if it is
+  parked with nothing queued. The frontend ends the caller's stream on the
+  session-ending output (a finish reason with `input_closed=True` in its
+  context), not when the close is sent; an EOS that ends an input is never
+  mistaken for it.
+- **A6. Rejected input.** A rejected input does not end the session. The
+  caller receives one `RequestOutput` with `finished=False`, no new tokens,
+  no finish reason, `error=None`, and `stream_rejection` set to a
+  `StreamRejection` holding the item's 0-based position in the generator, the
+  rejection reason and, if the engine attached one, its `RequestError` (as for
+  `engine_paused`). Its completion outputs are those the output kind gives for
+  a step with no new tokens. A rejection output is never merged with another
+  output. The engine's rejection output itself keeps finish reason `error`, so
+  `EngineCore` consumers see it unchanged; the frontend converts it.
+- **A7. Matching.** The frontend matches outputs to inputs by `update_seq`, not
+  by arrival order, so a rejection that arrives after later inputs were
+  accepted is attributed correctly and later outputs report the prompt of the
+  input that actually ran.
+- **A8. Rejected close.** A rejected close produces no rejection output; the
+  frontend aborts the session, because no further input can follow.
+- **A9. Session end.** The caller sees exactly one end: `generate()` either
+  yields one output with `finished=True` (after a close, abort, deadline
+  expiry, preemption, a failed state step, or a stop other than EOS) or raises
+  one exception (cancellation, a generator or input error, or a dead engine),
+  never both; whichever reaches the stream's output collector first wins. The
+  frontend's input task, not `generate()`, aborts the session on a generator or
+  input error, so `add_request()` callers get the same cleanup. Outputs and
+  rejections that arrive after the end are ignored.
+- **A10. Unadmitted streams.** Streaming input without `stream_admission=True`
+  is unchanged: a rejected input ends that session.
 
 ## Supported configurations
 

@@ -5,6 +5,7 @@ import enum
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any, Literal
 
 import msgspec
@@ -12,6 +13,7 @@ import numpy as np
 import torch
 
 from vllm.config.kv_events import KVEventsConfig
+from vllm.exceptions import GracefulHTTPError
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.outputs import RequestError
@@ -178,6 +180,12 @@ class StreamAdmissionContext(msgspec.Struct, frozen=True):  # type: ignore[call-
     """Marks an input for an admitted stream; the request ID names the stream."""
 
     input_closed: bool = False
+    # Numbers the input within its stream; 0 before any input is applied.
+    update_seq: int = 0
+
+    def closed(self) -> "StreamAdmissionContext":
+        """This context on an output that ends its session."""
+        return msgspec.structs.replace(self, input_closed=True)
 
 
 class StreamOutput(msgspec.Struct, frozen=True, array_like=True):  # type: ignore[call-arg]
@@ -192,6 +200,19 @@ class StreamAdmissionResult(msgspec.Struct, frozen=True):  # type: ignore[call-a
     request_id: str
     status: StreamAdmissionStatus
     reason: StreamAdmissionReason | None = None
+
+
+class StreamAdmissionError(GracefulHTTPError):
+    """A refused stream admission, carrying its result."""
+
+    def __init__(self, result: StreamAdmissionResult):
+        super().__init__(
+            f"Stream admission refused: {result.reason}",
+            HTTPStatus.CONFLICT
+            if result.reason == "request_id_in_use"
+            else HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+        self.result = result
 
 
 class EngineCoreRequest(
@@ -389,6 +410,9 @@ class EngineCoreOutputs(
 
     # Weight version used for this step.
     weight_version: str | None = None
+
+    # Admitted streams whose state slots were released since the last outputs.
+    retired_streams: list[str] | None = None
 
     def __post_init__(self):
         if self.timestamp == 0.0:
