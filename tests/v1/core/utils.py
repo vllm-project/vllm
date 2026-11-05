@@ -91,6 +91,9 @@ def create_scheduler(
     cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
+    watermark: float = 0.0,
+    max_priority_preemptions_per_step: int = 0,
+    max_num_inflight_kv_loads: int | None = None,
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
@@ -144,9 +147,11 @@ def create_scheduler(
         cache_aware_admission_window=cache_aware_admission_window,
         cache_aware_admission_threshold=cache_aware_admission_threshold,
         prefill_schedule_interval=prefill_schedule_interval,
-        # Ensure admission/preemption mechanics are deterministic
-        watermark=0.0,
+        # 0.0 by default, so admission/preemption mechanics are deterministic
+        watermark=watermark,
         policy=scheduling_policy,
+        max_priority_preemptions_per_step=max_priority_preemptions_per_step,
+        max_num_inflight_kv_loads=max_num_inflight_kv_loads,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
