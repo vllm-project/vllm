@@ -165,6 +165,16 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
+    # The fused slot is the unrotated shared expert. It cannot share the
+    # routed experts' input rotation.
+    moe_rotations = getattr(quant_config, "moe_input_rotation_sizes", None) or {}
+    if expert_prefix in moe_rotations:
+        return (
+            False,
+            f"{expert_prefix}: online Hadamard input rotation does not apply to "
+            "a fused shared-expert slot",
+        )
+
     # Re-quantization of a pre-quantized checkpoint.
     online_quant_config = quant_config.online_quantization_config
     if online_quant_config is not None:
