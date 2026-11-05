@@ -318,15 +318,21 @@ def test_topk_matches_torch_on_both_kernels(rows, width, k):
         assert int((got == -1).sum()) == k - n
 
 
-def _run_layers(monkeypatch, case, rows, metadata):
+def _run_layers(
+    monkeypatch, case, rows, metadata, k=TOPK, pad=0, pool_blocks=POOL_BLOCKS
+):
     """Ratio-2 dense layer, the candidate source, and a consumer both ways;
     each checked against the torch reference."""
     num_rows = len(rows)
     q, q_scale, weights, q_ref = _queries(num_rows)
-    hidden = torch.empty(num_rows, 1, device=DEVICE)
+    hidden = torch.empty(num_rows + pad, 1, device=DEVICE)
 
     def topk_buffer():
-        return torch.full((num_rows + 2, TOPK), 7, dtype=torch.int32, device=DEVICE)
+        return torch.full((num_rows + pad + 2, k), 7, dtype=torch.int32, device=DEVICE)
+
+    def assert_tail(out):
+        assert bool((out[num_rows : num_rows + pad] == -1).all())
+        assert bool((out[num_rows + pad :] == 7).all())
 
     _forward_context(monkeypatch, metadata(2))
     out = topk_buffer()
@@ -337,7 +343,7 @@ def _run_layers(monkeypatch, case, rows, metadata):
         q,
         q_scale,
         weights,
-        TOPK,
+        k,
         HEAD_DIM,
         MAX_LEN // 2,
         out,
@@ -346,11 +352,14 @@ def _run_layers(monkeypatch, case, rows, metadata):
     for i, (req, pos) in enumerate(rows):
         end = (pos + 1) // 2
         keys = case.keys(2, req, end)
-        _assert_topk(out[i], _scores(q_ref[i], weights[i], keys), TOPK)
+        _assert_topk(out[i], _scores(q_ref[i], weights[i], keys), k)
+    assert_tail(out)
 
     source = metadata(1)
     _forward_context(monkeypatch, source)
-    pool = torch.full((num_rows + 2, POOL_BLOCKS), 5, dtype=torch.int32, device=DEVICE)
+    pool = torch.full(
+        (num_rows + pad + 2, pool_blocks), 5, dtype=torch.int32, device=DEVICE
+    )
     out = topk_buffer()
     ops.rocm_mxfp4_sparse_attn_indexer(
         hidden,
@@ -359,7 +368,7 @@ def _run_layers(monkeypatch, case, rows, metadata):
         q,
         q_scale,
         weights,
-        TOPK,
+        k,
         HEAD_DIM,
         MAX_LEN,
         out,
@@ -371,12 +380,13 @@ def _run_layers(monkeypatch, case, rows, metadata):
     allowed = []
     for i, (req, pos) in enumerate(rows):
         scores = _scores(q_ref[i], weights[i], case.keys(1, req, pos + 1))
-        _assert_topk(out[i], scores, TOPK)
-        _assert_topk(pool[i], _block_maxima(scores), POOL_BLOCKS)
+        _assert_topk(out[i], scores, k)
+        _assert_topk(pool[i], _block_maxima(scores), pool_blocks)
         mask = torch.zeros_like(scores, dtype=torch.bool)
         for block in pool[i][pool[i] >= 0].tolist():
             mask[block * CAND_BLOCK : (block + 1) * CAND_BLOCK] = True
         allowed.append(torch.where(mask, scores, float("-inf")))
+    assert_tail(out)
 
     pa = ops._aiter()
     build = pa.build_candidate_gather
@@ -402,17 +412,18 @@ def _run_layers(monkeypatch, case, rows, metadata):
                 q,
                 q_scale,
                 weights,
-                TOPK,
+                k,
                 HEAD_DIM,
                 MAX_LEN,
                 out,
                 1,
                 pool,
                 CAND_BLOCK,
-                POOL_BLOCKS * CAND_BLOCK,
+                pool_blocks * CAND_BLOCK,
             )
             for i in range(num_rows):
-                _assert_topk(out[i], allowed[i], TOPK)
+                _assert_topk(out[i], allowed[i], k)
+            assert_tail(out)
         if gather:
             launches = len(consumer.gather_launches) + (consumer.decode is not None)
             assert len(builds) == launches
@@ -480,6 +491,43 @@ def test_prefill_layers_match_reference(
             case, rows, r, chunks, query_start_loc, gather_rows, gather
         ),
     )
+
+
+@pytest.mark.parametrize("k", [TOPK, 512, 1024])
+@pytest.mark.parametrize("step, pad", [("decode", 3), ("mixed", 0), ("mixed", 3)])
+def test_decode_rows_skip_the_fill_in_mixed_and_padded_steps(monkeypatch, step, pad, k):
+    set_random_seed(0)
+    dec_lens = [900, 1500, 610, 0]
+    pre_lens, new_tokens = ([760, 450], [60, 40]) if step == "mixed" else ([], [])
+    case = _Case(dec_lens + pre_lens, 128)
+    nd = len(dec_lens)
+    rows = [(req, n - 1 if n else -1) for req, n in enumerate(dec_lens)]
+    rows += [
+        (nd + r, n - q + i)
+        for r, (n, q) in enumerate(zip(pre_lens, new_tokens))
+        for i in range(q)
+    ]
+    query_start_loc = [
+        *range(nd + 1),
+        *(nd + t for t in itertools.accumulate(new_tokens)),
+    ]
+
+    def metadata(ratio, gather=True):
+        md = _decode_metadata(case, rows[:nd], ratio, [1] * nd)
+        md.num_decodes = nd
+        if pre_lens:
+            chunk = [(nd, len(case.seq_lens), nd, len(rows))]
+            pre = _prefill_metadata(
+                case, rows, ratio, chunk, query_start_loc, 1 << 20, gather
+            )
+            md.prefill, md.prefill_plans = pre.prefill, pre.prefill_plans
+            md.gather_launches = pre.gather_launches
+            md.num_prefills = len(pre_lens)
+            md.num_prefill_tokens = len(rows) - nd
+        return md
+
+    pool_blocks = max(POOL_BLOCKS, 2 * k // CAND_BLOCK)
+    _run_layers(monkeypatch, case, rows, metadata, k, pad, pool_blocks)
 
 
 def _rope_gptj(x, cos_sin, positions):

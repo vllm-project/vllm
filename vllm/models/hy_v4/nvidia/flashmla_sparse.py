@@ -20,7 +20,7 @@ name would silently change KV cache behaviour. Only``supports_sink`` and the
 two kernel wrappers differ from the parent.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
@@ -50,6 +50,10 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
     FlashMLA kernels, which fold it into the softmax denominator:
     ``out *= exp(lse) / (exp(lse) + exp(sink))``.
     """
+
+    # The sinks are sharded by head with TP, and ShardQ runs every head on
+    # each rank.
+    supports_shardq: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -181,7 +185,7 @@ class HYV4FlashMLASparseImpl(FlashMLASparseImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padded_heads
+        padded_num_heads = self._compute_fp8_decode_padded_heads(actual_num_heads)
         attn_sink = self._sinks_for_query(q, head_dim=2, kernel_heads=padded_num_heads)
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
