@@ -1664,6 +1664,11 @@ ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+_NVFP4_EMBEDDING_TIED = (
+    "NVFP4 embeddings cannot be tied to an LM head; quantize the LM head separately"
+)
+
+
 class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
     """W4A16 NVFP4 token embedding.
 
@@ -1671,6 +1676,9 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
     first), one e4m3 scale per 16 values and a per-tensor fp32 scale. A lookup
     gathers the packed rows and dequantizes only those.
     """
+
+    # Post-load processing only builds a constant lookup table.
+    supports_pre_processed_weights = True
 
     def create_weights(
         self,
@@ -1719,7 +1727,8 @@ class ModelOptNvFp4EmbeddingMethod(QuantizeMethodBase):
         refill_derived(layer, "e2m1_lut", torch.cat((e2m1, -e2m1)))
 
     def apply(self, layer, x, bias=None):
-        raise NotImplementedError("NVFP4 embedding has no linear apply")
+        # Reached only when a model uses the embedding as its LM head.
+        raise NotImplementedError(_NVFP4_EMBEDDING_TIED)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         packed = layer.weight[input_]
@@ -2066,10 +2075,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if model_config is not None and getattr(
                 model_config.hf_text_config, "tie_word_embeddings", False
             ):
-                raise ValueError(
-                    "NVFP4 embeddings cannot be tied to an LM head; "
-                    "quantize the LM head separately"
-                )
+                raise ValueError(_NVFP4_EMBEDDING_TIED)
             return ModelOptNvFp4EmbeddingMethod()
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):

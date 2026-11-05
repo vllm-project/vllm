@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.utils import weights_already_processed
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 
@@ -77,6 +78,16 @@ def test_nvfp4_embedding_matches_reference_dequant(dist_init):
     lut = layer.e2m1_lut.data_ptr()
     layer.quant_method.process_weights_after_loading(layer)
     assert layer.e2m1_lut.data_ptr() == lut
+
+    # Fast-start loading hands over already-processed weights.
+    assert layer.quant_method.supports_pre_processed_weights
+    with weights_already_processed():
+        layer.quant_method.process_weights_after_loading(layer)
+    torch.testing.assert_close(layer(ids), expected, rtol=0, atol=0)
+
+    # A model that reuses the embedding as its LM head gets the tie error.
+    with pytest.raises(NotImplementedError, match="cannot be tied"):
+        layer.quant_method.apply(layer, torch.zeros(1, hidden, dtype=torch.bfloat16))
 
 
 def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
