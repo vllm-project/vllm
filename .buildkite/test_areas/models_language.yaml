@@ -128,6 +128,7 @@ steps:
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Language Models (Extended Generation)"
   device: h200_35gb
   key: language-models-test-extended-generation
+  automatic_shard: true
   timeout_in_minutes: 80
   optional: true
   source_file_dependencies:
@@ -143,6 +144,7 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Language Models (Extended Generation)"
       dind: false
       device: mi355_dpx
