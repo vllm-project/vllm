@@ -22,6 +22,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
     VllmTritonJitKernel,
     triton_kernel_dispatcher_with_warmup,
+    triton_ptr_range,
     triton_warmup_inputs,
 )
 from vllm.platforms import current_platform
@@ -477,6 +478,80 @@ def test_triton_warmup_inputs_expands_explicit_pointer_dtypes() -> None:
             value=2,
             BLOCK=16,
         )
+
+
+@pytest.mark.parametrize("live_ptr_range", [None, 1 << 32])
+def test_warmup_pointer_specializes_like_the_live_tensor(
+    live_ptr_range: int | None,
+) -> None:
+    """A stand-in must land on the same side of ROCm's 2 GiB buffer-ops window.
+
+    KV-cache views sit in an allocation far past it, so a stand-in that keeps
+    the optimistic default range warms a ``tt.pointer_range`` specialization no
+    launch ever asks for, and the kernel JITs on its first real batch.
+    """
+    backend = pytest.importorskip("triton.backends.amd.compiler").HIPBackend
+    if not hasattr(backend, "is_within_2gb"):
+        # if it ever changes in the future
+        assert not hasattr(backend, "get_tensor_specialization"), (
+            "Triton still specializes tensor arguments but dropped "
+            "is_within_2gb; re-derive TritonWarmupTensor.ptr_range_bytes "
+            "against whatever now decides tt.pointer_range"
+        )
+        pytest.skip("Triton no longer specializes tensor arguments")
+    is_within_2gb = backend.is_within_2gb
+
+    live = torch.empty(64, dtype=torch.uint8)
+    if live_ptr_range is not None:
+        live.ptr_range = lambda: live_ptr_range
+
+    stub = TritonWarmupTensor(torch.bfloat16, ptr_range_bytes=triton_ptr_range(live))
+
+    assert is_within_2gb(stub) == is_within_2gb(live)
+    assert is_within_2gb(stub) is (live_ptr_range is None)
+
+
+def test_warmup_pointer_range_survives_the_fake_tensor_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatcher that needs real tensors must not drop ``ptr_range_bytes``.
+
+    A dispatcher touching tensor APIs re-runs its case through fake tensors,
+    so the declared range has to round-trip the stand-in as an attribute and
+    come back out of both conversion points, key derivation and the warmup
+    launch. Dropping it there silently restores the optimistic <2 GiB
+    specialization and the kernel JITs on its first real batch.
+    """
+    kernel = _FakeTritonKernel()
+    over_2gb = 1 << 32
+
+    def warmup_inputs() -> dict[str, Any]:
+        return dict(
+            first=TritonWarmupTensor(
+                torch.bfloat16, shape=(2, 3), ptr_range_bytes=over_2gb
+            ),
+            second=1,
+        )
+
+    @triton_kernel_dispatcher_with_warmup(kernel=kernel, warmup_inputs=warmup_inputs)
+    def dispatch(first: torch.Tensor, second: int) -> LaunchSpec:
+        assert isinstance(first, torch.Tensor)
+        return (first.shape[0],), dict(CONST=first[0].numel())
+
+    derived: list[dict[str, Any]] = []
+
+    def derive(kernel: Any, kwargs: dict[str, Any]) -> set[TritonJitKey]:
+        derived.append(kwargs)
+        return {TritonJitKey(id(kernel), "fake", 0, kwargs["CONST"])}
+
+    _patch_key_deriver(monkeypatch, derive)
+
+    keys = dispatch.get_warmup_keys()
+    kernel.warmup_calls.clear()
+    dispatch.compile(keys[0])
+
+    assert [kwargs["first"].ptr_range_bytes for kwargs in derived] == [over_2gb]
+    assert [call["first"].ptr_range_bytes for call in kernel.warmup_calls] == [over_2gb]
 
 
 def test_triton_key_derivation_applies_wrappers_and_runtime_options(
