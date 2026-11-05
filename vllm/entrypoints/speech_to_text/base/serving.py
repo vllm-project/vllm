@@ -359,6 +359,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
         return input_len
 
+    def _get_diarized_segments(
+        self, text: str, start_time: float
+    ) -> list[DiarizedTranscriptionSegment]:
+        return [
+            replace(
+                segment,
+                start=segment.start + start_time,
+                end=segment.end + start_time,
+            )
+            for segment in self.model_cls.parse_diarized_transcript(
+                text, self.model_config
+            )
+        ]
+
     def _get_verbose_segments(
         self,
         tokens: tuple,
@@ -637,20 +651,12 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
                 elif request.response_format == "diarized_json":
                     chunk_diarized_parts[idx].extend(
-                        replace(
-                            segment,
-                            start=segment.start + start_time,
-                            end=segment.end + start_time,
-                        )
-                        for segment in self.model_cls.parse_diarized_transcript(
-                            op.outputs[0].text, self.model_config
-                        )
+                        self._get_diarized_segments(op.outputs[0].text, start_time)
                     )
                 else:
+                    raw_text = op.outputs[0].text
                     chunk_text_parts[idx].append(
-                        self.model_cls.post_process_output(
-                            op.outputs[0].text, self.model_config
-                        )
+                        self.model_cls.post_process_output(raw_text, self.model_config)
                     )
             total_segments = [
                 segment
