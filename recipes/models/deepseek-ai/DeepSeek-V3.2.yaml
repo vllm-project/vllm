@@ -24,7 +24,7 @@ model:
   supports_dcp: true
   base_args:
     - "--trust-remote-code"
-    - "--kernel-config.enable_flashinfer_autotune=False"
+    - "--disable-flashinfer-autotune"
   base_env: {}
 
 dependencies:
@@ -122,7 +122,7 @@ guide: |
   vllm serve deepseek-ai/DeepSeek-V3.2 \
     --tensor-parallel-size 8 \
     --trust-remote-code \
-    --kernel-config.enable_flashinfer_autotune=False \
+    --disable-flashinfer-autotune \
     --tokenizer-mode deepseek_v32 \
     --tool-call-parser deepseek_v32 \
     --enable-auto-tool-choice \

@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
 from vllm.model_executor.layers.rotary_embedding.mrope_vit_setup import (
-    vit_mrope_setup,
+    VitMropeSetup,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
@@ -59,11 +59,12 @@ class MiniMaxVLPatchEmbed(nn.Module):
             stride=(temporal_patch_size, patch_size, patch_size),
             bias=False,
         )
+        # The checkpoint stores this weight in fp32 (the vision tower's only
+        # fp32 tensor); keep it that way so the conv runs at full precision.
+        self.patch_embedding.to(torch.float32)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # pixel_values: (N, C * temporal_patch_size * patch_size²)
-        if self.patch_embedding.weight.dtype != pixel_values.dtype:
-            self.patch_embedding = self.patch_embedding.to(pixel_values.dtype)
         x = pixel_values.reshape(
             pixel_values.shape[0],
             self.num_channels,
@@ -71,7 +72,8 @@ class MiniMaxVLPatchEmbed(nn.Module):
             self.patch_size,
             self.patch_size,
         )
-        return self.patch_embedding(x).reshape(x.shape[0], -1)
+        out = self.patch_embedding(x.to(self.patch_embedding.weight.dtype))
+        return out.reshape(x.shape[0], -1).to(pixel_values.dtype)
 
 
 class MiniMaxVLAttention(nn.Module):
@@ -352,6 +354,8 @@ class MiniMaxVLVisionTransformer(nn.Module):
         self.register_buffer("inv_freq_t", inv_freq_t, persistent=False)
         self.register_buffer("inv_freq_h", inv_freq_h, persistent=False)
         self.register_buffer("inv_freq_w", inv_freq_w, persistent=False)
+        # Pluggable so OOT platforms can substitute the setup kernel.
+        self.mrope_setup = VitMropeSetup()
 
         self.embeddings = MiniMaxVLPatchEmbed(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -456,7 +460,7 @@ class MiniMaxVLVisionTransformer(nn.Module):
         # 3D RoPE cos/sin: (3, total_N, half_rot_dim) fp32 t/h/w planes for
         # triton_mrope from one fused setup kernel. Kept fp32 so the kernel
         # computes the rotation in fp32, matching the reference.
-        rotary_cos, rotary_sin = vit_mrope_setup(
+        rotary_cos, rotary_sin = self.mrope_setup(
             self.inv_freq_t,
             self.inv_freq_h,
             self.inv_freq_w,
@@ -655,7 +659,9 @@ class MiniMaxVLVisionModel(nn.Module):
             prefix=maybe_prefix(prefix, "patch_merge_mlp"),
         )
 
-        self.dtype = self.vision_model.embeddings.patch_embedding.weight.dtype
+        # Tower compute dtype; the patch embedding weight stays fp32 (see
+        # MiniMaxVLPatchEmbed), so take it from the projector instead.
+        self.dtype = self.multi_modal_projector.linear_1.weight.dtype
         self.out_hidden_size = text_hidden_size
 
     def forward(
