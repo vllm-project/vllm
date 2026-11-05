@@ -217,6 +217,7 @@ fn progress_only(output: &crate::protocol::output::EngineCoreOutput) -> bool {
         spec_decode_metrics,
         prompt_token_id_logprobs,
         error,
+        watermarking,
         prefill_progress,
     } = output;
     prefill_progress.is_some()
@@ -238,6 +239,7 @@ fn progress_only(output: &crate::protocol::output::EngineCoreOutput) -> bool {
         && spec_decode_metrics.is_none()
         && prompt_token_id_logprobs.is_none()
         && error.is_none()
+        && watermarking.is_none()
 }
 
 impl Drop for OutputSender {

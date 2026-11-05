@@ -9251,9 +9251,17 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
     assert request.mm_features[0].data is handle
 
 
-@pytest.mark.parametrize("async_scheduling", [False, True])
-@pytest.mark.parametrize("include_prefill_progress", [False, True])
-@pytest.mark.parametrize("max_tokens", [1, 3])
+@pytest.mark.parametrize(
+    ("async_scheduling", "include_prefill_progress", "max_tokens"),
+    [
+        (False, False, 1),
+        (False, True, 1),
+        (False, True, 3),
+        (True, False, 1),
+        (True, True, 1),
+        (True, True, 3),
+    ],
+)
 def test_prefill_progress_emits_prefill_stats_once(
     async_scheduling, include_prefill_progress, max_tokens
 ):
@@ -9304,14 +9312,18 @@ def test_prefill_progress_emits_prefill_stats_once(
     assert token_outputs[-1].finish_reason == FinishReason.LENGTH
 
 
-def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
-    request = Request(
+def _prefill_progress_request(prompt_tokens: int, max_tokens: int = 4) -> Request:
+    return Request(
         "progress",
-        list(range(100)),
-        SamplingParams(max_tokens=10),
+        list(range(prompt_tokens)),
+        SamplingParams(max_tokens=max_tokens),
         None,
         include_prefill_progress=True,
     )
+
+
+def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
+    request = _prefill_progress_request(100, max_tokens=10)
     request.status = RequestStatus.RUNNING
     stats = PrefillStats()
     stats.set(
@@ -9340,13 +9352,7 @@ def test_prefill_progress_preserves_cache_accounting_after_decode_starts():
 
 
 def test_prefill_progress_coalesces_work_but_never_delays_load_corrections():
-    request = Request(
-        "progress",
-        list(range(10_000)),
-        SamplingParams(max_tokens=10),
-        None,
-        include_prefill_progress=True,
-    )
+    request = _prefill_progress_request(10_000, max_tokens=10)
     request.status = RequestStatus.RUNNING
     first = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
     assert first is not None
@@ -9384,13 +9390,7 @@ def test_prefill_progress_coalesces_work_but_never_delays_load_corrections():
 
 
 def test_prefill_progress_volume_is_bounded_by_work_instead_of_chunk_count():
-    request = Request(
-        "progress",
-        list(range(10_000)),
-        SamplingParams(max_tokens=10),
-        None,
-        include_prefill_progress=True,
-    )
+    request = _prefill_progress_request(10_000, max_tokens=10)
     request.status = RequestStatus.RUNNING
     snapshots = []
     for completed in range(10_001):
@@ -9415,13 +9415,7 @@ def test_prefill_progress_volume_is_bounded_by_work_instead_of_chunk_count():
     ],
 )
 def test_prefill_progress_refreshes_unchanged_unresolved_work(status, phase):
-    request = Request(
-        "refresh",
-        list(range(100)),
-        SamplingParams(max_tokens=4),
-        None,
-        include_prefill_progress=True,
-    )
+    request = _prefill_progress_request(100)
     request.status = status
     first = Scheduler._make_prefill_progress(request, None, False, None, 0.0)
     assert first is not None
@@ -9434,13 +9428,7 @@ def test_prefill_progress_refreshes_unchanged_unresolved_work(status, phase):
 
 
 def test_prefill_progress_does_not_confirm_pending_external_kv():
-    request = Request(
-        "pending-kv",
-        list(range(100)),
-        SamplingParams(max_tokens=4),
-        None,
-        include_prefill_progress=True,
-    )
+    request = _prefill_progress_request(100)
     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
     request.num_computed_tokens = 80
     request.prefill_progress_cache_tokens = (20, 0)

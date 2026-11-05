@@ -2884,22 +2884,15 @@ class Scheduler(SchedulerInterface):
 
         prompt_tokens = request.num_prompt_tokens
         previous = request.last_prefill_progress
-        local_cached = (
-            prefill_stats.num_local_cached_tokens
-            if prefill_stats
-            else previous[4]
-            if previous
-            else 0
-        )
-        external_cached = (
-            prefill_stats.num_external_cached_tokens
-            if prefill_stats
-            else previous[5]
-            if previous
-            else 0
-        )
         if request.prefill_progress_cache_tokens is not None:
             local_cached, external_cached = request.prefill_progress_cache_tokens
+        elif prefill_stats is not None:
+            local_cached = prefill_stats.num_local_cached_tokens
+            external_cached = prefill_stats.num_external_cached_tokens
+        elif previous is not None:
+            local_cached, external_cached = previous[4:6]
+        else:
+            local_cached = external_cached = 0
         local_cached = min(local_cached, prompt_tokens)
         external_cached = min(external_cached, prompt_tokens - local_cached)
         pending_kv = min(
