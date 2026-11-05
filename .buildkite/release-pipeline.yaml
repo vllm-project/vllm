@@ -272,10 +272,6 @@ steps:
           queue: arm64_cpu_queue_release
         commands:
           - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          # TODO(arpera):
-          # Remove BUILD_NIXL=true once NIXL has a wheel built against torch 2.15
-          # For details: https://github.com/vllm-project/vllm/pull/60090
-          # Tracking issue report: https://github.com/ai-dynamo/nixl/issues/2297
           - |
             DOCKER_BUILDKIT=1 docker buildx build --load \
               $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134) \
@@ -287,7 +283,6 @@ steps:
               --build-arg torch_cuda_arch_list="${CUDA_ARCH_AARCH64}" \
               --build-arg INSTALL_KV_CONNECTORS=true \
               --build-arg INSTALL_RUBIN_PRERELEASE=true \
-              --build-arg BUILD_NIXL=true \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REPO=https://github.com/triton-lang/triton.git \
               --build-arg TRITON_INSTALL_FROM_SOURCE_REVISION=3f6e41132b5edf639bfb872ad73d4688765e08b8 \
               --build-arg RUN_WHEEL_CHECK=false \
@@ -543,6 +538,24 @@ steps:
           DOCKER_BUILDKIT: "1"
           DOCKERHUB_USERNAME: "vllmbot"
 
+      - label: "Publish nightly multi-arch EFA image to DockerHub - CUDA 13.0"
+        depends_on:
+          - create-multi-arch-manifest-efa
+        if: build.env("NIGHTLY") == "1"
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/push-nightly-builds.sh efa"
+          # Clean up old nightly builds (keep only last 14)
+          - "bash .buildkite/scripts/cleanup-nightly-builds.sh efa-nightly-"
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
+        env:
+          DOCKER_BUILDKIT: "1"
+          DOCKERHUB_USERNAME: "vllmbot"
+
       - label: "Publish nightly CPU multi-arch image to DockerHub"
         depends_on:
           - build-cpu-release-image-x86
@@ -622,10 +635,6 @@ steps:
           - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
           - bash .buildkite/scripts/rocm/build.sh rocm release-base
         retry: &rocm_release_retry {automatic: [{exit_status: 75, limit: 1}]}   # registry error (build.sh)
-        plugins: &rocm_hub_login   # authenticated Docker Hub pulls and pushes
-          - docker-login#v3.0.0:
-              username: vllmbot
-              password-env: DOCKERHUB_TOKEN
 
       - label: ":rocm: Build ROCm 10.0 release image + wheels"
         key: build-rocm100-release
@@ -637,7 +646,6 @@ steps:
           - aws ecr-public get-login-password --region us-east-1 | docker login -u AWS --password-stdin $${ROCM_CI_REPO%/*}
           - bash .buildkite/scripts/rocm/build.sh rocm release
         retry: *rocm_release_retry
-        plugins: *rocm_hub_login
 
       - label: ":s3: Upload ROCm 10.0 wheels"
         key: upload-rocm100-wheels
@@ -646,7 +654,6 @@ steps:
         timeout_in_minutes: 60
         env: {S3_BUCKET: vllm-wheels, ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm wheels
-        plugins: *rocm_hub_login
 
       - label: ":docker: ROCm 10.0 image: ECR tags (+ nightly Docker Hub)"
         key: build-rocm100-release-image
@@ -657,7 +664,10 @@ steps:
         agents: {queue: small_cpu_queue_release}
         env: {ECR: *rocm_ecr}
         command: bash .buildkite/scripts/rocm/publish.sh rocm images
-        plugins: *rocm_hub_login
+        plugins:
+          - docker-login#v3.0.0:
+              username: vllmbot
+              password-env: DOCKERHUB_TOKEN
 
       # Generate https://wheels.vllm.ai/rocm/ (the default stack's variant).
       - block: "Generate Root Index for ROCm Wheels for Release"

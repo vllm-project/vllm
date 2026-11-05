@@ -56,6 +56,10 @@ Create a JSON configuration file (e.g., `mooncake_config.json`):
   Store provider owns the memory pool and (optionally) the SSD tier.
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback.
   `"nvlink"` is used by the opt-in [EGM deployment](#standalone-egm-over-nvlink).
+- `device_name_per_gpu`: Optional list of RDMA device names indexed by
+  physical GPU ID, such as `["rdma0", "rdma1", ...]`. Each rank's store client
+  uses only its own GPU's entry, which may list several devices separated by
+  commas. Set it instead of `device_name` to give each GPU its local NIC.
 - `global_segment_size`: CPU memory contributed to the distributed pool (per
   GPU). Must be `> 0` in `embedded` mode and `0` in `standalone-store` mode.
 - `local_buffer_size`: Private buffer for this node's own operations (per GPU).
@@ -320,7 +324,9 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
-- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread so it never blocks the scheduler step. The request is held until the in-flight lookup completes, then resumed on a later step. Default: `false`.
+- `lookup_async` (bool): Run the external prefix-cache lookup on a background thread without waiting for its result. With a positive `lookup_prefetch_limit`, lookup starts as soon as the request is added to the scheduler, so it overlaps the time the request waits in the queue. GPU KV allocation and loading still happen through the scheduler. Default: `false`.
+- `lookup_prefetch_limit` (int): Maximum number of arrival-time lookups in flight. Beyond it, a request is looked up when the scheduler first reaches it; scheduler lookups are not capped. Set to a positive value to enable arrival-time lookup. Default: `0` (disabled).
+- `lookup_prefetch_ttl_s` (float): Maximum age of a completed async lookup result, measured from when its RPC returned. Older results are looked up again, as are lookups whose token/hash range changed; a lookup still in flight never expires. Default: `2.0` seconds.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `custom_mem_pool` (str): Optional Mooncake allocator for the GPU KV cache.
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
