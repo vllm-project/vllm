@@ -253,6 +253,7 @@ async def async_request_openai_completions(
             if response.status == 200:
                 first_chunk_received = False
                 saw_done = False
+                server_aborted = False
                 stream_error: str | None = None
                 handler = StreamedResponseHandler()
 
@@ -275,6 +276,9 @@ async def async_request_openai_completions(
                         else:
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
+                            choices = data.get("choices")
+                            if choices and choices[0].get("finish_reason") == "abort":
+                                server_aborted = True
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -283,7 +287,7 @@ async def async_request_openai_completions(
                                 "object"
                             ) == "error":
                                 stream_error = json.dumps(error or data)
-                            elif choices := data.get("choices"):
+                            elif choices:
                                 # Note that text could be empty here
                                 # e.g. for special tokens
                                 text = choices[0].get("text")
@@ -306,6 +310,9 @@ async def async_request_openai_completions(
                 if stream_error is not None:
                     output.success = False
                     output.error = stream_error
+                elif server_aborted:
+                    output.success = False
+                    output.error = "Server aborted the request."
                 elif not first_chunk_received:
                     output.success = False
                     output.error = (
@@ -466,6 +473,7 @@ async def async_request_openai_chat_completions(
             if response.status == 200:
                 first_chunk_received = False
                 saw_done = False
+                server_aborted = False
                 stream_error: str | None = None
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
@@ -488,14 +496,15 @@ async def async_request_openai_chat_completions(
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
                             _update_server_metrics(output, data)
+                            choices = data.get("choices")
+                            if choices and choices[0].get("finish_reason") == "abort":
+                                server_aborted = True
 
                             if (error := data.get("error")) or data.get(
                                 "object"
                             ) == "error":
                                 stream_error = json.dumps(error or data)
-                            elif (
-                                choices := data.get("choices")
-                            ) and _choice_has_streamed_output(choices[0]):
+                            elif choices and _choice_has_streamed_output(choices[0]):
                                 content = choices[0]["delta"].get("content")
                                 # First token
                                 if not first_chunk_received:
@@ -519,6 +528,9 @@ async def async_request_openai_chat_completions(
                 if stream_error is not None:
                     output.success = False
                     output.error = stream_error
+                elif server_aborted:
+                    output.success = False
+                    output.error = "Server aborted the request."
                 elif not first_chunk_received:
                     output.success = False
                     output.error = (

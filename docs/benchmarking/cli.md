@@ -181,7 +181,8 @@ P99 ITL (ms):                            8.39
 
 For the `openai`, `vllm`, and `openai-chat` backends, a successful streaming
 request must produce output and end with the `[DONE]` sentinel, without an
-in-stream error. HTTP 200 alone does not establish success: a stream that
+in-stream error or explicit server abort (`finish_reason: "abort"`). HTTP 200
+alone does not establish success: a stream that
 closes after partial output, even after a finish reason or usage chunk, is
 reported as failed when `[DONE]` is missing. Such requests are excluded from
 successful-request latency and throughput statistics. Reaching the requested
