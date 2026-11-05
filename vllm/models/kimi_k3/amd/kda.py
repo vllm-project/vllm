@@ -344,12 +344,10 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-    def process_weights_after_loading(self) -> None:
-        if not is_weights_pre_processed():
-            self.refresh_derived_weights()
-
     @torch.no_grad()
-    def refresh_derived_weights(self) -> None:
+    def process_weights_after_loading(self) -> None:
+        if is_weights_pre_processed():
+            return
         if self.decode_conv1d_weight is not None:
             self.decode_conv1d_weight.copy_(
                 self.conv1d.weight.view(
