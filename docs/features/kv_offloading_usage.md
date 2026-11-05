@@ -296,7 +296,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
-| `accelerated` | no | `""` | Set to `"true"` to use the NIXL OBJ accelerated engine (S3 over RDMA via NVIDIA cuObject). Requires an RDMA-capable endpoint and a NIXL build with the OBJ accelerated engine; see the NIXL OBJ README. |
+| `accelerated` | no | `""` | Set to `"true"` to use the NIXL OBJ accelerated engine (S3 over RDMA via NVIDIA cuObject). Requires an RDMA-capable endpoint and a NIXL build that includes [ai-dynamo/nixl#2369](https://github.com/ai-dynamo/nixl/pull/2369), which is not in a NIXL release yet (tested with NIXL `main` at `2ff2509f`); see the NIXL OBJ README. |
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 
