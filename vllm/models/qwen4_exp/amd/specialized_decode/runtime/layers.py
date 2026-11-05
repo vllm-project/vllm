@@ -76,10 +76,15 @@ def _unused() -> dict:
 class Launcher:
     """Per-rank launch state and the launches of every layer of a step."""
 
-    def __init__(self, model, widths, tp: int, rank: int, group, dev):
+    def __init__(
+        self, model, widths, tp: int, rank: int, group, dev, verify: bool = False
+    ):
         from vllm.models.qwen4_exp.amd.specialized_decode.runtime.peer import PeerBuffer
 
         self.model, self.widths, self.tp, self.rank = model, widths, tp, rank
+        # MTP: every step a verify step, a GDN layer two launches (gdn_front,
+        # gdn_back) around vLLM's GDN core
+        self.verify = verify
         # zeroed: the MoE's split-unit marks are compared against step tags
         self.scratch = torch.zeros(
             K.scratch_bytes(max(widths)), dtype=torch.uint8, device=dev
@@ -115,7 +120,8 @@ class Launcher:
         )
         self.args = [self._static_args(ly) for ly in model.layers]
         self.launches = sum(
-            2 if ly.layer_type != "linear_attention" else 1 for ly in model.layers
+            2 if ly.layer_type != "linear_attention" or verify else 1
+            for ly in model.layers
         )
         if self.launches % 2:
             raise ValueError(
@@ -192,6 +198,12 @@ class Launcher:
             trace=self.traced,
             allreduce=self.allreduce,
         )
+        if layer.layer_type == "linear_attention" and self.verify:
+            out_shuffled = bool(mxfp4_shuffled(layer.linear_attn.out_proj))
+            return [
+                K.LayerBuild(kind="gdn_front", stats=stats, **common),
+                K.LayerBuild(kind="gdn_back", out_shuffled=out_shuffled, **common),
+            ]
         if layer.layer_type == "linear_attention":
             g = layer.linear_attn
             return [
@@ -217,6 +229,45 @@ class Launcher:
         a["sync_next"] = self.slots[(seq + 1) % 2]
         K.run(key, a)
         return seq + 1
+
+
+def gdn_verify_core(a, x) -> torch.Tensor:
+    """``QwenGatedDeltaNetAttention.forward_hip`` up to out_proj's input on an
+    MTP verify step (vLLM's GDN core applies the spec-decode metadata: each
+    draft's state slot, the accepted-token offsets) -> core [S, NV HD] bf16,
+    the gdn_back launch's input; the gated norm as the stock forward runs it."""
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        _encode_layer_name,
+    )
+
+    n = x.size(0)
+    qkvz, _ = a.in_proj_qkvz(x)
+    ba, _ = a.in_proj_ba(x)
+    heads = a.num_v_heads // a.tp_size
+    core = x.new_empty(n, heads, a.head_v_dim)
+    z = torch.empty_like(core)
+    torch.ops.vllm.qwen_gdn_attention_core(
+        qkvz.view(n, -1),
+        ba.view(n, -1),
+        z,
+        core,
+        layer_name=_encode_layer_name(a.prefix),
+        use_aiter=True,
+    )
+    return a.norm(core, z).reshape(n, -1).contiguous()
+
+
+def per_row(block_table, token_to_req, positions):
+    """A verify step's sparse attention arguments a row at a time: (block
+    table rows, request index of each row, causal lengths). A request's rows
+    are consecutive tokens; each attends up to its own position, not the
+    request's last draft."""
+    rows = token_to_req.size(0)
+    return (
+        block_table.index_select(0, token_to_req.long()),
+        torch.arange(rows, dtype=torch.int32, device=token_to_req.device),
+        (positions + 1).to(torch.int32),
+    )
 
 
 def _wide_qsa(attn) -> bool:
@@ -309,7 +360,9 @@ def _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp):
     )
 
 
-def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]:
+def qsa_core(
+    attn, x, qkv, ixqk, positions, verify: bool = False
+) -> tuple[torch.Tensor, torch.Tensor]:
     """``Qwen4ExpQSAAttention.forward`` up to the output gate (the qsa_back
     launch applies it to o_proj's input) -> (attention output [S, heads HD],
     gate [S, heads HD]). ``qkv`` and ``ixqk``: ``attn.qkv_proj(x)`` and
@@ -319,7 +372,9 @@ def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]
     selects them (the decode top-k's set; a row within the budget takes all
     of its blocks unscored), and ``wide.attention`` attends their tokens in
     place (other cache formats run vLLM's whole QSA; other ropes or metadata
-    vLLM's prepare)."""
+    vLLM's prepare). ``verify``: an MTP verify step, which runs vLLM's
+    prepare and whose rows attend causally within their request
+    (``per_row``)."""
     from vllm.models.qwen4_exp.amd import qsa
 
     n = x.shape[0]
@@ -334,7 +389,11 @@ def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]
         comp = cast(QSAIndexerMetadata, md[ix.compressed_key_cache.prefix])
         rows = raw.num_actual_tokens
         query = torch.empty_like(out)
-        prep = _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp)
+        # the fused prepare pools a group from the ring's earlier keys: a
+        # verify step's other rows of the request write them in the same launch
+        prep = None
+        if not verify:
+            prep = _prep(attn, rows, qkv, ixqk, query, gate, positions, main, raw, comp)
         q_ix = None
         if prep is None:
             q_raw, raw_keys = ixqk[:rows].split(
@@ -371,13 +430,18 @@ def qsa_core(attn, x, qkv, ixqk, positions) -> tuple[torch.Tensor, torch.Tensor]
             selected=blocks,
             prep=prep,
         )
+        table, reqs, lens = main.block_table, token_to_req, comp.seq_lens
+        if verify:
+            table, reqs, lens = per_row(
+                table, token_to_req, comp.logical_positions[:rows]
+            )
         attention.sparse_attention(
             query[:rows],
             attn.kv_cache,
             blocks,
-            main.block_table,
-            token_to_req,
-            comp.seq_lens,
+            table,
+            reqs,
+            lens,
             ix.compress_ratio,
             out[:rows],
             dense=True,

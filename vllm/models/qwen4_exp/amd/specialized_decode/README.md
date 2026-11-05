@@ -52,6 +52,16 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
   Runner V2, FULL CUDA graphs for decode (PIECEWISE steps run vLLM's forward);
 - pure decode of 1-128 rows (graph padding rows are inert: their GDN state
   slot is the null block);
+- MTP (`--speculative-config '{"method": "mtp", "num_speculative_tokens": N}'`):
+  pure verify steps of whole requests, N + 1 consecutive tokens each, at the
+  capture sizes in 1-128 that are multiples of N + 1 (at N = 3, up to 32
+  requests). A GDN layer runs as two launches, `gdn_front` (attn mix → x)
+  and `gdn_back` (out_proj onwards), around vLLM's in_proj, GDN core (on the
+  spec-decode metadata) and gated norm; a QSA layer runs vLLM's prepare
+  (the fused one pools a group from keys the request's other rows write in
+  the same launch) and attends causally within the request. The drafter
+  reads the state before the final mixer, which the step leaves where the
+  stock forward does;
 - the checkpoint's shapes (`wide/layout.py`, `SHAPES`) and formats: online
   MXFP4 GDN projections (`--quantization-config.targets` for
   `linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) on either AITER FP4
@@ -66,7 +76,9 @@ a layer, up to ~80 rows on one; uniform: ~470), so the schedule
 Default-deny, in three stages, each reporting every reason in one error
 (`runtime/__init__.py`, `runtime/guards.py`): the config (TP other than 2,
 PP, DP, EP, EPLB, DCP, PCP, DBO, HC/MoE sequence parallelism, LoRA, KV
-connectors, routed-expert capture, speculative decoding, sleep mode, CPU
+connectors, routed-expert capture, speculative decoding other than MTP, more
+than 127 speculative tokens, adaptive verification, dynamic speculative
+decoding, MTP without AITER's Triton GDN kernels, sleep mode, CPU
 weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
 an unfused shared expert, the V1 runner, `STOCK_TORCH_COMPILE`, other model
 shapes, no capture size in 1-128, a platform other than unpartitioned

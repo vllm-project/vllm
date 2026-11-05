@@ -23,7 +23,15 @@ around vLLM's attention (``wide.layer``):
 The PLE layer, the final mixer and the embedding stay vLLM's. The kernels keep
 the multi-stream state materialized (stock defers each combine to the next
 mix, with the same bf16 rounding), so the PLE layer and the final mixer read a
-plain state."""
+plain state.
+
+With MTP every planned step is a verify step of whole requests,
+num_speculative_tokens + 1 consecutive tokens each. A GDN layer runs gdn_front
+(attn mix -> x), vLLM's in_proj, GDN core (on the spec-decode metadata) and
+gated norm (``gdn_verify_core``), then gdn_back (out_proj onwards); a QSA
+layer runs vLLM's prepare and attends causally within each request
+(``qsa_core``). The drafter's input, the state before the final mixer, goes
+to the buffer the stock forward fills."""
 
 from typing import Any, NamedTuple
 
@@ -44,6 +52,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.layers import (
     Launcher,
+    gdn_verify_core,
     qsa_core,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.routing import step_reason
@@ -55,10 +64,12 @@ logger = init_logger(__name__)
 
 
 class Step(NamedTuple):
-    """A planned step: ``width`` rows, one decode token a request."""
+    """A planned step: ``width`` rows, one decode token a request, or (MTP,
+    ``verify``) whole requests of num_speculative_tokens + 1 rows."""
 
     width: int
     attn_metadata: dict[str, Any]  # by layer name
+    verify: bool = False
 
 
 def agree(reasons: list[str], group, what: str) -> None:
@@ -89,7 +100,13 @@ class SpecializedDecode:
         )
         dev = model.embed_tokens.weight.device
         self.launch = Launcher(
-            model, config.widths, tp.world_size, tp.rank_in_group, tp.cpu_group, dev
+            model,
+            config.widths,
+            tp.world_size,
+            tp.rank_in_group,
+            tp.cpu_group,
+            dev,
+            verify=config.q > 1,
         )
         builds = sorted({k for s in config.widths for k in self._keys(s)}, key=repr)
         for key in builds:
@@ -107,11 +124,12 @@ class SpecializedDecode:
         self.counted_event: torch.cuda.Event | None = None
         self.counted_at = 0
         logger.info(
-            "%s: %d layers, widths %s, %d builds, %d launches a step, %s TP "
+            "%s: %d layers, widths %s%s, %d builds, %d launches a step, %s TP "
             "all-reduce lines; other steps run vLLM's decode",
             NAME,
             len(model.layers),
             ",".join(map(str, config.widths)),
+            f" (MTP verify steps of {config.q} rows a request)" if config.q > 1 else "",
             len(builds),
             self.launch.launches,
             self.launch.allreduce,
@@ -144,7 +162,11 @@ class SpecializedDecode:
         if self._kv_key() is None:
             return
         tp = get_tp_group()
-        agree(cache_reasons(self.model, tp.world_size), tp.cpu_group, "the KV caches")
+        agree(
+            cache_reasons(self.model, tp.world_size, self.config.q),
+            tp.cpu_group,
+            "the KV caches",
+        )
         self.launch.bind_caches()
         self._kv = self._kv_key()
 
@@ -163,7 +185,8 @@ class SpecializedDecode:
           graphs, and taking one would leave them uncaptured for the prefills
           of that size;
         - widths without a build (``DecodeConfig.widths``);
-        - steps that are not pure decode steps (``step_reason``).
+        - steps that are not pure decode steps, with MTP not pure verify steps
+          of whole uniform requests (``step_reason``).
 
         Eager steps of a built width run the kernels too. Every predicate is the
         same on all TP ranks: the kernels' exchanges need every rank on one
@@ -178,7 +201,8 @@ class SpecializedDecode:
         if width not in self.config.widths:
             return None
         md = get_forward_context().attn_metadata
-        if step_reason(md, self.gdn_prefix, width) is not None:
+        q = self.config.q
+        if step_reason(md, self.gdn_prefix, width, q) is not None:
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:
@@ -187,7 +211,7 @@ class SpecializedDecode:
                 "(ModelState.initialize_kv_cache)"
             )
         logger.info_once("%s: first specialized step (%d rows)", NAME, width)
-        return Step(width, md)
+        return Step(width, md, q > 1)
 
     def run(
         self,
@@ -215,7 +239,11 @@ class SpecializedDecode:
                 stats = True
             keys = la.keys(layer, rows, stats)
             dyn = {"state": state, "x": x}
-            if layer.layer_type == "linear_attention":
+            if layer.layer_type == "linear_attention" and step.verify:
+                seq = la.launch(keys[0], i, seq, dyn)
+                core = gdn_verify_core(layer.linear_attn, x)
+                seq = la.launch(keys[1], i, seq, dyn | {"attn": core})
+            elif layer.layer_type == "linear_attention":
                 dyn["st_idx"] = md[
                     layer.linear_attn.prefix
                 ].non_spec_state_indices_tensor
@@ -223,10 +251,17 @@ class SpecializedDecode:
             else:
                 seq = la.launch(keys[0], i, seq, dyn)
                 attn, gate = qsa_core(
-                    layer.self_attn, x, la.qkv[:rows], la.ixqk[:rows], positions
+                    layer.self_attn,
+                    x,
+                    la.qkv[:rows],
+                    la.ixqk[:rows],
+                    positions,
+                    step.verify,
                 )
                 seq = la.launch(keys[1], i, seq, dyn | {"attn": attn, "gate": gate})
             stats = False
+        if model._mtp_hidden_buffer is not None:
+            model._mtp_hidden_buffer[: state.size(0)].copy_(state)
         _, h, _ = model.hyper_connection_mixer.mix(state)
         return h
 

@@ -304,7 +304,8 @@ class KernelConfig:
     MonoKernel: persistent kernels that run most or all of one decoder layer
     in one or a few launches (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
     MI355X; Qwen3.8-Flash-Next MXFP4 on MI355X with tensor parallel size 2, for
-    decode steps of 1-128 requests; Muse Spark MXFP4 on MI355X with tensor
+    decode steps of 1-128 rows, with MTP verify steps of whole requests;
+    Muse Spark MXFP4 on MI355X with tensor
     parallel size 8, expert parallelism and a 7-token DSpark draft, for
     speculative verify steps of 1-16 requests, with bf16 MoE activations instead
     of the checkpoint's MXFP4). A deployment that cannot run it is refused at

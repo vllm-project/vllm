@@ -1588,6 +1588,84 @@ def test_decode_widths_take_every_capture_size():
             LayerBuild(kind="gdn", tokens=rows, tp=2)
 
 
+def test_mtp_widths_hold_whole_requests():
+    """With MTP every planned step is a verify step of whole requests: the
+    builds are the capture sizes that are multiples of
+    num_speculative_tokens + 1."""
+    from types import SimpleNamespace
+
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime import (
+        decode_widths,
+        verify_rows,
+    )
+
+    sizes = [1, 2, 3, 4, 8, 12, 16, 24, 32, 64, 128, 136, 256]
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_capture_sizes=sizes),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
+    assert verify_rows(config) == 4
+    assert decode_widths(config, 4) == (4, 8, 12, 16, 24, 32, 64, 128)
+    assert decode_widths(config, 3) == (3, 12, 24)
+    assert verify_rows(SimpleNamespace(speculative_config=None)) == 1
+
+
+def _gdn_md(**kw):
+    from types import SimpleNamespace
+
+    md = dict(
+        num_prefills=0,
+        num_decodes=0,
+        num_spec_decodes=2,
+        spec_sequence_masks=torch.ones(2, dtype=torch.bool),
+        uniform_spec_sequence_length=4,
+        spec_state_indices_tensor=torch.zeros(2, 4, dtype=torch.int32),
+        non_spec_state_indices_tensor=None,
+    )
+    md.update(kw)
+    return {"gdn": SimpleNamespace(**md)}
+
+
+@pytest.mark.parametrize(
+    "md, width, q, reason",
+    [
+        (_gdn_md(), 8, 4, None),
+        (_gdn_md(), 12, 4, "not uniform"),
+        (_gdn_md(uniform_spec_sequence_length=None), 8, 4, "not uniform"),
+        (_gdn_md(num_decodes=1), 8, 4, "not pure verify"),
+        (_gdn_md(num_prefills=1), 8, 4, "not pure decode"),
+        (
+            _gdn_md(num_spec_decodes=0, spec_sequence_masks=None),
+            8,
+            4,
+            "not spec-verify",
+        ),
+        (_gdn_md(), 8, 1, "spec-verify"),
+    ],
+)
+def test_verify_routing(md, width, q, reason):
+    """With MTP the kernels take pure verify steps of whole uniform requests
+    filling the width; without, no verify step."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.routing import (
+        step_reason,
+    )
+
+    assert step_reason(md, "gdn", width, q) == reason
+
+
+@pytest.mark.parametrize("rows", [4, 16, 128])
+def test_verify_builds(rows):
+    """gdn_front and gdn_back, a verify step's GDN launches, compile at
+    verify widths in both all-reduce codecs."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import layer as K
+
+    for codec in ("bf16", "int4"):
+        for kind, extra in (("gdn_front", {"stats": True}), ("gdn_back", {})):
+            key = K.LayerBuild(kind=kind, tokens=rows, tp=2, allreduce=codec, **extra)
+            K.compile_only(key)
+            assert K.phase_names(key)
+
+
 @pytest.mark.parametrize(
     "level, codec",
     [
@@ -1672,6 +1750,74 @@ def test_qsa_sparse_attention(rows):
     )
     if pad is not None:
         assert out[pad].abs().max().item() == 0
+    assert rel(out.float(), expect) < 1e-2
+
+
+@pytest.mark.parametrize("q", [2, 4])
+def test_qsa_sparse_attention_verify(q):
+    """An MTP verify step's rows through ``per_row``: each row of a request
+    attends up to its own position (a causal tail inside the request's
+    drafts), against float64 softmax attention; the requests' contexts end
+    inside a block, on a block edge and past the 2048-token budget."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.layers import per_row
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention
+
+    gen = torch.Generator().manual_seed(q)
+    page, heads, hd, top, ratio = 96, 12, 256, 512, 4
+    seq_lens = [37, 2049, 4097]  # the requests' lengths with all q drafts
+    reqs = len(seq_lens)
+    rows = reqs * q
+    pages_per_req = -(-max(seq_lens) // page)
+    blocks = reqs * pages_per_req + 1
+    stride = page * 2 * hd + 4096
+    pool = torch.randn(blocks * stride, generator=gen).to(torch.bfloat16)
+    kv = pool.as_strided((blocks, 1, page, 2 * hd), (stride, page * 2 * hd, 2 * hd, 1))
+    table = (
+        torch.randperm(blocks - 1, generator=gen)[: reqs * pages_per_req] + 1
+    ).view(reqs, -1)
+    t2r = torch.arange(reqs, dtype=torch.int32).repeat_interleave(q)
+    positions = torch.tensor(
+        [s - q + j for s in seq_lens for j in range(q)], dtype=torch.int64
+    )
+    sel = torch.full((rows, top), -1, dtype=torch.int32)
+    for r in range(rows):
+        complete = (int(positions[r]) + 1) // ratio
+        sel[r, : min(complete, top)] = torch.randperm(complete, generator=gen)[
+            :top
+        ].int()
+    qv = (torch.randn(rows, heads, hd, generator=gen) * 0.5).to(torch.bfloat16)
+
+    expect = torch.zeros(rows, heads, hd, dtype=torch.float64)
+    for r in range(rows):
+        c = int(positions[r]) + 1
+        chosen = sel[r][sel[r] >= 0].long()
+        t = torch.cat(
+            [
+                (chosen[:, None] * ratio + torch.arange(ratio)).flatten(),
+                torch.arange(c // ratio * ratio, c),
+            ]
+        )
+        rec = kv[table[t2r[r]][t // page], 0, t % page].double()
+        k, v = rec[:, :hd], rec[:, hd:]
+        p = torch.softmax(qv[r].double() @ k.T / hd**0.5, dim=-1)
+        expect[r] = p @ v
+
+    dev = torch.device("cuda")
+    row_table, row_req, row_len = per_row(
+        table.int().to(dev).contiguous(), t2r.to(dev), positions.to(dev)
+    )
+    out = torch.empty(rows, heads, hd, dtype=torch.bfloat16, device=dev)
+    attention.sparse_attention(
+        qv.to(dev),
+        pool.to(dev).as_strided(kv.shape, kv.stride()),
+        sel.to(dev),
+        row_table,
+        row_req,
+        row_len,
+        ratio,
+        out,
+        dense=True,
+    )
     assert rel(out.float(), expect) < 1e-2
 
 

@@ -23,15 +23,29 @@ NAME = "Qwen3.8-Flash-Next specialized decode (--monokernel)"
 @dataclass(frozen=True)
 class DecodeConfig:
     """``widths``: the step widths (rows) the wide kernels are built for, the
-    deployment's CUDA graph capture sizes in [MIN_TOKENS, MAX_TOKENS]; a step
-    of another width runs vLLM's decode."""
+    deployment's CUDA graph capture sizes in [MIN_TOKENS, MAX_TOKENS] (with
+    MTP, the multiples of ``q``); a step of another width runs vLLM's decode.
+    ``q``: the rows a request decodes a step, 1, or with MTP
+    num_speculative_tokens + 1 (every planned step is then a verify step)."""
 
     widths: tuple[int, ...]
+    q: int = 1
 
 
-def decode_widths(vllm_config) -> tuple[int, ...]:
+def decode_widths(vllm_config, q: int = 1) -> tuple[int, ...]:
     sizes = vllm_config.compilation_config.cudagraph_capture_sizes or ()
-    return tuple(sorted(s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS))
+    return tuple(
+        sorted(
+            s for s in set(sizes) if L.MIN_TOKENS <= s <= L.MAX_TOKENS and s % q == 0
+        )
+    )
+
+
+def verify_rows(vllm_config) -> int:
+    """Rows a request decodes a step: num_speculative_tokens + 1 with
+    speculative decoding, else 1."""
+    spec = vllm_config.speculative_config
+    return 1 if spec is None else spec.num_speculative_tokens + 1
 
 
 def specialized_decode_config(vllm_config) -> DecodeConfig | None:
@@ -41,11 +55,13 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
     if not vllm_config.kernel_config.monokernel:
         return None
     reasons = unsupported(vllm_config)
-    widths = decode_widths(vllm_config)
+    q = verify_rows(vllm_config)
+    widths = decode_widths(vllm_config, q)
     if not widths:
         reasons.append(
-            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS}: the wide "
-            "kernels serve FULL decode graphs of those widths"
+            f"no CUDA graph capture size in {L.MIN_TOKENS}-{L.MAX_TOKENS}"
+            + (f" divisible by {q}" if q > 1 else "")
+            + ": the wide kernels serve FULL decode graphs of those widths"
         )
     if reasons:
         raise ValueError(
@@ -58,7 +74,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
             "use FULL decode graphs",
             NAME,
         )
-    return DecodeConfig(widths=widths)
+    return DecodeConfig(widths=widths, q=q)
 
 
 def unsupported(vllm_config) -> list[str]:
@@ -82,7 +98,7 @@ def unsupported(vllm_config) -> list[str]:
         vllm_config.parallel_config,
         vllm_config.cache_config,
     )
-    oc = vllm_config.offload_config
+    spec, oc = vllm_config.speculative_config, vllm_config.offload_config
     checks = (
         (
             pc.tensor_parallel_size != L.TP,
@@ -114,8 +130,29 @@ def unsupported(vllm_config) -> list[str]:
             "CPU weight offload",
         ),
         (vllm_config.weight_transfer_config is not None, "weight updates"),
-        # the GDN phase runs plain decode rows, one token a request
-        (vllm_config.speculative_config is not None, "speculative decoding"),
+        # a verify step runs whole uniform requests of num_speculative_tokens + 1
+        # rows; the drafter reads the pre-mixer state the MTP method keeps
+        (
+            spec is not None and spec.method != "mtp",
+            f"speculative decoding method {getattr(spec, 'method', None)!r} (MTP only)",
+        ),
+        (
+            spec is not None and spec.num_speculative_tokens + 1 > L.MAX_TOKENS,
+            f"more than {L.MAX_TOKENS - 1} speculative tokens",
+        ),
+        (
+            spec is not None and spec.enable_adaptive_verification,
+            "adaptive verification",
+        ),
+        (
+            spec is not None and spec.uses_dynamic_speculative_decoding(),
+            "dynamic speculative decoding",
+        ),
+        # a verify step's GDN layers run vLLM's GDN core on AITER's Triton path
+        (
+            spec is not None and not gdn_aiter_triton_available(),
+            "MTP without AITER's Triton GDN kernels",
+        ),
         # the GDN phase reads and writes one state slot a request in place
         (
             cc.mamba_cache_mode != "none",
@@ -171,6 +208,14 @@ def unsupported(vllm_config) -> list[str]:
     if layers > L.MAX_LAYERS:
         reasons.append(f"{layers} decoder layers (at most {L.MAX_LAYERS})")
     return reasons + platform_reasons()
+
+
+def gdn_aiter_triton_available() -> bool:
+    from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+        GDN_AITER_TRITON_AVAILABLE,
+    )
+
+    return GDN_AITER_TRITON_AVAILABLE
 
 
 def text_shapes(text) -> tuple:

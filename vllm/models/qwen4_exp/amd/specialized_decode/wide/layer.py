@@ -11,6 +11,13 @@ QSA layer around vLLM's attention (``LayerBuild.kind``):
                (vLLM's QSA attention follows)
     qsa_back   o_proj (gated) -> TP exchange -> attn combine -> the MLP half
 
+An MTP verify step splits a GDN layer around vLLM's GDN core, which applies
+the spec-decode metadata (each draft's state slot, the accepted tokens):
+
+    gdn_front  [stats] attn mix -> x
+               (vLLM's in_proj, GDN core and gated norm follow)
+    gdn_back   out_proj -> TP exchange -> attn combine -> the MLP half
+
 Phases are separated by grid barriers; an exchange's readers wait on its line
 flags instead. Up to ``tiled.RESIDENT_MAX`` rows a mix is one phase and so is
 GDN proj -> out_proj -> attn combine: their hand-offs are tagged pairs
@@ -67,7 +74,8 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import qsa as qsa_
 
-KINDS = ("gdn", "qsa_front", "qsa_back")
+KINDS = ("gdn", "qsa_front", "qsa_back", "gdn_front", "gdn_back")
+BACKS = ("qsa_back", "gdn_back")  # a layer's second launch
 ATTN, MLP = 0, 1  # a layer's two exchanges
 
 
@@ -155,7 +163,7 @@ def phase_names(key) -> list[str]:
     mix = lambda t: [f"{t}.{p}" for p in parts]  # noqa: E731
     mlp = mix("mlp") + moe.phase_names(key.tokens)
     out = ["start"] + (["stats"] if key.stats else [])
-    if key.kind != "qsa_back":
+    if key.kind not in BACKS:
         out += mix("attn")
     if key.kind == "qsa_front":
         out += ["qsa_proj"]
@@ -164,7 +172,7 @@ def phase_names(key) -> list[str]:
         if tiled.resident(key.tokens):
             gdn_ = ["gdn+out+allreduce+combine"]  # one phase (tagged hand-offs)
         out += gdn_ + mlp
-    if key.kind == "qsa_back":
+    if key.kind in BACKS:
         out += ["out+allreduce+combine"] + mlp
     return out
 
@@ -365,7 +373,7 @@ def build(key: LayerBuild):
             own = (rank == r).select(bases[r], own)
         ep = ld(epoch, 0, fx.Int32)
         names: list[str] = []
-        first = TRACE_BACK if key.kind == "qsa_back" else 0
+        first = TRACE_BACK if key.kind in BACKS else 0
 
         def stamp(name):
             if const_expr(key.trace):
@@ -548,6 +556,15 @@ def build(key: LayerBuild):
                 source = tiled.Source(scr.core, VALUE_DIM)  # type: ignore[assignment]
                 name = "out+allreduce+combine"
             mlp_half(back(out_w, source, VALUE_DIM, pending, name))
+        if const_expr(key.kind == "gdn_front"):
+            mix("attn", ATTN, a_norm, a_di, a_up, scr.inj_a, down_w)
+        if const_expr(key.kind == "gdn_back"):
+            pending = back(
+                tiled.Fp4Weights(w_out, w_out_s, HIDDEN, VALUE_DIM, key.out_shuffled),
+                tiled.Source(attn, VALUE_DIM),
+                VALUE_DIM,
+            )
+            mlp_half(pending)
         if const_expr(key.kind == "qsa_back"):
             pending = back(
                 tiled.Bf16Weights(w_out, HIDDEN, QSA_CORE),
