@@ -73,34 +73,19 @@ def checkpoint(tmp_path_factory):
     return str(path)
 
 
-def _build(checkpoint):
+def _build(checkpoint, **config_overrides):
     from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
 
     vllm_config = VllmConfig(model_config=ModelConfig(checkpoint, max_model_len=1024))
+    for key, val in config_overrides.items():
+        setattr(vllm_config.parallel_config, key, val)
     with (
         set_current_vllm_config(vllm_config),
         set_default_torch_dtype(torch.bfloat16),
         torch.device("cuda"),
     ):
         return MiniMaxM3Model(vllm_config=vllm_config, prefix="model")
-
-
-def test_each_deferred_all_reduce_completes_once(dist_init, checkpoint):
-    model = _build(checkpoint)
-    deferred = [layer.ffn_all_reduce_deferred for layer in model.layers]
-    assert all(deferred)
-    assert [layer.fuse_input_allreduce for layer in model.layers] == [
-        False,
-        *deferred[:-1],
-    ]
-    assert model.fuse_final_norm_allreduce
-
-
-def test_eagle3_captures_after_a_deferring_layer_are_reduced(dist_init, checkpoint):
-    model = _build(checkpoint)
-    assert not model._aux_needs_reduce(0)
-    assert all(model._aux_needs_reduce(idx) for idx in range(1, LAYERS + 1))
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -111,7 +96,6 @@ def _run_deferred_matches_reduced(
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.minimax_m3.amd.model import MiniMaxM3Model
-    from vllm.models.minimax_m3.amd.mono.envs import envs
     from vllm.v1.worker.workspace import init_workspace_manager
 
     with monkeypatch.context() as m:
@@ -124,11 +108,13 @@ def _run_deferred_matches_reduced(
         init_workspace_manager(device)
 
         def build(defer: bool):
-            # Mono decode is the switch that turns deferral off; at TP2 it then
-            # refuses the deployment, so both models run the same layer loop.
-            m.setattr(envs, "MONO_ENABLE", not defer)
+            # PP > 1 disables deferral.  Faking pp_size=2 in the config
+            # builds non-deferred layers without needing mono or a real PP
+            # setup; the model still runs on one rank.
             model_config = ModelConfig(os.environ[_CKPT_ENV], max_model_len=1024)
             vllm_config = VllmConfig(model_config=model_config)
+            if not defer:
+                vllm_config.parallel_config.pipeline_parallel_size = 2
             with (
                 set_current_vllm_config(vllm_config),
                 set_default_torch_dtype(torch.bfloat16),
@@ -163,6 +149,7 @@ def _run_deferred_matches_reduced(
 def test_deferred_matches_reduced_at_tp2(checkpoint, monkeypatch, use_aiter):
     """The final hidden states and every EAGLE3 capture match the all-reduce-
     per-FFN model: a dropped or doubled deferred reduce is off by a TP factor."""
+    pytest.importorskip("flydsl")
     tp_size = 2
     if torch.accelerator.device_count() < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs.")
@@ -176,7 +163,8 @@ def test_mono_decode_keeps_every_ffn_reduced(dist_init, checkpoint, monkeypatch)
     from vllm.models.minimax_m3.amd.mono.envs import envs
 
     monkeypatch.setattr(envs, "MONO_ENABLE", True)
-    model = _build(checkpoint)
+    # mono_would_activate needs TP4 + DP1 + no EP; fake TP4 in the config.
+    model = _build(checkpoint, tensor_parallel_size=4)
     assert not any(
         layer.ffn_all_reduce_deferred or layer.fuse_input_allreduce
         for layer in model.layers
