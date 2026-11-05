@@ -55,6 +55,8 @@ class DraftContextState:
     deduplicate_contexts_max_history: int | None
     all_token_ids: torch.Tensor | None = None
     total_lens: torch.Tensor | None = None
+    uncommitted_ring: torch.Tensor | None = None
+    uncommitted_state: torch.Tensor | None = None
 
 
 class Watermarker(ABC):
