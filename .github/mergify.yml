@@ -160,7 +160,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=(?i)llama
+      - files~=(?i)(?:^|[/_.-])m?llama(?!(?:index|stack))
       - title~=(?i)llama
   actions:
     label:
@@ -186,7 +186,7 @@ pull_request_rules:
   conditions:
     - label != stale
     - or:
-      - files~=(?i)(?:mistral|voxtral|mixtral|pixtral)
+      - files~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
       - title~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
   actions:
     label:
