@@ -367,6 +367,7 @@ def test_phase_split_without_phase_returns_kernel() -> None:
     [
         ("batch_invariant", "VLLM_BATCH_INVARIANT"),
         ("capture_sizes", "largest CUDA graph capture size 16"),
+        ("decoder_replay_sizes", "largest CUDA graph capture size 16"),
         ("data_parallel", "does not support data parallelism"),
         ("elastic_ep", "does not support data parallelism"),
         ("encoder_cudagraphs", "encoder CUDA graphs"),
@@ -382,6 +383,8 @@ def test_phase_split_rejects_unsafe_configs(
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     elif setting == "capture_sizes":
         vllm_config.compilation_config.cudagraph_capture_sizes = [8, 16]
+    elif setting == "decoder_replay_sizes":
+        vllm_config.compilation_config.decoder_replay_cudagraph_capture_sizes = [16]
     elif setting == "data_parallel":
         vllm_config.parallel_config.data_parallel_size = 2
     elif setting == "elastic_ep":

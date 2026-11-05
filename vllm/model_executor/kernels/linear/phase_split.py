@@ -129,7 +129,14 @@ def _check_phase_split_config(phase: PhaseSpec, option: str) -> None:
         )
     if not shares_scale:
         return
-    max_capture_size = max(config.compilation_config.cudagraph_capture_sizes or [0])
+    compilation = config.compilation_config
+    max_capture_size = max(
+        [
+            *(compilation.cudagraph_capture_sizes or []),
+            *compilation.decoder_replay_cudagraph_capture_sizes,
+        ],
+        default=0,
+    )
     if decode != prefill and prefill == kNvfp4DynamicTensor:
         assert phase.max_decode_tokens is not None
         if phase.max_decode_tokens < max_capture_size:

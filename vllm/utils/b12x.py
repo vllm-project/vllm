@@ -187,9 +187,9 @@ def plan_b12x_linear(
     """Declare every serving shape of a packed b12x linear weight, with the
     activation precision ``phase`` gives each call; None keeps BF16
     activations. An undeclared token count is prepared on first use, and that
-    preparation evicts kernels other layers compiled earlier in the same
-    forward, which then fails CUDA graph capture. ``previous`` is returned when
-    nothing changed, e.g. on a weight reload."""
+    preparation evicts kernels compiled earlier, including ones already
+    captured in CUDA graphs. ``previous`` is returned when nothing changed, e.g.
+    on a weight reload."""
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
@@ -215,6 +215,13 @@ def plan_b12x_linear(
         if cutoff is not None and cutoff >= capacity and not decode:
             # Every planned call is a decode call; larger ones run in
             # capacity-sized chunks, so prefill never quantizes.
+            if prefill:
+                logger.info_once(
+                    "max_decode_tokens=%d covers every step of at most %d "
+                    "tokens, so prefill activations stay unquantized",
+                    cutoff,
+                    capacity,
+                )
             prefill = False
     if decode == prefill:
         cutoff = None

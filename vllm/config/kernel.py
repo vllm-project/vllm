@@ -430,7 +430,8 @@ class KernelConfig:
     request in the step, and run the FP4 GEMM, which speeds up long prefills
     but is lossy. Outputs therefore depend on batch composition. Must be at
     least the largest CUDA graph capture size; not supported with data
-    parallelism or encoder CUDA graphs, and requires VLLM_USE_LAYERNAME=1 (the
+    parallelism (including elastic EP), encoder CUDA graphs, or client-supplied
+    prompt or multimodal embeddings, and requires VLLM_USE_LAYERNAME=1 (the
     default on torch >= 2.11). None (default) keeps BF16 activations for every
     input. Alias for
     quantization_config.linear.phase with decode "unquantized", prefill "nvfp4",

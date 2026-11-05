@@ -983,6 +983,7 @@ def test_mxfp8_phase_rejects_other_kernels_and_formats(monkeypatch, _select_b12x
     "setting,match",
     [
         ("capture_sizes", "largest CUDA graph capture size 8"),
+        ("decoder_replay_sizes", "largest CUDA graph capture size 16"),
         ("data_parallel", "does not support data parallelism"),
         ("elastic_ep", "does not support data parallelism"),
         ("encoder_cudagraphs", "encoder CUDA graphs"),
@@ -999,6 +1000,9 @@ def test_b12x_nvfp4_w4a16_a16_max_tokens_rejects_unsafe_rows(
     config.parallel_config.data_parallel_size = 2 if setting == "data_parallel" else 1
     config.parallel_config.enable_elastic_ep = setting == "elastic_ep"
     config.compilation_config.cudagraph_mm_encoder = setting == "encoder_cudagraphs"
+    config.compilation_config.decoder_replay_cudagraph_capture_sizes = (
+        [16] if setting == "decoder_replay_sizes" else []
+    )
     with pytest.raises(ValueError, match=match) as error:
         init_nvfp4_linear_kernel(use_a16=True)
     assert "kernel_config.b12x_nvfp4_w4a16_a16_max_tokens" in str(error.value)
