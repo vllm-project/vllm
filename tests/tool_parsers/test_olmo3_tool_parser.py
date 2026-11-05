@@ -68,12 +68,22 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 )
 
 
+@pytest.mark.parametrize(
+    "model_output",
+    [
+        "How can I help you today?",
+        "<p>hello",
+        "<b>bold</b>",
+        "<function> is an HTML-like tag, not a tool call.",
+    ],
+)
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
+def test_no_tool_call(
+    streaming: bool, model_output: str, default_tokenizer: TokenizerLike
+):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
         default_tokenizer
     )
-    model_output = "How can I help you today?"
 
     content, tool_calls = run_tool_extraction(
         tool_parser, model_output, streaming=streaming
