@@ -506,9 +506,6 @@ def test_mamba_resumes_from_the_last_accepted_row(seed):
 _CACHES = {
     "packed": ((None, "H", "B", "2D"), None),
     "packed_nhd": ((None, "B", "H", "2D"), (0, 2, 1, 3)),
-    "two_first": ((2, None, "B", "H", "D"), None),
-    "blocks_first": ((None, 2, "B", "H", "D"), None),
-    "heads_major": ((None, 2, "H", "B", "D"), (0, 1, 3, 2, 4)),
     "mla": ((None, "B", "D"), None),
 }
 
@@ -524,11 +521,7 @@ def _token_view(cache, kind):
     """``[planes, tokens, heads, dim]`` view of a cache by kernel-block token id."""
     if kind.startswith("packed"):
         return cache.transpose(1, 2).flatten(0, 1)[None]
-    if kind == "two_first":
-        return cache.flatten(1, 2)
-    if kind == "mla":
-        return cache.flatten(0, 1)[None, :, None, :]
-    return cache.transpose(0, 1).flatten(1, 2)
+    return cache.flatten(0, 1)[None, :, None, :]
 
 
 def _module(**attrs):
@@ -663,7 +656,7 @@ def test_kv_compactor_binds_the_layers_it_moves(case):
         modules = {"attn": _module(kv_cache=cache)}
         runner = _runner(specs, modules, kernel_block, num_blocks)
     else:
-        cache = torch.zeros(4, 2, 16, 1, 64, dtype=torch.bfloat16)
+        cache = torch.zeros(4, 1, 16, 128, dtype=torch.bfloat16)
         specs = {
             "attn": _spec(FullAttentionSpec),
             "ring": _spec(CircularBufferSpec),
@@ -697,7 +690,11 @@ def test_kv_compactor_binds_the_layers_it_moves(case):
     "cache, match",
     [
         (torch.zeros(3, 4, 5, 6), "layout"),
-        (torch.zeros(2, 8, 4, 2, 16, dtype=torch.float64), "copy"),
+        (torch.zeros(8, 2, 4, 16, dtype=torch.float64), "copy"),
+        # K/V-split views: [2, blocks, ...] and [blocks, 2, ...] read the same
+        # when there are 2 blocks, and vLLM does not give layers either.
+        (torch.zeros(2, 8, 4, 2, 16), "layout"),
+        (torch.zeros(8, 2, 4, 2, 16), "layout"),
     ],
 )
 def test_kv_cache_layout_refuses_what_it_cannot_read(cache, match):

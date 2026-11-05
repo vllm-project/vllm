@@ -62,17 +62,15 @@ def accepted_rows(result: AcceptResult, num_reqs: int) -> torch.Tensor:
 
 @dataclass(frozen=True)
 class KvCacheLayout:
-    """Where token ``t`` of head ``h`` of plane ``p`` (K or V) of one layer lives:
-    ``(t // block_size) * stride_block + (t % block_size) * stride_slot
-    + h * stride_head + p * stride_plane``, ``head_dim`` contiguous elements."""
+    """Where token ``t`` of head ``h`` of one layer lives: ``(t // block_size) *
+    stride_block + (t % block_size) * stride_slot + h * stride_head``,
+    ``head_dim`` contiguous elements."""
 
     stride_block: int
     stride_slot: int
     stride_head: int
-    stride_plane: int
     block_size: int
     num_heads: int
-    num_planes: int
     head_dim: int
     dtype: torch.dtype
 
@@ -80,56 +78,30 @@ class KvCacheLayout:
 def kv_cache_layout(kv_cache: torch.Tensor, num_blocks: int) -> KvCacheLayout:
     """The layout of a layer's KV cache tensor as the attention backend views it.
 
-    Takes the logical shapes vLLM's backends use: ``[blocks, heads, block_size,
-    content]`` (K and V packed in the content, FlashAttention, FlashInfer,
-    FlexAttention), ``[2, blocks, block_size, heads, dim]``, ``[blocks, 2,
-    block_size, heads, dim]`` and ``[blocks, block_size, dim]`` (MLA); the strides
-    are the tensor's own, so a permuted physical order is read correctly. A packed
-    content row moves whole, so it is one plane of ``content`` elements.
+    vLLM gives every paged attention layer a ``[blocks, heads, block_size,
+    content]`` view (K and V packed in the content), and MLA layers squeeze it to
+    ``[blocks, block_size, content]``; the strides are the tensor's own, so a
+    permuted physical order is read correctly. A packed content row moves whole.
     """
     shape, stride = kv_cache.shape, kv_cache.stride()
-    if kv_cache.dim() == 4 and shape[0] == num_blocks:
-        if stride[3] != 1:
-            raise NotImplementedError("KV compaction needs contiguous head dims")
-        _check_dtype(kv_cache.dtype)
-        return KvCacheLayout(
-            stride_block=stride[0],
-            stride_slot=stride[2],
-            stride_head=stride[1],
-            stride_plane=0,
-            block_size=shape[2],
-            num_heads=shape[1],
-            num_planes=1,
-            head_dim=shape[3],
-            dtype=kv_cache.dtype,
-        )
-    if kv_cache.dim() == 5 and shape[0] == 2 and shape[1] == num_blocks:
-        plane, block = 0, 1
-    elif kv_cache.dim() == 5 and shape[0] == num_blocks and shape[1] == 2:
-        block, plane = 0, 1
-    elif kv_cache.dim() == 3 and shape[0] == num_blocks:
-        if stride[2] != 1:
-            raise NotImplementedError("KV compaction needs contiguous head dims")
-        _check_dtype(kv_cache.dtype)
-        return KvCacheLayout(
-            stride[0], stride[1], 0, 0, shape[1], 1, 1, shape[2], kv_cache.dtype
-        )
-    else:
+    if kv_cache.dim() not in (3, 4) or shape[0] != num_blocks:
         raise NotImplementedError(
             f"KV compaction does not know the KV cache layout {tuple(shape)}"
         )
-    if stride[4] != 1:
+    if stride[-1] != 1:
         raise NotImplementedError("KV compaction needs contiguous head dims")
     _check_dtype(kv_cache.dtype)
+    if kv_cache.dim() == 3:
+        return KvCacheLayout(
+            stride[0], stride[1], 0, shape[1], 1, shape[2], kv_cache.dtype
+        )
     return KvCacheLayout(
-        stride_block=stride[block],
+        stride_block=stride[0],
         stride_slot=stride[2],
-        stride_head=stride[3],
-        stride_plane=stride[plane],
+        stride_head=stride[1],
         block_size=shape[2],
-        num_heads=shape[3],
-        num_planes=2,
-        head_dim=shape[4],
+        num_heads=shape[1],
+        head_dim=shape[3],
         dtype=kv_cache.dtype,
     )
 
@@ -148,23 +120,19 @@ def _compact_kv_kernel(
     stride_block,
     stride_slot,
     stride_head,
-    stride_plane,
     block_size,  # tokens per block of the cache as the backend views it
-    NUM_HEADS: tl.constexpr,
     DIM: tl.constexpr,
     DIM_P: tl.constexpr,
     DTYPE: tl.constexpr,
 ):
-    b, layer, plane_head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
-    plane = plane_head // NUM_HEADS
-    head = plane_head % NUM_HEADS
+    b, layer, head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     # The verify rows are the query's last rows, so row r sits at context + r.
     context = tl.load(seq_lens_ptr + b) - tl.load(count_ptr + b)
     base = tl.load(layer_ptrs + layer).to(tl.pointer_type(DTYPE))
     table = tl.load(table_ptrs + layer).to(tl.pointer_type(tl.int32))
     table_row = table + b * tl.load(table_strides + layer)
     table_block_size = tl.load(table_block_sizes + layer).to(tl.int64)
-    offset = head * stride_head + plane * stride_plane
+    offset = head * stride_head
     dims = tl.arange(0, DIM_P)
     # Path order: path[j] >= j, so a destination is only ever a source read earlier.
     for j in range(1, tl.load(path_len_ptr + b)):
@@ -243,11 +211,7 @@ class KvCompactor(SpecKernel):
         ``seq_lens[b]``."""
         result = step.result
         for layout, layer_ptrs, table_ptrs, table_strides, table_sizes in self.launches:
-            grid = (
-                step.num_reqs,
-                layer_ptrs.shape[0],
-                layout.num_planes * layout.num_heads,
-            )
+            grid = (step.num_reqs, layer_ptrs.shape[0], layout.num_heads)
             _compact_kv_kernel[grid](
                 layer_ptrs,
                 table_ptrs,
@@ -261,9 +225,7 @@ class KvCompactor(SpecKernel):
                 layout.stride_block,
                 layout.stride_slot,
                 layout.stride_head,
-                layout.stride_plane,
                 layout.block_size,
-                NUM_HEADS=layout.num_heads,
                 DIM=layout.head_dim,
                 DIM_P=triton.next_power_of_2(layout.head_dim),
                 DTYPE=getattr(tl, _BITS[layout.dtype.itemsize]),
