@@ -429,6 +429,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 
 // Split V over a cluster while the split grid still fits in one wave (2 CTAs
 // per SM). On B300 this picks 4 up to 2 requests and 2 at 4 requests (HV=32).
+// TODO: sweeps on B300 and H100 suggest splits still pay off up to ~3 CTAs per
+// SM. Benchmark more GPUs before raising the limit.
 int choose_split_v(int num_blocks, int device) {
   int major = 0, num_sms = 0;
   cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
