@@ -185,7 +185,7 @@ prepare_cache_tags() {
         fi
     fi
 
-    CACHE_FROM_MAIN="${MAIN_CACHE_ECR}:latest"
+    CACHE_FROM_MAIN=""  # experiment: import only this branch's caches
     export CACHE_TO CACHE_FROM CACHE_FROM_BASE_BRANCH CACHE_FROM_MAIN
 }
 
