@@ -30,11 +30,11 @@ The trainer replays a row to reproduce the computation that produced a sampled t
 
 - **Delivery is block-wise and session-scoped.** Each full KV block is written when it fills, to `<job>/<session>/<block_hash>`; at request end a tail and a manifest are written, and only then is the response sent. Release deletes the session prefix in one call (0.2–1 ms).
 - **The delivery pool doubles as the session's prefix cache (P-S).** A prefix hit is allowed only up to what the session already published, so rows for hits are always in the pool. Cross-session hits (shared system prompts) are truncated, at <1% of prefill. No engine-side row cache is needed.
-- **Flow control instead of dropping.** The writer retries until a write lands; the engine pauses scheduling on backlog; the driver caps in-flight sessions so the pool cannot fill. 0 missing rows and 0 leaked keys in every run, down to a 16 MB pool.
+- **Flow control instead of dropping.** Objects are pinned, so the store never evicts a listed row. The writer retries until a write lands, the engine pauses scheduling on backlog, and the driver caps in-flight sessions using the real bytes per token at the target context length. Every run had 0 missing rows and 0 leaked keys, down to a 16 MB pool.
 - **Engine events need explicit handling, and each was found and fixed by test.** Preemption, in-flight weight updates (`pause` + `reset_prefix_cache`), write failures, prefix hits that end mid-block, forks, and speculative decoding each break a naive implementation; the protocol lists what the engine does in each case.
 - **Verify against an independent reference.** For prefix-hit positions the engine's own inline rows are read back from the same store, so "delivered = inline" cannot see delivery errors there. Correctness is checked against each trajectory's own first computation, dumped by the engine.
 - **Sizes on DeepSeek-V4.1-Flash.** R3 480 B/token; indexer 16 KB raw, 2.5–3.6 KB after 20-bit packing and zstd; hidden ~5 KB as fp8 (full-vocabulary KL < 1e-3).
-- **At scale.** 512K context, 108 turns, 13 replicas on one shared Mooncake pool over RDMA: 0 missing and 0 wrong of 3.48e8 rows.
+- **At scale.** 512K context, 108 turns, 13 replicas on one shared Mooncake pool over RDMA: 0 missing and 0 wrong of 3.48e8 rows. With 8 replicas, delivering through Mooncake costs the engine nothing measurable compared with the engine-local store; every hop is far below its NIC and memory ceilings. The one slow hop is decoding the indexer on the trainer's CPU, which must move to the GPU.
 
 ## Status
 

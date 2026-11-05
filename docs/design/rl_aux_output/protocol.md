@@ -46,7 +46,7 @@ The sampled token's logprob is returned inline with the response; that number is
 | `aux_session` | The session. All objects share the key prefix `<job>/<session>/` and are released together. |
 | `aux_trajectory` | The trajectory within the session (needed when a session holds several: GRPO samples, forks). Tails and version segments are tracked per trajectory. |
 | `aux_parent` | For the first request of a fork: the parent trajectory (`""` for the session's root). The fork takes over the parent's state at the fork point. Ignored without `aux_trajectory`. |
-| `aux_start` | "I already have the first `aux_start` rows." Needed for sampling-following outputs and inline mode. |
+| `aux_start` | "I already have the first `aux_start` rows." For the next turn of a trajectory it must equal the previous request's real row count (`prompt + generated − 1`): the engine cannot tell real rows from truncated drafts (§6.7), so it relies on this value to know which previous rows came first. |
 
 Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask` or `hidden_states`): temperature, `top_k`, `top_p`, `min_p` and token masking are allowed; with any truncation or masking `top_k ≤ 256`; parameters that change logit values (penalties, `logit_bias`) are rejected because the trainer cannot reconstruct them.
 
@@ -72,7 +72,7 @@ Sampling-parameter constraints (when requesting `topk_logprobs`, `sampling_mask`
 | `tail_start`, `tail_nbytes` | the tail object covering `[tail_start, rows)`; it can span several blocks |
 | `rows` | rows covered; can exceed `L−1` (see §7) |
 | `weight_versions` | `[[start, version], ...]` covering `[0, rows)`, describing the stored objects |
-| `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts, chunk layout for sampling-following outputs |
+| `fields` | per output: name, dtype, per-token shape, codec, layout, `missing` and `holes` counts; for sampling-following outputs the chunk count and every chunk's row count (`chunk_lens`: a preemption flushes a short chunk) |
 | `invalid_from` | first position computed on invalid KV, if the engine ever rewound this request (§6.8); rows from here are not valid |
 
 ## 4. Objects
@@ -87,13 +87,15 @@ Objects are immutable. Block hashes are vLLM's prefix block hashes (including mu
 
 ## 5. Deduplication and copies
 
-Within a session a block is stored once per distinct computation that a trajectory must see:
+Within a session a block is stored once per distinct computation that some trajectory must see. Each stored object carries a version record: the weight version of every position in the block.
 
-- A trajectory that already holds a block (its own copy, or a shared one it used) drops any later recompute of it. First computation wins.
-- Another trajectory computing the same block **at the same weight version** shares the stored copy (invariant 3).
-- Another trajectory computing it **at a different version** stores its own copy as `hash~<tag>` and lists that name. Versions are compared as the set of versions in the block's segments, not the segment boundaries (a block whose first rows came from a prefix hit has a segment starting mid-block).
-- A block that starts before the request's `aux_start` and whose hash the session already published is always shared: those tokens were computed first by an earlier request (the previous turn, or the parent of a fork).
-- The writer keeps per (session, trajectory) which name it holds for each hash, plus a digest, owner and version record per stored object. All of it is dropped when the session is released.
+- **Same trajectory:** a trajectory that already holds a block (its own copy, or a shared one it used) drops any later recompute of it. First computation wins.
+- **Another trajectory, same version at every position:** shares the stored copy (invariant 3). The comparison is per position, not per set of versions: a block whose first rows are at v0 and the rest at v1 is not the same as a block computed entirely at v1. Identical bytes do not override a version mismatch, because the labels must describe the delivered rows.
+- **Another trajectory, a different version anywhere in the block:** stores its own copy as `hash~<tag>` and lists that name.
+- **Rows served by a prefix hit:** inside the requesting trajectory's version record they are marked "as recorded by the object" and match any version. A copy that keeps such rows takes their versions from the object it hit.
+- **Blocks entirely before the request's own rows:** a block whose last position precedes the request's first computed position, or that the trajectory (or its parent, for a fork) already holds, was computed first by an earlier request. It is shared as is.
+- **Failures are per object:** a write failure marks that exact object (`hash`, `hash~<tag>`, or an indexer object) as lost. The lost object is never rewritten. A failed indexer object does not affect the block's R3 object.
+- **Writer bookkeeping:** per (session, trajectory) the writer keeps which name it holds for each hash, plus a digest, owner and version record per stored object. All of it is dropped when the session is released.
 
 ## 6. Engine behavior, event by event
 
@@ -105,7 +107,7 @@ Rows are captured from the forward, per request, at the captured positions (not 
 
 Allowed only up to the longest prefix the session already published (the delivery pool is the session's cache). Rows for hit positions are therefore always in the pool. Cross-session hits are truncated.
 
-A hit can end mid-block. The rows of that block before the hit point were computed by whoever filled the block; this request never captured them. The request does not publish that block (it would publish pad rows as valid); the request that computed the whole block publishes it.
+A hit can end mid-block. The rows of that block before the hit point were computed by whoever filled the block, and this request never captured them. When the request publishes the block, those rows are taken from the session's stored object for the block, which is the object whose KV the hit used. If that object cannot be read, the block is reported missing. Pad rows are never published as valid.
 
 ### 6.3 The next turn of a trajectory
 
@@ -113,11 +115,27 @@ vLLM does not cache unfinished blocks, so the next turn re-prefills `[start of t
 
 ### 6.4 Forks
 
-The fork's first request names its parent. At its first capture the fork takes the parent's tail that covers the fork point and the parent's version segments, restricted to blocks before the fork point (blocks the parent computed later are not the fork's). Blocks before the fork point that the parent published are shared (§5).
+The fork's first request names its parent. At its first capture the fork takes over the parent's state at the fork point:
+
+- **Tail:** the parent request the fork continues from ended at the fork point, so its tail is the parent tail reaching `aux_start` with the smallest end. Later turns of the parent end further. The worker keeps a short history of tails per trajectory, keyed by start and end.
+- **Blocks:** the blocks the parent held before the fork point. With speculative decoding the parent's last step may have verified position `aux_start` itself and completed that block. In that case the fork-point tail starts right after the block, and the whole block is the parent's.
+- **Version segments:** the parent's segments up to where the fork's own rows begin. Segments the parent started later belong to the parent's later turns.
+- **Fork-point tail gone:** if the tail has left the history, the fork's recompute of the partial block is its own computation and carries its own version. It is never labelled with the parent's.
 
 ### 6.5 Preemption
 
-A preemption is not a finish. The scheduler reports it separately; the worker stashes what only this computation has: rows of blocks not yet published, the tail, indexer blocks, the hidden-state cursor, and a freeze point equal to the capture cursor. On resume the stash is restored and positions below the freeze point keep the stashed rows. If the output in flight at the preemption finishes the request while it is parked, the request is finished from the stash. An abort while parked drops the stash.
+A preemption is not a finish. The scheduler reports it separately. The worker stashes what only this computation has, plus a freeze point equal to the capture cursor:
+
+- rows of blocks not yet published, and the tail;
+- indexer blocks;
+- the hidden-state cursor and chunk lengths;
+- `invalid_from`.
+
+**Resume.** The stash is restored, and positions below the freeze point keep the stashed rows. This happens with or without session metadata on the resumed request.
+
+**Finish.** At the real finish, a stashed full block goes through the version rule of §5 even if a sibling has meanwhile published the same hash. The stash holds this trajectory's first computation, and a sibling's copy can be of another version. A request that finishes while parked (the output in flight at the preemption ended it) is finished from the stash, including tails that span several blocks.
+
+**Abort.** A request that ends and is preempted in the same step is finished, not stashed. An abort while parked drops the stash.
 
 ### 6.6 In-flight weight update
 
@@ -135,9 +153,10 @@ Block-level KV-load failure recovery rewinds a request's computed tokens. vLLM r
 
 ### 6.9 Writes and write failures
 
-- A background thread writes; it never blocks the forward. All TP ranks compute identical rows; "key already exists" counts as success.
-- **Full pool:** retry until the write lands. Each worker caps pending bytes; beyond the cap the engine schedules no new tokens until writes catch up.
-- **A failed block write:** the block is lost for good. Its hash is poisoned: later recomputations are not substituted (they can be of another version, and the version record of those positions describes the lost computation). The block stays missing and every manifest that lists it reports it.
+- A background thread writes; it never blocks the forward. One TP rank writes (the others compute identical rows and skip); "key already exists" counts as success.
+- **Encoding off the writer thread:** indexer compression (zstd, which releases the GIL) runs on a small thread pool ahead of the writer. The writer takes the results in order. Manifests stay on the writer thread, because they read the sizes of the objects put before them. At 512K context, a single writer thread spent 46% of its time in zstd and the engine paused about 3% of the time on writer backlog. The pool removes most of that wait.
+- **Full pool:** objects must never be evicted (§9). A put into a full pool fails and is retried until it lands. Each worker caps pending bytes, and beyond the cap the engine schedules no new tokens until writes catch up.
+- **A failed block write:** that object is lost for good, and its exact name is marked lost. Later recomputations are not substituted: they can be of another version, and the version record of those positions describes the lost computation. The block stays missing, and every manifest that lists it reports it.
 - **A failed manifest, tail or chunk write:** the writer writes the request's error marker (retrying ~1 s). A reader that finds the marker fails that request at once instead of waiting; siblings are unaffected.
 - Tail and manifest are written as soon as the request finishes, not at a later engine step (an idle engine never runs one).
 
@@ -159,7 +178,8 @@ aux.release_session(job, session)  # after the session is consumed and the step 
   - verify each block's tokens against the sample;
   - R3 sanity: the 6 expert ids in a row are distinct; an all-zero row is an error;
   - replay compares expert sets; rows whose set is unchanged keep the trainer's own ids and weights;
-  - a failed read fails the step collectively: all ranks all-reduce a success flag and retry or skip together.
+  - a failed read fails the step collectively: all ranks all-reduce a success flag and retry or skip together;
+  - decode on the GPU: copy the packed indexer bytes (5 bytes per pair of values, 37% fewer than int32) and unpack them where replay runs. A single CPU thread decoding numpy is the bottleneck of the whole path: about 180 MB/s, against more than 10 GB/s for the store's get.
 - **release** deletes everything under `<job>/<session>/` (Mooncake `remove_by_regex`), once the session will not grow, all reads are done and the step has committed. It also tells the writer to drop the session's bookkeeping (a release marker), so writer memory is bounded by live sessions.
 - Retrying a failed step re-reads; rolling back to an earlier checkpoint requires regeneration; saving rollouts offline requires reading them inline first.
 
@@ -171,8 +191,9 @@ aux.release_session(job, session)  # after the session is consumed and the step 
 
 ## 9. Store
 
-- Objects are written with soft pin + TTL, the master configured with `allow_evict_soft_pinned_objects=false`.
-- TTL ≥ longest session lifetime + queueing + margin; the master's eviction high watermark ≤ in-flight cap − one session's maximum bytes.
+- **No eviction.** A listed object that disappears breaks invariant 4 silently: the reader can only time out. Objects are written hard-pinned, or soft-pinned with eviction of soft-pinned objects disabled on the master. They leave the store only through session release or the abort fallback. Without pinning, an overfull pool evicted 1.81M keys and the readers hung.
+- **Segment lifetime.** Mooncake keeps one replica per object by default, so an object lives in whichever segment it was placed in. A node's segment must stay up until every consumer of every object placed on it has read and released. Taking down one replica's segment when that replica finished removed other replicas' objects.
+- **Sizing with real bytes per token.** At 512K context the indexer is 10 KB per token packed and about 5.6 KB after zstd (ratio ~1.8, against 4.6–6.7 at short context). R3 adds 480 B and hidden states about 5 KB per generated token. The in-flight cap of §8 must use these numbers; a cap computed from short-context sizes over-admits by about 2×.
 - At job end, delete everything under `<job>/` and report the number of keys as a leak metric (expected 0).
 
 ## 10. Checklist
@@ -206,3 +227,8 @@ Training framework:
 | Context rewriting / compaction | rewritten prefixes hash differently and are rewritten |
 | Multiple policies / LoRAs | a session per policy; separate in-flight caps |
 | Job end | delete by job prefix, report the count |
+
+## 12. Known limits
+
+- **A prefix hit does not say which computation produced the KV it hits.** The session's first copy of a block is listed for every hit on that hash. This is wrong only if all three of the following happen: the KV of the first computation is evicted from every cache tier; another trajectory recomputes the block at a different weight version (it keeps its own copy, and its KV is now the cached one); and a third trajectory hits that KV. Two fixes are possible. One is to follow vLLM's KV cache events (stored / removed, per block hash) so the worker knows which object the cached KV belongs to. The other is to carry R3 in the KV cache itself (#64383), which makes rows follow the KV by construction. The indexer would still need the first.
+- **The engine-local row cache (c1)** reads hit rows from a generation-scoped base store. Its version records describe spliced rows rather than the base payload, and a request parked across a generation change reads the new generation. The P-S design (§6.2) does not use this path.
