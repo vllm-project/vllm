@@ -274,6 +274,24 @@ def test_plan_kind_rules(case):
 _LOWERED = ": keeps verify rows in chain order"
 
 
+def _resolve(**settings):
+    """Resolve the capabilities of a runner over a hybrid whose layers all
+    verify trees, with ``settings`` on the runner."""
+    runner = object.__new__(GPUModelRunner)
+    runner.attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
+    runner.compilation_config = CompilationConfig()
+    runner.compilation_config.static_forward_context = layers
+    runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
+    runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
+    runner.batch_sharder, runner.adaptive_verification = None, None
+    runner.speculator_hooks = frozenset({"plan", "accept"})
+    for setting, value in settings.items():
+        setattr(runner, setting, value)
+    spec_round = object.__new__(SpecRound)
+    spec_round.kernels = _provided()
+    return spec_round.resolve_capabilities(runner)
+
+
 @pytest.mark.parametrize(
     "setting, value, reason",
     [
@@ -304,23 +322,18 @@ def test_runner_settings_lower_trees_to_chains(setting, value, reason):
     """The runner's settings, the Mamba state mode it reads from the cache
     config, and a speculator without its own accept lower a model that verifies
     trees to chains."""
-    runner = object.__new__(GPUModelRunner)
-    runner.attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
-    runner.compilation_config = CompilationConfig()
-    runner.compilation_config.static_forward_context = layers
-    runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
-    runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
-    runner.batch_sharder = None
-    runner.speculator_hooks = frozenset({"plan", "accept"})
-    if setting is not None:
-        setattr(runner, setting, value)
-    spec_round = object.__new__(SpecRound)
-    spec_round.kernels = _provided()
-
-    caps = spec_round.resolve_capabilities(runner)
+    caps = _resolve(**({} if setting is None else {setting: value}))
 
     assert caps.plan_kind == ("tree" if reason is None else "chain")
     assert [limit.reason for limit in caps.limits] == ([reason] if reason else [])
+
+
+@pytest.mark.parametrize("hooks", [{"plan"}, {"accept"}])
+def test_adaptive_verification_refuses_plan_hooks(hooks):
+    """Adaptive verification sets each request's verified drafts itself, so a
+    speculator that plans or accepts cannot run with it."""
+    with pytest.raises(ValueError, match="enable_adaptive_verification=false"):
+        _resolve(adaptive_verification=object(), speculator_hooks=frozenset(hooks))
 
 
 # --- resolving the speculator's resources -------------------------------------

@@ -116,6 +116,13 @@ class SpecRound:
         built: the lowest plan kind of any target layer (draft layers do not
         count), lowered to ``"chain"`` by each runner setting that keeps rows in
         chain order."""
+        if runner.adaptive_verification is not None and runner.speculator_hooks:
+            raise ValueError(
+                "Adaptive verification sets each request's verified drafts, so it "
+                "cannot run a speculator that overrides "
+                f"{' or '.join(sorted(runner.speculator_hooks))}. Pass "
+                "enable_adaptive_verification=false in the speculative config."
+            )
         limits = layer_spec_limits(
             runner.attn_groups,
             runner.compilation_config.static_forward_context,
