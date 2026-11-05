@@ -301,6 +301,7 @@ def _save_scales_state(monkeypatch: pytest.MonkeyPatch, path: Path):
     monkeypatch.setattr(mod, "_fp8_scale_save_path", str(path))
     monkeypatch.setattr(mod, "_fp8_scale_save_margin", 2.0)
     monkeypatch.setattr(mod, "_fp8_saved_scale_refs", {})
+    monkeypatch.setattr(mod, "_fp8_scale_save_every_wrap", False)
     renames: list[tuple[str, str, dict]] = []
     replace = os.replace
 
@@ -317,7 +318,6 @@ def test_scale_file_saved_atomically(tmp_path, monkeypatch) -> None:
     """The first amax wrap publishes the scale file with one rename (readers,
     e.g. other data-parallel encoder ranks, never see a partial file), leaves
     no temporary file behind and disarms the one-shot save."""
-    monkeypatch.delenv("VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP", raising=False)
     save_file = tmp_path / "scales.json"
     save_file.write_text('{"torn": ')  # left by an interrupted writer
     mod, renames = _save_scales_state(monkeypatch, save_file)
@@ -343,11 +343,11 @@ def test_scale_file_saved_atomically(tmp_path, monkeypatch) -> None:
 
 
 def test_scale_file_rewritten_every_wrap(tmp_path, monkeypatch) -> None:
-    """With VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP=1 every wrap rewrites
-    the file, which ends with the scales of the last amax window."""
-    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP", "1")
+    """With mm_encoder_fp8_scale_save_every_wrap every wrap rewrites the
+    file, which ends with the scales of the last amax window."""
     save_file = tmp_path / "scales.json"
     mod, renames = _save_scales_state(monkeypatch, save_file)
+    monkeypatch.setattr(mod, "_fp8_scale_save_every_wrap", True)
     t = torch.tensor
 
     mod._maybe_save_fp8_scales(LAYER_0, t(1.0), t(1.0), t(1.0), True)
@@ -359,3 +359,18 @@ def test_scale_file_rewritten_every_wrap(tmp_path, monkeypatch) -> None:
     }
     assert [p.name for p in tmp_path.iterdir()] == ["scales.json"]
     assert mod._fp8_scale_save_path == str(save_file)
+
+
+def test_scale_save_every_wrap_requires_save_path(tmp_path) -> None:
+    from vllm.config.multimodal import MultiModalConfig
+
+    with pytest.raises(ValueError, match="requires 'mm_encoder_fp8_scale_save_path'"):
+        MultiModalConfig(
+            mm_encoder_attn_dtype="fp8", mm_encoder_fp8_scale_save_every_wrap=True
+        )
+    cfg = MultiModalConfig(
+        mm_encoder_attn_dtype="fp8",
+        mm_encoder_fp8_scale_save_path=str(tmp_path / "scales.json"),
+        mm_encoder_fp8_scale_save_every_wrap=True,
+    )
+    assert cfg.mm_encoder_fp8_scale_save_every_wrap
