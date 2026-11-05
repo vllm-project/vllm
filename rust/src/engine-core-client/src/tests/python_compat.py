@@ -139,6 +139,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    watermarking: bool | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -296,6 +297,7 @@ outputs = EngineCoreOutputs(
             new_token_ids=[7, 8],
             finish_reason=FinishReason.ERROR,
             error=RequestError("engine_paused", "Generation is paused.", True),
+            watermarking=True,
             routed_experts=[
                 np.arange(4, dtype=np.uint8).reshape(2, 1, 2).dtype.str,
                 [2, 1, 2],
