@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
+    has_flashinfer_swiglustep_activation,
     quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -51,6 +52,23 @@ class TrtLlmNvFp4ExpertsBase:
         "gemm1_clamp_limit",
     )
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if (
+            moe_config.activation == MoEActivation.SWIGLUSTEP
+            and activation_key == kNvfp4DynamicToken
+        ):
+            return False, "SWIGLUSTEP requires per-tensor NVFP4 activation scales"
+        return mk.FusedMoEExperts.is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -62,6 +80,8 @@ class TrtLlmNvFp4ExpertsBase:
         # Quantize the input here (deferred from prepare) to capture a per-token
         # global scale, instead of a static one.
         self.per_token_activation = per_token_activation
+        if per_token_activation and moe_config.activation == MoEActivation.SWIGLUSTEP:
+            raise ValueError("SWIGLUSTEP requires per-tensor NVFP4 activation scales")
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -101,6 +121,13 @@ class TrtLlmNvFp4ExpertsBase:
         beta = quant_config.gemm1_beta
         if beta is None:
             beta = getattr(moe_config, "swiglu_beta", None)
+
+        if moe_config.activation == MoEActivation.SWIGLUSTEP:
+            # StepFun clamps after SiLU and accepts no alpha/beta modifiers.
+            if alpha is not None or beta is not None:
+                raise ValueError("SWIGLUSTEP does not support swiglu alpha/beta")
+            if clamp is None:
+                clamp = 7.0
 
         if moe_config.is_act_and_mul:
             self.gemm1_clamp_limit = _per_expert(clamp)
@@ -227,6 +254,8 @@ class TrtLlmNvFp4ExpertsBase:
         """Supports SITU only when the installed FlashInfer exposes it."""
         if activation == MoEActivation.SITU:
             return has_flashinfer_situ_activation()
+        if activation == MoEActivation.SWIGLUSTEP:
+            return has_flashinfer_swiglustep_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
