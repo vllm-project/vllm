@@ -455,15 +455,16 @@ def test_mha_attn_aiter_fp8_pad_head_dim(
     pad_head_dim: int,
     layout: tuple[list[int], int, int, int],
 ):
-    """VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 pads head_dim 80 to 128 in the eager
-    and in the encoder CUDA graph layout; the real rows match the reference
-    either way."""
+    """VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM=128 pads head_dim 80 to 128 and passes
+    (1,) descales (AITER's asm kernel) in the eager and in the encoder CUDA
+    graph layout; the default keeps head_dim 80 and (1, 1, 1, 1) descales
+    (CK-tile). The real rows match the reference either way, and pad 128
+    matches pad 16."""
     aiter = pytest.importorskip("aiter")
     if not hasattr(aiter, "flash_attn_varlen_fp8_pertensor_func"):
         pytest.skip("Installed AITER does not provide varlen FP8 attention")
     import vllm.model_executor.layers.attention.mm_encoder_attention as mm_attn
 
-    monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", str(pad_head_dim))
     var_seq_len, num_rows, num_slots, max_seqlen = layout
     num_heads, head_size = 16, 80
     set_random_seed(0)
@@ -491,24 +492,31 @@ def test_mha_attn_aiter_fp8_pad_head_dim(
         cu_seqlens = torch.tensor(offsets, dtype=torch.int32)
         scale = 1.0 / head_size**0.5
 
-        attn = MMEncoderAttention(num_heads, head_size, scale=scale)
-        launched_head_dims = []
+        launched = []
         wrapper = mm_attn.vit_aiter_fp8_attn_wrapper
 
         def spy(**kwargs):
-            launched_head_dims.append(kwargs["q"].shape[-1])
+            launched.append((kwargs["q"].shape[-1], tuple(kwargs["q_descale"].shape)))
             return wrapper(**kwargs)
 
         monkeypatch.setattr(mm_attn, "vit_aiter_fp8_attn_wrapper", spy)
-        output = attn(
-            q,
-            k,
-            v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=torch.tensor(max_seqlen, dtype=torch.int32, device="cpu"),
-        )
 
-        assert launched_head_dims == [128 if pad_head_dim == 128 else head_size]
+        def run(pad: int) -> torch.Tensor:
+            monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", str(pad))
+            attn = MMEncoderAttention(num_heads, head_size, scale=scale)
+            return attn(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=torch.tensor(max_seqlen, dtype=torch.int32, device="cpu"),
+            )
+
+        output = run(pad_head_dim)
+        if pad_head_dim == 128:
+            assert launched == [(128, (1,))]
+        else:
+            assert launched == [(head_size, (1, 1, 1, 1))]
         assert output.shape == (1, num_rows, num_heads, head_size)
         output = output[:, :real_len].float()
         ref_output = torch.cat(
@@ -526,7 +534,18 @@ def test_mha_attn_aiter_fp8_pad_head_dim(
             output.flatten(), ref_output.flatten(), dim=0
         )
         assert cosine.item() >= 0.99
+        assert (output - ref_output).abs().mean().item() <= 0.03
         assert (output - ref_output).abs().max().item() <= 0.30
+
+        if pad_head_dim == 128:
+            # Same FP8 inputs (zero columns quantize to exact zeros), so the
+            # asm and CK-tile kernels differ only in accumulation rounding.
+            output_16 = run(16)[:, :real_len].float()
+            cosine = torch.nn.functional.cosine_similarity(
+                output.flatten(), output_16.flatten(), dim=0
+            )
+            assert cosine.item() >= 0.999
+            assert (output - output_16).abs().max().item() <= 0.05
     finally:
         vllm_config.model_config = old_model_config
 
