@@ -472,6 +472,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         static_context[self.layer_name] = self
 
+    def process_weights_after_loading(self) -> None:
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         mapper = None
         if self.fuse_indexer_projection:
