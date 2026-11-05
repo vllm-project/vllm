@@ -132,6 +132,7 @@ steps:
   - tests/tools/test_rocm_build.py
   - tests/tools/test_amd_ci_fast_exit.py
   - .buildkite/scripts/hardware_ci/amd_ci_fast_exit.py
+  - .buildkite/scripts/hardware_ci/amd_ci_fault_trap.c
   - tests/tools/test_kernel_symbol_map.py
   - tools/ci/kernel_symbol_map.py
   - tools/ci/rocm_kernel_symbol_map.py
@@ -139,24 +140,22 @@ steps:
   - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
   - pytest -v -s tools/test_kernel_symbol_map.py
 
-# Disabled until torch-abi-audit transitive dependencies are locked.
-# - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
-#   timeout_in_minutes: 35
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_1
-#   no_gpu: true
-#   optional: true
-#   working_dir: "/vllm-workspace/"
-#   source_file_dependencies:
-#   - .buildkite/check-torch-abi.py
-#   - csrc/
-#   - cmake/
-#   - setup.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system torch-abi-audit==0.0.1
-#   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+- label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
+  timeout_in_minutes: 10
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - .buildkite/check-torch-abi.py
+  - csrc/
+  - cmake/
+  - setup.py
+  - vllm/platforms/rocm.py
+  commands:
+  - python3 /vllm-workspace/.buildkite/check-torch-abi.py
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -477,7 +476,8 @@ steps:
     pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
     pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
     VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' &&
-    pytest -v -s models/test_mimo_v2_attention_backend.py ;;
+    pytest -v -s models/test_mimo_v2_attention_backend.py &&
+    pytest -v -s models/multimodal/test_mimo_v2_omni.py ;;
     2)
     pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
     --ignore models/multimodal/generation/test_whisper.py &&
@@ -1298,9 +1298,13 @@ steps:
   source_file_dependencies:
   - csrc/attention/
   - csrc/core/vec_dtypes/
+  - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
+  - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+  - vllm/models/minimax_m3/common/indexer.py
+  - vllm/models/minimax_m3/amd/ops/sparse_pa.py
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
@@ -1314,6 +1318,7 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
     --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
@@ -1570,8 +1575,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
@@ -4374,6 +4377,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s
+      kernels/attention/test_minimax_m3_nvfp4_index.py
       kernels/test_apply_repetition_penalties.py
       kernels/test_awq_int4_to_int8.py
       kernels/test_bf16_skinny_gemm.py
@@ -4561,11 +4565,11 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
+- label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -4840,7 +4844,7 @@ steps:
   - tests/models/test_hyv4_rocm.py
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
-  - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_deepseek_v4_vl.py
   commands:
   - >-
     pytest -v -s
@@ -4848,7 +4852,7 @@ steps:
     models/transformers/test_backend.py
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
-    models/test_deepseek_v4_vl_stream_weights.py
+    models/test_deepseek_v4_vl.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4871,6 +4875,34 @@ steps:
     models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+
+- label: ":amd: (MI355 DPX) Step5"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  - vllm/model_executor/models/step3p7.py
+  - vllm/model_executor/models/step3_vl.py
+  - vllm/model_executor/models/step_vl.py
+  - vllm/config/compilation.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/transformers_utils/configs/step5.py
+  - vllm/model_executor/warmup/step5_dsa_warmup.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/triton_utils/
+  - vllm/platforms/rocm.py
+  - tests/v1/attention/utils.py
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - pytest -v -s models/step5
+  - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
@@ -4972,11 +5004,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
@@ -4992,11 +5019,6 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Generation)" # TBD
@@ -5010,8 +5032,6 @@ steps:
   - tests/models/language/generation
   optional: true
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
@@ -5824,6 +5844,26 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/umbp_integration
+
+- label: ":amd: (MI355) UMBP Connector TP2 Integration"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125
