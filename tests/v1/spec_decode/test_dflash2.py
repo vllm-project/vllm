@@ -43,7 +43,7 @@ def test_grouped_conv_matches_reference(block_size: int):
     torch.testing.assert_close(actual, expected.flatten(0, 1).flatten(-2))
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "rows,width,query,group,taps",
     [
@@ -58,7 +58,7 @@ def test_grouped_conv_matches_reference(block_size: int):
 def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     """Dtype rounding and request boundaries survive residual/norm fusion."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam.nvidia.dflash2_conv_ops import conv_residual_norm
+    from vllm.models.beam import conv_residual_norm
 
     torch.manual_seed(42)
     hidden = torch.randn(rows, width, device="cuda", dtype=dtype)
@@ -87,9 +87,7 @@ def test_beam_conv_residual_norm(rows, width, query, group, taps, warps, dtype):
     torch.testing.assert_close(actual, expected, rtol=tolerance, atol=tolerance)
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
-)
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize(
     "batch,num_groups,group_size,block_size,taps",
@@ -289,7 +287,7 @@ def test_selector_edges_match_sequential_reference():
     torch.testing.assert_close(actual, expected)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize(
     "batch,steps,top_k,rank",
     [(1, 1, 3, 5), (1, 15, 8, 128), (32, 15, 16, 256), (3, 5, 17, 65)],
@@ -299,7 +297,7 @@ def test_selector_edges_match_sequential_reference():
 def test_fused_score_edges_match_reference(
     batch, steps, top_k, rank, unary_dtype, anchor_dtype
 ):
-    """The CUDA edge kernel keeps the reference's anchors and predecessor
+    """The GPU edge kernel keeps the reference's anchors and predecessor
     mapping, and returns FP32 scores whatever the unary dtype."""
     torch.manual_seed(1)
     vocab = 257
@@ -320,12 +318,12 @@ def test_fused_score_edges_match_reference(
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA required")
 @pytest.mark.parametrize("rows", [8, 64, 256])
 def test_beam_draft_qk_norm_rope_cache(rows):
     """Fused query preparation preserves BF16 rounding and ignores padded slots."""
     from vllm import _custom_ops as ops
-    from vllm.models.beam.nvidia.attention_ops import beam_qk_norm_rope
+    from vllm.models.beam import beam_qk_norm_rope
 
     torch.manual_seed(42)
     qkv = torch.randn(rows, 896, device="cuda", dtype=torch.bfloat16)
@@ -817,6 +815,52 @@ def test_context_kv_uses_quantized_projection_fallback(monkeypatch):
     torch.testing.assert_close(actual_k, expected_k)
     torch.testing.assert_close(actual_v, expected_v)
     assert [projection.calls for projection in projections] == [1, 1]
+
+
+def test_ripple_draft_skips_context_rope_on_nope_layers(monkeypatch):
+    """The Ripple drafter routes to its own class, whose context keys carry RoPE
+    exactly where the layer's queries do."""
+    from torch import nn
+
+    from vllm.config.speculative import SpeculativeConfig
+    from vllm.model_executor.models import qwen3_dflash
+    from vllm.model_executor.models.ricursive_dflash2 import RicursiveDFlash2Model
+
+    def draft_config(**kwargs):
+        config = SimpleNamespace(
+            architectures=["DFlash2DraftModel"], model_type="qwen3", **kwargs
+        )
+        config.update = lambda d: config.__dict__.update(d)
+        return config
+
+    routed = SpeculativeConfig.hf_config_override(draft_config(no_rope_layers=[1]))
+    assert routed.architectures == ["DFlash2RicursiveDraftModel"]
+    plain = SpeculativeConfig.hf_config_override(draft_config())
+    assert plain.architectures == ["DFlash2DraftModel"]
+
+    def fake_rope(positions, query, key, head_size, cache, is_neox):
+        # Marks rotated keys with 100 + position.
+        query.add_(positions[:, None].to(query.dtype) + 100)
+
+    monkeypatch.setattr(qwen3_dflash.ops, "rotary_embedding", fake_rope)
+    model = RicursiveDFlash2Model.__new__(RicursiveDFlash2Model)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(no_rope_layers=[1])
+    model._rope_cos_sin_cache = torch.zeros(1)
+    model._rope_head_size = 4
+    model._rope_is_neox = True
+
+    num_layers, num_ctx, head_dim = 3, 2, 4
+    keys = torch.arange(num_layers * num_ctx * head_dim, dtype=torch.float32)
+    keys = keys.view(num_layers, num_ctx, 1, head_dim)
+    all_k = keys.clone()
+    positions = torch.tensor([5, 6])
+    model._apply_context_rope(all_k, positions)
+
+    rotated = keys + (positions.float() + 100).view(1, num_ctx, 1, 1)
+    torch.testing.assert_close(all_k[0], rotated[0])
+    torch.testing.assert_close(all_k[1], keys[1])
+    torch.testing.assert_close(all_k[2], rotated[2])
 
 
 def test_score_edges_keeps_out_of_vocabulary_anchors_in_range():

@@ -140,24 +140,22 @@ steps:
   - pytest -v -s tools/test_docker_build_metadata_args.py tools/test_rocm_build.py tools/test_amd_ci_fast_exit.py
   - pytest -v -s tools/test_kernel_symbol_map.py
 
-# Disabled until torch-abi-audit transitive dependencies are locked.
-# - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
-#   timeout_in_minutes: 35
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-#   dind: false
-#   agent_pool: mi300_1
-#   no_gpu: true
-#   optional: true
-#   working_dir: "/vllm-workspace/"
-#   source_file_dependencies:
-#   - .buildkite/check-torch-abi.py
-#   - csrc/
-#   - cmake/
-#   - setup.py
-#   - vllm/platforms/rocm.py
-#   commands:
-#   - uv pip install --system torch-abi-audit==0.0.1
-#   - python3 /vllm-workspace/.buildkite/check-torch-abi.py
+- label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
+  timeout_in_minutes: 10
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - .buildkite/check-torch-abi.py
+  - csrc/
+  - cmake/
+  - setup.py
+  - vllm/platforms/rocm.py
+  commands:
+  - python3 /vllm-workspace/.buildkite/check-torch-abi.py
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -5999,15 +5997,7 @@ steps:
   - vllm/v1/worker/gpu/spec_decode/
   - tests/v1/e2e/spec_decode/conftest.py
   commands:
-  - >-
-    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
-    pytest -v -s
-    v1/e2e/spec_decode/acceptance_rates/mtp_other/
-    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
-    --deselect "tests/v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]";
-    fi
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"; fi
-  - if [ "$$BUILDKITE_PARALLEL_JOB" = "2" ]; then pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[True]"; fi
+  - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI355 DPX) V1 E2E Hybrid Chunked Prefill" # TBD
   timeout_in_minutes: 35

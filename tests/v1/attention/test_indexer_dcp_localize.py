@@ -591,6 +591,73 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_cuda() or not has_cutedsl(),
+    reason="This test requires CUDA and CuteDSL",
+)
+@pytest.mark.parametrize("logits_dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("num_positions", [16384, 131072, 1 << 20])
+def test_cutedsl_gathered_select_compact_keys_match_reference(
+    num_positions: int, logits_dtype: torch.dtype
+):
+    """Scores at the logits dtype (upcast BF16 SM100 MQA logits tie at the
+    top-k boundary) keyed only by their high score bits and the id bits below
+    ``num_positions`` must select the same set as the full 64-bit key."""
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        dcp_topk_id_bits,
+        dcp_topk_score_bits,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    torch.manual_seed(7)
+    device = torch.device("cuda")
+    rows, world, topk = 5, 8, 2048
+    num_candidates = world * topk
+    scores = torch.randn((rows, num_candidates), device=device)
+    # Row 1: 64 distinct values, so the boundary tie spans hundreds of ids.
+    scores[1] = (scores[1] * 8).round().clamp(-32, 31)
+    # Row 2: all negative. Row 3: padding mixed in. Row 4: all tied.
+    scores[2] = -scores[2].abs()
+    scores[4] = 0.5
+    scores = scores.to(logits_dtype).float()
+    ids = torch.stack(
+        [
+            torch.randperm(num_positions, device=device)[:num_candidates]
+            for _ in range(rows)
+        ]
+    ).to(torch.int32)
+    # Largest id first, swapped into place so ids stay unique even when
+    # num_candidates == num_positions.
+    largest = num_positions - 1
+    at = (ids == largest).int().argmax(dim=1)
+    ids[torch.arange(rows, device=device), at] = ids[:, 0]
+    ids[:, 0] = largest
+    ids[3, ::3] = -1
+    # Rank-major [world, rows, topk, 2], as a dim-0 all-gather produces.
+    gathered = (
+        torch.stack((scores, ids.float()), dim=-1)
+        .view(rows, world, topk, 2)
+        .transpose(0, 1)
+        .contiguous()
+    )
+
+    expected = _ref_stable_topk_from_candidates_fp64(scores, ids, topk)
+    full = torch.empty((rows, topk), device=device, dtype=torch.int32)
+    stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=full)
+    compact = torch.empty_like(full)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered,
+        topk,
+        out=compact,
+        score_bits=dcp_topk_score_bits(logits_dtype),
+        id_bits=dcp_topk_id_bits(num_positions),
+    )
+    for row in range(rows):
+        want = sorted(expected[row].tolist())
+        assert sorted(full[row].tolist()) == want
+        assert sorted(compact[row].tolist()) == want
+
+
+@pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="This test requires CUDA or ROCm"
 )
 def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
