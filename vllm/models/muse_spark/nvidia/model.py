@@ -66,6 +66,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
@@ -82,8 +83,10 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.models.common.ops.sequence_parallel import (
+    can_sp_all_gather_matmul,
     is_sequence_parallel_active,
     sp_all_gather,
+    sp_all_gather_matmul,
     sp_reduce_scatter,
     sp_shard,
 )
@@ -125,6 +128,7 @@ from vllm.models.muse_spark.nvidia.ops.cute_dsl.qk_norm import (
 from vllm.models.muse_spark.nvidia.ops.mnnvl_fusions import (
     maybe_create_all_gather_dual_norm,
     maybe_create_all_gather_norm_quant,
+    maybe_create_all_reduce_dual_norm,
     tp_group_spans_nodes,
 )
 from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
@@ -164,6 +168,8 @@ _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT = (
 _ROUTER_MULTI_STREAM_TOKEN_THRESHOLD = 256
 # Decode-sized batches only; prefill keeps the replicated projections.
 _SHARDED_PROJECTION_MAX_TOKENS = 256
+# The one-shot o_proj all-reduce + boundary beats two-shot + norm up to here.
+_FUSED_ATTN_ALL_REDUCE_MAX_TOKENS = 48
 # Measured on GB300 TP8 (two nodes): below this the cross-node gather costs
 # more than the smaller unpooler GEMM saves.
 _MULTI_NODE_SHARDED_UNPOOLER_MIN_TOKENS = 32
@@ -267,6 +273,11 @@ def _all_gather_norm_residual_then_norm(
     return out, new_stream
 
 
+# The cluster-per-row FlashInfer kernel wins for decode; from here on the
+# Triton boundary kernel streams prefill rows closer to HBM bandwidth.
+_FLASHINFER_DUAL_NORM_MAX_TOKENS = 1024
+
+
 def norm_residual_then_norm(
     x: MuseSpark1xResidualStream,
     pre_norm: MuseSpark1xRMSNorm,
@@ -297,6 +308,11 @@ def norm_residual_then_norm(
     if (
         can_fuse_boundary
         and gated_residual_next_rmsnorm is not None
+        and (
+            router_input is not None
+            or branch.shape[0] < _FLASHINFER_DUAL_NORM_MAX_TOKENS
+            or not supports_norm_residual_norm(branch, stream)
+        )
         and _uses_flashinfer_dual_norm(post_norm, connection, pre_norm, out_dtype)
         and (not post_norm.has_weight or _FLASHINFER_DUAL_NORM_HAS_POST_WEIGHT)
         and supports_gated_residual_next_rmsnorm(
@@ -720,7 +736,7 @@ class MuseSpark1xMoE(nn.Module):
             return False
         if self.use_sequence_parallel_moe:
             num_tokens = cdiv(num_tokens, self.tp_size)
-        return 32 < num_tokens <= 128
+        return 16 < num_tokens <= 128
 
     def _route_and_pool(
         self, hidden_states: torch.Tensor, router_input: torch.Tensor
@@ -998,7 +1014,12 @@ class MuseSpark1xMoE(nn.Module):
             hidden_states, topk_weights, topk_ids = self._route_topk_and_pool(
                 hidden_states, router_input
             )
-            experts_out = self.experts(hidden_states, topk_weights, topk_ids)
+            if self.use_hybrid_moe:
+                experts_out = self.experts(
+                    hidden_states, topk_weights, topk_ids, sp_active=sp_active
+                )
+            else:
+                experts_out = self.experts(hidden_states, topk_weights, topk_ids)
         else:
             router_logits, hidden_states = self._route_and_pool(
                 hidden_states, router_input
@@ -1244,6 +1265,14 @@ class MuseSpark1xAttention(nn.Module):
         scaling = torch.log((positions.float() + 1.0) / floor_scale) * q_scale + 1.0
         return scaling.clamp_min(1.0).unsqueeze(-1)
 
+    def can_fuse_sp_gather(self, x: torch.Tensor) -> bool:
+        """Whether the sequence all-gather can be fused into the QKV GEMM."""
+        return (
+            isinstance(self.qkv_proj.quant_method, UnquantizedLinearMethod)
+            and self.qkv_proj.bias is None
+            and can_sp_all_gather_matmul(x, self.qkv_proj.weight)
+        )
+
     def _get_attn_temperature_scale(self, positions: torch.Tensor) -> torch.Tensor:
         assert self.attn_temperature_tuning_floor_scale is not None
         assert self.attn_temperature_tuning_q_scale is not None
@@ -1314,9 +1343,19 @@ class MuseSpark1xAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        gather_input: bool = False,
+        reduce_output: bool = True,
     ) -> torch.Tensor:
-        """Attention over an input the caller has already normalized."""
-        qkv, _ = self.qkv_proj(hidden_states)
+        """Attention over an input the caller has already normalized.
+
+        With ``gather_input``, ``hidden_states`` is this rank's sequence shard;
+        the all-gather is fused into the QKV GEMM.
+        """
+        if gather_input:
+            qkv = sp_all_gather_matmul(hidden_states, self.qkv_proj.weight)
+            qkv = qkv[: positions.shape[0]]
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
 
         q, k, v, og = self._qk_norm_rope_kv_insert(qkv, positions)
 
@@ -1355,9 +1394,11 @@ class MuseSpark1xAttention(nn.Module):
                 attn_output = og.sigmoid() * attn_output
 
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
-        return self._project_output(attn_output)
+        return self._project_output(attn_output, reduce_output)
 
-    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+    def _project_output(
+        self, attn_output: torch.Tensor, reduce_output: bool = True
+    ) -> torch.Tensor:
         sp_active = is_sequence_parallel_active(
             self.is_sequence_parallel_output, attn_output.shape[0], self.sp_min_tokens
         )
@@ -1371,7 +1412,7 @@ class MuseSpark1xAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         if sp_active:
             output = sp_reduce_scatter(output)
-        elif self.is_sequence_parallel_output:
+        elif self.is_sequence_parallel_output and reduce_output:
             output = tensor_model_parallel_all_reduce(output)
         return output
 
@@ -1489,6 +1530,8 @@ class MuseSpark1xDecoderLayer(nn.Module):
         self.default_dtype = torch.get_default_dtype()
         # Set by the model when the next boundary may consume unpooler shards.
         self.all_gather_dual_norm: Any | None = None
+        # Set by the model to fuse the o_proj all-reduce into the FFN boundary.
+        self.all_reduce_dual_norm: Any | None = None
 
         self.is_sequence_parallel = is_sequence_parallel_enabled(vllm_config)
         self.sp_min_tokens = get_trtllm_token_threshold(vllm_config) + 1
@@ -1537,10 +1580,20 @@ class MuseSpark1xDecoderLayer(nn.Module):
         sp_active = is_sequence_parallel_active(
             self.is_sequence_parallel, positions.shape[0], self.sp_min_tokens
         )
-        if sp_active and self.is_sequence_parallel_input:
+        gather_input = sp_active and self.is_sequence_parallel_input
+        if gather_input and not self.self_attn.can_fuse_sp_gather(attn_input):
             # Positions carries the unpadded length of the gathered sequence.
             attn_input = sp_all_gather(attn_input)[: positions.shape[0]]
-        attn_out = self.self_attn(positions=positions, hidden_states=attn_input)
+            gather_input = False
+        fuse_all_reduce = not sp_active and self._fuses_attn_all_reduce(
+            positions.shape[0]
+        )
+        attn_out = self.self_attn(
+            positions=positions,
+            hidden_states=attn_input,
+            gather_input=gather_input,
+            reduce_output=not fuse_all_reduce,
+        )
         if sp_active and not self.is_sequence_parallel_input:
             stream = sp_shard(stream)
         router_input = None
@@ -1548,17 +1601,34 @@ class MuseSpark1xDecoderLayer(nn.Module):
             self.feed_forward, MuseSpark1xMoE
         ) and self.feed_forward.wants_fp32_router_input(attn_out.shape[0]):
             router_input = torch.empty_like(attn_out, dtype=torch.float32)
-        ffn_in, stream = norm_residual_then_norm(
-            MuseSpark1xResidualStream(
-                stream=stream,
-                branch=attn_out,
-                post_norm=self.post_attn_norm,
-                connection=self.add_attn,
-            ),
-            self.pre_ffn_norm,
-            out_dtype=self.default_dtype,
-            router_input=router_input,
-        )
+        if fuse_all_reduce:
+            assert self.all_reduce_dual_norm is not None
+            ffn_in, stream = self.all_reduce_dual_norm(
+                attn_out,
+                stream,
+                self.add_attn.alpha,
+                self.add_attn.beta,
+                self.pre_ffn_norm.weight,
+                constants=self._attn_boundary_constants(router_input is not None),
+                post_weight=(
+                    self.post_attn_norm.weight
+                    if self.post_attn_norm.has_weight
+                    else None
+                ),
+                router_output=router_input,
+            )
+        else:
+            ffn_in, stream = norm_residual_then_norm(
+                MuseSpark1xResidualStream(
+                    stream=stream,
+                    branch=attn_out,
+                    post_norm=self.post_attn_norm,
+                    connection=self.add_attn,
+                ),
+                self.pre_ffn_norm,
+                out_dtype=self.default_dtype,
+                router_input=router_input,
+            )
         if sp_active and not self.feed_forward.use_mega_moe:
             # Non-megakernel experts need every token.
             branch = sp_shard(self.feed_forward(sp_all_gather(ffn_in)))
@@ -1588,6 +1658,33 @@ class MuseSpark1xDecoderLayer(nn.Module):
             branch=branch,
             post_norm=self.post_ffn_norm,
             connection=self.add_ffn,
+        )
+
+    def _attn_boundary_constants(self, has_router: bool) -> Any:
+        from vllm.models.muse_spark.nvidia.ops.all_reduce_dual_norm import (
+            DualNormConstants,
+        )
+
+        post, pre = self.post_attn_norm, self.pre_ffn_norm
+        return DualNormConstants(
+            post_eps=post.variance_epsilon,
+            next_eps=pre.variance_epsilon,
+            post_gain_center=post.fused_gain_center if post.has_weight else 0.0,
+            next_gain_center=pre.fused_gain_center,
+            has_post_weight=post.has_weight,
+            has_router=has_router,
+        )
+
+    def _fuses_attn_all_reduce(self, num_tokens: int) -> bool:
+        return (
+            self.all_reduce_dual_norm is not None
+            and num_tokens <= _FUSED_ATTN_ALL_REDUCE_MAX_TOKENS
+            and _uses_flashinfer_dual_norm(
+                self.post_attn_norm,
+                self.add_attn,
+                self.pre_ffn_norm,
+                self.default_dtype,
+            )
         )
 
     def _defers_column_gather(self, num_tokens: int, sp_active: bool) -> bool:
@@ -1638,6 +1735,7 @@ class MuseSpark1xModel(LlamaModel):
         self._configure_replicated_prefix()
         self._configure_column_gather()
         self._configure_pooler_gather()
+        self._configure_attn_all_reduce()
         if self.is_sequence_parallel:
             from vllm.models.muse_spark.nvidia.ops.gemm_rs import (
                 maybe_create_gemm_rs,
@@ -1706,6 +1804,29 @@ class MuseSpark1xModel(LlamaModel):
                 has_post_weight=layer.post_ffn_norm.has_weight,
                 **_dual_norm_constants(layer.post_ffn_norm, next_norm),
             )
+
+    def _configure_attn_all_reduce(self) -> None:
+        """Fuse the o_proj all-reduce into the attention -> FFN boundary."""
+        layers = [
+            layer
+            for layer in islice(self.layers, self.start_layer, self.end_layer)
+            if layer.self_attn.is_sequence_parallel_output
+            and not layer.self_attn.o_proj.reduce_results
+        ]
+        if not layers or not getattr(
+            self.config, "muse_spark_tep_fused_attn_all_reduce", True
+        ):
+            return
+        op = maybe_create_all_reduce_dual_norm(
+            self.config.hidden_size, _FUSED_ATTN_ALL_REDUCE_MAX_TOKENS
+        )
+        if op is None:
+            return
+        for layer in layers:
+            layer.all_reduce_dual_norm = op
+            # Compile ahead of CUDA graph capture.
+            for has_router in (False, True):
+                op.compiled(layer._attn_boundary_constants(has_router))
 
     def _configure_pooler_gather(self) -> None:
         """Let sharded poolers gather straight into the NVFP4 expert input."""
