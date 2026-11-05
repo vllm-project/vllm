@@ -932,11 +932,6 @@ def test_deepseek_v4_heterogeneous_fhmoe_compatibility_gates(
         offload_config=None,
     )
     monkeypatch.setattr(deepseek_v4_model.current_platform, "is_rocm", lambda: True)
-    monkeypatch.setattr(
-        deepseek_v4_model.envs,
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
-        True,
-    )
     monkeypatch.setattr(deepseek_v4_model, "on_gfx950", lambda: True)
     monkeypatch.setattr(
         deepseek_v4_model.rocm_aiter_ops,
