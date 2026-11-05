@@ -4,13 +4,16 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
+use crate::error::ApiError;
 use crate::server_info::ServerInfoConfigFormat;
 use crate::state::AppState;
+use crate::utils::invalid_query;
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -41,10 +44,13 @@ pub(crate) struct ServerInfoParams {
 /// Get server configuration and environment metadata.
 pub async fn server_info(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ServerInfoParams>,
-) -> Response {
-    match state.server_info_response(params.config_format.into()) {
-        Some(response) => Json(response).into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
+    params: Result<Query<ServerInfoParams>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(params) = params.map_err(invalid_query)?;
+    Ok(
+        match state.server_info_response(params.config_format.into()) {
+            Some(response) => Json(response).into_response(),
+            None => StatusCode::NOT_FOUND.into_response(),
+        },
+    )
 }

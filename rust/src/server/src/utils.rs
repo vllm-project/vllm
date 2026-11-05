@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::BoxError;
+use axum::extract::rejection::QueryRejection;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -57,6 +58,12 @@ where
 /// Construct an API error for a failed utility call to the engine core.
 pub fn utility_call_error(method: &str, error: impl AsReport) -> ApiError {
     ApiError::server_error(format!("failed to call {method}: {}", error.as_report()))
+}
+
+/// Map a rejected query string to the JSON 400 that FastAPI returns for a
+/// query validation error, instead of axum's plain-text rejection.
+pub(crate) fn invalid_query(error: QueryRejection) -> ApiError {
+    ApiError::invalid_request(error.body_text(), None)
 }
 
 /// Deserialize a boolean query parameter with the spellings FastAPI accepts.

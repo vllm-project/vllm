@@ -10180,6 +10180,44 @@ async fn world_size_route_accepts_python_spelled_bool_query_value() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn dev_routes_reject_invalid_query_with_json_error() {
+    let (app, _engine_task) = test_dev_mode_app_with_ready(default_ready_response()).await;
+    let cases = [
+        ("GET", "/get_world_size?include_dp=maybe"),
+        ("GET", "/server_info?config_format=yaml"),
+        ("POST", "/reset_prefix_cache?reset_external=maybe"),
+    ];
+    let mut bodies = Vec::new();
+    for (method, uri) in cases {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "application/json",
+            "{uri}"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("decode json error");
+        bodies.push(format!("{uri}: {body}"));
+    }
+    expect_test::expect![[r#"
+        /get_world_size?include_dp=maybe: {"error":{"message":"Failed to deserialize query string: include_dp: invalid boolean value `maybe`","type":"BadRequestError","param":null,"code":400}}
+        /server_info?config_format=yaml: {"error":{"message":"Failed to deserialize query string: config_format: unknown variant `yaml`, expected `text` or `json`","type":"BadRequestError","param":null,"code":400}}
+        /reset_prefix_cache?reset_external=maybe: {"error":{"message":"Failed to deserialize query string: reset_external: invalid boolean value `maybe`","type":"BadRequestError","param":null,"code":400}}"#]].assert_eq(&bodies.join("\n"));
+}
+
 // ========================= Profiler route tests =========================
 
 async fn test_profiling_app_with_engine_script<F>(script: F) -> (axum::Router, MockEngineTask)

@@ -12,7 +12,7 @@ use vllm_metrics::METRICS;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::utility_call_error;
+use crate::utils::{invalid_query, utility_call_error};
 
 #[derive(Serialize)]
 pub(crate) struct IsSleepingResponse {
@@ -47,10 +47,6 @@ pub(crate) struct SleepParams {
 
 const fn default_sleep_level() -> SleepLevel {
     SleepLevel::OffloadWeights
-}
-
-fn invalid_query(error: QueryRejection) -> ApiError {
-    ApiError::invalid_request(error.body_text(), None)
 }
 
 /// Put the engine to sleep.

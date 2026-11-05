@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use crate::utils::{deserialize_query_bool, utility_call_error};
+use crate::utils::{deserialize_query_bool, invalid_query, utility_call_error};
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ResetPrefixCacheParams {
@@ -29,8 +30,9 @@ pub(crate) struct ResetPrefixCacheResponse {
 /// cache.
 pub async fn reset_prefix_cache(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<ResetPrefixCacheParams>,
+    params: Result<Query<ResetPrefixCacheParams>, QueryRejection>,
 ) -> Result<Json<ResetPrefixCacheResponse>, ApiError> {
+    let Query(params) = params.map_err(invalid_query)?;
     let success = state
         .engine_core_client()
         .reset_prefix_cache(params.reset_running_requests, params.reset_external)
