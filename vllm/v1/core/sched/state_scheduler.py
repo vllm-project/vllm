@@ -172,13 +172,17 @@ class StateScheduler(Scheduler):
         assert not self.stream_admissions.misplaced_multimodal_input(update), (
             "multimodal item is outside replacement prompt"
         )
-        prompt = list(update.prompt_token_ids or ())
+        prompt = update.prompt_token_ids or ()
         self.encoder_cache_manager.free(session)
-        session.prompt_token_ids = prompt
-        session._all_token_ids[:] = prompt
+        # Replace the token buffers in place: the all_token_ids view wraps one.
+        assert session.prompt_token_ids is not None
+        del session.prompt_token_ids[:]
+        session.prompt_token_ids.extend(prompt)
+        del session._all_token_ids[:]
+        session._all_token_ids.extend(prompt)
         session._output_token_ids.clear()
         session.num_computed_tokens = 0
-        session.num_prompt_tokens = len(prompt)
+        session.num_prompt_tokens = len(session.prompt_token_ids)
         session.prompt_embeds = None
         session.prompt_is_token_ids = None
         session.mm_features = list(update.mm_features or ())

@@ -121,8 +121,8 @@ imply release (the slot may be quarantined or still short of its fence).
 With persistent state enabled, the engine core exposes the utility method
 `admit_stream(request)`, which reserves a slot before any input arrives. It
 atomically reserves a slot and parks an empty resumable request. The request
-must be an empty, resumable sampling request (`n=1`, no stop strings, no
-structured outputs, no transfer connectors). Async frontends call it through
+must be a resumable sampling request with no prompt, `None` or empty (`n=1`,
+no stop strings, no structured outputs, no transfer connectors). Async frontends call it through
 `EngineCoreClient.admit_stream_async`, which routes the stream's outputs back
 to the calling API server, as for an ordinary request, or through `AsyncLLM`
 (see [Admitted streams in `AsyncLLM`](#admitted-streams-in-asyncllm)).
@@ -204,7 +204,7 @@ request ID that input processing assigns:
 
 | Request | Prompt | `resumable` | `stream_admission` |
 | --- | --- | --- | --- |
-| Admission | empty | `True` | none |
+| Admission | none | `True` | none |
 | Input *k* (*k* ≥ 1) | the item's prompt | `True` | `update_seq=k` |
 | Close | ignored placeholder | `False` | `update_seq` = last input + 1, `input_closed=True` |
 

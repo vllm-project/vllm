@@ -11,6 +11,8 @@ on the CPU.
 
 import asyncio
 
+import msgspec
+import numpy as np
 import pytest
 import pytest_asyncio
 import regex as re
@@ -39,17 +41,19 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine import core_client as core_client_mod
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, UtilityResult
+from vllm.v1.token_buffer import TokenBuffer
 
 pytestmark = pytest.mark.cpu_test
 
 # Deadlock guard for every wait; nothing here sleeps for a fixed time.
 TIMEOUT = 5.0
 _ADDRESSES = {"input_address": "inproc://in", "output_address": "inproc://out"}
-_ADMIT_ARGS = MsgpackDecoder(tuple[int, int, str, tuple[EngineCoreRequest]])
+# Bound so its signature is the utility's, as EngineCoreProc looks it up.
+_ADMIT_STREAM = EngineCore.admit_stream.__get__(object())
 
 
 def _context(update_seq, input_closed=False):
@@ -100,6 +104,14 @@ async def _cancel_owned(*tasks):
         await asyncio.wait_for(asyncio.gather(*owned, return_exceptions=True), TIMEOUT)
 
 
+def _as_engine_request(request: EngineCoreRequest) -> EngineCoreRequest:
+    # The client sends the prompt as an int32 ndarray viewing the received
+    # frame; copy it as the engine's Request does.
+    if request.prompt_token_ids is not None:
+        request.prompt_token_ids = TokenBuffer(request.prompt_token_ids)
+    return request
+
+
 class _FakeEngine:
     """The engine side of the client's sockets.
 
@@ -117,17 +129,27 @@ class _FakeEngine:
         self.held: list[asyncio.Future] = []
         # Refuse admissions with this reason as soon as they are delivered.
         self.auto_refuse: str | None = None
+        # The frames of each admit_stream utility call, as the client sent them.
+        self.admission_frames: list[list] = []
         self.barriers = 0
 
     def send_multipart(self, message, copy=False):
         _, kind, *frames = message
         kind = EngineCoreRequestType(bytes(kind))
         if kind == EngineCoreRequestType.ADD:
-            payload = MsgpackDecoder(EngineCoreRequest).decode(frames)
+            payload = _as_engine_request(
+                MsgpackDecoder(EngineCoreRequest).decode(frames)
+            )
         else:
             payload = MsgpackDecoder().decode(frames)
             if kind == EngineCoreRequestType.UTILITY and payload[2] == "admit_stream":
-                payload = list(_ADMIT_ARGS.decode(frames))
+                # Decoded as EngineCoreProc does: as builtins, then converted to
+                # the utility's argument types.
+                self.admission_frames.append(frames)
+                (request,) = EngineCoreProc._convert_msgspec_args(
+                    _ADMIT_STREAM, payload[3]
+                )
+                payload[3] = (_as_engine_request(request),)
         sent = asyncio.get_running_loop().create_future()
         if self.hold is not None and (
             (kind == EngineCoreRequestType.ABORT and self.hold == "abort")
@@ -429,10 +451,14 @@ async def _start_generate(llm, engine, inputs, caller="caller"):
     return stream, first, admission.request_id
 
 
-async def _admit_on_client(client, engine, request_id, external_req_id=None):
+async def _admit_on_client(
+    client, engine, request_id, external_req_id=None, prompt_token_ids=()
+):
     request = EngineCoreRequest(
         request_id=request_id,
-        prompt_token_ids=[],
+        prompt_token_ids=prompt_token_ids
+        if isinstance(prompt_token_ids, np.ndarray)
+        else list(prompt_token_ids),
         mm_features=None,
         sampling_params=_params(),
         pooling_params=None,
@@ -519,7 +545,8 @@ async def test_admitted_stream_a1_admits_before_reading_generator(llm, engine):
     inputs = _Inputs([1, 2, 3])
     task = _spawn(llm.add_request("caller", inputs(), _params(), stream_admission=True))
     call_id, admission = await engine.admission()
-    assert admission.prompt_token_ids == []
+    # An admission carries no prompt.
+    assert admission.prompt_token_ids is None
     assert admission.resumable
     assert admission.stream_admission is None
     assert admission.external_req_id == "caller"
@@ -1197,6 +1224,51 @@ async def test_retirement_r1_wait_by_caller_id_unknown_raises(llm, engine):
 
 
 @pytest.mark.asyncio
+async def test_admit_stream_utility_decodes_on_engine_path_out_of_band(
+    engine, vllm_config, monkeypatch
+):
+    """The client's admit_stream call, with every buffer sent out of band,
+    passes EngineCoreProc's utility decoding into EngineCore.admit_stream."""
+    import queue
+
+    from tests.v1.core.test_scheduler import _pausable_stream_core
+
+    monkeypatch.setattr(envs, "VLLM_MSGPACK_ZERO_COPY_THRESHOLD", 0)
+    _OWNED.clear()
+    client = core_client_mod.AsyncMPClient(
+        vllm_config, UniProcExecutor, False, client_addresses=_ADDRESSES
+    )
+    try:
+        task = await _admit_on_client(client, engine, "stream")
+        delivered = _spawn(engine.admission())
+        await asyncio.wait(
+            {task, delivered}, timeout=TIMEOUT, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task.done():
+            task.result()  # Raises why the admission was not delivered.
+        call_id, request = await delivered
+        (frames,) = engine.admission_frames
+        proc = _pausable_stream_core()
+        proc.output_queue = queue.Queue()
+        # As EngineCoreProc's input thread decodes a utility call.
+        proc._handle_client_request(
+            EngineCoreRequestType.UTILITY, MsgpackDecoder().decode(frames)
+        )
+        _, outputs = proc.output_queue.get_nowait()
+        reply = outputs.utility_output
+        assert reply.failure_message is None
+        result = msgspec.convert(reply.result.result, StreamAdmissionResult)
+        assert result == StreamAdmissionResult(True, "stream", "never_fed")
+        assert proc.scheduler.requests["stream"].prompt_token_ids == []
+        engine.accept(call_id, request)
+        assert (await asyncio.wait_for(task, TIMEOUT)).accepted
+    finally:
+        reader = client.resources.output_queue_task
+        client.shutdown()
+        await _cancel_owned(reader)
+
+
+@pytest.mark.asyncio
 async def test_admit_stream_async_routes_stream_to_calling_client(engine, vllm_config):
     """An admitted stream's outputs return to the client that admitted it."""
     _OWNED.clear()
@@ -1222,6 +1294,25 @@ async def test_admit_stream_async_routes_stream_to_calling_client(engine, vllm_c
         reader = client.resources.output_queue_task
         client.shutdown()
         await _cancel_owned(reader)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt", [[1], np.array([1], dtype=np.int32)], ids=["list", "ndarray"]
+)
+async def test_admit_stream_async_refuses_a_prompt_before_tracking(
+    client, engine, prompt
+):
+    """An admission with a prompt is refused as the engine would refuse it,
+    before anything is tracked or sent."""
+    task = await _admit_on_client(client, engine, "s-1", prompt_token_ids=prompt)
+    with pytest.raises(ValueError, match="Admission requires an empty"):
+        await asyncio.wait_for(task, TIMEOUT)
+    await engine.client_barrier(client)
+    assert engine.pending() == []
+    assert engine.admission_frames == []
+    with pytest.raises(ValueError, match="not tracked"):
+        await asyncio.wait_for(client.wait_stream_retired_async("s-1"), TIMEOUT)
 
 
 @pytest.mark.asyncio

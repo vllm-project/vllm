@@ -853,6 +853,10 @@ class AsyncLLM(EngineClient):
             self.output_processor.abort_requests([internal_req_id], internal=True)
             if isinstance(error, (asyncio.CancelledError, EngineDeadError)):
                 raise
+            # The client may have refused it before tracking it, and so before
+            # it could release the reservation.
+            release(error)
+            forget()
             raise VLLMValidationError(str(error)) from error
         if not result.accepted:
             self.output_processor.abort_requests([internal_req_id], internal=True)

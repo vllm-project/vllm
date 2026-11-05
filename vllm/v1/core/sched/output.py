@@ -87,14 +87,7 @@ class NewRequestData:
     def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         # Workers receive these by pickle and keep them only for this step.
-        untrack_long_lists(
-            (
-                self.prompt_token_ids,
-                self.prefill_token_ids,
-                self.prompt_is_token_ids,
-                *self.block_ids,
-            )
-        )
+        untrack_long_lists((self.prompt_is_token_ids, *self.block_ids))
 
     @property
     def prompt_len(self) -> int:

@@ -9324,11 +9324,11 @@ def _admit_stream(core, request=None):
     return core.admit_stream(request or _stream_request())
 
 
-def _stream_chunk(core=None, *, closed=False, request_id="stream"):
+def _stream_chunk(core=None, *, closed=False, request_id="stream", tokens=(1, 2, 3)):
     from vllm.v1.engine import StreamAdmissionContext
 
     payload = _stream_request(request_id)
-    payload.prompt_token_ids = [1, 2, 3]
+    payload.prompt_token_ids = list(tokens)
     payload.stream_admission = StreamAdmissionContext(closed)
     return Request.from_engine_core_request(payload, None)
 
@@ -9830,7 +9830,12 @@ def test_stream_admission_utility_wire_round_trip(monkeypatch):
     encoder = MsgpackEncoder()
     decoder = MsgpackDecoder()
     for sequence in range(1, 4):
-        args = (_stream_request(str(sequence)),)
+        # As the client sends it: no prompt.
+        args = (
+            msgspec.structs.replace(
+                _stream_request(str(sequence)), prompt_token_ids=None
+            ),
+        )
         proc._handle_client_request(
             EngineCoreRequestType.UTILITY,
             (0, sequence, "admit_stream", decoder.decode(encoder.encode(args))),
@@ -10260,6 +10265,7 @@ def test_stream_admission_ingress_rejection_preserves_identity(
     from vllm.multimodal.cache import MultiModalCacheMissError
     from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
     from vllm.v1.engine.core import EngineCoreProc, EngineShutdownState
+    from vllm.v1.engine.core_client import _with_packed_prompt
     from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
     core = _stream_core()
@@ -10284,7 +10290,10 @@ def test_stream_admission_ingress_rejection_preserves_identity(
     payload.prompt_token_ids = [1]
     payload.client_index = 7
     payload.stream_admission = context if identity != "untagged" else None
-    payload = MsgpackDecoder(EngineCoreRequest).decode(MsgpackEncoder().encode(payload))
+    # As a frontend sends it: the prompt packed as an int32 ndarray.
+    payload = MsgpackDecoder(EngineCoreRequest).decode(
+        MsgpackEncoder().encode(_with_packed_prompt(payload))
+    )
     if cause == "preprocessing_error":
 
         def fail(*args, **kwargs):
@@ -10381,10 +10390,7 @@ def test_state_stream_replaces_history_only_at_legal_park(queued):
     core = _stream_core()
     assert _admit_stream(core).accepted
     scheduler = core.scheduler
-    chunk = _stream_chunk(core)
-    chunk.prompt_token_ids = [3]
-    chunk._all_token_ids[:] = [3]
-    chunk.num_prompt_tokens = 1
+    chunk = _stream_chunk(core, tokens=[3])
     scheduler.add_request(chunk)
     step = scheduler.schedule()
     handle = step.state_slot_handles["stream"]["state"]
@@ -10419,10 +10425,7 @@ def test_state_stream_stop_token_terminates_instead_of_parking(queued):
     assert _admit_stream(core).accepted
     scheduler = core.scheduler
     manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
-    chunk = _stream_chunk(core)
-    chunk.prompt_token_ids = [3]
-    chunk._all_token_ids[:] = [3]
-    chunk.num_prompt_tokens = 1
+    chunk = _stream_chunk(core, tokens=[3])
     scheduler.add_request(chunk)
     session = scheduler.requests["stream"]
     session.sampling_params.stop_token_ids = [6]
@@ -10462,10 +10465,7 @@ def test_state_stream_replaces_only_after_park_not_length_stop(queued):
     scheduler = core.scheduler
     manager = scheduler.kv_cache_manager.coordinator.state_managers["state"]
     peer_handle = manager.get("peer")
-    chunk = _stream_chunk(core)
-    chunk.prompt_token_ids = [3]
-    chunk._all_token_ids[:] = [3]
-    chunk.num_prompt_tokens = 1
+    chunk = _stream_chunk(core, tokens=[3])
     chunk.max_tokens = chunk.sampling_params.max_tokens = 1
     scheduler.add_request(chunk)
     session = scheduler.requests["stream"]
@@ -11211,3 +11211,43 @@ def test_stream_retirement_only_batch_reaches_output_queue():
     ]
     ((_, batch),) = retired
     assert batch.outputs == []
+
+
+@pytest.mark.parametrize("tokens", [[4, 5, 6], [0]], ids=["multi_token", "one_token"])
+def test_admitted_stream_frontend_packed_input_is_checked_and_applied(tokens):
+    """Frontends send an input's prompt as an int32 ndarray: it passes the
+    multimodal placement check and replaces the session prompt, whether
+    applied at once to a parked session or dequeued after an EOS."""
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    core.prefix_hash_config = None
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+
+    def send(update_seq, prompt, mm_features=None):
+        payload = _stream_request()
+        payload.prompt_token_ids = np.array(prompt, dtype=np.int32)
+        payload.mm_features = mm_features
+        payload.stream_admission = _seq_context(update_seq)
+        request, _ = core.preprocess_add_request(payload)
+        core.add_request(request)
+
+    send(1, tokens, _stream_mm_chunk(0).mm_features)
+    session = scheduler.requests["stream"]
+    assert not scheduler.state_error_outputs
+    assert session.prompt_token_ids == tokens
+    assert list(session.all_token_ids) == tokens
+    assert session.num_prompt_tokens == len(tokens)
+    assert session.stream_admission == _seq_context(1)
+
+    session.mm_features = []
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": len(tokens)}
+    send(2, tokens[::-1] + [9])
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert scheduler.requests["stream"] is session
+    assert session.prompt_token_ids == tokens[::-1] + [9]
+    assert list(session.all_token_ids) == tokens[::-1] + [9]
+    assert session.stream_admission == _seq_context(2)

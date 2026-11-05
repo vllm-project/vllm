@@ -84,6 +84,8 @@ class StreamAdmissions:
         result without moving its deadline.
         """
         self._validate(payload)
+        # Frontends send no prompt, in-process callers an empty one.
+        payload = msgspec.structs.replace(payload, prompt_token_ids=[])
         fingerprint = sha256(
             msgspec.msgpack.encode(payload, order="deterministic")
         ).digest()
@@ -123,7 +125,10 @@ class StreamAdmissions:
             raise ValueError("Admission request_id must contain 1 to 256 characters")
         if (
             not payload.resumable
-            or payload.prompt_token_ids != []
+            or (
+                payload.prompt_token_ids is not None
+                and len(payload.prompt_token_ids) > 0
+            )
             or payload.mm_features
             or self.unsupported_input(payload)
             or payload.abort_immediately
@@ -164,7 +169,9 @@ class StreamAdmissions:
         never cover it whole. An encoder-decoder item is encoder input whose
         length is independent of the decoder prompt, so only its start counts.
         """
-        num_tokens = len(request.prompt_token_ids or ())
+        # A frontend's input carries an int32 ndarray, an in-process one a list.
+        prompt = request.prompt_token_ids
+        num_tokens = 0 if prompt is None else len(prompt)
         for feature in request.mm_features or ():
             position = feature.mm_position
             if not 0 <= position.offset < num_tokens:

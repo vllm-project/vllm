@@ -7,6 +7,7 @@ import sys
 import uuid
 import weakref
 from abc import ABC, abstractmethod
+from array import array
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
@@ -17,6 +18,7 @@ from typing import Any, TypeAlias, TypeVar
 
 import msgspec
 import msgspec.msgpack
+import numpy as np
 import zmq
 import zmq.asyncio
 
@@ -81,6 +83,16 @@ AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 EngineIdentity = bytes
+
+
+def _with_packed_prompt(request: EngineCoreRequest) -> EngineCoreRequest:
+    """Copy of request with its prompt token ids as an int32 ndarray, which is
+    sent out of band when long and decoded by the engine without a Python int
+    per token. The frontend keeps the original."""
+    if not isinstance(request.prompt_token_ids, list):
+        return request
+    packed = np.frombuffer(array("i", request.prompt_token_ids), dtype=np.int32)
+    return msgspec.structs.replace(request, prompt_token_ids=packed)
 
 
 class EngineCoreClient(ABC):
@@ -1235,7 +1247,7 @@ class SyncMPClient(MPClient):
     def add_request(self, request: EngineCoreRequest) -> None:
         if self.is_dp:
             self.engines_running = True
-        self._send_input(EngineCoreRequestType.ADD, request)
+        self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
 
     def abort_requests(self, request_ids: list[str]) -> None:
         if request_ids and not self.resources.engine_dead:
@@ -1521,7 +1533,7 @@ class AsyncMPClient(MPClient):
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         request.client_index = self.client_index
-        await self._send_input(EngineCoreRequestType.ADD, request)
+        await self._send_input(EngineCoreRequestType.ADD, _with_packed_prompt(request))
         self._ensure_output_queue_task()
 
     async def admit_stream_async(
@@ -1539,6 +1551,10 @@ class AsyncMPClient(MPClient):
         `on_forget` once its retirement can no longer be waited for.
         """
         self.ensure_alive()
+        # The admission is sent without its prompt, so refuse a prompt here as
+        # the engine would, before anything is tracked or sent.
+        if request.prompt_token_ids is not None and len(request.prompt_token_ids):
+            raise ValueError("Admission requires an empty resumable sampling request")
         # The admitted stream's outputs return to this client, as for an ADD.
         request.client_index = self.client_index
         request_id = request.request_id
@@ -1549,7 +1565,14 @@ class AsyncMPClient(MPClient):
         message = (
             EngineCoreRequestType.UTILITY.value,
             *self.encoder.encode(
-                (self.client_index, call_id, "admit_stream", (request,))
+                (
+                    self.client_index,
+                    call_id,
+                    "admit_stream",
+                    # An admission has no prompt, so no token array crosses the
+                    # utility path, whose arguments are decoded as builtins.
+                    (msgspec.structs.replace(request, prompt_token_ids=None),),
+                )
             ),
         )
         send: asyncio.Future | None = None
@@ -1937,6 +1960,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # The engine that receives it wakes the other ranks if they are idle.
         chosen_engine = self.get_core_engine_for_request(request)
+        request = _with_packed_prompt(request)
         await self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
 
         self._ensure_output_queue_task()
