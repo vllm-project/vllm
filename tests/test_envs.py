@@ -315,11 +315,11 @@ def test_rocm_vit_fp8_pad_head_dim_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", raising=False)
     assert env_func() == 16
 
-    for value, expected in (("0", 16), ("16", 16), ("128", 128)):
+    for value, expected in (("", 16), ("0", 16), ("16", 16), ("128", 128)):
         monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", value)
         assert env_func() == expected
 
-    for value in ("", "32", "100", "256", "-1", "abc"):
+    for value in ("32", "100", "256", "-1", "abc"):
         monkeypatch.setenv("VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", value)
         with pytest.raises(ValueError, match="VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM"):
             env_func()
