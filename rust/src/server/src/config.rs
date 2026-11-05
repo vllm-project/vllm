@@ -80,6 +80,8 @@ pub struct ApiServerOptions {
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, log every error response at ERROR (`--log-error-stack`).
+    pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
@@ -87,6 +89,8 @@ pub struct ApiServerOptions {
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
+    /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
+    pub server_dev_mode: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,

@@ -93,7 +93,11 @@ impl From<JsonRejection> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status_code(), Json(self.to_error_response())).into_response()
+        let body = self.to_error_response();
+        let mut response = (self.status_code(), Json(body.clone())).into_response();
+        // For `--log-error-stack`.
+        response.extensions_mut().insert(body);
+        response
     }
 }
 
