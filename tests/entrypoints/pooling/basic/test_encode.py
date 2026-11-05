@@ -8,7 +8,7 @@ import pytest
 from vllm import LLM, PoolingParams
 from vllm.exceptions import VLLMValidationError
 
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "vllm-project/multilingual-e5-small"
 
 PROMPTS = [
     "Hello, my name is",

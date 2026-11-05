@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.extensible_tensor import granule_aligned_blocks
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -31,7 +30,6 @@ from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
     HiddenStateCacheSpec,
-    HiSparseHotSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -612,17 +610,14 @@ def _get_kv_cache_bytes_per_block(
         for group in kv_cache_groups
     )
     assert bytes_per_block > 0
-    alignments = [
-        group.kv_cache_spec.page_size_bytes
-        for group in kv_cache_groups
-        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-    ]
-    alignments.extend(
-        _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
-        for group in kv_cache_groups
-        for layer_name in group.layer_names
+    alignment = math.lcm(
+        *(
+            _get_per_layer_spec(group, layer_name).get_block_stride_alignment()
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        )
     )
-    return round_up(bytes_per_block, math.lcm(*alignments))
+    return round_up(bytes_per_block, alignment)
 
 
 def validate_kv_cache_layout(
@@ -1618,6 +1613,11 @@ def get_kv_cache_configs(
             vllm_config.parallel_config.decode_context_parallel_size,
         )
 
+    # Every worker receives the scheduler's new_block_ids_to_zero.
+    needs_kv_cache_zeroing = any(cfg.needs_kv_cache_zeroing for cfg in kv_cache_configs)
+    for cfg in kv_cache_configs:
+        cfg.needs_kv_cache_zeroing = needs_kv_cache_zeroing
+
     return kv_cache_configs
 
 
@@ -1748,7 +1748,11 @@ def shrink_kv_cache_configs(
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
         kv_cache_config.kv_cache_tensors = [
-            replace(tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks)
+            tensor
+            if tensor.host_resident
+            else replace(
+                tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks
+            )
             for tensor in kv_cache_config.kv_cache_tensors
         ]
         groups = kv_cache_config.kv_cache_groups
@@ -1770,66 +1774,16 @@ def shrink_kv_cache_configs(
         kv_cache_config.num_blocks = num_blocks
 
 
-def granule_aligned_kv_cache_blocks(
-    num_blocks: int, kv_cache_configs: list[KVCacheConfig], commit_granule: int
-) -> int:
-    """Round num_blocks down so every worker's KV cache segments (one per
-    layer or one overall, num_blocks blocks of one tensor's block stride)
-    span whole commit granules. A KV connector registers each committed
-    segment for RDMA, which cannot span several physical chunks."""
-    strides = {
-        tensor.block_stride
-        for kv_cache_config in kv_cache_configs
-        for tensor in kv_cache_config.kv_cache_tensors
-    }
-    return granule_aligned_blocks(num_blocks, strides, commit_granule)
-
-
-def align_extensible_kv_cache_capacity(
-    vllm_config: VllmConfig,
-    kv_cache_configs: list[KVCacheConfig],
-    scheduler_kv_cache_config: KVCacheConfig,
-    commit_granule: int,
-) -> None:
-    """Lower the reserved capacity to a granule-aligned block count, so that
-    segment offsets (multiples of the capacity) sit on granule boundaries."""
-    num_blocks = granule_aligned_kv_cache_blocks(
-        scheduler_kv_cache_config.num_blocks, kv_cache_configs, commit_granule
-    )
-    if num_blocks >= scheduler_kv_cache_config.num_blocks:
-        return
-    for kv_cache_config in kv_cache_configs + [scheduler_kv_cache_config]:
-        old_num_blocks = kv_cache_config.num_blocks
-        shrink_kv_cache_configs(vllm_config, [kv_cache_config], num_blocks)
-        # Unlike the post-warmup shrink, this happens before allocation: the
-        # placements must describe the smaller reservation. Layer-outermost
-        # tensors place layers `num_blocks` blocks apart.
-        kv_cache_config.kv_cache_tensors = [
-            replace(
-                tensor,
-                layer_stride=num_blocks * tensor.block_stride,
-                offset=tensor.offset // old_num_blocks * num_blocks,
-            )
-            if tensor.layer_stride == old_num_blocks * tensor.block_stride
-            else tensor
-            for tensor in kv_cache_config.kv_cache_tensors
-        ]
-    vllm_config.cache_config.num_gpu_blocks = num_blocks
-
-
 def finalize_extensible_kv_cache(
     vllm_config: VllmConfig,
     kv_cache_configs: list[KVCacheConfig],
     scheduler_kv_cache_config: KVCacheConfig,
     compilation_times: list["CompilationTimes"],
-    commit_granule: int | None = None,
 ) -> int:
     """Settle the KV cache size from the memory workers measured after warmup.
 
     Every rank must agree on one block count, so the minimum becomes the
-    scheduler's num_blocks; the caller commits it on the workers. With
-    commit_granule (set when a KV connector is configured) the count is
-    also granule-aligned, see `granule_aligned_kv_cache_blocks`.
+    scheduler's num_blocks; the caller commits it on the workers.
     """
     # No measurements: the elastic-EP scale-up path skips warmup. Elastic EP
     # leaves the extensible KV cache off, so this branch is not reached; it
@@ -1841,10 +1795,6 @@ def finalize_extensible_kv_cache(
     )
     num_blocks = min(block_counts, default=scheduler_kv_cache_config.num_blocks)
     num_blocks = min(num_blocks, scheduler_kv_cache_config.num_blocks)
-    if commit_granule is not None:
-        num_blocks = granule_aligned_kv_cache_blocks(
-            num_blocks, kv_cache_configs, commit_granule
-        )
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
     )
