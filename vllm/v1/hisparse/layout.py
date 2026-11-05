@@ -34,7 +34,6 @@ logger = init_logger(__name__)
 
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
-_INDEXER_BLOCK_ALIGNMENT = 16
 
 
 @dataclass(frozen=True)
@@ -146,11 +145,7 @@ def _lay_out_hisparse_groups(
     )
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(
         {
-            name: replace(
-                spec.copy_with_new_block_size(spec.block_size * pages_per_block),
-                block_stride_alignment=_INDEXER_BLOCK_ALIGNMENT,
-                kernel_block_alignment=_INDEXER_BLOCK_ALIGNMENT,
-            )
+            name: _fill_indexer_block(spec, pages_per_block)
             for name, spec in indexer_specs.items()
         }
     )
@@ -238,6 +233,13 @@ def _lay_out_hisparse_groups(
         *hot_groups,
         *regular_groups,
     ]
+
+
+def _fill_indexer_block(spec: MLAAttentionSpec, pages: int) -> MLAAttentionSpec:
+    filled = spec.copy_with_new_block_size(spec.block_size * pages)
+    if spec.kernel_block_alignment is None:
+        return filled
+    return replace(filled, block_stride_alignment=spec.kernel_block_alignment)
 
 
 def _group_page_bytes(group: KVCacheGroupSpec) -> int:

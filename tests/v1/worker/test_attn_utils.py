@@ -56,6 +56,31 @@ from vllm.v1.worker.utils import (
 )
 
 
+@pytest.mark.parametrize(("family", "alignment"), [(90, 16), (100, 16), (120, None)])
+def test_glm5next_indexer_declares_its_kernel_alignment(monkeypatch, family, alignment):
+    """The indexer backend, not HiSparse, states where its paged-MQA kernel
+    accepts sub-block kernel ids; padding stays at whole kernel blocks."""
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.backends.mla.indexer import Glm5NextIndexerBackend
+
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda f: f == family
+    )
+    spec = MLAAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.uint8,
+        tokens_per_state=4,
+        cache_role=SparseCacheRole.INDEXER,
+    )
+
+    spec = customize_attention_spec(Glm5NextIndexerBackend, spec)  # type: ignore[type-abstract]
+
+    assert spec.kernel_block_alignment == alignment
+    assert spec.block_stride_alignment == MultipleOf(256)
+
+
 @pytest.mark.parametrize(
     ("enabled", "block_size", "main_sizes", "indexer_sizes", "expected", "indexer"),
     [

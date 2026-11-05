@@ -833,6 +833,32 @@ def test_hopper_sparse_mla_skips_backends_without_hisparse(
 
 
 @blackwell_only
+@pytest.mark.parametrize("use_hisparse", [False, True])
+def test_sm120_sparse_mla_has_no_hisparse_backend(use_hisparse):
+    """SM120's only sparse MLA backend has no validated HiSparse path, so
+    HiSparse must fail selection rather than run on it."""
+    attention_config = AttentionConfig(
+        hisparse_config=HiSparseConfig() if use_hisparse else None
+    )
+    with (
+        patch.object(
+            type(current_platform),
+            "get_device_capability",
+            return_value=DeviceCapability(12, 0),
+        ),
+        set_current_vllm_config(VllmConfig(attention_config=attention_config)),
+    ):
+        if not use_hisparse:
+            backend = get_attn_backend(
+                512, torch.bfloat16, None, use_mla=True, use_sparse=True
+            )
+            assert backend.get_name() == "FLASHINFER_MLA_SPARSE_SM120"
+            return
+        with pytest.raises(ValueError, match="HiSparse not supported"):
+            get_attn_backend(512, torch.bfloat16, None, use_mla=True, use_sparse=True)
+
+
+@blackwell_only
 @pytest.mark.parametrize("use_mm_prefix", [False, True])
 @pytest.mark.parametrize("flash_attn_version", [None, 3, 4])
 def test_hopper_mm_prefix_selects_triton_flash_attn(

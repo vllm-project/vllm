@@ -183,6 +183,10 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE_SM120"
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return False
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(64)]

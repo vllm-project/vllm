@@ -40,6 +40,7 @@ from vllm.multimodal.inputs import (
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
+from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     get_kv_cache_groups,
@@ -226,9 +227,12 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     assert layouts[0] == layouts[1]
 
 
-def test_hisparse_packs_hot_layers_up_to_largest_device_page():
+@pytest.mark.parametrize("kernel_block_alignment", [None, 16])
+def test_hisparse_packs_hot_layers_up_to_largest_device_page(kernel_block_alignment):
     """Hybrid models share the device pool with larger non-MLA pages; hot
-    layers must pack up to that page, not one group per index group."""
+    layers must pack up to that page, not one group per index group. Indexer
+    blocks drop whole-kernel-block padding only if their kernels accept
+    sub-block offsets."""
     mla = dict(block_size=64, num_kv_heads=1, dtype=torch.bfloat16)
     specs: dict[str, KVCacheSpec] = {}
     for layer in range(2):
@@ -236,7 +240,11 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page():
             head_size=576, is_index_group_leader=True, **mla
         )
         specs[f"model.layers.{layer}.self_attn.indexer"] = MLAAttentionSpec(
-            head_size=128, cache_role=SparseCacheRole.INDEXER, **mla
+            head_size=128,
+            cache_role=SparseCacheRole.INDEXER,
+            block_stride_alignment=MultipleOf(64),
+            kernel_block_alignment=kernel_block_alignment,
+            **mla,
         )
     specs["model.layers.2.self_attn"] = FullAttentionSpec(
         block_size=64, num_kv_heads=1, head_size=4096, dtype=torch.bfloat16
@@ -261,6 +269,10 @@ def test_hisparse_packs_hot_layers_up_to_largest_device_page():
         indexer_group.kv_cache_spec.page_size_bytes
         == full_attn_group.kv_cache_spec.page_size_bytes
     )
+    assert {
+        spec.block_stride_alignment
+        for spec in indexer_group.kv_cache_spec.kv_cache_specs.values()
+    } == {kernel_block_alignment or MultipleOf(64)}
 
 
 def test_hisparse_rejects_deepseek_v4():
