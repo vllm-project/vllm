@@ -13,7 +13,8 @@ post-load processing has the hazards found on real models:
 (f) post-load processing grows a weight (padding): a reload writes it into
     the existing storage to keep its address;
 (g) online quantization: the kernel tensor cannot hold the BF16 checkpoint
-    tensor, which is staged and quantized as at cold start.
+    tensor, which is staged and quantized as at cold start; its parent derives
+    a tensor from it.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -110,6 +111,14 @@ def _quantize_int8(layer):  # (g): BF16 checkpoint tensor, int8 kernel tensor
     replace_parameter(layer, "weight_scale", scale)
 
 
+def _dequantize_child(layer):  # (g): parent reads the quantized child
+    w = layer.online.weight.float() * layer.online.weight_scale
+    if hasattr(layer, "W"):
+        layer.W.copy_(w)
+    else:
+        layer.W = w
+
+
 _SHAPES = {
     "attn.kv_b.weight": ((8, 4), torch.bfloat16),
     "proj.weight": ((4, 6), torch.bfloat16),
@@ -118,7 +127,7 @@ _SHAPES = {
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
-    "online.weight": ((4, 4), torch.bfloat16),
+    "deq.online.weight": ((4, 4), torch.bfloat16),
 }
 _PWAL = {
     "attn.kv_b": None,
@@ -127,7 +136,8 @@ _PWAL = {
     "nvfp4": _consume_scale_2,
     "engram": _pack,
     "pad": _pad,
-    "online": _quantize_int8,
+    "deq": _dequantize_child,
+    "deq.online": _quantize_int8,
 }
 
 
@@ -163,14 +173,14 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
-            online = name.startswith("online.")
+            online = path[-1] == "online"
             param = torch.nn.Parameter(
                 torch.empty(shape, dtype=dtype, device="meta" if online else None),
                 False,
             )
             parent.register_parameter(local, param)
             if online:  # as the online methods' create_weights
-                parent.quant_method = _OnlineMethod(_PWAL["online"])
+                parent.quant_method = _OnlineMethod(_PWAL["deq.online"])
                 initialize_online_processing(parent)
 
     def load_weights(self, weights):
@@ -289,7 +299,7 @@ class TestReloadEqualsColdStart:
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
             ["pad.weight"],
-            ["online.weight", "online.weight_scale"],
+            ["deq.online.weight", "deq.online.weight_scale", "deq.W"],
         ],
         ids=[
             "a-parent-derived",
@@ -312,19 +322,29 @@ class TestReloadEqualsColdStart:
 
 
 class TestUnsent:
-    def test_tensor_without_post_processing_keeps_its_bytes(self):
+    @pytest.mark.parametrize(
+        "unsent,kept",
+        [
+            ("attn.kv_b.weight", ["attn.kv_b.weight"]),
+            ("deq.online.weight", ["deq.online.weight", "deq.online.weight_scale"]),
+        ],
+        ids=["no-post-processing", "online-quant"],
+    )
+    def test_unsent_tensor_keeps_its_bytes(self, unsent, kept):
         # a frozen table the trainer does not send (Engram, an n-gram
         # embedding): its module has no post-load processing, so a reload
-        # keeps its cold-start bytes; derived tensors read them as cold start
+        # keeps its cold-start bytes; an unsent online-quantized module gets
+        # its kernel tensors back before the post-load rerun, so parents
+        # derive from them as at cold start
         model = _cold_start(_checkpoint())
         old = _checkpoint()
         new = _checkpoint(1.01)
-        sent = {n: t for n, t in new.items() if n != "attn.kv_b.weight"}
+        sent = {n: t for n, t in new.items() if n != unsent}
         before = _state(model)
         _reload(model, sent)
         after = _state(model)
-        _assert_same(after, before, names=["attn.kv_b.weight"], addresses=True)
-        expected = dict(new, **{"attn.kv_b.weight": old["attn.kv_b.weight"]})
+        _assert_same(after, before, names=kept, addresses=True)
+        expected = dict(new, **{unsent: old[unsent]})
         _assert_same(after, _state(_cold_start(expected)))
 
 
@@ -365,6 +385,31 @@ class TestRefusals:
         monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
         with pytest.raises(RuntimeError, match="fused shared experts"):
             _cold_start(_checkpoint())
+
+    def test_online_quantization_with_eplb_refused(self, monkeypatch):
+        # the kernel's quant config keeps the staged scales, which EPLB does
+        # not rearrange
+        init = _ToyModel.__init__
+
+        def with_eplb(self):
+            init(self)
+            parallel = SimpleNamespace(enable_eplb=True)
+            self.deq.online.moe_config = SimpleNamespace(moe_parallel_config=parallel)
+
+        monkeypatch.setattr(_ToyModel, "__init__", with_eplb)
+        with pytest.raises(RuntimeError, match="EPLB"):
+            _cold_start(_checkpoint())
+
+    def test_modular_moe_method_forwards_online_quantization(self):
+        # elastic EP wraps the quant method after cold start; a reload must
+        # still stage the wrapped online-quantized experts
+        from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+            FusedMoEModularMethod,
+        )
+
+        wrapper = object.__new__(FusedMoEModularMethod)
+        wrapper.__dict__["old_quant_method"] = _OnlineMethod(None)
+        assert wrapper.uses_meta_device
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
     def test_humming_refused(self, monkeypatch, method_cls):

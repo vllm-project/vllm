@@ -9,11 +9,8 @@ which must keep addresses (captured CUDA graphs) and refill derived tensors.
 Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
-Online-quantized modules (``quant_method.uses_meta_device``) are the
-exception: their kernel storage cannot hold the BF16 checkpoint tensors. They
-reload the way they cold start: ``begin`` stages them (layerwise), so their
-loaders buffer the checkpoint tensors and quantize once the module is complete,
-copying the result into the kernel tensors.
+Online-quantized modules (``uses_meta_device``) cannot hold BF16 checkpoint
+bytes: they reload as they cold start, staged layerwise and quantized in place.
 
 Delivery contract (not checked here): an update delivers every checkpoint
 tensor of each module whose PWAL changes its layout or is not idempotent.
@@ -102,6 +99,18 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
 
     for name, module in model.named_modules():
         method = getattr(module, "quant_method", None)
+        moe_config = getattr(module, "moe_config", None)
+        if (
+            getattr(method, "uses_meta_device", False)
+            and moe_config is not None
+            and moe_config.moe_parallel_config.enable_eplb
+        ):
+            # a staged reload leaves the kernel's quant config on the staged
+            # scales, which an EPLB rearrangement does not move
+            raise RuntimeError(
+                f"direct reload: online quantization with EPLB is not supported "
+                f"({name})"
+            )
         # requantization releases the checkpoint parameters it dequantizes;
         # fused shared experts quantize staging parameters that post-load
         # processing deletes
@@ -161,14 +170,6 @@ def _check_params_kept(model: torch.nn.Module) -> None:
         )
 
 
-def _online_quant_modules(model: torch.nn.Module) -> list[torch.nn.Module]:
-    return [
-        m
-        for m in model.modules()
-        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
-    ]
-
-
 def _owned(model: torch.nn.Module, t: torch.Tensor) -> bool:
     ckpt = getattr(t, "_ckpt", None)
     return ckpt is not None and ckpt[0] is model._ckpt_owner
@@ -218,13 +219,19 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     bytes until a finish succeeds."""
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    online = _online_quant_modules(model)
-    for module in online:  # still staged if an update was aborted
+    online = [
+        m
+        for m in model.modules()
+        if getattr(getattr(m, "quant_method", None), "uses_meta_device", False)
+    ]
+    # Unstage what an aborted update left staged: this only restores the
+    # cold-start state, so the checks below still see the committed model.
+    for module in online:
         unstage_layer(module)
     _check_params_kept(model)
     views = _checkpoint_views(model)
 
-    # nothing above modified the model
+    # nothing above modified the model beyond restoring it
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
@@ -234,7 +241,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
-    for module in online:
+    for module in online:  # before any in-place fill, which then skips meta params
         stage_layer_for_reload(module)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)

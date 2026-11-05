@@ -59,6 +59,10 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return self.old_quant_method.supports_eplb
 
     @property
+    def uses_meta_device(self) -> bool:  # type: ignore[override]
+        return self.old_quant_method.uses_meta_device
+
+    @property
     def method_name(self) -> str:
         return self.old_quant_method.method_name
 
