@@ -264,6 +264,8 @@ class ModelArchConfigConvertorBase:
                         quant_cfg["quant_method"] = "modelopt"
                     elif quant_algo_upper == "NVFP4":
                         quant_cfg["quant_method"] = "modelopt_fp4"
+                    elif quant_algo_upper == "INT8_PB_WO":
+                        quant_cfg["quant_method"] = "modelopt_int8"
                     elif quant_algo_upper == "MIXED_PRECISION":
                         quant_cfg["quant_method"] = "modelopt_mixed"
                     else:

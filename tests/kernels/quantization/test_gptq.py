@@ -9,6 +9,10 @@ from vllm import _custom_ops as ops  # noqa: F401
 from vllm.model_executor.determinism.batch_invariant import (
     dequantize_gptq_weight,
 )
+from vllm.model_executor.kernels.linear import (
+    ExllamaLinearKernel,
+    MPLinearLayerConfig,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     gptq_pack,
     gptq_quantize_weights,
@@ -62,3 +66,23 @@ def test_dequantize_gptq_weight_matches_reference(quant_type, group_size, dtype)
     assert w_deq.shape == (size_k, size_n)
     assert w_deq.dtype == dtype
     torch.testing.assert_close(w_deq, w_ref, rtol=0, atol=0)
+
+
+# Exllama's kernels walk K in 128-wide blocks of 32-wide steps, start each block
+# on group offset_k // group_size and switch groups only at those steps, so any
+# other group size reads the wrong scales.
+@pytest.mark.parametrize(
+    ("group_size", "supported"),
+    [(16, False), (48, False), (96, False), (160, False), (192, False)]
+    + [(32, True), (64, True), (128, True), (256, True)],
+)
+def test_exllama_only_accepts_group_sizes_it_computes(group_size, supported):
+    config = MPLinearLayerConfig(
+        full_weight_shape=(3840, 256),
+        partition_weight_shape=(3840, 256),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=group_size,
+        zero_points=False,
+    )
+    assert ExllamaLinearKernel.can_implement(config)[0] == supported
