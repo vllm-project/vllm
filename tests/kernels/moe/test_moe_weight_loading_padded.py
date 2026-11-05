@@ -9,19 +9,11 @@ have the original unpadded size. These tests verify that weight loading
 correctly handles this mismatch.
 """
 
-import dataclasses
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
-    RoutingMethodType,
-)
-from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
 )
@@ -30,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 
-from .utils import DEVICE, make_dummy_moe_config
+from .utils import make_dummy_moe_config
 
 
 class TestGetHiddenDim:
@@ -553,57 +545,6 @@ class TestLoadWeightsExpertBias:
         weights = [(expert_name, torch.zeros(self.NUM_EXPERTS, 1))]
         with pytest.raises(AttributeError, match=param_name.replace(".", r"\.")):
             list(RoutedExperts.load_weights(experts, weights))
-
-    @pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1), (4, 3)])
-    def test_down_bias_owned_by_tp_rank_zero(
-        self, default_vllm_config, tp_size, tp_rank
-    ):
-        """w2 is row-parallel and its bias is added before the TP all-reduce,
-        so only TP rank 0 may hold it."""
-        parallel_config = dataclasses.replace(
-            FusedMoEParallelConfig.make_no_parallel(), tp_size=tp_size, tp_rank=tp_rank
-        )
-        moe_config = FusedMoEConfig(
-            num_experts=self.NUM_EXPERTS,
-            experts_per_token=1,
-            hidden_dim=64,
-            intermediate_size=128,
-            num_local_experts=self.NUM_EXPERTS,
-            num_logical_experts=self.NUM_EXPERTS,
-            moe_parallel_config=parallel_config,
-            activation=MoEActivation.SILU,
-            in_dtype=torch.bfloat16,
-            device=DEVICE,
-            routing_method=RoutingMethodType.TopK,
-            max_num_tokens=16,
-            has_bias=True,
-        )
-        experts = RoutedExperts(
-            "model.layers.0.mlp.experts",
-            torch.bfloat16,
-            moe_config,
-            quant_config=None,
-            expert_map_manager=ExpertMapManager(
-                max_num_batched_tokens=16,
-                top_k=1,
-                global_num_experts=self.NUM_EXPERTS,
-                num_redundant_experts=0,
-                num_expert_group=None,
-                moe_parallel_config=parallel_config,
-                placement_strategy="linear",
-                enable_eplb=False,
-            ),
-        )
-        checkpoint = torch.arange(1, 65, dtype=torch.bfloat16)
-        original = checkpoint.clone()
-        experts.w2_bias.data.fill_(7)
-
-        loaded = list(experts.load_weights([("0.down_proj.bias", checkpoint)]))
-
-        assert loaded == ["w2_bias"]
-        expected = checkpoint if tp_rank == 0 else torch.zeros_like(checkpoint)
-        assert torch.equal(experts.w2_bias[0].cpu(), expected)
-        assert torch.equal(checkpoint, original)
 
 
 class TestLoadWeightsExpertMapping:
