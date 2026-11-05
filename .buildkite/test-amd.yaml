@@ -4674,9 +4674,11 @@ steps:
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/models/test_dsv41_asm_layers.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+  - pytest -v -s tests/models/test_dsv41_asm_layers.py
 
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120

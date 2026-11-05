@@ -3,10 +3,11 @@
 
 import functools
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -66,6 +67,9 @@ from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v41.amd.asm.decode import AsmDecodeLayer
 
 logger = init_logger(__name__)
 
@@ -594,6 +598,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
                     "are not supported."
                 )
         self._use_aiter_sparse_mla = _aiter_sparse_mla_enabled(self._has_kv_transfer)
+        # Set by the asm decode layer on the layers whose eager break it takes.
+        self.asm: AsmDecodeLayer | None = None
         if self.compressor is None and self.indexer is None:
             # Dense layers have nothing to overlap; keep the base serial path.
             self.aux_stream_list = None
@@ -952,6 +958,25 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             inverse_rope=False,
         )
         return self._wo_b_after_wo_a(z.flatten(1))
+
+    @eager_break_during_capture
+    def _sparse_indexer_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        index_q: torch.Tensor | None,
+        index_q_scale: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        q: torch.Tensor,
+        kv: torch.Tensor,
+        positions: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        args = (hidden_states, index_q, index_q_scale, index_weights, q, kv)
+        if self.asm is not None:
+            self.asm.sparse_indexer_and_attn(self, *args, positions, out)
+            return
+        # within this eager break the base's own decorator runs it directly
+        super()._sparse_indexer_and_attn(*args, positions, out)
 
     def _wo_b_after_wo_a(self, zf: torch.Tensor) -> torch.Tensor:
         if self._wo_b_scale is not None and zf.dim() == 2:

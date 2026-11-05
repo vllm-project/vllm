@@ -65,6 +65,9 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v41.amd.asm.decode import AsmDecodeLayer
+from vllm.models.deepseek_v41.amd.asm.decode import enabled as asm_decode_enabled
+from vllm.models.deepseek_v41.amd.asm.engram import AsmEngram
 from vllm.models.deepseek_v41.amd.engram import RocmEngram
 from vllm.models.deepseek_v41.amd.mhc import (
     MHC_OVERLAP_MAX_TOKENS,
@@ -213,7 +216,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         if engram_layout is not None:
             layer_id = extract_layer_index(prefix)
             if layer_id in engram_layout.layer_ids:
-                self.engram = RocmEngram(
+                engram_cls = (
+                    AsmEngram if asm_decode_enabled(vllm_config) else RocmEngram
+                )
+                self.engram = engram_cls(
                     config,
                     vllm_config.quant_config,
                     engram_layout,
@@ -299,12 +305,25 @@ class DeepseekV4DecoderLayer(nn.Module):
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
         self.fuse_seam_norm = HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM
-        # Decode steps of an eligible layer may run as the mono decode layer.
+        # Decode steps of 17-256 rows may run on the asm decode layer (gfx950,
+        # TP4), those up to its limit on the mono decode layer.
+        self.asm = AsmDecodeLayer.create(self, vllm_config)
         self.mono = MonoDecodeLayer.create(self, vllm_config)
         if self.mono is not None and self.mono.ffn_only:
             # A decode step hands wo_b's TP partial to the FFN launch; forward
             # reduces it on the others.
             self.attn.wo_b.reduce_results = False
+
+    def _pre(self, mhc_pre, mhc_overlap, *args, **kwargs):
+        """``mhc_pre``, on the asm decode layer where it takes the seam."""
+        if self.asm is not None:
+            outs = self.asm.seam(*args, **kwargs)
+            if outs is not None:
+                if mhc_overlap is not None:
+                    # forward joins the overlap stream after the sublayer
+                    mhc_overlap.fork()
+                return outs
+        return mhc_pre(*args, **kwargs)
 
     @staticmethod
     def _hc_collapse(x: torch.Tensor, pre_mix: torch.Tensor) -> torch.Tensor:
@@ -323,6 +342,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         engram_hashes: torch.Tensor | None = None,
         engram_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.asm is not None:
+            # first forward (the eager profile run): kernels, weights and
+            # collectives
+            self.asm.install()
         if self.mono is not None:
             out = self.mono(
                 self,
@@ -426,7 +449,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
+                residual, post_mix, res_mix, x, attn_pre = self._pre(
+                    mhc_pre,
+                    mhc_overlap,
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -440,7 +465,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                     res_mix,
                     x,
                     attn_pre,
-                ) = mhc_pre(
+                ) = self._pre(
+                    mhc_pre,
+                    mhc_overlap,
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -456,7 +483,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if self.use_sequence_parallel:
             x = sp_all_gather(x)[: positions.shape[0]]
 
-        x = self.attn(positions, x, None)
+        out = self.asm.attn(positions, x) if self.asm is not None else None
+        x = out if out is not None else self.attn(positions, x, None)
         if mhc_overlap is not None:
             mhc_overlap.join()
         if self.use_sequence_parallel:
@@ -467,7 +495,9 @@ class DeepseekV4DecoderLayer(nn.Module):
                 return out
             x = tensor_model_parallel_all_reduce(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
+        residual, post_mix, res_mix, x, ffn_pre = self._pre(
+            mhc_pre,
+            mhc_overlap,
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -486,7 +516,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
-        x = self.ffn(x, input_ids)
+        out = self.asm.ffn(x) if self.asm is not None else None
+        x = out if out is not None else self.ffn(x, input_ids)
         if mhc_overlap is not None:
             mhc_overlap.join()
         return x, residual, post_mix, res_mix, ffn_pre
