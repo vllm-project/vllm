@@ -43,6 +43,17 @@ def _gpu_tensor_ptrs(obj: object, path: str, ptrs: dict, seen: set) -> None:
         _gpu_tensor_ptrs(value, f"{path}.{name}", ptrs, seen)
 
 
+def _opt_in(worker) -> None:
+    """Opt the served model in to direct reload: gpt-oss is not marked
+    `SupportsDirectReload` until its expert padding is reset at begin
+    (#64352); this test checks addresses and outputs on the same weights."""
+    from vllm.model_executor.models.interfaces import SupportsDirectReload
+
+    model = worker.get_model()
+    cls = type(model)
+    model.__class__ = type(cls.__name__, (cls, SupportsDirectReload), {})
+
+
 def _model_tensor_ptrs(worker) -> dict[str, int]:
     ptrs: dict[str, int] = {}
     _gpu_tensor_ptrs(worker.model_runner.model, "model", ptrs, set())
@@ -54,16 +65,21 @@ def _model_tensor_ptrs(worker) -> dict[str, int]:
     reason="TRT-LLM and CuteDSL MoE kernels need SM100",
 )
 @pytest.mark.parametrize(
-    "model,moe_backend,compare_outputs",
+    "model,moe_backend,compare_outputs,opt_in",
     [
-        ("openai/gpt-oss-20b", "flashinfer_trtllm", True),
+        ("openai/gpt-oss-20b", "flashinfer_trtllm", True, True),
         # NVFP4 CuteDSL greedy outputs differ between two generations on one
         # server, reload or not, so only the addresses are checked
-        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", False),
+        ("RedHatAI/Qwen3-30B-A3B-NVFP4", "flashinfer_cutedsl", False, False),
     ],
 )
 def test_reload_keeps_moe_output(
-    model: str, moe_backend: str, compare_outputs: bool, vllm_runner, monkeypatch
+    model: str,
+    moe_backend: str,
+    compare_outputs: bool,
+    opt_in: bool,
+    vllm_runner,
+    monkeypatch,
 ) -> None:
     monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -76,6 +92,8 @@ def test_reload_keeps_moe_output(
     ) as llm:
         before = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
         ptrs = llm.collective_rpc(_model_tensor_ptrs)
+        if opt_in:
+            llm.collective_rpc(_opt_in)
         llm.collective_rpc("reload_weights")  # the served checkpoint
         after_ptrs = llm.collective_rpc(_model_tensor_ptrs)
         after = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)

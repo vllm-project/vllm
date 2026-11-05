@@ -1367,11 +1367,14 @@ class VllmConfig:
                 "Direct reload does not support draft_lm_head_quantization."
             )
         transfer = self.weight_transfer_config
-        if transfer is not None and transfer.backend == "sharded_rdt":
-            # its replay plan is baked by a layerwise (meta) dry run
+        # sharded_rdt: its replay plan is baked by a layerwise (meta) dry run;
+        # sparse_nccl: its patches skip begin/finish, so neither the model
+        # check nor the post-load processing rerun of direct reload applies
+        if transfer is not None and transfer.backend in ("sharded_rdt", "sparse_nccl"):
             raise ValueError(
-                "Direct reload does not support the sharded_rdt weight-transfer "
-                "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
+                f"Direct reload does not support the {transfer.backend} "
+                "weight-transfer backend. Use VLLM_RELOAD_MODE=layerwise or "
+                "another backend."
             )
 
     def _verify_kv_transfer_compat(self) -> None:

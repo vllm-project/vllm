@@ -2274,7 +2274,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # How weight updates reload the model: "layerwise" rebuilds each layer
     # from the checkpoint tensors; "direct" writes them into the live
-    # tensors and reruns post-load processing in place.
+    # tensors and reruns post-load processing in place. A direct update
+    # raises for a model class that does not declare SupportsDirectReload.
     "VLLM_RELOAD_MODE": env_with_choices(
         "VLLM_RELOAD_MODE", "layerwise", ["layerwise", "direct"]
     ),

@@ -41,6 +41,7 @@ from vllm.transformers_utils.config import set_default_rope_theta
 from .interfaces import (
     HasInnerState,
     IsHybrid,
+    SupportsDirectReload,
     SupportsLoRA,
     SupportsPP,
 )
@@ -498,6 +499,7 @@ class FalconH1ForCausalLM(
     SupportsLoRA,
     SupportsPP,
     IsHybrid,
+    SupportsDirectReload,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

@@ -71,6 +71,7 @@ from vllm.model_executor.models.interfaces import (
     IsHybrid,
     MambaStateShapes,
     MixtureOfExperts,
+    SupportsDirectReload,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -727,6 +728,7 @@ class NemotronHForCausalLM(
     SupportsQuant,
     MixtureOfExperts,
     SupportsReplaySSM,
+    SupportsDirectReload,
 ):
     # Relevant only if self.has_moe is True
     is_non_gated_moe = True

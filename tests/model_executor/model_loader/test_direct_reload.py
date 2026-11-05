@@ -35,6 +35,7 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsDirectReload
 from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
@@ -119,7 +120,7 @@ class _Layer(torch.nn.Module):
         self.quant_method = _Method(fn) if fn is not None else None
 
 
-class _ToyModel(torch.nn.Module):
+class _ToyModel(torch.nn.Module, SupportsDirectReload):
     def __init__(self):
         super().__init__()
         self.attn = _Layer(_derive_w_uk)
@@ -297,47 +298,67 @@ class TestRefusals:
             begin_direct_reload(model)
         _assert_same(_state(model), before, addresses=True)
 
-    def test_online_quantization_refused(self, monkeypatch):
+    def _assert_begin_refused(self, model, match) -> None:
+        before = _state(model)
+        with pytest.raises(RuntimeError, match=match):
+            begin_direct_reload(model)
+        _assert_same(_state(model), before, addresses=True)
+        assert "_direct_reload_begun" not in model.__dict__
+
+    def test_unmarked_model_refused_at_begin_not_cold_start(self):
+        class _Unmarked(_ToyModel):  # the mark is not inherited
+            pass
+
+        with _DEVICE:
+            model = _Unmarked()
+        model.load_weights(_checkpoint().items())
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        self._assert_begin_refused(
+            model, r"_Unmarked is not validated .*VLLM_RELOAD_MODE=layerwise"
+        )
+
+    def test_online_quantization_refused(self):
         # finish clears the guard that keeps online quantization from
         # quantizing its converted bytes again
-        online = object.__new__(Fp8PerTensorOnlineLinearMethod)
-        init = _ToyModel.__init__
+        model = _cold_start(_checkpoint())
+        model.proj.quant_method = object.__new__(Fp8PerTensorOnlineLinearMethod)
+        self._assert_begin_refused(model, "online quantization")
 
-        def with_online_layer(self):
-            init(self)
-            self.proj.quant_method = online
-
-        monkeypatch.setattr(_ToyModel, "__init__", with_online_layer)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
-
-    def test_online_shared_experts_refused(self, monkeypatch):
+    def test_online_shared_experts_refused(self):
         # post-load processing deletes the staging parameters a reload loads
-        init = _ToyModel.__init__
-
-        def with_online_shared_experts(self):
-            init(self)
-            self.proj.shared_expert_online_loader = object()
-
-        monkeypatch.setattr(_ToyModel, "__init__", with_online_shared_experts)
-        with pytest.raises(RuntimeError, match="online quantization"):
-            _cold_start(_checkpoint())
+        model = _cold_start(_checkpoint())
+        model.proj.shared_expert_online_loader = object()
+        self._assert_begin_refused(model, "online quantization")
 
     @pytest.mark.parametrize("method_cls", ["HummingLinearMethod", "HummingMoEMethod"])
-    def test_humming_refused(self, monkeypatch, method_cls):
+    def test_humming_refused(self, method_cls):
         # its post-load processing runs only once per quant method
         from vllm.model_executor.layers.quantization import humming as humming_mod
 
-        humming = object.__new__(getattr(humming_mod, method_cls))
-        init = _ToyModel.__init__
+        model = _cold_start(_checkpoint())
+        model.proj.quant_method = object.__new__(getattr(humming_mod, method_cls))
+        self._assert_begin_refused(model, "humming")
 
-        def with_humming_layer(self):
-            init(self)
-            self.proj.quant_method = humming
+    @pytest.mark.parametrize(
+        "module_path,cls_name",
+        [
+            ("vllm.models.muse_spark.nvidia.mega_moe", "MuseSparkMegaMoEExperts"),
+            ("vllm.models.muse_spark.nvidia.hybrid_moe", "MuseSparkHybridMoEExperts"),
+            ("vllm.models.deepseek_v4.amd.mega_moe", "DeepseekV4AiterMegaMoEExperts"),
+        ],
+    )
+    def test_unsupported_component_refused(self, module_path, cls_name):
+        # post-load processing with a one-shot guard: a rerun is a no-op
+        import importlib
 
-        monkeypatch.setattr(_ToyModel, "__init__", with_humming_layer)
-        with pytest.raises(RuntimeError, match="humming"):
-            _cold_start(_checkpoint())
+        cls = getattr(importlib.import_module(module_path), cls_name)
+        model = _cold_start(_checkpoint())
+        experts = object.__new__(cls)
+        torch.nn.Module.__init__(experts)
+        model.proj.add_module("experts", experts)
+        self._assert_begin_refused(
+            model, rf"{cls_name} is not supported \(proj\.experts\)"
+        )
 
     def test_replaced_param_refused(self):
         # a new Parameter under a checkpoint name has no checkpoint layout:
@@ -574,6 +595,16 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
             {"weight_transfer_config": SimpleNamespace(backend="sharded_rdt")},
             "sharded_rdt",
         ),
+        (
+            "direct",
+            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
+            "sparse_nccl",
+        ),
+        (
+            "layerwise",
+            {"weight_transfer_config": SimpleNamespace(backend="sparse_nccl")},
+            None,
+        ),
     ],
     ids=[
         "defaults",
@@ -587,6 +618,8 @@ _ONLINE = object.__new__(OnlineQuantizationConfig)
         "lora",
         "draft-lm-head-quant",
         "sharded-rdt",
+        "sparse-nccl",
+        "layerwise-sparse-nccl",
     ],
 )
 def test_verify_direct_reload_compat(monkeypatch, mode, overrides, match):

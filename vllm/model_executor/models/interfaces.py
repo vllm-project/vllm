@@ -1240,6 +1240,34 @@ def supports_replayssm(
 
 
 @runtime_checkable
+class SupportsDirectReload(Protocol):
+    """The model was validated with direct weight reload
+    (``VLLM_RELOAD_MODE=direct``) for the quantization formats and kernels
+    its tests cover; other paths rely on component refusals and the runtime
+    checks of the reload."""
+
+    supports_direct_reload: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_direct_reload(
+    model: type[object],
+) -> TypeIs[type[SupportsDirectReload]]: ...
+
+
+@overload
+def supports_direct_reload(model: object) -> TypeIs[SupportsDirectReload]: ...
+
+
+def supports_direct_reload(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsDirectReload]] | TypeIs[SupportsDirectReload]:
+    # not inherited: subclasses (drafts, wrappers) are validated separately
+    cls = model if isinstance(model, type) else type(model)
+    return SupportsDirectReload in cls.__bases__
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 

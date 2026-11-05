@@ -78,7 +78,18 @@ def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tenso
 
 
 def _check_supported_modules(model: torch.nn.Module) -> None:
-    # config-level refusals: VllmConfig._verify_direct_reload_compat
+    """Refuse models and modules not known to reload correctly. Runs in
+    `begin`, so a cold start that never reloads is unaffected; config-level
+    refusals: VllmConfig._verify_direct_reload_compat."""
+    from vllm.model_executor.models.interfaces import supports_direct_reload
+
+    if not supports_direct_reload(type(model)):
+        raise RuntimeError(
+            f"direct reload: {type(model).__name__} is not validated with "
+            "direct reload (it does not declare SupportsDirectReload); use "
+            "VLLM_RELOAD_MODE=layerwise"
+        )
+
     from vllm.model_executor.layers.quantization.humming import (
         HummingLinearMethod,
         HummingMoEMethod,
@@ -89,6 +100,13 @@ def _check_supported_modules(model: torch.nn.Module) -> None:
     )
 
     for name, module in model.named_modules():
+        # a component whose post-load processing a rerun cannot repeat and
+        # which the checks below would not see (e.g. a one-shot guard)
+        if reason := getattr(module, "direct_reload_unsupported", None):
+            raise RuntimeError(
+                f"direct reload: {type(module).__name__} is not supported "
+                f"({name or type(model).__name__}): {reason}"
+            )
         method = getattr(module, "quant_method", None)
         # also without an online config (experts_int8); fused shared experts
         # quantize staging parameters that post-load processing deletes
@@ -113,7 +131,6 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     Runs once; reloads reuse the cold-start record."""
     if hasattr(model, "_ckpt_param_names") or is_weights_pre_processed():
         return  # pre-processed weights are already in runtime layout
-    _check_supported_modules(model)
     # a model owns the tensors it records first; `begin` refuses a shared one
     # (a target lm_head in a draft) whose post-load processing re-laid it out
     model._ckpt_owner = object()  # tags owned tensors (ids of freed ones recur)
@@ -194,6 +211,7 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
+    _check_supported_modules(model)
     if not hasattr(model, "_ckpt_param_names"):
         raise RuntimeError("direct reload: no checkpoint layout was recorded")
     _check_params_kept(model)

@@ -48,6 +48,7 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
 
+from .interfaces import SupportsDirectReload
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
 from .utils import (
@@ -868,7 +869,7 @@ class DFlashQwen3Model(nn.Module):
             yield name, weight
 
 
-class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+class DFlashQwen3ForCausalLM(Qwen3ForCausalLM, SupportsDirectReload):
     # The speculator this is a draft model of (see SpeculativeDraftModel).
     speculator_config_class = DFlashSpeculatorConfig
 

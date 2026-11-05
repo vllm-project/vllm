@@ -18,6 +18,7 @@ from vllm.model_executor.model_loader.reload import (
     start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.models.interfaces import SupportsDirectReload
 from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
 BLOCK = (128, 128)
@@ -230,7 +231,7 @@ def _shared(experts):
     )
 
 
-class _Model(torch.nn.Module):
+class _Model(torch.nn.Module, SupportsDirectReload):
     """Finishes a load the way the GLM model, wrapper and MTP drafter do."""
 
     def __init__(self):

@@ -138,6 +138,11 @@ class MonoDecode:
         self._layer_name = attn0.layer_name
         self._index_prefix = attn0.indexer.index_cache.prefix
         self._enabled = True
+        # the runner's converted weight copies are built once
+        model.direct_reload_unsupported = (
+            "mono decode keeps weight copies a reload does not refresh "
+            "(VLLM_ROCM_MINIMAX_M3_MONO)"
+        )
 
     def _disable(self, why: str) -> None:
         logger.warning("MiniMax-M3 mono decode off: %s", why)

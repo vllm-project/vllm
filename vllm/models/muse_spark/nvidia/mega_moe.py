@@ -91,6 +91,9 @@ def _shard_padding_mask(is_padding: torch.Tensor, num_tokens: int) -> torch.Tens
 
 class MuseSparkMegaMoEExperts(nn.Module):
     _symm_buffer_cache: dict[tuple, tuple] = {}
+    # finalize_weights runs once (a rerun returns early) and drops or rebinds
+    # the expert parameters, so a reload would keep the cold-start weights
+    direct_reload_unsupported = "its expert weights are transformed only once"
 
     def __init__(
         self,
