@@ -572,8 +572,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
-        FlashInferB12xMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
+        # Opt-in via --linear-backend flashinfer_b12x; after Marlin so auto
+        # selection does not change.
+        FlashInferB12xMxfp8LinearKernel,
         B12xMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,

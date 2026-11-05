@@ -137,8 +137,26 @@ class FlashInferB12xMxfp8LinearKernel(FlashInferCutlassMxfp8LinearKernel):
 
     max_b12x_m = 512
 
+    def __init__(self, c: Mxfp8LinearLayerConfig) -> None:
+        super().__init__(c)
+        # Shapes CUTLASS rejects (e.g. N < 128) stay on b12x at every M.
+        self.cutlass_ok = FlashInferCutlassMxfp8LinearKernel.can_implement(c)[0]
+
     def select_mm_backend(self, m: int) -> str:
-        return "b12x" if m <= self.max_b12x_m else "cutlass"
+        if m <= self.max_b12x_m or not self.cutlass_ok:
+            return "b12x"
+        return "cutlass"
+
+    @classmethod
+    def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        # b12x needs whole BK=128 tiles along K and has no constraint on N.
+        _, K = c.weight_shape
+        if K < 128 or K % 128 != 0:
+            return (
+                False,
+                f"b12x mm_mxfp8 requires K to be a multiple of 128, got K={K}.",
+            )
+        return True, None
 
     @classmethod
     def is_supported(
