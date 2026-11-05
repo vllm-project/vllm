@@ -1382,6 +1382,29 @@ def test_lazy_store_returns_blocks_to_eviction_end() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Test 2f: Lazy walk stays at the eviction end
+# ---------------------------------------------------------------------------
+def test_lazy_walk_does_not_offload_past_eviction_window() -> None:
+    """Lazy: blocks past target_free from the queue head are not offloaded yet."""
+    fix = make_scheduler(num_cpu_blocks=32, num_gpu_blocks=32, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    target = sched._target_free
+
+    req = make_request(num_blocks=target)
+    gpu_pool.free_blocks(_allocate_gpu_blocks(gpu_pool, req, target))
+    # The queue now holds target uncached blocks, then target cached ones.
+    fillers = _flush_old_blocks_to_lru_head(
+        gpu_pool, num_filler_blocks=gpu_pool.get_num_free_blocks() - 2 * target
+    )
+
+    for _ in range(2):
+        meta = sched.build_connector_meta(make_scheduler_output({}))
+        assert not meta.store_gpu_blocks
+    gpu_pool.free_blocks(fillers)
+
+
+# ---------------------------------------------------------------------------
 # Test 3: LRU eviction order
 # ---------------------------------------------------------------------------
 def test_lru_eviction_order() -> None:
@@ -2357,7 +2380,6 @@ def test_reset_pending_lazy_stores() -> None:
     assert sched.reset() is False
     assert len(sched._store_event_to_blocks) == 0
     assert len(sched._abandoned_store_event_to_blocks) == 1
-    assert sched._cursor is None
 
     simulate_store_completion(sched, meta.store_event)
     assert len(sched._abandoned_store_event_to_blocks) == 0
