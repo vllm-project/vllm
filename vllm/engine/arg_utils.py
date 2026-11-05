@@ -563,6 +563,7 @@ class EngineArgs:
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_hc_sp: bool = ParallelConfig.enable_hc_sp
     enable_hc_sp_quick_reduce: bool = ParallelConfig.enable_hc_sp_quick_reduce
+    enable_hc_sp_aiter_ipc: bool = ParallelConfig.enable_hc_sp_aiter_ipc
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_batch_sharded_sampling: bool | None = (
         ParallelConfig.enable_batch_sharded_sampling
@@ -1311,6 +1312,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-hc-sp-quick-reduce",
             **parallel_kwargs["enable_hc_sp_quick_reduce"],
+        )
+        parallel_group.add_argument(
+            "--enable-hc-sp-aiter-ipc",
+            **parallel_kwargs["enable_hc_sp_aiter_ipc"],
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
@@ -2608,6 +2613,7 @@ class EngineArgs:
             is_moe_model=model_config.is_moe,
             enable_hc_sp=self.enable_hc_sp,
             enable_hc_sp_quick_reduce=self.enable_hc_sp_quick_reduce,
+            enable_hc_sp_aiter_ipc=self.enable_hc_sp_aiter_ipc,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_batch_sharded_sampling=self.enable_batch_sharded_sampling,
             enable_ep_weight_filter=self.enable_ep_weight_filter,

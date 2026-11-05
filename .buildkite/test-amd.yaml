@@ -2834,11 +2834,14 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/distributed/device_communicators/cuda_communicator.py
   - vllm/distributed/device_communicators/quick_all_reduce.py
+  - vllm/distributed/device_communicators/aiter_custom_all_reduce.py
+  - vllm/_aiter_ops.py
   - tests/models/qwen4_exp/test_ple.py
   - tests/models/qwen4_exp/test_tpsp.py
   - tests/models/qwen4_exp/test_sp_quick_reduce.py
+  - tests/models/qwen4_exp/test_sp_aiter_ipc.py
   commands:
-  - pytest -v -s models/qwen4_exp/test_tpsp.py models/qwen4_exp/test_sp_quick_reduce.py
+  - pytest -v -s models/qwen4_exp/test_tpsp.py models/qwen4_exp/test_sp_quick_reduce.py models/qwen4_exp/test_sp_aiter_ipc.py
 
 - label: ":amd: (MI355) Distributed DP Basic" # TBD
   timeout_in_minutes: 45

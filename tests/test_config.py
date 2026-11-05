@@ -4732,6 +4732,9 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
 
 
 @pytest.mark.parametrize(
+    "flag", ["enable_hc_sp_quick_reduce", "enable_hc_sp_aiter_ipc"]
+)
+@pytest.mark.parametrize(
     "rocm,tp_size,hc_sp,moe_sp,dbo,int4,error",
     [
         (True, 2, True, False, False, True, None),
@@ -4744,20 +4747,22 @@ def test_hc_sp_model_support(enabled, supported, cuda_alike, tp_size, pp_size, e
         (False, 1, False, False, False, False, None),  # ignored with TP=1
     ],
 )
-def test_hc_sp_quick_reduce_validation(
-    monkeypatch, rocm, tp_size, hc_sp, moe_sp, dbo, int4, error
+def test_hc_sp_collective_flag_validation(
+    monkeypatch, flag, rocm, tp_size, hc_sp, moe_sp, dbo, int4, error
 ):
-    """The flag needs ROCm, active HC SP, TP=2, no DBO and the INT4 env var; it
-    is ignored with TP=1, like --enable-hc-sp."""
+    """Both flags need ROCm, active HC SP, TP=2 and no DBO; they are ignored with
+    TP=1, like --enable-hc-sp. Only the INT4 flag needs the INT4 env var."""
+    if flag == "enable_hc_sp_aiter_ipc" and not int4:
+        error = None
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "INT4" if int4 else "FP")
     envs.disable_envs_cache()
     parallel_kwargs = dict(
         enable_hc_sp=hc_sp,
-        enable_hc_sp_quick_reduce=True,
         enable_dbo=dbo,
         tensor_parallel_size=tp_size,
         # Avoid backend auto-detection in this config-only test.
         distributed_executor_backend="mp",
+        **{flag: True},
     )
     if moe_sp:
         parallel_kwargs.update(
@@ -4767,10 +4772,24 @@ def test_hc_sp_quick_reduce_validation(
         )
     with patch("vllm.config.parallel.current_platform.is_rocm", return_value=rocm):
         if error:
-            with pytest.raises(ValueError, match=error):
+            # The message names the flag that was set.
+            with pytest.raises(
+                ValueError, match=rf"--{flag.replace('_', '-')} .*{error}"
+            ):
                 ParallelConfig(**parallel_kwargs)
         else:
             ParallelConfig(**parallel_kwargs)
+
+
+@pytest.mark.parametrize(
+    "flag", ["enable_hc_sp_quick_reduce", "enable_hc_sp_aiter_ipc"]
+)
+def test_hc_sp_collective_flag_separates_the_compile_cache(flag):
+    """The flags choose the collective ops of the compiled graph, so they are
+    part of its cache key."""
+    assert (
+        ParallelConfig(**{flag: True}).compute_hash() != ParallelConfig().compute_hash()
+    )
 
 
 @pytest.mark.parametrize(

@@ -206,6 +206,15 @@ class ParallelConfig:
     collectives stay exact and a warning is logged. Validated on gfx950 only.
     Not supported with DBO. Ignored when TP=1.
     """
+    enable_hc_sp_aiter_ipc: bool = False
+    """Run the HC SP reduce-scatter and all-gather of the Qwen4Exp decoder layers
+    through AITER's exact IPC collectives instead of RCCL (ROCm, TP=2). With
+    `--enable-hc-sp-quick-reduce` they also serve the steps below its size gate.
+    It needs HC SP (four collectives with `--enable-hc-sp`, two when only MoE SP
+    enables it, which is untested) and `VLLM_ROCM_USE_AITER=1`; without gfx950 or
+    the AITER custom all-reduce the collectives stay on RCCL and a warning is
+    logged. Validated on gfx950 only. Not supported with DBO. Ignored when TP=1.
+    """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_batch_sharded_sampling: bool | None = None
@@ -1289,19 +1298,27 @@ class ParallelConfig:
                 f"be at least the number of microbatches ({self.num_ubatches})."
             )
 
-        if self.enable_hc_sp_quick_reduce and self.tensor_parallel_size > 1:
-            if not current_platform.is_rocm():
-                raise ValueError("--enable-hc-sp-quick-reduce requires ROCm")
-            if not (self.enable_hc_sp or self.use_sequence_parallel_moe):
-                raise ValueError(
-                    "--enable-hc-sp-quick-reduce requires HC sequence parallelism "
-                    "(--enable-hc-sp)"
-                )
-            if self.tensor_parallel_size != 2:
-                raise ValueError("--enable-hc-sp-quick-reduce supports TP=2 only")
-            if self.use_ubatching:
-                raise ValueError("--enable-hc-sp-quick-reduce does not support DBO")
-            if envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION != "INT4":
+        if self.tensor_parallel_size > 1:
+            for flag, enabled in (
+                ("--enable-hc-sp-quick-reduce", self.enable_hc_sp_quick_reduce),
+                ("--enable-hc-sp-aiter-ipc", self.enable_hc_sp_aiter_ipc),
+            ):
+                if not enabled:
+                    continue
+                if not current_platform.is_rocm():
+                    raise ValueError(f"{flag} requires ROCm")
+                if not (self.enable_hc_sp or self.use_sequence_parallel_moe):
+                    raise ValueError(
+                        f"{flag} requires HC sequence parallelism (--enable-hc-sp)"
+                    )
+                if self.tensor_parallel_size != 2:
+                    raise ValueError(f"{flag} supports TP=2 only")
+                if self.use_ubatching:
+                    raise ValueError(f"{flag} does not support DBO")
+            if (
+                self.enable_hc_sp_quick_reduce
+                and envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION != "INT4"
+            ):
                 raise ValueError(
                     "--enable-hc-sp-quick-reduce requires "
                     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4"

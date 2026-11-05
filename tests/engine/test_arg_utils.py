@@ -636,23 +636,26 @@ def test_attention_config():
         engine_args.create_engine_config()
 
 
-def test_enable_hc_sp_quick_reduce_reaches_the_parallel_config():
+@pytest.mark.parametrize(
+    "flag", ["enable_hc_sp_quick_reduce", "enable_hc_sp_aiter_ipc"]
+)
+def test_hc_sp_collective_flag_reaches_the_parallel_config(flag):
     """The flag is off by default. The CLI flag lands in `ParallelConfig`, whose
     validation then rejects it without HC SP: a flag dropped on the way would
     build the config silently."""
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    assert not EngineArgs.from_cli_args(parser.parse_args([])).enable_hc_sp_quick_reduce
+    assert not getattr(EngineArgs.from_cli_args(parser.parse_args([])), flag)
     args = parser.parse_args(
         [
             "--model",
             "facebook/opt-125m",
             "--tensor-parallel-size",
             "2",
-            "--enable-hc-sp-quick-reduce",
+            "--" + flag.replace("_", "-"),
         ]
     )
     engine_args = EngineArgs.from_cli_args(args)
-    assert engine_args.enable_hc_sp_quick_reduce
+    assert getattr(engine_args, flag)
     with (
         patch("vllm.config.parallel.current_platform.is_rocm", return_value=True),
         pytest.raises(ValueError, match="requires HC sequence parallelism"),

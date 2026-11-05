@@ -79,10 +79,9 @@ from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .ops.sequence_parallel import (
-    sp_all_gather_quantized,
-    sp_reduce_scatter,
-    sp_reduce_scatter_quantized,
+    DECODER_LAYER_SP_COLLECTIVES,
     sp_shard,
+    use_sp_aiter_ipc,
 )
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
@@ -202,13 +201,13 @@ class Qwen4ExpDecoderLayer(nn.Module):
         # MoE SP also enables HC SP, while HC SP can be enabled independently.
         self.use_hc_sequence_parallel = is_hc_sequence_parallel_enabled(vllm_config)
         # The four SP collectives of the decoder layer may use INT4 QuickReduce
-        # (opt-in, lossy). The other SP sites (embedding shard, LM-head gather,
-        # PLE) always stay exact.
-        quick_reduce = self.use_hc_sequence_parallel and use_quick_sp(vllm_config)
-        self.sp_all_gather = sp_all_gather_quantized if quick_reduce else sp_all_gather
-        self.sp_reduce_scatter = (
-            sp_reduce_scatter_quantized if quick_reduce else sp_reduce_scatter
-        )
+        # (opt-in, lossy) and AITER's exact IPC collectives (opt-in, below the
+        # INT4 size gate with both). The other SP sites (embedding shard,
+        # LM-head gather, PLE) always stay on the common exact path.
+        self.sp_all_gather, self.sp_reduce_scatter = DECODER_LAYER_SP_COLLECTIVES[
+            self.use_hc_sequence_parallel and use_quick_sp(vllm_config),
+            self.use_hc_sequence_parallel and use_sp_aiter_ipc(vllm_config),
+        ]
         self.layer_idx = extract_layer_index(prefix)
         self.use_sequence_parallel = (
             vllm_config.parallel_config.use_sequence_parallel_moe
