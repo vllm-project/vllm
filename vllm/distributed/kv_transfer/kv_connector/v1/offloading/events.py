@@ -21,8 +21,8 @@ Windowed attention groups keep the legacy placeholder payload.
 """
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import msgspec
 
@@ -34,8 +34,11 @@ from vllm.distributed.kv_events import (
     KVCacheEvent,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    generate_block_hash_extra_keys,
     maybe_convert_block_hash,
     resolve_block_hashes,
     to_event_extra_keys,
@@ -58,6 +61,8 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
+    import torch
+
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
         GroupOffloadConfig,
     )
@@ -107,8 +112,7 @@ class _OffloadEventMetadata(
     block_size: int
     lora_id: int | None
     lora_name: str | None
-    # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
-    extra_keys: tuple[tuple[Any, ...] | None, ...] | None
+    extra_keys: tuple[tuple[Any, ...] | None, ...]
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: int
@@ -122,6 +126,10 @@ class _RequestEventContext:
     block_hashes: list[BlockHash]
     all_token_ids: Sequence[int]
     lora_request: "LoRARequest | None"
+    cache_salt: str | None
+    mm_features: list[MultiModalFeatureSpec]
+    prompt_embeds: "torch.Tensor | None"
+    _prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes]
     resumable: bool
     kv_transfer_params: dict[str, Any] | None
     group_configs: dict[int, "GroupOffloadConfig"]
@@ -156,8 +164,30 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
     if len(meta.block_hashes) > 1:
         meta.parent_block_hash = meta.block_hashes[-2]
     meta.block_hashes = meta.block_hashes[-1:]
+    meta.extra_keys = meta.extra_keys[-1:]
     meta.token_ids = ()
     return meta
+
+
+def _block_extra_keys(
+    req: Request | _RequestEventContext, start: int, end: int, block_size: int
+) -> tuple[tuple[Any, ...] | None, ...]:
+    """Each block's hash extra keys, as the GPU block pool publishes them."""
+    assert (end - start) % block_size == 0
+    if not (req.lora_request or req.mm_features or req.cache_salt) and (
+        req.prompt_embeds is None
+    ):
+        return (None,) * ((end - start) // block_size)
+    keys: list[tuple[Any, ...] | None] = []
+    mm_idx = 0
+    if start > 0 and req.mm_features:
+        mm_idx, _ = get_mm_features_in_window(req.mm_features, start, end)
+    for block_start in range(start, end, block_size):
+        block_keys, mm_idx = generate_block_hash_extra_keys(
+            cast(Request, req), block_start, block_start + block_size, mm_idx
+        )
+        keys.append(block_keys)
+    return tuple(keys)
 
 
 class OffloadingEventsTracker:
@@ -203,6 +233,12 @@ class OffloadingEventsTracker:
                     block_hashes=request.block_hashes,
                     all_token_ids=request.all_token_ids,
                     lora_request=request.lora_request,
+                    cache_salt=request.cache_salt,
+                    mm_features=[
+                        replace(feature, data=None) for feature in request.mm_features
+                    ],
+                    prompt_embeds=request.prompt_embeds,
+                    _prompt_embeds_per_block_hashes=request._prompt_embeds_per_block_hashes,
                     resumable=request.resumable,
                     kv_transfer_params=request.kv_transfer_params,
                     group_configs={
@@ -351,7 +387,9 @@ class OffloadingEventsTracker:
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=_block_extra_keys(
+                req, chunk_start, boundary_tokens, tokens_per_hash
+            ),
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies=_PRIMARY_RESIDENCY_BIT,
@@ -478,7 +516,9 @@ class OffloadingEventsTracker:
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
-            extra_keys=None,
+            extra_keys=_block_extra_keys(
+                req, tok_start, tok_end, group_config.tokens_per_block
+            ),
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
             active_residencies=_PRIMARY_RESIDENCY_BIT,

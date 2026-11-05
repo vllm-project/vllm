@@ -391,6 +391,27 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
 
+- label: ":nvidia: (H200 MIG 18GB) Self-describing KV Offload Events"
+  key: self-describing-kv-offload-events
+  depends_on:
+    - image-build
+  timeout_in_minutes: 20
+  device: h200_18gb
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - vllm/v1/core/kv_cache_utils.py
+    - vllm/v1/request.py
+    - tests/v1/kv_connector/unit/offloading_connector/
+    - tests/v1/kv_connector/unit/test_offloading_connector.py
+  commands:
+    - >-
+      pytest -v -s
+      tests/v1/kv_connector/unit/offloading_connector/test_events.py
+      tests/v1/kv_connector/unit/offloading_connector/test_scheduler.py
+      tests/v1/kv_connector/unit/offloading_connector/test_config.py
+      tests/v1/kv_connector/unit/test_offloading_connector.py::test_self_describing_offload_events_preserve_cache_salt
+
 - label: ":nvidia: (H200 MIG 18GB) Extract Hidden States Integration"
   key: extract-hidden-states-integration
   automatic_shard: true

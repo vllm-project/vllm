@@ -117,6 +117,15 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 | `canonical_layout` | no | `false` | both | Store each offloaded block in a common canonical representation instead of each worker's local GPU page (enables sharing across TP sizes and single-copy storage of replicated KV). See [Canonical Layout](#canonical-layout). |
 
+Self-describing `BlockStored.extra_keys` contains one entry per announced hash,
+using the GPU event format: LoRA names, multimodal identifiers and relative
+offsets, the cache salt on the first block, and prompt-embedding digests.
+These fields remain available when an asynchronous store completes after its
+request is released. Recurrent checkpoints carry only the final block's extra
+keys. Placeholder events have no token, parent-chain, or namespace metadata;
+consumers that need salted namespaces must enable `self_describing_kv_events`
+and ignore placeholder stores (including unsupported windowed groups).
+
 ## Canonical Layout
 
 By default, each worker copies its own GPU page to the CPU tier unchanged, so an offloaded block is stored in whatever form that worker happens to hold it.

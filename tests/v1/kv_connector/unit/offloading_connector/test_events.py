@@ -3,7 +3,6 @@
 import gc
 import weakref
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -27,6 +26,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     GroupOffloadConfig,
     OffloadingConnectorScheduler,
 )
+from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -84,12 +85,13 @@ def _wire_hash(block_hash: BlockHash):
 
 
 def _request(*, block_hashes: list[BlockHash], token_count: int, req_id: str = "req"):
-    req = MagicMock()
-    req.request_id = req_id
-    req.block_hashes = block_hashes
-    req.all_token_ids = list(range(1, token_count + 1))
-    req.lora_request = None
-    return req
+    return Request(
+        request_id=req_id,
+        prompt_token_ids=list(range(1, token_count + 1)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
 
 
 def _group_config(
@@ -211,7 +213,7 @@ def _removed_event(
 
 
 def _lookup_chunk() -> tuple[
-    OffloadingEventsTracker, MagicMock, GroupOffloadConfig, OffloadKey
+    OffloadingEventsTracker, Request, GroupOffloadConfig, OffloadKey
 ]:
     tracker = _tracker()
     req = _request(block_hashes=[_hash(0)], token_count=4)
@@ -411,6 +413,121 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     assert key not in tracker._pending_event_metadata
 
 
+@pytest.mark.parametrize("record_snapshot", [False, True])
+@pytest.mark.parametrize("with_lora", [False, True])
+@pytest.mark.parametrize("source", ["salt", "multimodal", "embeddings"])
+@pytest.mark.cpu_test
+def test_store_preserves_extra_keys_after_request_freed(
+    record_snapshot, with_lora, source
+):
+    """Async stores retain each block's namespace after Request cleanup."""
+    import hashlib
+
+    block_hashes = [_hash(i) for i in range(4)]
+    embeddings = torch.arange(32, dtype=torch.float32).reshape(16, 2)
+    request = Request(
+        request_id="extra-keys",
+        prompt_token_ids=list(range(16)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+        cache_salt="salt" if source == "salt" else None,
+        lora_request=LoRARequest("adapter", 7, "/adapter") if with_lora else None,
+        mm_features=[
+            MultiModalFeatureSpec(
+                None, "image", identifier, PlaceholderRange(offset, length)
+            )
+            for identifier, offset, length in [("img0", 1, 2), ("img1", 6, 8)]
+        ]
+        if source == "multimodal"
+        else None,
+        prompt_embeds=embeddings if source == "embeddings" else None,
+    )
+    group = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group,))
+    keys = [make_offload_key(block_hashes[i], 0) for i in (1, 3)]
+    for chunk_idx, key in enumerate(keys):
+        context.set_offload_key_position(key, (chunk_idx + 1) * 8)
+        if record_snapshot:
+            tracker.record_store(request, group, chunk_idx, key)
+    request_ref = weakref.ref(request)
+    del request
+    gc.collect()
+    assert request_ref() is None
+
+    stores = list(
+        tracker.take_events(
+            [
+                OffloadingEvent(
+                    keys=keys,
+                    medium=Medium.CPU,
+                    removed=False,
+                    req_context=context,
+                    removal_expected=True,
+                )
+            ]
+        )
+    )
+    adapter = ("adapter",) if with_lora else ()
+    extras: list[tuple[object, ...]]
+    if source == "salt":
+        extras = [("salt",), (), (), ()]
+    elif source == "multimodal":
+        extras = [(("img0", 1),), (("img1", 2),), (("img1", -2),), (("img1", -6),)]
+    else:
+        extras = [
+            (hashlib.sha256(embeddings[i : i + 4].numpy().tobytes()).digest(),)
+            for i in range(0, 16, 4)
+        ]
+    expected = [adapter + extra or None for extra in extras]
+    assert [event.extra_keys for event in stores] == [expected[:2], expected[2:]]
+    assert [event.lora_id for event in stores] == [7 if with_lora else None] * 2
+    [removed] = tracker.take_events([_removed_event(keys)])
+    assert removed.block_hashes == [_wire_hash(h) for h in block_hashes]
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("mamba", [False, True])
+@pytest.mark.cpu_test
+def test_extra_keys_align_with_complete_and_partial_checkpoint_hashes(partial, mamba):
+    tracker = _tracker()
+    request = Request(
+        request_id="checkpoint-extra-keys",
+        prompt_token_ids=list(range(16)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=[_hash(i) for i in range(4)],
+        cache_salt="salt",
+        lora_request=LoRARequest("adapter", 7, "/adapter"),
+        mm_features=[
+            MultiModalFeatureSpec(
+                None, "image", "image", PlaceholderRange(offset=6, length=8)
+            )
+        ],
+    )
+    group = _group_config(
+        block_size=8, blocks_per_chunk=2, tokens_per_hash=4, mamba=mamba
+    )
+    boundary = 12 if partial else 16
+    key = make_offload_key(request.block_hashes[boundary // 4 - 1], 0)
+    expected: list[tuple[object, ...]]
+    if partial:
+        tracker.record_partial_store(request, group, boundary, key)
+        expected = [
+            ("adapter", "salt"),
+            ("adapter", ("image", 2)),
+            ("adapter", ("image", -2)),
+        ]
+    else:
+        tracker.record_store(request, group, 0, key)
+        expected = [("adapter", ("image", 6), "salt"), ("adapter", ("image", -2))]
+    [stored] = tracker.take_events([_stored_event([key])])
+    assert stored.extra_keys == (expected[-1:] if mamba else expected)
+    assert len(stored.extra_keys) == len(stored.block_hashes)
+
+
 def test_mamba_store_uses_request_context():
     block_hashes = [_hash(i) for i in range(4)]
     request = Request(
@@ -470,7 +587,7 @@ def test_take_events_publishes_routable_block_stored():
             assert event.parent_block_hash == _wire_hash(_hash(i - 1))
         assert event.lora_id is None
         assert event.lora_name is None
-        assert event.extra_keys is None
+        assert event.extra_keys == [None]
         assert event.group_idx == 0
         assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
         assert event.kv_cache_spec_sliding_window is None
@@ -495,7 +612,7 @@ def test_promotion_emits_full_cpu_stored_event():
     assert event.block_size == 4
     assert event.lora_id is None
     assert event.lora_name is None
-    assert event.extra_keys is None
+    assert event.extra_keys == [None]
     assert event.group_idx == 0
     assert event.kv_cache_spec_kind == KVCacheSpecKind.FULL_ATTENTION.value
     assert event.kv_cache_spec_sliding_window is None
@@ -806,7 +923,7 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         )
         assert event.ownership == "kvcr"
         assert event.block_size == 1600
-        assert event.token_ids == req.all_token_ids
+        assert event.token_ids == list(req.all_token_ids)
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
     primary.complete_store([key], ctx, success=success)
@@ -883,7 +1000,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
         [_stored_event([key], ownership="kvcr", removal_expected=True)]
     )
     assert inventory.block_size == 1600
-    assert inventory.token_ids == req.all_token_ids
+    assert inventory.token_ids == list(req.all_token_ids)
     assert old_cleanup == []
     assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
     primary.complete_store([key], ctx, success=success)

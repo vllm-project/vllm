@@ -131,6 +131,24 @@ class MockSubscriber:
         """Clean up resources."""
         self.sub.close()
 
+    def replay_stored_events(self, endpoint: str) -> list[BlockStored]:
+        stored: list[BlockStored] = []
+        with self.ctx.socket(zmq.DEALER) as replay:
+            replay.setsockopt(zmq.LINGER, 0)
+            replay.connect(endpoint)
+            replay.send_multipart([b"", (0).to_bytes(8, "big")])
+            while True:
+                assert replay.poll(10_000), "Timed out waiting for event replay"
+                _, topic, sequence, payload = replay.recv_multipart()
+                if sequence == b"\xff" * 8:
+                    return stored
+                assert topic == self.topic_bytes
+                stored.extend(
+                    event
+                    for event in self.decoder.decode(payload).events
+                    if isinstance(event, BlockStored)
+                )
+
 
 def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> None:
     """Wait for async offload transfers to finish so prefix cache can reset.
@@ -323,6 +341,87 @@ def test_cpu_offloading(
         if subscriber is not None:
             subscriber.close()
         del llm
+
+
+def test_self_describing_offload_events_preserve_cache_salt(monkeypatch):
+    """Real inference publishes each salted CPU root in its GPU namespace."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with socket.socket() as sock, socket.socket() as replay_sock:
+        sock.bind(("127.0.0.1", 0))
+        replay_sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        replay_port = replay_sock.getsockname()[1]
+    endpoint = f"tcp://127.0.0.1:{port}"
+    subscriber = MockSubscriber(endpoint, topic="salted-offload")
+    llm = None
+    try:
+        llm = LLM(
+            model="facebook/opt-125m",
+            max_model_len=128,
+            max_num_batched_tokens=128,
+            max_num_seqs=1,
+            gpu_memory_utilization=0.2,
+            kv_cache_memory_bytes=8 << 20,
+            attention_config={"backend": "TRITON_ATTN"},
+            enforce_eager=True,
+            enable_prefix_caching=True,
+            kv_events_config=KVEventsConfig(
+                enable_kv_cache_events=True,
+                publisher="zmq",
+                endpoint=f"tcp://*:{port}",
+                replay_endpoint=f"tcp://*:{replay_port}",
+                topic="salted-offload",
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="OffloadingConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "cpu_bytes_to_use": 16 << 20,
+                    "blocks_per_chunk": 2,
+                    "self_describing_kv_events": True,
+                },
+            ),
+        )
+        for salt in ("session-a", "session-b"):
+            llm.generate(
+                TokensPrompt(prompt_token_ids=list(range(100, 165)), cache_salt=salt),
+                SamplingParams(temperature=0, min_tokens=4, max_tokens=4),
+                use_tqdm=False,
+            )
+            _wait_for_prefix_cache_reset(llm)
+        stored = []
+        roots = []
+
+        def capture_roots():
+            nonlocal stored, roots
+            stored = subscriber.replay_stored_events(f"tcp://127.0.0.1:{replay_port}")
+            roots = [
+                event
+                for event in stored
+                if event.medium == "CPU"
+                and event.parent_block_hash is None
+                and event.block_size > 0
+            ]
+            return len(roots) >= 2
+
+        _poll_until(capture_roots, timeout_s=10, what="both CPU root stores")
+        assert len({event.block_hashes[0] for event in roots}) == 2
+        gpu_extra_keys = {
+            block_hash: event.extra_keys[idx]
+            for event in stored
+            if event.medium == "GPU"
+            for idx, block_hash in enumerate(event.block_hashes)
+        }
+        for event in roots:
+            assert event.extra_keys == [gpu_extra_keys[h] for h in event.block_hashes]
+        assert {event.extra_keys[0] for event in roots} == {
+            ("session-a",),
+            ("session-b",),
+        }
+    finally:
+        subscriber.close()
+        if llm is not None:
+            llm.llm_engine.engine_core.shutdown()
 
 
 def _sliding_window_partial_chunk_test(llm: LLM) -> None:
