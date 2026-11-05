@@ -278,11 +278,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (H200 MIG 18GB) [Nightly] Multimodal Models (Extended Pooling)"
+- label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
   automatic_shard: true
   optional: true
-  device: h200_18gb
+  device: h200_35gb
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
