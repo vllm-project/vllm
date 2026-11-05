@@ -74,6 +74,7 @@ def _silu_mul_quant_sorted_kernel(
     intermediate: tl.constexpr,
     BLOCK_M: tl.constexpr,
     GROUP_K: tl.constexpr,
+    USE_UE8M0: tl.constexpr,
 ):
     row_start = tl.program_id(0) * BLOCK_M
     if row_start >= tl.load(num_tokens_post_padded_ptr):
@@ -90,9 +91,15 @@ def _silu_mul_quant_sorted_kernel(
     silu = tl.div_rn(gate, 1.0 + tl.extra.cuda.libdevice.exp(-gate))
     silu = silu.to(input_ptr.dtype.element_ty).to(tl.float32)
     result = (silu * up).to(input_ptr.dtype.element_ty).to(tl.float32)
-    scale_raw = tl.maximum(tl.max(tl.abs(result), 1), 1e-10) * (1.0 / 448.0)
-    scale = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
-    quantized = tl.minimum(tl.maximum(tl.div_rn(result, scale[:, None]), -448.0), 448.0)
+    amax = tl.maximum(tl.max(tl.abs(result), 1), 1e-10)
+    if USE_UE8M0:
+        scale = tl.math.exp2(tl.ceil(tl.log2(amax * (1.0 / 448.0))))
+        quantized = tl.div_rn(result, scale[:, None])
+    else:
+        # match per_token_group_quant_fp8: scale = amax / max, q = x * (1 / scale)
+        scale = tl.div_rn(amax, 448.0)
+        quantized = result * tl.div_rn(1.0, scale)[:, None]
+    quantized = tl.minimum(tl.maximum(quantized, -448.0), 448.0)
     tl.store(
         output_ptr + rows[:, None] * intermediate + cols[None, :],
         quantized.to(tl.float8e4nv),
@@ -347,6 +354,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
+                use_ue8m0=self.quant_config.use_ue8m0_act_scales,
             )
 
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
@@ -462,6 +470,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and self._lora_context is None
             and not hooked
             and not self.quantization_emulation
+            # The sorted kernel mirrors the unfused activation path, which the
+            # route-major layout takes only when DeepGEMM E8M0 is enabled.
             and is_deep_gemm_e8m0_used()
             and a2_scale is None
             and sorted_token_ids is not None
@@ -477,6 +487,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         if use_sorted_a:
             assert sorted_token_ids is not None
+            sorted_use_ue8m0 = self.quant_config.use_ue8m0_act_scales
+            if sorted_use_ue8m0 is None:
+                sorted_use_ue8m0 = is_deep_gemm_e8m0_used()
             num_sorted_rows = sorted_token_ids.numel()
             # GEMM fills padding inside active blocks; quantization skips the tail.
             intermediate_cache1 = workspace2.new_empty((num_sorted_rows, 1, N))
@@ -629,6 +642,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 cache2_dim,
                 BLOCK_M=16,
                 GROUP_K=128,
+                USE_UE8M0=sorted_use_ue8m0,
             )
         elif (
             activation == MoEActivation.SILU
@@ -655,6 +669,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.per_act_token_quant,
                 self.block_shape,
                 quantization_emulation=self.quantization_emulation,
+                use_ue8m0=self.quant_config.use_ue8m0_act_scales,
             )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
@@ -931,6 +946,7 @@ class TritonWNA16Experts(TritonExperts):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
+            use_ue8m0=self.quant_config.use_ue8m0_act_scales,
         )
 
         invoke_fused_moe_wna16_triton_kernel(

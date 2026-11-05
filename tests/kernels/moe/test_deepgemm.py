@@ -35,11 +35,19 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+    Fp8MoeBackend,
+    make_fp8_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    _quantize_input,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.utils.deep_gemm import (
     calc_diff,
+    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     per_block_cast_to_fp8,
 )
@@ -632,3 +640,23 @@ def test_deepgemm_fp4_vs_triton(
             f"DeepGEMM FP4 path was not executed during the test. "
             f"Call counter: {call_counter['cnt']}"
         )
+
+
+@pytest.mark.parametrize(
+    ("backend", "expect_pow2"),
+    [(Fp8MoeBackend.TRITON, False), (Fp8MoeBackend.DEEPGEMM, True)],
+)
+@pytest.mark.skipif(not is_deep_gemm_e8m0_used(), reason="Requires DeepGEMM E8M0")
+def test_e8m0_act_scales_only_for_deepgemm_backend(
+    backend, expect_pow2, default_vllm_config
+):
+    """Kernels that take float32 scales should not pay the UE8M0 rounding
+    error just because DeepGEMM E8M0 is enabled globally."""
+    w_scale = torch.ones(1, 1, 1, device="cuda")
+    quant_config = make_fp8_moe_quant_config(
+        backend, w_scale, w_scale, None, None, block_shape=BLOCK_SIZE
+    )
+    x = torch.randn(16, 512, device="cuda", dtype=torch.bfloat16)
+    _, a_scale = _quantize_input(x, quant_config)
+    is_pow2 = torch.equal(a_scale, torch.exp2(torch.round(torch.log2(a_scale))))
+    assert is_pow2 == expect_pow2

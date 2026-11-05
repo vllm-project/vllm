@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -182,8 +183,10 @@ def setup_cuda():
     "H200" not in torch.cuda.get_device_name(),
     reason="The sorted-A TMA path is tuned for H200",
 )
-def test_sorted_a_tma_moe_matches_route_major(workspace_init):
-    """The H200 sorted path preserves routed FP8 block outputs exactly."""
+@pytest.mark.parametrize("use_ue8m0_act_scales", [None, False])
+def test_sorted_a_tma_moe_matches_route_major(workspace_init, use_ue8m0_act_scales):
+    """The H200 sorted path preserves routed FP8 block outputs exactly, with
+    both UE8M0 (DeepGEMM E8M0) and float32 activation scales."""
     torch.manual_seed(123)
     m, experts, hidden, intermediate, topk = 1024, 256, 4096, 256, 8
     x = (torch.randn((m, hidden)) / 10).to(torch.bfloat16)
@@ -195,6 +198,7 @@ def test_sorted_a_tma_moe_matches_route_major(workspace_init):
         torch.float8_e4m3fn,
         block_shape=[128, 128],
     )
+    quant_config = replace(quant_config, use_ue8m0_act_scales=use_ue8m0_act_scales)
     moe_config = make_dummy_moe_config(
         num_experts=experts,
         experts_per_token=topk,
