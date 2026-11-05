@@ -256,3 +256,32 @@ def test_topk_pack_matches_vllm():
         if bad:
             failed.append((i, case[0].shape[0], bad))
     assert not failed, f"batches that differ (case, rows, outputs): {failed}"
+
+
+@pytest.mark.parametrize("rows", [1024, 2048])
+def test_topk_pack_from_row_lens_matches_vllm(rows):
+    from vllm.models.deepseek_v41.amd import rocm
+
+    g = torch.Generator().manual_seed(rows)
+    block_size = 64
+    row_lens = torch.randint(0, 2 * TOPK, (rows,), generator=g, dtype=torch.int32)
+    topk = torch.randint(0, 2 * TOPK, (rows, TOPK), generator=g, dtype=torch.int32)
+    topk[torch.arange(TOPK) >= row_lens[:, None]] = -1
+    block_table = torch.randint(
+        0, 300000, (rows, 2 * TOPK // block_size), generator=g, dtype=torch.int32
+    )
+    case = (
+        topk.cuda(),
+        torch.arange(rows, dtype=torch.int32).cuda(),
+        block_table.cuda(),
+        block_size,
+        (torch.rand(rows, generator=g) > 0.15).cuda(),
+    )
+    ref = rocm._compute_global_topk_ragged_indices_and_indptr_old(*case)
+    out = rocm.compute_global_topk_ragged_indices_and_indptr(
+        *case, row_lens=row_lens.cuda()
+    )
+    nnz = int(ref[1][-1])
+    assert torch.equal(out[2], ref[2])
+    assert torch.equal(out[1], ref[1])
+    assert torch.equal(out[0][:nnz], ref[0][:nnz])

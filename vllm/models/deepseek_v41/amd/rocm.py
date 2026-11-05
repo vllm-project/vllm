@@ -214,13 +214,121 @@ def _pack_global_topk_ragged_kernel(
         written += tl.sum(valid.to(tl.int32), axis=0)
 
 
+_RAGGED_FROM_LENS_MAX_ROWS = 1024
+
+
+@triton.jit
+def _pack_topk_ragged_from_lens_kernel(
+    global_topk_ragged_ptr,
+    topk_indptr_ptr,
+    topk_lens_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    row_lens_ptr,
+    is_valid_token_ptr,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    topk,
+    MAX_ROWS: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """One-launch ragged pack of rows filled exactly to min(topk, row_lens[t])."""
+    token_idx = tl.program_id(0)
+
+    rows = tl.arange(0, MAX_ROWS)
+    before = rows < token_idx
+    row_lens = tl.load(row_lens_ptr + rows, mask=before, other=0)
+    row_ok = tl.load(is_valid_token_ptr + rows, mask=before, other=0)
+    row_lens = tl.where(row_ok, tl.minimum(tl.maximum(row_lens, 0), topk), 0)
+    out_start = tl.sum(row_lens, axis=0)
+
+    out_len = tl.load(row_lens_ptr + token_idx)
+    is_valid_token = tl.load(is_valid_token_ptr + token_idx)
+    out_len = tl.where(is_valid_token, tl.minimum(tl.maximum(out_len, 0), topk), 0)
+    tl.store(topk_lens_ptr + token_idx, out_len)
+    tl.store(topk_indptr_ptr + token_idx + 1, out_start + out_len)
+    if token_idx == 0:
+        tl.store(topk_indptr_ptr, 0)
+
+    offset = tl.arange(0, BLOCK_SIZE)
+    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
+    mask = offset < out_len
+    local_idx = tl.load(
+        topk_indices_ptr + token_idx * topk_indices_stride + offset,
+        mask=mask,
+        other=-1,
+    )
+    valid = mask & (local_idx >= 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+        mask=valid,
+        other=0,
+    )
+    slot_ids = tl.where(valid, block_numbers * block_size + local_idx % block_size, -1)
+    tl.store(global_topk_ragged_ptr + out_start + offset, slot_ids, mask=mask)
+
+
+def _pack_topk_ragged_from_lens(
+    topk_indices: torch.Tensor,
+    row_lens: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+    num_tokens, topk = topk_indices.shape
+    if (
+        not 0 < num_tokens <= _RAGGED_FROM_LENS_MAX_ROWS
+        or row_lens.shape[0] != num_tokens
+    ):
+        return None
+    device = topk_indices.device
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=device)
+    topk_indptr = torch.empty(num_tokens + 1, dtype=torch.int32, device=device)
+    global_topk_ragged = torch.empty(
+        num_tokens * topk, dtype=torch.int32, device=device
+    )
+    _pack_topk_ragged_from_lens_kernel[(num_tokens,)](
+        global_topk_ragged,
+        topk_indptr,
+        topk_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        row_lens,
+        is_valid_token,
+        token_to_req_indices,
+        block_table,
+        block_table.stride(0),
+        block_size,
+        topk,
+        MAX_ROWS=_RAGGED_FROM_LENS_MAX_ROWS,
+        BLOCK_SIZE=triton.next_power_of_2(topk),
+        num_warps=8,
+    )
+    return global_topk_ragged, topk_indptr, topk_lens
+
+
 def compute_global_topk_ragged_indices_and_indptr(
     topk_indices: torch.Tensor,
     token_to_req_indices: torch.Tensor,
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    row_lens: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if row_lens is not None:
+        packed = _pack_topk_ragged_from_lens(
+            topk_indices,
+            row_lens,
+            token_to_req_indices,
+            block_table,
+            block_size,
+            is_valid_token,
+        )
+        if packed is not None:
+            return packed
     # On gfx942 with --monokernel, a decode batch of up to 16
     # rows is packed with one launch instead of 4 (topk_pack.py). Other
     # batches return None there and take the function below.
