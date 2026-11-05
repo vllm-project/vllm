@@ -158,8 +158,8 @@ def _refit_kernel(
 
 
 @triton.jit
-def _max_and_sumexps(logits, BLOCK_SIZE: tl.constexpr):
-    """Block max, its sumexp, and its sumexp with the max entry left out.
+def _max_and_excl_sumexp(logits):
+    """Block max, and its sumexp with one copy of that max left out.
 
     The excluding sum is what keeps the feature accurate. Forming the full sum
     and subtracting the max's own e^(m-m) = 1 term afterwards is catastrophic
@@ -167,23 +167,21 @@ def _max_and_sumexps(logits, BLOCK_SIZE: tl.constexpr):
     is gone as soon as it falls below an fp32 ulp of 1.0 (~6e-8), which a
     confident drafter reaches routinely.
     """
-    block_max, argmax = tl.max(logits, axis=0, return_indices=True)
-    finite = block_max > float("-inf")
-    exps = tl.exp(logits - block_max)
-    # Exclude by position, not by value: a tie would zero both copies, and
-    # -inf vocab padding ties with itself across the whole block.
-    is_max = tl.arange(0, BLOCK_SIZE) == argmax
-    sumexp = tl.where(finite, tl.sum(exps, axis=0), 0.0)
-    excl_sumexp = tl.where(finite, tl.sum(tl.where(is_max, 0.0, exps), axis=0), 0.0)
-    return block_max, sumexp, excl_sumexp
+    block_max = tl.max(logits, axis=0)
+    # Excluding by value zeroes every entry tied for the max, so add back all
+    # but one: the others are distinct tokens and belong to the complement.
+    is_max = logits == block_max
+    excl_sumexp = tl.sum(tl.where(is_max, 0.0, tl.exp(logits - block_max)), axis=0)
+    excl_sumexp += tl.sum(is_max.to(tl.float32), axis=0) - 1.0
+    # An all--inf block (vocab padding) ties with itself throughout, leaving a
+    # spurious BLOCK_SIZE - 1 above; it holds no tokens, so it contributes none.
+    return block_max, tl.where(block_max > float("-inf"), excl_sumexp, 0.0)
 
 
 @triton.jit(do_not_specialize=["num_tokens"])
 def _local_max_sumexp_kernel(
     local_max_ptr,
     local_max_stride,
-    local_sumexp_ptr,
-    local_sumexp_stride,
     local_excl_sumexp_ptr,
     local_excl_sumexp_stride,
     logits_ptr,
@@ -209,7 +207,6 @@ def _local_max_sumexp_kernel(
         tl.store(
             local_max_ptr + token_idx * local_max_stride + block_idx, float("-inf")
         )
-        tl.store(local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, 0.0)
         tl.store(
             local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
             0.0,
@@ -233,11 +230,8 @@ def _local_max_sumexp_kernel(
         ).to(tl.float32)
         / temp
     )
-    block_max, block_sumexp, block_excl_sumexp = _max_and_sumexps(logits, BLOCK_SIZE)
+    block_max, block_excl_sumexp = _max_and_excl_sumexp(logits)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, block_max)
-    tl.store(
-        local_sumexp_ptr + token_idx * local_sumexp_stride + block_idx, block_sumexp
-    )
     tl.store(
         local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + block_idx,
         block_excl_sumexp,
@@ -256,8 +250,6 @@ def _predict_kernel(
     intercepts_ptr,
     local_max_ptr,
     local_max_stride,
-    local_sumexp_ptr,
-    local_sumexp_stride,
     local_excl_sumexp_ptr,
     local_excl_sumexp_stride,
     idx_mapping_ptr,
@@ -301,11 +293,6 @@ def _predict_kernel(
         mask=blocks_mask,
         other=float("-inf"),
     )
-    sumexps = tl.load(
-        local_sumexp_ptr + token_idx * local_sumexp_stride + blocks,
-        mask=blocks_mask,
-        other=0.0,
-    )
     excl_sumexps = tl.load(
         local_excl_sumexp_ptr + token_idx * local_excl_sumexp_stride + blocks,
         mask=blocks_mask,
@@ -315,23 +302,26 @@ def _predict_kernel(
     # The feature, logit(q(m*)) for the row's max draft logit, m*, is:
     #   q(x) = e^(x - m*) / Σ_z e^(z - m*)
     #   logit(q(m*)) = log(q(m*) / (1 - q(m*)))
-    #   	= m* - log(Σ_{z≠m*} e^(z - m*)).
+    #                = -log(Σ_{z≠m*} e^(z - m*)).
     # It scores the draft distribution, not the token drawn from it, so it is
     # a function of the prefix alone. Trimming a draft therefore never
     # conditions on the token being trimmed, and rejection sampling stays
     # lossless. Scoring the drawn token instead would select on the proposal
     # and bias the emitted distribution toward the drafter's confident modes.
 
-    # Rescale each block's partial to the global max and sum. Only the block
-    # holding the global max drops its own entry; a block that merely ties
-    # contributes in full, because that is a different token and so is genuinely
-    # part of the complement. Every term is non-negative, so the complement keeps
-    # fp32 relative accuracy however small it is -- which is the point, since the
-    # feature is its logarithm and is read at e^-80.
+    # Rescale each block's partial to the global max and sum. Every block but
+    # the one holding the global max has to put its own local max back, since
+    # that is a different token and so is genuinely part of the complement; it
+    # re-enters as e^(m_i - m*), the scale itself. A block that merely ties the
+    # global max is one of those, and contributes in full.
+    #
+    # Every term is added, never subtracted, and none exceeds the total, so the
+    # complement keeps fp32 relative accuracy however small it is -- which is
+    # the point, since the feature is its logarithm and is read at e^-80.
     global_max, best_block = tl.max(maxes, axis=0, return_indices=True)
-    sums = tl.where(blocks == best_block, excl_sumexps, sumexps)
+    scale = tl.where(blocks_mask, tl.exp(maxes - global_max), 0.0)
     complement_sumexp = tl.sum(
-        tl.where(blocks_mask, sums * tl.exp(maxes - global_max), 0.0), axis=0
+        excl_sumexps * scale + tl.where(blocks == best_block, 0.0, scale), axis=0
     )
 
     # Shifted by m*, the numerator is e^(m* - m*) = 1, so the feature is just the
@@ -514,13 +504,10 @@ class OnlineAcceptanceEstimator:
         local_max = torch.empty(
             num_tokens, num_blocks, dtype=torch.float32, device=self.device
         )
-        local_sumexp = torch.empty_like(local_max)
         local_excl_sumexp = torch.empty_like(local_max)
         _local_max_sumexp_kernel[(num_tokens, num_blocks)](
             local_max,
             local_max.stride(0),
-            local_sumexp,
-            local_sumexp.stride(0),
             local_excl_sumexp,
             local_excl_sumexp.stride(0),
             logits,
@@ -543,8 +530,6 @@ class OnlineAcceptanceEstimator:
             self.intercepts,
             local_max,
             local_max.stride(0),
-            local_sumexp,
-            local_sumexp.stride(0),
             local_excl_sumexp,
             local_excl_sumexp.stride(0),
             idx_mapping,

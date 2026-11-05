@@ -392,9 +392,10 @@ def test_feature_drops_exactly_one_tied_maximum(num_tied: int, placement: str):
     Both placements are needed because they fail differently, and each is blind
     to the other's bug:
 
-    - ``same_block`` catches excluding by value (``logits == block_max``), which
-      zeroes every tied entry inside the block at once. Spread across blocks it
-      would hit one entry per block and look correct.
+    - ``same_block`` catches excluding by value (``logits == block_max``)
+      without adding the other tied copies back, which zeroes every tied entry
+      inside the block at once. Spread across blocks it would hit one entry per
+      block and look correct.
     - ``across_blocks`` catches excluding from every block whose local max ties
       the global max, instead of from the single selected one. Within one block
       there is no second block to wrongly exclude from.
