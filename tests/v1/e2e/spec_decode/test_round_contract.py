@@ -80,7 +80,12 @@ def _tuples(outputs) -> list[tuple[list[int], str, object]]:
     ]
 
 
-def _run(model: str, speculative_config: dict | None = None, **kwargs):
+def _run(
+    model: str,
+    speculative_config: dict | None = None,
+    params: SamplingParams = SP,
+    **kwargs,
+):
     llm = LLM(
         model=model,
         max_model_len=1024,
@@ -90,7 +95,7 @@ def _run(model: str, speculative_config: dict | None = None, **kwargs):
         **kwargs,
     )
     try:
-        outputs = _tuples(llm.generate(PROMPTS, SP))
+        outputs = _tuples(llm.generate(PROMPTS, params))
         drafted = _metric(llm, "vllm:spec_decode_num_draft_tokens")
         acceptance = compute_acceptance_len(llm.get_metrics()) if drafted else 1.0
     finally:
@@ -191,15 +196,23 @@ def test_tree_speculator_runs_chains(model, backend, tp, capfd):
 # --- E5: a tree speculator on a backend that verifies trees -----------------
 
 
-def test_tree_speculator_verifies_trees(capfd):
+# The test backend reads the batch layout on the host, so attention runs
+# eagerly: piecewise CUDA graphs at most.
+_TREE_MODES = {
+    "eager": {"enforce_eager": True},
+    "piecewise": {"compilation_config": {"cudagraph_mode": "PIECEWISE"}},
+}
+
+
+@pytest.mark.parametrize("mode", _TREE_MODES)
+def test_tree_speculator_verifies_trees(mode, capfd):
     """On the plugin's tree attention backend (TRITON_ATTN with the plan rows
     recomputed under their ancestor masks) a dense model verifies the 2-way
     trees: nothing lowers them, a step accepts a path that skips a sibling, and
     greedy tokens and logprobs match decoding without speculation."""
     from vllm_add_test_speculators import OFF_CHAIN
 
-    # The test backend reads the batch layout on the host: no CUDA graphs.
-    kwargs = {"attention_config": {"backend": "CUSTOM"}, "enforce_eager": True}
+    kwargs = {"attention_config": {"backend": "CUSTOM"}, **_TREE_MODES[mode]}
     config = {"method": "test_ngram_tree", **NGRAM}
     got, drafted, acceptance = _run(DENSE, config, **kwargs)
     out, err = capfd.readouterr()
@@ -207,6 +220,19 @@ def test_tree_speculator_verifies_trees(capfd):
     assert OFF_CHAIN in out + err
     assert drafted > 0 and acceptance > 1
     _check(DENSE, got, "tree_verifies_trees", **kwargs)
+
+
+def test_tree_speculator_samples_trees(capfd):
+    """At temperature > 0 the 2-way trees verify by sampling: nothing lowers
+    them, drafts are accepted and every request decodes."""
+    kwargs = {"attention_config": {"backend": "CUSTOM"}, "enforce_eager": True}
+    config = {"method": "test_ngram_tree", **NGRAM}
+    params = SamplingParams(max_tokens=SP.max_tokens, temperature=0.8, seed=0)
+    got, drafted, acceptance = _run(DENSE, config, params, **kwargs)
+    out, err = capfd.readouterr()
+    assert LOWERED not in out + err
+    assert drafted > 0 and acceptance > 1
+    assert all(tokens for tokens, _, _ in got)
 
 
 # --- E7: data parallel ranks at different budgets -----------------------------
