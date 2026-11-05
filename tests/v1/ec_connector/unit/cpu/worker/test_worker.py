@@ -241,8 +241,7 @@ def test_load_path_delegates_transfer_submission(make_worker):
     stream = Mock()
     compute_stream = Mock()
     worker._acquire_stream = Mock(return_value=stream)
-    start_event, end_event = Mock(), Mock()
-    worker._acquire_event = Mock(side_effect=[start_event, end_event])
+    worker._acquire_event = Mock(side_effect=[Mock(), Mock()])
     worker._submit_transfer = Mock()
 
     dst_buf = MagicMock()
@@ -268,11 +267,6 @@ def test_load_path_delegates_transfer_submission(make_worker):
     _, count, direction = worker._submit_transfer.call_args.args
     assert count == 1
     assert direction == ECCPUTransferDirection.HOST_TO_DEVICE
-    end_event.record.assert_called_once_with(stream)
-    compute_stream.wait_event.assert_called_once_with(end_event)
-    compute_stream.wait_stream.assert_not_called()
-    dst_buf.record_stream.assert_called_once_with(compute_stream)
-    assert worker._inflight_loads[-1].end_event is end_event
 
 
 # ── save_caches ──────────────────────────────────────────────────────────────

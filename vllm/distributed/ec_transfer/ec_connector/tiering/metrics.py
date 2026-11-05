@@ -22,6 +22,8 @@ COUNTER_KEYS = (
     "cpu_hits",
     "recomputes",
     "fs_reads",
+    "fs_prefetch_reads",
+    "fs_cpu_alloc_failures",
     "fs_read_completions",
     "fs_read_failures",
     "fs_read_bytes",
@@ -35,6 +37,16 @@ COUNTER_KEYS = (
 HISTOGRAM_KEYS = (
     "fs_read_queue_seconds",
     "fs_read_transfer_seconds",
+    "fs_read_publish_seconds",
+    "fs_read_completion_delay_seconds",
+    "fs_request_wait_seconds",
+    "fs_prefetch_submit_seconds",
+    "fs_admission_check_seconds",
+    "fs_ready_to_load_seconds",
+    "h2d_host_submit_seconds",
+    "h2d_device_seconds",
+    "d2h_host_submit_seconds",
+    "d2h_device_seconds",
     "fs_write_queue_seconds",
     "fs_write_transfer_seconds",
 )
@@ -90,7 +102,8 @@ class ECTieringStats(ECConnectorStats):
             self.data["counters"][key] += value
         for key, values in other.data["histograms"].items():
             self.data["histograms"][key].extend(values)
-        self.data["gauges"].update(other.data["gauges"])
+        if other.data.get("gauges_updated", False):
+            self.data["gauges"].update(other.data["gauges"])
         self.data["gauges_updated"] |= other.data.get("gauges_updated", False)
         return self
 
@@ -178,5 +191,6 @@ class ECTieringPromMetrics(ECConnectorPromMetrics):
             histogram = self._histograms[key][engine_idx]
             for value in values:
                 histogram.observe(value)
-        for key, value in transfer_stats_data["gauges"].items():
-            self._gauges[key][engine_idx].set(value)
+        if transfer_stats_data.get("gauges_updated", False):
+            for key, value in transfer_stats_data["gauges"].items():
+                self._gauges[key][engine_idx].set(value)

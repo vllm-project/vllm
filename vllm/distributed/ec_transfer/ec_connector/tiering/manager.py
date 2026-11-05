@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from time import monotonic
 from typing import Protocol
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
@@ -100,6 +101,7 @@ class ECTieringManager:
         self._prefetch_requests: dict[str, set[str]] = {}
         self._prefetch_waiters: dict[str, set[str]] = {}
         self._prefetch_holds: set[str] = set()
+        self._prefetch_ready_times: dict[str, float] = {}
 
     def prefetch_entry(
         self,
@@ -124,6 +126,8 @@ class ECTieringManager:
                 element_size,
                 reclaim_prefetch=False,
             )
+            if self._stats is not None and identifier in self._pending_read_identifiers:
+                self._stats.increment("fs_prefetch_reads")
         if (
             identifier in self._pending_read_identifiers
             or identifier in self._prefetch_holds
@@ -147,9 +151,16 @@ class ECTieringManager:
                 del self._prefetch_waiters[key]
                 if key in self._prefetch_holds:
                     self._prefetch_holds.remove(key)
+                    self._prefetch_ready_times.pop(key, None)
                     self._primary.unpin(key)
         if not identifiers:
             del self._prefetch_requests[request_id]
+
+    def on_primary_load(self, identifier: str) -> None:
+        """Measure the first load dispatch of a retained prefetched entry."""
+        ready = self._prefetch_ready_times.pop(identifier, None)
+        if ready is not None and self._stats is not None:
+            self._stats.observe("fs_ready_to_load_seconds", monotonic() - ready)
 
     def _forget_prefetch(self, identifier: str) -> None:
         for request_id in tuple(self._prefetch_waiters.get(identifier, ())):
@@ -272,8 +283,11 @@ class ECTieringManager:
             for key in tuple(self._prefetch_holds):
                 self._primary.unpin(key)
             self._prefetch_holds.clear()
+            self._prefetch_ready_times.clear()
             entry = self._primary.alloc(identifier, num_blocks, shape)
         if entry is None:
+            if self._stats is not None:
+                self._stats.increment("fs_cpu_alloc_failures")
             return False
         try:
             destinations = self._primary.block_views(entry.block_ids)
@@ -313,9 +327,23 @@ class ECTieringManager:
             self._pending_read_identifiers.remove(identifier)
             if completion.success:
                 self._primary.mark_ready(identifier)
+                if self._stats is not None:
+                    published = monotonic()
+                    if completion.submit_time is not None:
+                        self._stats.observe(
+                            "fs_read_publish_seconds",
+                            published - completion.submit_time,
+                        )
+                    if completion.io_end_time is not None:
+                        self._stats.observe(
+                            "fs_read_completion_delay_seconds",
+                            published - completion.io_end_time,
+                        )
                 if self._prefetch_waiters.get(identifier):
                     self._primary.pin(identifier)
                     self._prefetch_holds.add(identifier)
+                    if self._stats is not None:
+                        self._prefetch_ready_times[identifier] = published
             else:
                 self._primary.discard(identifier)
                 self._forget_prefetch(identifier)

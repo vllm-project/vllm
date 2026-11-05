@@ -36,6 +36,7 @@ class ECFileIOCompletion:
     queue_time: float
     transfer_time: float
     error: str | None = None
+    io_end_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class _PendingJob:
     file_size_bytes: int
     submit_time: float
     start_time: float | None = None
+    io_end_time: float | None = None
     error: str | None = None
 
 
@@ -164,12 +166,13 @@ class ECFileIOExecutor:
 
             job_id = self._next_job_id
             self._next_job_id += 1
-            self._pending[job_id] = _PendingJob(
+            job = _PendingJob(
                 operation=operation,
                 cache_key=cache_key,
                 file_size_bytes=file_size_bytes,
                 submit_time=submit_time,
             )
+            self._pending[job_id] = job
             self._increment_pending(operation, file_size_bytes)
 
             def task() -> None:
@@ -179,10 +182,11 @@ class ECFileIOExecutor:
                     task_factory()
                 except Exception as exc:
                     with self._lock:
-                        self._pending[job_id].error = (
-                            f"{type(exc).__name__}: {exc}"
-                        )
+                        self._pending[job_id].error = f"{type(exc).__name__}: {exc}"
                     raise
+                finally:
+                    # Published to the scheduler through the pool completion queue.
+                    job.io_end_time = time.monotonic()
 
             if operation == "read":
                 self._pool.enqueue_load(job_id, 1, [task])
@@ -247,6 +251,7 @@ class ECFileIOExecutor:
                     queue_time=job.start_time - job.submit_time,
                     transfer_time=transfer_time,
                     error=job.error,
+                    io_end_time=job.io_end_time,
                 )
             )
 
@@ -276,9 +281,7 @@ class ECFileIOExecutor:
             self._pending_delete_jobs -= 1
             self._pending_delete_bytes -= file_size_bytes
 
-    def _oldest_queue_age(
-        self, operation: ECFileIOOperation, now: float
-    ) -> float:
+    def _oldest_queue_age(self, operation: ECFileIOOperation, now: float) -> float:
         submit_times = (
             job.submit_time
             for job in self._pending.values()

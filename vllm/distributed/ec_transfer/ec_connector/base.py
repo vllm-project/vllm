@@ -243,10 +243,6 @@ class ECConnectorBase(ABC):
         """Optionally start nonblocking prefetch after a request is enqueued."""
         return
 
-    def on_schedule_begin(self) -> None:
-        """Publish available completions before this step examines requests."""
-        return
-
     @abstractmethod
     def has_cache_item(
         self,

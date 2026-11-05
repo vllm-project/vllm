@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
+from time import monotonic
 
 from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
     ECFileIOExecutor,
@@ -57,6 +58,11 @@ def test_executor_round_trip_reports_one_completion_per_job(
         assert read_completions[0].job_id == read_id
         assert read_completions[0].success
         assert read_completions[0].operation == "read"
+        assert (
+            read_completions[0].submit_time
+            <= read_completions[0].io_end_time
+            <= monotonic()
+        )
         assert destination == b"abcdefXY"
         assert executor.stats().pending_read_jobs == 0
         assert executor.stats().pending_read_bytes == 0
@@ -99,6 +105,7 @@ def test_executor_reports_io_failure_once(tmp_path: Path) -> None:
         assert not completions[0].success
         assert completions[0].error is not None
         assert "FileNotFoundError" in completions[0].error
+        assert completions[0].io_end_time >= completions[0].submit_time
         assert executor.poll_completed() == []
     finally:
         executor.shutdown()
@@ -122,10 +129,13 @@ def test_shutdown_drains_then_rejects_new_jobs(tmp_path: Path) -> None:
     assert [completion.job_id for completion in completions] == [job_id]
     assert completions[0].success
     assert entry_path.read_bytes() == b"data"
-    assert executor.submit_read(
-        "read-key",
-        entry_path,
-        [memoryview(bytearray(4))],
-        4,
-    ) is None
+    assert (
+        executor.submit_read(
+            "read-key",
+            entry_path,
+            [memoryview(bytearray(4))],
+            4,
+        )
+        is None
+    )
     executor.shutdown()

@@ -27,11 +27,9 @@ class ECTieringConnector(ECCPUConnector):
 
     def on_new_request(self, request: Request) -> None:
         assert self.connector_scheduler is not None
-        self.connector_scheduler.on_new_request(request)
-
-    def on_schedule_begin(self) -> None:
-        assert self.connector_scheduler is not None
-        self.connector_scheduler.on_schedule_begin()
+        callback = getattr(self.connector_scheduler, "on_new_request", None)
+        if callback is not None:
+            callback(request)
 
     def _make_scheduler(self, vllm_config: VllmConfig):
         from vllm.distributed.ec_transfer.ec_connector.tiering.scheduler import (
@@ -40,10 +38,19 @@ class ECTieringConnector(ECCPUConnector):
 
         return ECTieringScheduler(vllm_config)
 
+    def _make_worker(self, vllm_config: VllmConfig):
+        from vllm.distributed.ec_transfer.ec_connector.tiering.worker import (
+            ECTieringWorker,
+        )
+
+        return ECTieringWorker(vllm_config)
+
     def get_ec_connector_stats(self) -> ECConnectorStats | None:
-        if self.connector_scheduler is None:
-            return None
-        return self.connector_scheduler.get_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_stats()
+        return None
 
     @classmethod
     def build_ec_connector_stats(

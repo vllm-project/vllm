@@ -60,6 +60,8 @@ class ECReadResult:
     queue_time: float = 0.0
     transfer_time: float = 0.0
     error: str | None = None
+    submit_time: float | None = None
+    io_end_time: float | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +341,8 @@ class ECFileSystemTierManager:
                 queue_time=completion.queue_time,
                 transfer_time=completion.transfer_time,
                 error=completion.error,
+                submit_time=completion.submit_time,
+                io_end_time=completion.io_end_time,
             )
         )
         self._evict_to_capacity()
