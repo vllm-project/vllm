@@ -151,6 +151,9 @@ class EngineCoreReadyResponse:
     # Set when the engine hashes request blocks (prefix caching or a KV
     # connector), so that a frontend can send prompt block hashes.
     prefix_hash_config: PrefixHashConfig | None = None
+    # `CacheConfig.metrics_info()` after initialization, the labels of the
+    # frontend's `vllm:cache_config_info`.
+    cache_config_info: dict[str, str] | None = None
 
 
 class EngineCoreRequest(
