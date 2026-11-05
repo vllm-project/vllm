@@ -2003,7 +2003,9 @@ def _uncommitted_buffers(
 
 
 def _draft_context_words(contexts: torch.Tensor, key: int = 42) -> torch.Tensor:
-    state_0 = _philox_context_state(key & 0xFFFFFFFF, key >> 32, contexts)[0]
+    key_0 = torch.full(contexts.shape[:-1], key & 0xFFFFFFFF, dtype=torch.int64)
+    key_1 = torch.full(contexts.shape[:-1], key >> 32, dtype=torch.int64)
+    state_0 = _philox_context_state(key_0, key_1, contexts)[0]
     return ((state_0 + 2**31) % 2**32 - 2**31).to(torch.int32)
 
 
@@ -2163,6 +2165,30 @@ def test_gpu_sampler_allocates_uncommitted_ring_only_for_block_verification(
     assert sampler.uncommitted_ring.shape == (2, 16 * (num_speculative_tokens - 1))
     assert sampler.uncommitted_ring.dtype == torch.int32
     assert sampler.uncommitted_state.gpu.shape == (2, 2)
+
+
+@pytest.mark.parametrize(
+    ("block_history", "token_history", "steps"),
+    [(16, 32, 16), (None, 32, 32), (None, None, 8192)],
+)
+def test_block_context_history_falls_back_to_token_history(
+    make_gpu_watermark_sampler, block_history, token_history, steps
+):
+    config = VllmConfig()
+    config.speculative_config = SimpleNamespace(
+        rejection_sample_method="block", num_speculative_tokens=3
+    )
+
+    sampler = make_gpu_watermark_sampler(
+        StubWatermarker(),
+        max_num_reqs=1,
+        vllm_config=config,
+        deduplicate_contexts_max_history=token_history,
+        deduplicate_block_contexts_max_history=block_history,
+        draft_key=42,
+    )
+
+    assert sampler.uncommitted_ring.shape == (1, steps * 2)
 
 
 def test_gpu_sampler_forgets_uncommitted_contexts_of_a_new_request(

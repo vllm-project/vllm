@@ -46,7 +46,7 @@ _CONTEXT_DOMAIN = (
 _TOKEN_DOMAIN = tl.constexpr(_TOKEN_DOMAIN_VALUE) if HAS_TRITON else _TOKEN_DOMAIN_VALUE
 
 
-@triton.jit(do_not_specialize=["key_0", "key_1"])
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
 def _repeated_context_mask_kernel(
     output_ptr,
     all_token_ids_ptr,
@@ -65,8 +65,8 @@ def _repeated_context_mask_kernel(
     steps_ptr,
     steps_stride,
     enabled_ptr,
-    key_0,
-    key_1,
+    key_0_value,
+    key_1_value,
     uncommitted_ring_ptr,
     uncommitted_ring_stride,
     uncommitted_state_ptr,
@@ -81,6 +81,8 @@ def _repeated_context_mask_kernel(
     UNCOMMITTED_CONTEXTS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
     row = tl.program_id(0).to(tl.int64)
     req_idx = tl.load(req_indices_ptr + row).to(tl.int64)
     if req_idx < 0:
@@ -533,8 +535,6 @@ def _philox_context_state(
     key_1,
     CONTEXT_WIDTH: tl.constexpr,
 ):
-    key_0 = key_0.to(tl.uint32)
-    key_1 = key_1.to(tl.uint32)
     state_0 = tl.full((), _CONTEXT_DOMAIN, tl.uint32)
     state_1 = tl.full((), CONTEXT_WIDTH, tl.uint32)
     state_2 = tl.full((), 0, tl.uint32)
@@ -566,13 +566,21 @@ def _philox_context_state(
 
 def _context_words(key: int, contexts: torch.Tensor) -> torch.Tensor:
     """First word of the Philox context state, as an int32 ring entry."""
-    state_0, _, _, _ = _philox_context_state_torch(
-        key & _UINT32_MASK_VALUE, key >> 32, contexts
+    prefix_shape = contexts.shape[:-1]
+    key_0 = torch.full(
+        prefix_shape,
+        key & _UINT32_MASK_VALUE,
+        dtype=torch.int64,
+        device=contexts.device,
     )
+    key_1 = torch.full(
+        prefix_shape, key >> 32, dtype=torch.int64, device=contexts.device
+    )
+    state_0, _, _, _ = _philox_context_state_torch(key_0, key_1, contexts)
     return state_0.to(torch.int32)
 
 
-@triton.jit(do_not_specialize=["key_0", "key_1"])
+@triton.jit(do_not_specialize=["key_0_value", "key_1_value"])
 def _append_uncommitted_contexts_kernel(
     ring_ptr,
     ring_stride,
@@ -582,12 +590,14 @@ def _append_uncommitted_contexts_kernel(
     idx_mapping_ptr,
     cu_num_logits_ptr,
     num_sampled_ptr,
-    key_0,
-    key_1,
+    key_0_value,
+    key_1_value,
     CONTEXT_WIDTH: tl.constexpr,
     CONTEXT_POW2: tl.constexpr,
     CAPACITY: tl.constexpr,
 ):
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
     req = tl.program_id(0)
     first_row = tl.load(cu_num_logits_ptr + req)
     num_draft = tl.load(cu_num_logits_ptr + req + 1) - first_row - 1
@@ -988,7 +998,7 @@ def philox_gumbel_sample(
     return local_argmax.gather(dim=-1, index=max_block_index).view(-1)
 
 
-@triton.jit(do_not_specialize=["step", "key_0", "key_1"])
+@triton.jit(do_not_specialize=["step", "key_0_value", "key_1_value"])
 def _draft_step_kernel(
     sampled_ptr,
     sampled_stride,
@@ -1010,8 +1020,8 @@ def _draft_step_kernel(
     prior_contexts_ptr,
     prior_contexts_stride_0,
     prior_contexts_stride_1,
-    key_0,
-    key_1,
+    key_0_value,
+    key_1_value,
     uncommitted_ring_ptr,
     uncommitted_ring_stride,
     uncommitted_state_ptr,
@@ -1026,6 +1036,8 @@ def _draft_step_kernel(
     BLOCKS_POW2: tl.constexpr,
 ):
     """Finish draft step `step` (if SAMPLE) and build the next step's skip mask."""
+    key_0 = key_0_value.to(tl.uint32)
+    key_1 = key_1_value.to(tl.uint32)
     row = tl.program_id(0).to(tl.int64)
     contexts_row_ptr = contexts_ptr + row * context_stride
     if SAMPLE:

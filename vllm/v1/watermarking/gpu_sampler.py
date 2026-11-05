@@ -17,6 +17,8 @@ from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
 
 logger = init_logger(__name__)
 
+_DEFAULT_BLOCK_CONTEXTS_MAX_HISTORY = 8192
+
 
 class GPUWatermarkSampler(Sampler):
     def __init__(
@@ -26,7 +28,7 @@ class GPUWatermarkSampler(Sampler):
         *args,
         deduplicate_contexts: Literal["none", "single_turn", "all"] = "single_turn",
         deduplicate_contexts_max_history: int | None = 8192,
-        deduplicate_block_contexts_max_history: int = 8192,
+        deduplicate_block_contexts_max_history: int | None = None,
         draft_key: int | None = None,
         **kwargs,
     ) -> None:
@@ -55,10 +57,14 @@ class GPUWatermarkSampler(Sampler):
             and speculative_config.num_speculative_tokens > 1
         ):
             device = self.watermarking.gpu.device
+            max_steps = (
+                deduplicate_block_contexts_max_history
+                or deduplicate_contexts_max_history
+                or _DEFAULT_BLOCK_CONTEXTS_MAX_HISTORY
+            )
             self.uncommitted_ring = torch.zeros(
                 self.sampling_states.max_num_reqs,
-                deduplicate_block_contexts_max_history
-                * (speculative_config.num_speculative_tokens - 1),
+                max_steps * (speculative_config.num_speculative_tokens - 1),
                 dtype=torch.int32,
                 device=device,
             )

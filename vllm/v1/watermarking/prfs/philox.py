@@ -56,15 +56,13 @@ def _philox4x32_10(
 
 
 def _philox_context_state(
-    key_0_value: int,
-    key_1_value: int,
+    key_0: torch.Tensor,
+    key_1: torch.Tensor,
     contexts: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     contexts = contexts.to(torch.int64) & _UINT32_MASK
     prefix_shape = contexts.shape[:-1]
     device = contexts.device
-    key_0 = torch.full(prefix_shape, key_0_value, dtype=torch.int64, device=device)
-    key_1 = torch.full(prefix_shape, key_1_value, dtype=torch.int64, device=device)
     state = (
         torch.full(prefix_shape, _CONTEXT_DOMAIN, dtype=torch.int64, device=device),
         torch.full(
@@ -109,7 +107,7 @@ def _philox_uniform(
     device = contexts.device
     key_0 = torch.full(prefix_shape, key_0_value, dtype=torch.int64, device=device)
     key_1 = torch.full(prefix_shape, key_1_value, dtype=torch.int64, device=device)
-    state = _philox_context_state(key_0_value, key_1_value, contexts)
+    state = _philox_context_state(key_0, key_1, contexts)
 
     output_shape = torch.broadcast_shapes(prefix_shape + (1,), token_ids.shape)
     tokens = torch.broadcast_to(token_ids.to(device=device), output_shape)
