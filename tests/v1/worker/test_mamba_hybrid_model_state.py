@@ -99,6 +99,7 @@ def test_add_request_seeds_state_idx_in_mamba_blocks() -> None:
     state = object.__new__(MambaHybridModelState)
     state.cache_config = SimpleNamespace(block_size=16, mamba_block_size=880)
     state._align_mode = True
+    state.mm_prefix_ranges = None
     state.rope_state = None
     state.prompt_embeds_state = None
     state.num_accepted_tokens_gpu = torch.ones(2, dtype=torch.int32)
