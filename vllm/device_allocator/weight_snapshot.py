@@ -234,7 +234,12 @@ def install(worker_cls) -> None:
             kwargs["load_dummy_weights"] = True
         elif restore:
             self.vllm_config.load_config.load_format = "dummy"
-        out = orig(self, *args, **kwargs)
+        # Lets model-specific checkpoint validation skip the dummy load.
+        os.environ["VLLM_WEIGHT_SNAPSHOT_RESTORING"] = "1" if restore else ""
+        try:
+            out = orig(self, *args, **kwargs)
+        finally:
+            os.environ.pop("VLLM_WEIGHT_SNAPSHOT_RESTORING", None)
         roots = _roots(self.model_runner)
         (restore_fn if restore else save)(roots, path)
         return out
