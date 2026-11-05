@@ -7,10 +7,9 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
+import transformers
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING_NAMES,
-)
+from transformers.models.auto.processing_auto import PROCESSOR_MAPPING_NAMES
 
 import vllm.envs as envs
 from vllm.config.model_arch import (
@@ -1143,6 +1142,12 @@ class ModelConfig:
 
         return mm_device_do_normalize
 
+    def _has_transcription_request(self) -> bool:
+        """Check the processor class, as creating the processor here is too early."""
+        name = PROCESSOR_MAPPING_NAMES.get(self.hf_config.model_type, "")
+        processor_cls = getattr(transformers, name, None)
+        return hasattr(processor_cls, "apply_transcription_request")
+
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
@@ -1169,12 +1174,7 @@ class ModelConfig:
                 cls += "EmbeddingModel"
             elif task == "classify":
                 cls += "ForSequenceClassification"
-        elif (
-            cls == "TransformersMultiModal"
-            and self.architectures
-            and self.architectures[0]
-            in MODEL_FOR_SPEECH_SEQ_2_SEQ_MAPPING_NAMES.values()
-        ):
+        elif cls == "TransformersMultiModal" and self._has_transcription_request():
             cls += "ForTranscription"
         else:
             cls += "ForCausalLM"

@@ -8,6 +8,7 @@ from packaging.version import Version
 from vllm.config import ModelConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.model_executor.model_loader import get_model_cls
+from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.transformers.multimodal import (
     MultiModalProcessor as TransformersMultiModalProcessor,
 )
@@ -228,6 +229,20 @@ def test_long_form_audio_limit(limit, expected_tokens):
 
     max_tokens = info.get_mm_max_tokens_per_item(10**6, {"audio": 1})
     assert max_tokens == {"audio": expected_tokens}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "transcribes"),
+    [
+        ("microsoft/VibeVoice-ASR-HF", True),
+        ("zai-org/GLM-ASR-Nano-2512", True),
+        ("ibm-granite/granite-speech-3.3-2b", False),
+    ],
+)
+def test_transcription_needs_a_transcription_request(model_id, transcribes):
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+
+    assert supports_transcription(get_model_cls(model_config)) == transcribes
 
 
 VIBEVOICE_OUTPUT = (
