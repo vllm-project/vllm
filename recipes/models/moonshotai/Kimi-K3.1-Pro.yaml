@@ -307,10 +307,6 @@ strategy_overrides:
         extra_env:
           VLLM_ENGINE_READY_TIMEOUT_S: "3600"
           DG_USE_MOE_DYNAMIC_TILE: "1"
-          PCCL_NET_PLUGIN_ENABLE: "1"
-          NCCL_SOCKET_IFNAME: "eth0"
-          NCCL_DEBUG: "WARN"
-          NCCL_IB_HCA: "fic2,vsolar"
       m890:
         extra_args:
           - "--tensor-parallel-size"
