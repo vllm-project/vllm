@@ -276,7 +276,9 @@ def test_flashinfer_sparse_full_graphs_exclude_prefill_keep_varlen_decode(
     backend = FlashInferMLASparseTRTLLMBackend
     config: Any = SimpleNamespace(
         speculative_config=SimpleNamespace(
-            num_speculative_tokens=num_speculative_tokens, parallel_drafting=False
+            num_speculative_tokens=num_speculative_tokens,
+            parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
     )
@@ -339,6 +341,7 @@ def test_dsv41_sparse_builders_keep_varlen_decode_graphs_only(
         speculative_config=SimpleNamespace(
             num_speculative_tokens=num_speculative_tokens,
             parallel_drafting=False,
+            max_num_new_slots_for_drafting=0,
         ),
         use_v2_model_runner=True,
     )
