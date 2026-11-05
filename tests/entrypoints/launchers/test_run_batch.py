@@ -12,10 +12,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 from fastapi.responses import JSONResponse
 from pydantic import TypeAdapter
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -47,6 +48,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
 )
+from vllm.entrypoints.pooling.scoring.protocol import ScoreResponse, ScoreResponseData
 from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.exceptions import RetryableRequestError, VLLMValidationError
@@ -636,33 +638,103 @@ def test_completions_invalid_input():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("response_factory", [JSONResponse, create_json_response])
-async def test_batch_embedding_json_responses(response_factory):
-    expected = EmbeddingResponse(
-        id="embd-test",
-        model=EMBEDDING_MODEL_NAME,
-        data=[EmbeddingResponseData(index=0, embedding=[0.25, -0.5])],
-        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
-    )
-
+@pytest.mark.parametrize(
+    ("input_line", "expected"),
+    [
+        (
+            INPUT_EMBEDDING_BATCH.splitlines()[0],
+            EmbeddingResponse(
+                id="embd-test",
+                model=EMBEDDING_MODEL_NAME,
+                data=[EmbeddingResponseData(index=0, embedding=[0.25, -0.5])],
+                usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+            ),
+        ),
+        (
+            INPUT_SCORE_BATCH.splitlines()[0],
+            ScoreResponse(
+                id="score-test",
+                model=RERANKER_MODEL_NAME,
+                data=[ScoreResponseData(index=0, score=0.75)],
+                usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+            ),
+        ),
+    ],
+    ids=["embedding", "score"],
+)
+async def test_batch_json_responses(response_factory, input_line, expected):
     async def handler(request):
         return response_factory(expected.model_dump())
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(input_line)
+    result = await run_batch_module.run_request(handler, request)
+    line = BatchRequestOutput.model_validate_json(result.to_json_line())
+
+    assert line.custom_id == request.custom_id
+    assert line.error is None
+    assert line.response is not None
+    assert line.response.status_code == 200
+    assert line.response.body == expected
+
+
+@pytest.mark.asyncio
+async def test_batch_embedding_json_body_is_written_as_is():
+    # Built the way EmbeddingServing builds it for encoding_format=float.
+    item = EmbeddingResponseData(index=0, embedding=[]).model_dump()
+    item["embedding"] = np.array([7.177709e-6, np.nan], dtype=np.float32)
+    body = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    ).model_dump()
+    body["data"] = [item]
+    response = create_json_response(body)
+
+    async def handler(request):
+        return response
 
     request = run_batch_module.BatchRequestInput.model_validate_json(
         INPUT_EMBEDDING_BATCH.splitlines()[0]
     )
     result = await run_batch_module.run_request(handler, request)
+    line = result.to_json_line()
 
-    assert result.custom_id == request.custom_id
-    assert result.error is None
-    assert result.response is not None
-    assert result.response.status_code == 200
-    assert result.response.body == expected
+    # orjson writes the float32 value as 0.000007177709 and NaN as null, as the
+    # online server returns them. Parsing the body back would rewrite the first
+    # and reject the second.
+    assert bytes(response.body).decode() in line
+    assert json.loads(line)["error"] is None
+
+
+async def _stream():
+    yield "data: {}\n\n"
 
 
 @pytest.mark.asyncio
-async def test_batch_rejects_json_stream():
+@pytest.mark.parametrize(
+    ("make_response", "error"),
+    [
+        (
+            lambda: StreamingResponse(iter([b"{}"]), media_type="application/json"),
+            "Request must not be sent in stream mode",
+        ),
+        (_stream, "Request must not be sent in stream mode"),
+        (
+            lambda: JSONResponse(content={}, status_code=500),
+            "Unexpected response status code: 500",
+        ),
+        (
+            lambda: Response(b"x", media_type="text/plain"),
+            "Unsupported response media type: text/plain",
+        ),
+        (object, "Unsupported response type"),
+    ],
+    ids=["streaming_response", "generator", "status", "media_type", "other"],
+)
+async def test_batch_rejects_unsupported_responses(make_response, error):
     async def handler(request):
-        return StreamingResponse(iter([b"{}"]), media_type="application/json")
+        return make_response()
 
     request = run_batch_module.BatchRequestInput.model_validate_json(
         INPUT_EMBEDDING_BATCH.splitlines()[0]
@@ -671,7 +743,7 @@ async def test_batch_rejects_json_stream():
 
     assert result.response is not None
     assert result.response.status_code == 400
-    assert result.error == "Request must not be sent in stream mode"
+    assert result.error == error
 
 
 def test_embeddings():
@@ -1384,7 +1456,7 @@ async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
         *["ScoreQueriesDocumentsRequest"] * 2,
         "EmbeddingCompletionRequest",
     ]
-    assert isinstance(output.error, ErrorResponse)
+    assert output.error == "Unexpected response status code: 400"
     assert output.response.status_code == 400
     type_adapter.assert_not_called()
 
