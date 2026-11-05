@@ -4,6 +4,7 @@
 
 # Added by the IBM Team, 2025
 from collections.abc import Iterable
+from itertools import islice
 
 import torch
 from torch import nn
@@ -389,10 +390,7 @@ class GraniteMoeHybridModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_attn = 0
-        for i, layer in enumerate(self.layers):
-            if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
-                num_attn += 1
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions, hidden_states=hidden_states, residual=residual
             )
@@ -444,6 +442,9 @@ class GraniteMoeHybridModel(nn.Module):
         expert_params_mapping = self.get_expert_mapping()
 
         def _load(n, p):
+            # Skip layers on other devices.
+            if is_pp_missing_parameter(n, self):
+                return
             param = params_dict[n]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p)
