@@ -82,7 +82,10 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED; on ROCm,
+    ROCM_AITER_FA and ROCM_AITER_FLYDSL_FP8. ROCM_AITER_FLYDSL_FP8 is opt-in
+    (gfx950, bf16 models): it quantizes Q/K/V to FP8 per tensor at runtime and
+    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
