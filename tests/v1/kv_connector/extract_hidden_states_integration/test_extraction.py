@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test, multi_gpu_test
-from tests.v1.e2e.spec_decode.utils import get_spec_decode_metric_value
 from vllm import LLM, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
@@ -287,10 +286,11 @@ def test_decode_drafts_option_saves_all_positions(
             "kv_connector_extra_config": {"shared_storage_path": tmp_path},
         },
         max_model_len=1024,
+        max_num_batched_tokens=128,
         enforce_eager=True,
         trust_remote_code=True,
         load_format="dummy",
-        disable_log_stats=False,
+        per_request_spec_decode_metrics="summary",
     )
     hidden_size = llm.llm_engine.model_config.get_hidden_size()
 
@@ -304,12 +304,9 @@ def test_decode_drafts_option_saves_all_positions(
         ),
     )
 
-    num_draft_tokens = get_spec_decode_metric_value(
-        llm.get_metrics(), "vllm:spec_decode_num_draft_tokens"
-    )
-    assert (num_draft_tokens > 0) == decode_drafts
-
     for output in outputs:
+        num_draft_tokens = output.outputs[0].spec_decode_metrics.num_draft_tokens
+        assert (num_draft_tokens > 0) == decode_drafts
         output_token_ids = output.outputs[0].token_ids
         assert len(output_token_ids) == 20
         obj = example_hidden_states_connector.load_hidden_states(
