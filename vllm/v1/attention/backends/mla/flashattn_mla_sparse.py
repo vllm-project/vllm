@@ -8,13 +8,14 @@ from typing import Any, ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadata,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -42,7 +43,10 @@ from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
 )
-from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+from vllm.vllm_flash_attn.flash_attn_interface import (
+    compile_flash_attn_varlen_func_from_specs,
+    flash_attn_varlen_func,
+)
 
 
 class FlashAttnMLASparseBackend(AttentionBackend):
@@ -376,6 +380,65 @@ def _pack_rows(x: torch.Tensor, buf: torch.Tensor) -> torch.Tensor:
     return buf
 
 
+class FA4GroupedPrefillKernel(VllmJitKernel["FA4GroupedPrefillKernel.CompileKey"]):
+    """Compile-only warmup for grouped prefill's FA4 calls.
+
+    FA4's varlen scheduler compiles a separate kernel for calls of more than 256
+    rows, so one row and a full call cover the grouped kernel's compile keys.
+    """
+
+    @dataclass(frozen=True)
+    class CompileKey:
+        num_rows: int
+        query_group_size: int
+        topk: int
+        kv_lora_rank: int
+        qk_rope_head_dim: int
+        dtype: torch.dtype
+
+    def get_warmup_keys(  # type: ignore[override]
+        self,
+        query_group_size: int,
+        topk: int,
+        kv_lora_rank: int,
+        qk_rope_head_dim: int,
+        dtype: torch.dtype,
+    ) -> list[CompileKey]:
+        return [
+            self.CompileKey(
+                num_rows, query_group_size, topk, kv_lora_rank, qk_rope_head_dim, dtype
+            )
+            for num_rows in (1, _GROUPED_PREFILL_ROWS)
+        ]
+
+    def compile(self, compile_key: CompileKey) -> None:
+        key = compile_key
+        rows, lora, rope = key.num_rows, key.kv_lora_rank, key.qk_rope_head_dim
+        # The KV row count is not part of FA4's compile key.
+        kv_rows = 1 << 16
+        compile_flash_attn_varlen_func_from_specs(
+            q_shape=(rows, 128, rope),
+            k_shape=(kv_rows, 1, rope),
+            k_stride=(lora + rope, rope, 1),
+            v_shape=(kv_rows, 1, lora),
+            v_stride=(lora + rope, lora, 1),
+            qv_shape=(rows, 128, lora),
+            q_dtype=key.dtype,
+            cu_seqlens_q_shape=(rows + 1,),
+            cu_seqlens_k_shape=(rows + 1,),
+            seqused_k_shape=(rows,),
+            max_seqlen_q=1,
+            max_seqlen_k=kv_rows,
+            gather_kv_indices_shape=(rows, key.query_group_size * key.topk),
+            gather_kv_valid_length_shape=(rows,),
+            gather_kv_query_group_size=key.query_group_size,
+            fa_version=4,
+        )
+
+
+_FA4_GROUPED_PREFILL_KERNEL = FA4GroupedPrefillKernel()
+
+
 @cache
 def _fa4_varlen_scalars(
     num_tokens: int, num_kv_rows: int, device: torch.device
@@ -394,15 +457,33 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        group_size = _QUERY_GROUP_SIZES.get(self.num_heads)
-        if (
-            group_size is not None
-            and self.topk_indices_buffer is not None
-            and is_workspace_manager_initialized()
-        ):
+        group_size = self._query_group_size(self.num_heads)
+        if group_size is None or self.topk_indices_buffer is None:
+            return
+        if is_workspace_manager_initialized():
             # Reserved before the workspace manager locks, so memory profiling
             # counts grouped prefill's scratch.
             self._grouped_prefill_scratch(group_size, torch.bfloat16)
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.kernel_config.enable_jit_warmup:
+            _FA4_GROUPED_PREFILL_KERNEL.register_warmup(
+                group_size,
+                self.topk_indices_buffer.shape[1],
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                vllm_config.model_config.dtype,
+            )
+
+    def _query_group_size(self, num_heads: int) -> int | None:
+        """Queries per grouped prefill row, or None if this layer never groups."""
+        if (
+            self.dcp_world_size > 1
+            or self.pcp_world_size > 1
+            or self.need_to_return_lse_for_decode
+            or isinstance(self.index_group, HiSparseMLAIndexGroup)
+        ):
+            return None
+        return _QUERY_GROUP_SIZES.get(num_heads)
 
     def _grouped_prefill_scratch(
         self, group_size: int, dtype: torch.dtype
@@ -521,14 +602,10 @@ class FlashAttnMLASparseFA4Impl(FlashInferMLASparseImpl):
     ) -> list[tuple[int, int, int]] | None:
         """(first token, grouped tokens, tokens) per prefill request, or None when
         this batch keeps one query per kernel row."""
-        md = getattr(self, "_attn_metadata", None)
-        group_size = _QUERY_GROUP_SIZES.get(q_pe.shape[1])
+        md = self._attn_metadata
+        group_size = self._query_group_size(q_pe.shape[1])
         if (
             group_size is None
-            or self.dcp_world_size > 1
-            or self.pcp_world_size > 1
-            or self.need_to_return_lse_for_decode
-            or isinstance(self.index_group, HiSparseMLAIndexGroup)
             or md is None
             or md.prefill is None
             or md.prefill.query_lens_cpu is None

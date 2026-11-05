@@ -529,6 +529,10 @@ def compile_flash_attn_varlen_func_from_specs(
     seqused_k_shape: tuple[int, ...] | None = None,
     page_table_shape: tuple[int, ...] | None = None,
     softcap: float | None = None,
+    qv_shape: tuple[int, ...] | None = None,
+    gather_kv_indices_shape: tuple[int, ...] | None = None,
+    gather_kv_valid_length_shape: tuple[int, ...] | None = None,
+    gather_kv_query_group_size: int = 1,
 ) -> None:
     if fa_version != 4:
         raise ValueError(
@@ -561,6 +565,7 @@ def compile_flash_attn_varlen_func_from_specs(
         (*q_shape[:-1], v_shape[-1]),
         q_dtype,
     )
+    qv = _make_compile_only_tensor_spec(qv_shape, q_dtype)
     lse = None
     if return_softmax_lse:
         assert q is not None
@@ -581,10 +586,18 @@ def compile_flash_attn_varlen_func_from_specs(
         q=q,
         k=k,
         v=v,
+        qv=qv,
         cu_seqlens_q=cu_seqlens_q,
         cu_seqlens_k=_make_compile_only_tensor_spec(cu_seqlens_k_shape, torch.int32, 4),
         seqused_k=_make_compile_only_tensor_spec(seqused_k_shape, torch.int32, 4),
         page_table=_make_compile_only_tensor_spec(page_table_shape, torch.int32, 4),
+        gather_kv_indices=_make_compile_only_tensor_spec(
+            gather_kv_indices_shape, torch.int32
+        ),
+        gather_kv_valid_length=_make_compile_only_tensor_spec(
+            gather_kv_valid_length_shape, torch.int32, 4
+        ),
+        gather_kv_query_group_size=gather_kv_query_group_size,
         max_seqlen_q=max_seqlen_q,
         max_seqlen_k=max_seqlen_k,
         softmax_scale=softmax_scale,

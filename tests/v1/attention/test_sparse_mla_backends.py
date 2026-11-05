@@ -4474,6 +4474,48 @@ def test_fa4_sparse_grouped_prefill_sub_chunks(workspace_init, monkeypatch, num_
     assert torch.equal(outs[0], outs[1])
 
 
+def test_fa4_grouped_prefill_warmup_covers_runtime_keys(workspace_init, monkeypatch):
+    """After the compile-only warmup, grouped prefill calls compile nothing."""
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    if (reason := _fa4_cute_mla_available()) is not None:
+        pytest.skip(reason)
+    import cutlass.cute as cute
+    from vllm.vllm_flash_attn.cute.interface import BIN_BATCH_SEARCH_THRESH
+
+    num_heads, group, topk, rows = 64, 2, 256, 300
+    # The warmup's 1-row and full calls must fall on both sides of FA4's
+    # varlen-scheduler threshold, which splits the grouped kernel's keys.
+    assert 1 <= BIN_BATCH_SEARCH_THRESH < flashattn_sparse_module._GROUPED_PREFILL_ROWS
+    monkeypatch.setattr(flashattn_sparse_module, "_GROUPED_PREFILL_ROWS", rows)
+    kernel = flashattn_sparse_module.FA4GroupedPrefillKernel()
+    kernel.compile_many(kernel.get_warmup_keys(group, topk, 512, 64, torch.bfloat16))
+
+    # 300 and 3 groups: calls of 300 rows (above the threshold) and of 3 (below).
+    inputs = _fa4_prefill_inputs(
+        num_heads, [1, 2 * rows + 1, 2 * 3], [300, 700, 650], topk=topk, device="cuda"
+    )
+    impl = _fa4_impl(inputs.logical, scale=inputs.scale)
+    real_fa4 = flashattn_sparse_module.flash_attn_varlen_func
+    grouped_calls = []
+
+    def no_compile(*args, **kwargs):
+        raise AssertionError("grouped prefill compiled a kernel after warmup")
+
+    def fa4(**kwargs):
+        if kwargs["gather_kv_query_group_size"] == 1:
+            return real_fa4(**kwargs)
+        grouped_calls.append(kwargs["gather_kv_indices"].shape[0])
+        with monkeypatch.context() as m:
+            m.setattr(cute, "compile", no_compile)
+            return real_fa4(**kwargs)
+
+    monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fa4)
+    with torch.inference_mode():
+        impl.forward_mqa(inputs.q, inputs.kv_cache, inputs.metadata, None)
+    assert grouped_calls == [rows, 3]
+
+
 @pytest.mark.parametrize(
     "config,expected",
     [
