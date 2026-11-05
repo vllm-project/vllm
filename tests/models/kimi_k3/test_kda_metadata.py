@@ -14,7 +14,7 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
-from vllm.config import SpeculativeConfig, VllmConfig
+from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.models.kimi_k3.nvidia.kda import KimiK3DeltaAttention
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
@@ -107,6 +107,7 @@ def _make_builder(
     disable_eagle_block_drop: bool = False,
     cache_hit_alignment_tokens: int | None = None,
     hash_block_size: int | None = None,
+    num_hash_lookahead_tokens: int = 0,
 ) -> _BuilderT:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -134,6 +135,7 @@ def _make_builder(
     vllm_config.cache_config.cache_hit_alignment_tokens = (
         cache_hit_alignment_tokens or hash_block_size
     )
+    vllm_config.num_hash_lookahead_tokens = num_hash_lookahead_tokens
     builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=mamba_block_size,
@@ -385,7 +387,6 @@ def test_internal_checkpoint_metadata_targets_last_aligned_boundary(
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
-    monkeypatch: pytest.MonkeyPatch,
     seq_len: int,
     disable_eagle_block_drop: bool,
     num_hash_lookahead_tokens: int,
@@ -393,11 +394,6 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
     expected_offset: int | None,
 ) -> None:
     """Lookahead hashes need no back-off from the replay boundary."""
-    monkeypatch.setattr(
-        VllmConfig,
-        "num_hash_lookahead_tokens",
-        property(lambda _: num_hash_lookahead_tokens),
-    )
     device = torch.device("cuda")
     batch = BatchSpec(seq_lens=[seq_len], query_lens=[seq_len])
     common_attn_metadata = create_common_attn_metadata(
@@ -417,6 +413,7 @@ def test_spec_internal_checkpoint_metadata_targets_replay_boundary(
         prefix_match_unit=prefix_match_unit,
         use_eagle=True,
         disable_eagle_block_drop=disable_eagle_block_drop,
+        num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         device=device,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)

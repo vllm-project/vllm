@@ -652,30 +652,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     # are not supported by Machete yet.
 
     # marlin arches for fp16 output
-    # Family-conditional 12.0f (one cubin for SM12x family) requires CUDA >= 13.0;
-    # fall back to architecture-specific 12.0a;12.1a on CUDA < 13.0 (e.g. 12.8).
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
+    cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
     # marlin has limited support for turing
     cuda_archs_loose_intersection(MARLIN_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
     # marlin arches for bf16 output (we need 9.0 for bf16 atomicAdd PTX)
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
-    # marlin arches for fp8 input
-    # - sm80 doesn't support fp8 computation
-    # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-    # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
+    cuda_archs_loose_intersection(MARLIN_BF16_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
     # marlin arches for other files
     cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
 
@@ -754,21 +735,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
       endif()
 
-      if (MARLIN_FP8_ARCHS)
-        file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
-        set_gencode_flags_for_srcs(
-          SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
-          CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
-        if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-          set_source_files_properties(${MARLIN_TEMPLATE_FP8_KERNEL_SRC}
-            PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-        endif()
-        list(APPEND VLLM_STABLE_EXT_SRC ${MARLIN_TEMPLATE_FP8_KERNEL_SRC})
-      endif()
-
       set(MARLIN_SRCS
          "csrc/quantization/marlin/marlin.cu"
-         "csrc/quantization/marlin/marlin_int4_fp8_preprocess.cu"
          "csrc/quantization/marlin/gptq_marlin_repack.cu"
          "csrc/quantization/marlin/awq_marlin_repack.cu")
       set_gencode_flags_for_srcs(
@@ -1221,6 +1189,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building Kimi K3 AttnRes for archs: ${KIMI_K3_ATTN_RES_ARCHS}")
   endif()
 
+  # Qwen4Exp HyperConnection up projection + gate mix (tcgen05).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS
+      "10.0f" "${CUDA_ARCHS}")
+  endif()
+  if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC "csrc/qwen4_exp/hc_up_gate_mix.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}"
+      CUDA_ARCHS "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}")
+    message(STATUS "Building Qwen4Exp HC up+gate mix for archs: "
+      "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+  endif()
+
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
@@ -1327,6 +1310,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
     endif()
+    if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX=1)
+    endif()
     if(BEAM_KERNEL_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_BEAM_KERNELS=1)
@@ -1418,24 +1405,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # moe marlin arches
-  # note that we always set `use_atomic_add=False` for moe marlin now,
-  # so we don't need 9.0 for bf16 atomicAdd PTX
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX" "${CUDA_ARCHS}")
   # moe marlin has limited support for turing
   cuda_archs_loose_intersection(MARLIN_MOE_SM75_ARCHS "7.5" "${CUDA_ARCHS}")
-  # moe marlin arches for fp8 input
-  # - sm80 doesn't support fp8 computation
-  # - sm90 and sm100 don't support QMMA.16832.F32.E4M3.E4M3 SAAS instruction
-  # so we only enable fp8 computation for SM89 (e.g. RTX 40x0)  and 12.0 (e.g. RTX 50x0)
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0f" "${CUDA_ARCHS}")
-  else()
-    cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
-  endif()
   # moe marlin arches for other files
   cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_OTHER_ARCHS)
@@ -1502,18 +1474,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
           PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
       endif()
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SM75_SRC})
-    endif()
-
-    if (MARLIN_MOE_FP8_ARCHS)
-      file(GLOB MARLIN_MOE_FP8_SRC "csrc/moe/marlin_moe_wna16/sm89_kernel_*.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${MARLIN_MOE_FP8_SRC}"
-        CUDA_ARCHS "${MARLIN_MOE_FP8_ARCHS}")
-      if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8)
-        set_source_files_properties(${MARLIN_MOE_FP8_SRC}
-          PROPERTIES COMPILE_FLAGS "-static-global-template-stub=false")
-      endif()
-      list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_FP8_SRC})
     endif()
 
     set(MARLIN_MOE_OTHER_SRC "csrc/moe/marlin_moe_wna16/ops.cu")
@@ -1731,6 +1691,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/mxfp4_w4a8_gemv_rdna3.cu")
   endif()
 
+  set(VLLM_ROCM_HAS_GFX115X OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx115[0-3]")
+    set(VLLM_ROCM_HAS_GFX115X ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/rdna35_gdn_chunked.cu")
+  endif()
+
   define_extension_target(
     _rocm_C
     DESTINATION vllm
@@ -1765,6 +1732,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_ROCM_HAS_GFX1100)
     target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
   endif()
+  if(VLLM_ROCM_HAS_GFX115X)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX115X)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
@@ -1796,7 +1766,6 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/fmha_sm100.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/flashkda.cmake)
-    include(cmake/external_projects/qutlass.cmake)
     include(cmake/external_projects/tml_fa4.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
