@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Exercise centered MRoPE, YaRN and image DP through a real Ling VL engine."""
 
-import os
-
 import pytest
 import regex as re
 import torch
@@ -18,7 +16,9 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.utils import encode_image_url
 
-MODEL = os.getenv("VLLM_TEST_BAILING_VL_MODEL", "inclusionAI/Ling-3.0-flash-VL")
+from ....utils import multi_gpu_only
+
+MODEL = "inclusionAI/Ling-3.0-flash-VL"
 
 
 def _image_then_text_positions(model):
@@ -37,7 +37,7 @@ def _image_then_text_positions(model):
     return positions.tolist(), delta
 
 
-@pytest.mark.distributed(num_gpus=4)
+@multi_gpu_only(num_gpus=4)
 @pytest.mark.usefixtures("enable_pickle")
 @pytest.mark.parametrize("encoder_mode", ["weights", "data"])
 def test_bailing_yarn_image_order_and_centered_positions(vllm_runner, encoder_mode):
