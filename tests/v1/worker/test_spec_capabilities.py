@@ -617,6 +617,7 @@ class _Calls:
     def __init__(self):
         self.conv = 0
         self.recurrent = 0
+        self.b: list[torch.Tensor] = []
 
 
 def _layer(
@@ -634,6 +635,7 @@ def _layer(
 
     def fake_recurrent(**kwargs):
         calls.recurrent += 1
+        calls.b.append(kwargs["b"])
         return torch.full((1, kwargs["q"].shape[0], 2, 3), -1.0), None
 
     monkeypatch.setattr(gdn_layer_module, "causal_conv1d_update", fake_conv)
@@ -737,3 +739,27 @@ def test_gdn_runs_the_bound_kernel(monkeypatch):
     assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is False
     layer.spec_verify_kernel = None
     assert layer._can_use_fused_gdn_mtp_decode(_spec_metadata()) is True
+
+
+def test_gdn_decode_keeps_b_and_a_strided(monkeypatch):
+    """Without spec rows the layer hands ``b`` and ``a`` to the kernels as the
+    strided views of ``ba`` they are, as on main."""
+    metadata = GDNAttentionMetadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        num_decodes=2,
+        num_decode_tokens=2,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=2,
+        non_spec_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        non_spec_state_indices_tensor=torch.zeros(2, dtype=torch.int32),
+    )
+    calls = _Calls()
+    layer = _layer(monkeypatch, calls, metadata)
+    b, a = torch.zeros(2, 4).chunk(2, dim=-1)
+    layer._forward_core(
+        mixed_qkv=torch.zeros(2, 5), b=b, a=a, core_attn_out=torch.zeros(2, 2, 3)
+    )
+    assert [x.data_ptr() for x in calls.b] == [b.data_ptr()]
+    assert not calls.b[0].is_contiguous()

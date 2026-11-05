@@ -64,8 +64,12 @@ class SpecRound:
         max_num_tokens: int,
         num_speculative_steps: int,
         device: torch.device,
+        plans: bool = False,
     ):
         self.vllm_config = vllm_config
+        # Whether the speculator overrides ``plan``. Without it every round is
+        # the scheduled chain, which commits nothing here and needs no result.
+        self.plans = plans
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.max_rows = num_speculative_steps + 1
@@ -297,8 +301,9 @@ class SpecRound:
         self, sampler_output: "SamplerOutput", input_batch: "InputBatch"
     ) -> AcceptResult | None:
         """The accepted path: the speculator's accept chose it, or the chain
-        sampler's arange (a view of a constant buffer). None without drafts."""
-        if input_batch.verify_plan is None:
+        sampler's arange (a view of a constant buffer). None without drafts or
+        without a speculator ``plan``."""
+        if not self.plans or input_batch.verify_plan is None:
             return None
         return accept_result_of(sampler_output, self.chain_path)
 

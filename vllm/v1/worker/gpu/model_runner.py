@@ -72,6 +72,7 @@ from vllm.utils.gc_utils import freeze_gc_for_cudagraph_capture
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.utils import supports_dynamic_spec_blocks
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     MambaSpec,
@@ -327,6 +328,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens,
                 self.num_speculative_steps,
                 self.device,
+                plans="plan" in self.speculator_hooks,
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
@@ -704,6 +706,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dcp_sharded = []
         sliding_window_reach = []
         null_tail = []
+        # Recurrent-state rows shrink with the drafts (`truncate`) only when
+        # the scheduler sizes them per step.
+        dynamic_spec_blocks = supports_dynamic_spec_blocks(
+            self.vllm_config, kv_cache_config.has_mamba_layers
+        )
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
@@ -717,8 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if isinstance(layer_spec, SlidingWindowSpec)
                 else 0
             )
-            # Recurrent-state rows shrink with the drafts (`truncate`).
-            null_tail.append(isinstance(layer_spec, MambaSpec))
+            null_tail.append(dynamic_spec_blocks and isinstance(layer_spec, MambaSpec))
             # Let each cache type account for CP. Attention KV is DCP-sharded,
             # while Mamba/GDN recurrent state is replicated across DCP ranks.
             max_num_blocks = spec.max_num_blocks_per_req(
@@ -2280,6 +2286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_spec_tokens_to_schedule=(
                 0 if skip_drafts else scheduler_output.num_spec_tokens_to_schedule
             ),
+            skip_drafter=skips_drafter(scheduler_output, dp_sync_state),
         )
 
         if not self.is_last_pp_rank:
@@ -2310,6 +2317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         cudagraph_stats = self.execute_model_state.cudagraph_stats
         num_spec_tokens = self.execute_model_state.num_spec_tokens_to_schedule
+        skip_drafter = self.execute_model_state.skip_drafter
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -2413,15 +2421,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         # The encoder runner exists only on the first PP rank, so later ranks
         # have no cached embeddings to gather.
-        # A step whose next round verifies no drafts (candidate budget 1) does
-        # not run the drafter: its forward over the accepted tokens would propose
-        # nothing. Under data parallelism only when every rank skips, since the
-        # drafter's forward runs in lockstep across ranks. A drafter with its
-        # own KV leaves the skipped tokens' draft KV unwritten; the target
-        # verifies every draft, so outputs do not change.
-        skip_drafter = num_spec_tokens == 0 and (
-            dp_sync_state is None or dp_sync_state.skip_drafts
-        )
         if (
             self.speculator is not None
             and not skip_drafter
@@ -2647,6 +2646,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return pcp.PCPManager
 
 
+def skips_drafter(
+    scheduler_output: SchedulerOutput, dp_sync_state: DPSyncState | None
+) -> bool:
+    """Whether the step skips the drafter: only when the candidate budget chose
+    no drafts (budget 1) and there is one DP rank. A step whose requests cannot
+    use drafts (``skip_drafts``) still proposes K=0, so a drafter with its own
+    KV writes it; under DP the drafter's forward runs in lockstep on every rank.
+    A skipped drafter leaves the step's draft KV unwritten; the target verifies
+    every draft, so outputs do not change."""
+    return dp_sync_state is None and scheduler_output.num_spec_tokens_to_schedule == 0
+
+
 class ExecuteModelState(NamedTuple):
     input_batch: InputBatch
     attn_metadata: dict[str, Any] | None
@@ -2658,6 +2669,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     num_spec_tokens_to_schedule: int
+    skip_drafter: bool = False
 
 
 class BatchReqState(NamedTuple):

@@ -14,6 +14,7 @@ import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config import CacheConfig, LoadConfig, LoRAConfig, ParallelConfig
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -24,7 +25,12 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.dp_utils import DPSyncState
+from vllm.v1.worker.gpu.model_runner import (
+    ExecuteModelState,
+    GPUModelRunner,
+    skips_drafter,
+)
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
 from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
 
@@ -141,6 +147,7 @@ def test_target_layer_selection_includes_kv_sharing_layers(monkeypatch):
     runner.vllm_config = SimpleNamespace(
         parallel_config=runner.parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        speculative_config=None,
     )
     runner.device = torch.device("cpu")
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
@@ -205,6 +212,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner.vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode="none"),
+        speculative_config=None,
     )
     runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
     runner.model_state = SimpleNamespace(
@@ -328,6 +336,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
     vllm_config = SimpleNamespace(
         parallel_config=parallel_config,
         cache_config=SimpleNamespace(mamba_cache_mode=mamba_cache_mode),
+        speculative_config=None,
     )
     runner = SimpleNamespace(
         max_model_len=max_model_len,
@@ -600,3 +609,22 @@ def test_standalone_draft_kv_dtype_override(
     assert target.cache_config.cache_dtype == "fp8_e4m3"
     assert draft_config.parallel_config.data_parallel_index == data_parallel_index
     assert target.parallel_config.data_parallel_index == data_parallel_index
+
+
+@pytest.mark.parametrize(
+    "num_spec_tokens_to_schedule, dp, skips",
+    [(0, False, True), (3, False, False), (0, True, False)],
+    ids=["budget-1", "requests-skip-drafts", "data-parallel"],
+)
+def test_only_a_budget_of_one_skips_the_drafter(num_spec_tokens_to_schedule, dp, skips):
+    """A step whose requests cannot use drafts (non-final prefill chunks) still
+    runs the drafter with K=0 so it writes its KV, as on main."""
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.skip_drafts = True
+    scheduler_output.num_spec_tokens_to_schedule = num_spec_tokens_to_schedule
+    dp_sync_state = (
+        DPSyncState(torch.zeros(2), None, None, False, 1, skip_drafts=True)
+        if dp
+        else None
+    )
+    assert skips_drafter(scheduler_output, dp_sync_state) is skips

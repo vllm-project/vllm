@@ -3,6 +3,7 @@
 import contextlib
 from collections.abc import Sequence
 
+from vllm.config import VllmConfig
 from vllm.sampling_params import RepetitionDetectionParams
 from vllm.v1.request import Request, RequestStatus
 
@@ -138,3 +139,20 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         return True
 
     return False
+
+
+def supports_dynamic_spec_blocks(
+    vllm_config: VllmConfig, has_mamba_layers: bool
+) -> bool:
+    """Whether recurrent-state blocks for draft rows can follow the drafts each
+    request verifies. Models without recurrent layers keep today's allocation;
+    adaptive verification can verify past the scheduled drafts; connectors and
+    PP keep append-only block tables."""
+    speculative_config = vllm_config.speculative_config
+    return (
+        speculative_config is not None
+        and has_mamba_layers
+        and not speculative_config.enable_adaptive_verification
+        and vllm_config.parallel_config.pipeline_parallel_size == 1
+        and vllm_config.kv_transfer_config is None
+    )

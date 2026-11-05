@@ -1779,8 +1779,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 core_attn_out[:num_actual_tokens],
             )
             return
-        b = b.contiguous()
-        a = a.contiguous()
 
         if spec_sequence_masks is not None:
             if spec_only:
@@ -2473,8 +2471,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
         self._forward_core(
             mixed_qkv=mixed_qkv,
-            b=b,
-            a=a,
+            b=b.contiguous(),
+            a=a.contiguous(),
             core_attn_out=core_attn_out,
         )
         num_actual_tokens = attn_metadata.num_actual_tokens

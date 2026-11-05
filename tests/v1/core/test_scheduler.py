@@ -58,6 +58,7 @@ from vllm.v1.core.sched.diffusion_scheduler import (
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.utils import supports_dynamic_spec_blocks
 from vllm.v1.core.single_type_kv_cache_manager import (
     MambaManager,
     register_all_kvcache_specs,
@@ -9071,3 +9072,8 @@ def test_scheduler_keeps_static_spec_blocks(case):
             kwargs = {} if k is None else {"num_speculative_tokens": k}
             scheduler = create_scheduler(use_v2_model_runner=True, **kwargs)
             assert not scheduler.dynamic_spec_blocks
+            # The runner nulls dropped recurrent-state rows by the same rule,
+            # so a recurrent model without speculation keeps main's tables.
+            assert supports_dynamic_spec_blocks(scheduler.vllm_config, True) == (
+                k is not None
+            )

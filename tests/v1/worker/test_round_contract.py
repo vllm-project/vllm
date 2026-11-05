@@ -31,6 +31,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.mm.rope import RopeState
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import SamplingStates
 from vllm.v1.worker.gpu.spec_decode.commit import (
@@ -216,7 +217,15 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
     resources = SpecResources(
         max_candidates=4, capture_shapes=(), max_branching=max_branching
     )
-    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE)  # type: ignore[arg-type]
+    spec_round = SpecRound(
+        None,  # type: ignore[arg-type]
+        resources,
+        4,
+        16,
+        3,
+        DEVICE,
+        plans=max_branching > 1,
+    )
     buffers = InputBuffers(4, 16, DEVICE)
     spec_round.init_tree_verify(buffers)
     batch = InputBatch.make_dummy(2, 6, buffers)
@@ -231,6 +240,13 @@ def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
         assert batch.tree_parents is not None and batch.tree_ancestors is not None
         assert batch.tree_parents.tolist() == [-1, 0, 1, -1, 0, 1]
         assert batch.tree_ancestors.tolist() == [0] * 6  # a chain: causal
+
+    # A speculator without ``plan`` verifies the scheduled chains: no result.
+    batch.verify_plan = spec_round.chain_plan
+    zeros = torch.zeros(2, 4, dtype=torch.int32, device=DEVICE)
+    sampled = SamplerOutput(zeros, None, None, zeros[:, 0], zeros[:, 0])
+    result = spec_round.accept_result(sampled, batch)
+    assert (result is None) == (max_branching == 1)
 
 
 class _Staged:

@@ -54,7 +54,11 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import (
+    check_stop,
+    remove_all,
+    supports_dynamic_spec_blocks,
+)
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -440,16 +444,8 @@ class Scheduler(SchedulerInterface):
         )
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
-        # See `dynamic_spec_blocks`. Models without recurrent layers keep
-        # today's allocation; adaptive verification can verify past the
-        # scheduled drafts; connectors and PP keep append-only block tables.
-        self._dynamic_spec_blocks_supported = (
-            speculative_config is not None
-            and self.speculator_config is not None
-            and self.has_mamba_layers
-            and not speculative_config.enable_adaptive_verification
-            and not self.use_pp
-            and self.connector is None
+        self._dynamic_spec_blocks_supported = supports_dynamic_spec_blocks(
+            vllm_config, self.has_mamba_layers
         )
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
