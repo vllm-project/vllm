@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result, bail};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
+use tonic::server::NamedService;
 use tonic::transport::Server as TonicServer;
 use tonic_health::server::health_reporter;
 use tracing::info;
@@ -301,18 +302,32 @@ pub async fn serve_render(config: RenderConfig, shutdown: CancellationToken) -> 
         let Some((address, grpc_listener)) = grpc_listener else {
             return Ok(());
         };
-        let (health_reporter, health_service) = health_reporter();
+        let (mut health_reporter, health_service) = health_reporter();
         health_reporter.set_serving::<grpc::RenderGrpcService<RenderState>>().await;
         let render_service =
             grpc::RenderGrpcService::new(grpc::RenderServiceImpl::new(state.clone()))
                 .max_decoding_message_size(DEFAULT_REQUEST_BODY_LIMIT_BYTES);
+        // Publish NOT_SERVING before the listener stops, then remove the
+        // service so open health watches end and the drain can finish.
+        let stop = {
+            let server_shutdown = server_shutdown.clone();
+            async move {
+                server_shutdown.cancelled().await;
+                health_reporter.set_not_serving::<grpc::RenderGrpcService<RenderState>>().await;
+                health_reporter
+                    .clear_service_status(
+                        <grpc::RenderGrpcService<RenderState> as NamedService>::NAME,
+                    )
+                    .await;
+            }
+        };
         info!(%address, "starting engine-free Rust render gRPC server");
         let result = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .add_service(health_service)
             .add_service(render_service)
-            .serve_with_incoming_shutdown(grpc_listener, server_shutdown.clone().cancelled_owned())
+            .serve_with_incoming_shutdown(grpc_listener, stop)
             .await
             .context("render gRPC server failed");
         server_shutdown.cancel();

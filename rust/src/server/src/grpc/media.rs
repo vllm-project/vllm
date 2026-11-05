@@ -33,11 +33,7 @@ pub(super) fn from_proto(media: Vec<pb::MediaItem>) -> Result<MultimodalInput, S
         };
         encoded_bytes = encoded_bytes.saturating_add(feature.kwargs.as_ref().map_or(0, Vec::len));
     }
-    if encoded_bytes > MAX_INLINE_MM_BYTES {
-        return Err(Status::resource_exhausted(format!(
-            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
-        )));
-    }
+    check_inline_kwargs_size(encoded_bytes)?;
     let features = media
         .into_iter()
         .enumerate()
@@ -121,6 +117,16 @@ pub(super) fn feature_to_proto(
         )),
         ..Default::default()
     })
+}
+
+/// Reject inline kwargs totalling more than one gRPC request may carry.
+pub(super) fn check_inline_kwargs_size(encoded_bytes: usize) -> Result<(), Status> {
+    if encoded_bytes > MAX_INLINE_MM_BYTES {
+        return Err(Status::resource_exhausted(format!(
+            "inline multimodal payload exceeds {MAX_INLINE_MM_BYTES} bytes"
+        )));
+    }
+    Ok(())
 }
 
 fn mixed_media_error() -> Status {
