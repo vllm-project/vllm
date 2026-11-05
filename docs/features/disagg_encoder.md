@@ -95,6 +95,71 @@ see [Cross-encoder output reuse](cross_encoder_cache.md).
 
 Please refer to the directories `tests/v1/ec_connector`
 
+### Python proxy with native Rust gRPC workers
+
+The Python proxy accepts `grpc://host:port` worker URLs in static mode and
+through its dynamic registration API. This uses vLLM's native Rust
+`Inference`/`Control` services, not the SMG `VllmEngine` protocol. Start workers
+with `vllm-rs serve ... --grpc-port PORT`, using the same model and processing
+configuration as the proxy. E is an EC producer; P is an EC consumer and KV
+producer; D is a KV consumer. E+PD is also supported.
+
+Run the proxy from a vLLM source checkout matching the workers, so its Python
+gRPC bindings can be generated from `rust/proto/`:
+
+```bash
+uv pip install --python .venv/bin/python grpcio-tools grpcio-health-checking
+
+ADMIN_API_KEY=example-key .venv/bin/python -m \
+  examples.disaggregated.disaggregated_encoder.disagg_epd_proxy \
+  --dynamic-registration --port 8000 \
+  --grpc-model Qwen/Qwen2.5-VL-3B-Instruct
+```
+
+The launcher registers each running worker over HTTP. For example, with E, P
+and D listening on gRPC ports 18001, 18002 and 18003:
+
+```bash
+curl -f http://localhost:8000/instances -H 'X-API-Key: example-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"encode","url":"grpc://localhost:18001"}'
+curl -f http://localhost:8000/instances -H 'X-API-Key: example-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"prefill","url":"grpc://localhost:18002"}'
+curl -f http://localhost:8000/instances -H 'X-API-Key: example-key' \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"decode","url":"grpc://localhost:18003"}'
+```
+
+For Mooncake PUSH, include P's `ec_zmq_addrs` in its registration, one address
+per `dp_size` replica, exactly as for HTTP workers. The proxy pins P's DP rank
+and gives E the corresponding transfer destination. NIXL PULL and the example
+connector do not need these addresses. Register `prefill_decode` instead of
+separate `prefill`/`decode` workers for E+PD. Existing registration, removal
+and health-probe behavior applies to gRPC workers too.
+
+Clients continue to call `/v1/chat/completions` over HTTP, including streaming.
+The proxy renders and tokenizes the chat template without fetching or
+preprocessing raw media. E receives the original media URL or data URI over
+gRPC, then preprocesses it and expands its prompt placeholders. After encoding,
+the proxy reuses the existing metadata-only rewrite: P and D receive placeholder
+metadata rather than pixels when available. The proxy prepares these small
+metadata-only features using vLLM's Python renderer; it loads no model weights.
+EC and KV tensors still move through their configured connectors, not gRPC.
+P's EC handles are not forwarded to D. Cancellation and RPC errors trigger a
+best-effort `Control.Abort` for the affected engine request.
+
+Use `--grpc-reasoning-parser` when output needs a reasoning parser, and
+`--grpc-trust-request-mm-kwargs` only for trusted clients that override media
+processing options. The current gRPC adapter supports one output sequence
+(`n=1`); streaming stop strings, prompt logprobs, echo, and beam search are
+rejected. Inline embedding/metadata features must fit the Rust frontend's
+16 MiB per-request limit; raw image URLs and data URIs do not use this inline
+feature budget. Raw media uses the worker's processing
+configuration; per-request media/processor overrides, raw/embedding mixtures
+and tool calls with raw media are rejected. `--grpc-request-timeout` sets the
+RPC deadline (300 seconds by default). The existing HTTP backend path is unchanged.
+
 ## 4  Development
 
 Disaggregated encoding is implemented by running two parts:

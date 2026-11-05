@@ -34,14 +34,14 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
 import aiohttp
 import msgspec
 import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
+from pydantic import AnyUrl, BaseModel, Field, UrlConstraints, model_validator
 
 ###############################################################################
 # FastAPI app & global state
@@ -56,6 +56,52 @@ DEFAULT_FAIL_THRESHOLD = 3
 # Stop probing an instance that has been down this long. 0 probes forever,
 # which is what a cluster that restarts instances in place wants.
 DEFAULT_EVICTED_TTL = 900.0
+BackendUrl = Annotated[
+    AnyUrl,
+    UrlConstraints(allowed_schemes=["http", "https", "grpc"], host_required=True),
+]
+
+grpc_backend = None
+grpc_model: str | None = None
+grpc_reasoning_parser: str | None = None
+grpc_trust_remote_code = False
+grpc_trust_request_mm_kwargs = False
+grpc_request_timeout = 300.0
+
+
+def get_grpc_backend():
+    global grpc_backend
+    if grpc_backend is None:
+        from examples.disaggregated.disaggregated_encoder.grpc_backend import (
+            GrpcBackend,
+        )
+
+        grpc_backend = GrpcBackend(
+            grpc_model,
+            trust_remote_code=grpc_trust_remote_code,
+            trust_request_mm_kwargs=grpc_trust_request_mm_kwargs,
+            reasoning_parser=grpc_reasoning_parser,
+            request_timeout=grpc_request_timeout,
+        )
+    return grpc_backend
+
+
+async def post_chat(session, url: str, data: dict, headers: dict):
+    if url.startswith("grpc://"):
+        return await get_grpc_backend().request(url, data, headers)
+    return await session.post(
+        f"{url}/v1/chat/completions",
+        data=msgspec.json.encode(data),
+        headers=headers,
+    )
+
+
+async def backend_models(url: str):
+    if url.startswith("grpc://"):
+        return await get_grpc_backend().models(url)
+    async with decode_session.get(f"{url}/v1/models") as resp:
+        resp.raise_for_status()
+        return await resp.json()
 
 
 class InstanceRole(str, enum.Enum):
@@ -241,6 +287,8 @@ class InstanceRegistry:
         self._drop_expired(now)
 
     async def _probe(self, session: aiohttp.ClientSession, url: str) -> bool:
+        if url.startswith("grpc://"):
+            return await get_grpc_backend().healthy(url, self._probe_timeout)
         async with session.get(f"{url}/health") as resp:
             return resp.status == 200
 
@@ -296,7 +344,7 @@ class InstanceRegistry:
 
 class InstanceRegistration(BaseModel):
     role: InstanceRole
-    url: AnyHttpUrl
+    url: BackendUrl
     ec_zmq_addrs: list[str] = Field(default_factory=list)
     dp_size: int = Field(default=1, ge=1)
 
@@ -689,13 +737,7 @@ async def fanout_encoder_primer(
                     for transfer_id in item_transfer_ids[idx]
                 ],
             }
-        tasks.append(
-            encode_session.post(
-                f"{target_url}/v1/chat/completions",
-                data=msgspec.json.encode(encoder_req),
-                headers=headers,
-            )
-        )
+        tasks.append(post_chat(encode_session, target_url, encoder_req, headers))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -844,7 +886,13 @@ async def maybe_prefill(
         prefill_response_json = msgspec.json.decode(await prefill_response.read())
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
-            return {**req_data, "kv_transfer_params": kv_transfer_params}
+            prepared = {**req_data, "kv_transfer_params": kv_transfer_params}
+            # D consumes KV; only P owns the encoder transfer handles.
+            if p_url.startswith("grpc://"):
+                prepared.pop("ec_transfer_params", None)
+            return prepared
+        if p_url.startswith("grpc://"):
+            raise HTTPException(502, "Prefill returned no KV transfer parameters")
 
     return req_data
 
@@ -878,10 +926,8 @@ async def process_prefill_stage(
     if dp_rank is not None:
         headers["X-data-parallel-rank"] = str(dp_rank)
     try:
-        prefill_response = await prefill_session.post(
-            f"{p_url}/v1/chat/completions",
-            data=msgspec.json.encode(prefill_request),
-            headers=headers,
+        prefill_response = await post_chat(
+            prefill_session, p_url, prefill_request, headers
         )
         prefill_response.raise_for_status()
 
@@ -901,6 +947,8 @@ async def process_prefill_stage(
 
         return prefill_response
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Prefill processing failed: %s", str(e))
         raise HTTPException(
@@ -983,13 +1031,16 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
-    global encode_session, prefill_session, decode_session
+    global encode_session, prefill_session, decode_session, grpc_backend
     if encode_session:
         await encode_session.close()
     if prefill_session:
         await prefill_session.close()
     if decode_session:
         await decode_session.close()
+    if grpc_backend is not None:
+        await grpc_backend.close()
+        grpc_backend = None
 
 
 ###############################################################################
@@ -1051,10 +1102,8 @@ async def forward_non_stream(
             if dp_rank is not None:
                 headers["X-data-parallel-rank"] = str(dp_rank)
 
-            async with decode_session.post(
-                f"{d_url}/v1/chat/completions",
-                data=msgspec.json.encode(prepared),
-                headers=headers,
+            async with await post_chat(
+                decode_session, d_url, prepared, headers
             ) as resp:
                 if resp.status >= 400:
                     detail = await resp.text()
@@ -1132,10 +1181,8 @@ async def forward_stream(
                 headers["X-data-parallel-rank"] = str(dp_rank)
 
             _first = None
-            async with decode_session.post(
-                f"{d_url}/v1/chat/completions",
-                data=msgspec.json.encode(prepared),
-                headers=headers,
+            async with await post_chat(
+                decode_session, d_url, prepared, headers
             ) as resp:
                 # Retry only before the first chunk: once anything reached the
                 # client the response cannot be replaced.
@@ -1181,6 +1228,48 @@ async def forward_stream(
         ) from e
 
 
+async def grpc_stream_response(
+    req_data,
+    req_id,
+    e_urls,
+    p_url,
+    d_url,
+    consumer_zmq,
+    dp_rank=None,
+    prefill_dp_rank=None,
+):
+    """Validate/render and finish E/P before committing the SSE response."""
+    prepared, _, _ = await prepare_for_decode(
+        req_data, req_id, e_urls, p_url, consumer_zmq, prefill_dp_rank
+    )
+    headers = {"x-request-id": req_id}
+    if dp_rank is not None:
+        headers["X-data-parallel-rank"] = str(dp_rank)
+    response = await post_chat(decode_session, d_url, prepared, headers)
+
+    async def chunks():
+        try:
+            async with response:
+                async for chunk in response.content.iter_any():
+                    yield chunk
+        except HTTPException as error:
+            yield (
+                b"data: "
+                + msgspec.json.encode(
+                    {
+                        "error": {
+                            "message": str(error.detail),
+                            "type": "server_error",
+                            "code": error.status_code,
+                        }
+                    }
+                )
+                + b"\n\ndata: [DONE]\n\n"
+            )
+
+    return StreamingResponse(chunks(), media_type="text/event-stream")
+
+
 ###############################################################################
 # Public routes
 ###############################################################################
@@ -1208,6 +1297,10 @@ async def chat_completions(request: Request):
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
+            if d_url.startswith("grpc://"):
+                return await grpc_stream_response(
+                    req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+                )
             return StreamingResponse(
                 forward_stream(
                     req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
@@ -1229,9 +1322,7 @@ async def chat_completions(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    async with decode_session.get(f"{app.state.d_urls[0]}/v1/models") as resp:
-        resp.raise_for_status()
-        return await resp.json()
+    return await backend_models(app.state.d_urls[0])
 
 
 @app.get("/health")
@@ -1241,6 +1332,10 @@ async def health_check():
             return "empty"
         for u in urls:
             try:
+                if u.startswith("grpc://"):
+                    if not await get_grpc_backend().healthy(u):
+                        return "unhealthy"
+                    continue
                 async with encode_session.get(f"{u}/health") as resp:
                     resp.raise_for_status()
             except Exception:
@@ -1288,6 +1383,8 @@ async def _post_if_available(
     • Raises for anything else.
 
     """
+    if url.startswith("grpc://"):
+        return None
     try:
         resp = await session.post(url, json=payload, headers=headers)
         if resp.status == 404:  # profiling disabled on that server
@@ -1409,7 +1506,7 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
         return {"registered": created}
 
     @app.delete("/instances", dependencies=[Depends(require_admin_key)])
-    async def unregister_instance(url: AnyHttpUrl):
+    async def unregister_instance(url: BackendUrl):
         return {"removed": registry.unregister(str(url).rstrip("/"))}
 
     @app.post("/v1/chat/completions")
@@ -1430,6 +1527,8 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
             "prefill_dp_rank": route.dp_rank if route.prefill is not None else None,
         }
         if req_data.get("stream", False):
+            if route.decode.url.startswith("grpc://"):
+                return await grpc_stream_response(*args, **ranks)
             return StreamingResponse(
                 forward_stream(*args, **ranks), media_type="text/event-stream"
             )
@@ -1444,9 +1543,7 @@ def build_app(config: EPDProxyConfig | None = None) -> FastAPI:
             raise HTTPException(
                 status_code=503, detail="No decode instance is registered"
             )
-        async with decode_session.get(f"{decode.url}/v1/models") as resp:
-            resp.raise_for_status()
-            return await resp.json()
+        return await backend_models(decode.url)
 
     @app.get("/health")
     async def health():
@@ -1492,6 +1589,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--grpc-model",
+        help="Model/tokenizer path for gRPC rendering; defaults to the request model.",
+    )
+    parser.add_argument("--grpc-reasoning-parser")
+    parser.add_argument("--grpc-trust-remote-code", action="store_true")
+    parser.add_argument("--grpc-trust-request-mm-kwargs", action="store_true")
+    parser.add_argument("--grpc-request-timeout", type=float, default=300.0)
     parser.add_argument(
         "--dynamic-registration",
         action="store_true",
@@ -1564,6 +1669,13 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    grpc_model = args.grpc_model
+    grpc_reasoning_parser = args.grpc_reasoning_parser
+    grpc_trust_remote_code = args.grpc_trust_remote_code
+    grpc_trust_request_mm_kwargs = args.grpc_trust_request_mm_kwargs
+    grpc_request_timeout = args.grpc_request_timeout
+    if grpc_request_timeout <= 0:
+        parser.error("--grpc-request-timeout must be positive")
     if args.fail_threshold < 1:
         parser.error("--fail-threshold must be at least 1")
     if args.log_requests:

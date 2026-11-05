@@ -318,6 +318,8 @@ steps:
     - tests/v1
     - tests/watermarking
     - examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py
+    - examples/disaggregated/disaggregated_encoder/
+    - rust/proto/
   device: cpu-small
   commands:
     # split the test to avoid interference
@@ -329,6 +331,7 @@ steps:
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - uv pip install --system grpcio-tools==1.78.0 grpcio-health-checking==1.78.0
     - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
     - pytest -v -s watermarking
