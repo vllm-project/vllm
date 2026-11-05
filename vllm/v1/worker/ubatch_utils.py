@@ -13,12 +13,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (  # noqa: F401
 )
 
 
-def is_last_ubatch_empty(
-    orig_num_tokens: int, padded_num_tokens: int, num_ubatches: int
-) -> bool:
-    return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
-
-
 # This pads the last ubatch slice out to the total number of tokens
 # (num_tokens + padding) since we do `create_ubatch_slices` before applying DP padding.
 def _pad_out_ubatch_slices(
