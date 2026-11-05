@@ -501,11 +501,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_fp8_serialized
 
+        quant_schema = self._init_quant_schema(
+            activation_key=kFp8StaticTensorSym,
+            weight_key=kFp8StaticTensorSym,
+        )
         # Select Fp8 MoE backend
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
-            weight_key=kFp8StaticTensorSym,
-            activation_key=kFp8StaticTensorSym,
+            quant_schema=quant_schema,
         )
 
     def create_weights(
@@ -902,10 +905,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 )
         self.per_token_activation = activation_key == kNvfp4DynamicToken
 
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_key,
+            weight_key=kNvfp4Static,
+        )
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=activation_key,
+            quant_schema=quant_schema,
         )
         if (
             self.per_token_activation
@@ -1394,7 +1400,14 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_mxfp8_serialized
 
-        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=kMxfp8Dynamic,
+            weight_key=kMxfp8Static,
+        )
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            quant_schema=quant_schema,
+        )
 
     def create_weights(
         self,

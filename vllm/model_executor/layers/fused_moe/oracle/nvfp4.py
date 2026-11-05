@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -201,12 +202,14 @@ def _use_a16(backend: NvFp4MoeBackend, checkpoint_uses_a16: bool) -> bool:
 
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
+
     from vllm.model_executor.layers.quantization.online.requantization import (
         is_requantization_source,
     )

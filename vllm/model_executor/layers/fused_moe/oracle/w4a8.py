@@ -14,12 +14,8 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     int4_w4afp8_moe_quant_config,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kFp8DynamicTokenSym,
-    kInt4Static,
 )
 
 if TYPE_CHECKING:
@@ -60,9 +56,11 @@ def backend_to_kernel_cls(
 
 def select_w4a8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None = kInt4Static,
-    activation_key: QuantKey | None = kFp8DynamicTokenSym,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[W4A8MoeBackend, type[mk.FusedMoEExperts]]:
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
+
     backends = [W4A8MoeBackend.CUTLASS, W4A8MoeBackend.HUMMING]
     if config.moe_backend != "auto":
         backend_map = {

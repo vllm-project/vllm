@@ -38,7 +38,10 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     mxfp4_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.model_executor.utils import replace_parameter
 
 # MXFP4 block size (elements per shared e8m0 scale), same as the checkpoint
@@ -170,8 +173,13 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         self.w13_precision_config: Any = None
         self.w2_precision_config: Any = None
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=kMxfp4Static,
+        )
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            config=self.moe, activation_key=self.activation_quant_key
+            config=self.moe,
+            quant_schema=quant_schema,
         )
         # The oracle may fall back to a backend computing another activation
         # format (EMULATION computes MXFP4): reject an override it cannot honour.

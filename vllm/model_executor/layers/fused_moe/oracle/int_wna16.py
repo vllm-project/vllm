@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
@@ -279,21 +280,18 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
 
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey,
+    quant_schema: FusedMoEQuantSchema,
     quant_config: QuantizationConfig | QuantizationArgs,
-    may_have_zp: bool,
-    may_have_bias: bool,
     allow_tile_padding: bool = False,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
     Args:
         config: the shared ``FusedMoEConfig`` for this layer.
-        weight_key: The QuantKey describing the weight quantization.
-                    Must have int4 or int8 type.
+        quant_schema: Static quantization schema. Its weight key must have an
+            int4 or int8 type; its weight role carries zero-point and bias
+            presence.
         quant_config: Quantization structure and checkpoint format description.
-        may_have_zp: Whether the integration can provide weight zero points.
-        may_have_bias: Whether the integration can provide expert bias.
         allow_tile_padding: Whether backends that require padding the weights
             up to a tile boundary may be selected.
 
@@ -301,6 +299,11 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
 
     """
+    weight_key = quant_schema.weight_key
+    assert weight_key is not None
+    may_have_zp = quant_schema.w1.has_zero_point
+    may_have_bias = quant_schema.w1.has_bias
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format

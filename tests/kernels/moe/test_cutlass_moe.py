@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
+    make_fused_moe_quant_schema,
     mxfp4_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
@@ -47,7 +48,10 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     remap_topk_to_local,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+    kMxfp4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -136,7 +140,8 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
     moe_config.swiglu_limit = 7.0
 
     selected, _ = nvfp4_oracle.select_nvfp4_moe_backend(
-        moe_config, weight_key=None, activation_key=None
+        moe_config,
+        make_fused_moe_quant_schema(activation_key=None, weight_key=None),
     )
 
     assert selected == expected
@@ -540,7 +545,11 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
     )
     with set_current_vllm_config(vllm_config):
         backend, experts_cls = mxfp4_oracle.select_mxfp4_moe_backend(
-            moe_config, activation_key=kMxfp4Dynamic
+            moe_config,
+            make_fused_moe_quant_schema(
+                activation_key=kMxfp4Dynamic,
+                weight_key=kMxfp4Static,
+            ),
         )
         assert backend == mxfp4_oracle.Mxfp4MoeBackend.CUTLASS_MXFP4_MXFP4
 

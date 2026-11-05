@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.b12x import B12xExperts
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    make_fused_moe_quant_schema,
     mxfp4_w4a16_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -54,6 +55,20 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+
+def _mxfp4_quant_schema(activation_key):
+    return make_fused_moe_quant_schema(
+        activation_key=activation_key,
+        weight_key=kMxfp4Static,
+    )
+
+
+def _nvfp4_quant_schema(activation_key):
+    return make_fused_moe_quant_schema(
+        activation_key=activation_key,
+        weight_key=kNvfp4Static,
+    )
 
 
 def _quantize_nvfp4_linear(
@@ -415,7 +430,7 @@ def test_explicit_b12x_mxfp4_selection(
 
     backend, experts_cls = select_mxfp4_moe_backend(
         config,
-        activation_key=activation_key,
+        _mxfp4_quant_schema(activation_key),
     )
 
     assert backend == expected_backend
@@ -437,7 +452,7 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
 
     backend, experts_cls = select_mxfp4_moe_backend(
         config,
-        activation_key=kMxfp8Dynamic,
+        _mxfp4_quant_schema(kMxfp8Dynamic),
     )
 
     assert backend == Mxfp4MoeBackend.B12X_MXFP4_BF16
@@ -465,7 +480,9 @@ def test_deepseek_v4_b12x_activation_selection(
     config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
     config.moe_backend = "b12x"
 
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(
+        config, _mxfp4_quant_schema(None)
+    )
 
     assert backend == expected_backend
     assert experts_cls is B12xExperts
@@ -494,7 +511,9 @@ def test_deepseek_v4_flashinfer_cutlass_falls_through_to_w4a8(
     config = make_dummy_moe_config(hidden_dim=256, intermediate_size=64)
     config.moe_backend = "flashinfer_cutlass"
 
-    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(config)
+    backend, experts_cls = select_deepseek_v4_mxfp4_moe_backend(
+        config, _mxfp4_quant_schema(None)
+    )
 
     assert backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
     assert experts_cls is FlashInferExperts
@@ -515,14 +534,21 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     monkeypatch.setattr(
         ct_mxfp4,
         "select_mxfp4_moe_backend",
-        lambda moe: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
+        lambda moe, quant_schema: (Mxfp4MoeBackend.B12X_MXFP4_MXFP8, B12xExperts),
     )
     monkeypatch.setattr(
         ct_mxfp4,
         "prepare_moe_fp4_layer_for_marlin",
         lambda layer: pytest.fail("b12x must not use Marlin packing"),
     )
-    moe_config = SimpleNamespace(w13_num_shards=2, moe_backend="b12x")
+    moe_config = SimpleNamespace(
+        w13_num_shards=2,
+        moe_backend="b12x",
+        has_bias=False,
+        swiglu_alpha=None,
+        swiglu_beta=None,
+        swiglu_limit=None,
+    )
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
     processed_layers: list[torch.nn.Module] = []
     fake_experts = SimpleNamespace(
@@ -564,7 +590,7 @@ def test_b12x_mxfp4_falls_back_to_a16(
     config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
     config.moe_backend = "b12x"
 
-    backend, experts_cls = select_mxfp4_moe_backend(config)
+    backend, experts_cls = select_mxfp4_moe_backend(config, _mxfp4_quant_schema(None))
 
     assert backend == Mxfp4MoeBackend.B12X_MXFP4_BF16
     assert experts_cls is B12xExperts
@@ -601,8 +627,7 @@ def test_explicit_b12x_nvfp4_selection(
 
     backend, experts_cls = select_nvfp4_moe_backend(
         config,
-        weight_key=kNvfp4Static,
-        activation_key=activation_key,
+        _nvfp4_quant_schema(activation_key),
     )
 
     assert backend == NvFp4MoeBackend.B12X

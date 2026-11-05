@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from typing import Union
 
@@ -17,10 +17,16 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP4_DTYPE,
+    FP8_DTYPE,
+    INT4_DTYPE,
+    MXFP_SCALE_DTYPE,
     GroupShape,
     QuantKey,
+    ScaleDesc,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
 
@@ -210,6 +216,478 @@ class FusedMoEQuantDesc:
     bias: torch.Tensor | None = None
 
 
+# Transitional representation of a legacy descriptor that had no GroupShape.
+_NO_GROUP_SHAPE = GroupShape(0, 0)
+
+
+@dataclass(frozen=True)
+class FusedMoEStaticQuantDesc:
+    """Static description of one activation or weight role."""
+
+    key: QuantKey | None = None
+
+    # Supplemental layout metadata only when the legacy role shape cannot be
+    # recovered from the key's scale group shape.
+    alignment_shape: GroupShape | None = None
+
+    has_bias: bool = False
+    has_zero_point: bool = False
+
+    def __post_init__(self) -> None:
+        assert (
+            self.alignment_shape is None
+            or self.key is None
+            or (self.alignment_shape != self.key.scale.group_shape)
+        ), "alignment_shape must not duplicate key.scale.group_shape"
+
+    @property
+    def group_shape(self) -> GroupShape | None:
+        if self.alignment_shape is not None and self.alignment_shape != _NO_GROUP_SHAPE:
+            return self.alignment_shape
+        return self.key.scale.group_shape if self.key is not None else None
+
+    @property
+    def legacy_group_shape(self) -> GroupShape | None:
+        if self.alignment_shape == _NO_GROUP_SHAPE:
+            return None
+        if self.alignment_shape is not None:
+            return self.alignment_shape
+        return self.group_shape
+
+    @property
+    def is_quantized(self) -> bool:
+        return self.key is not None
+
+    @property
+    def is_scale_static(self) -> bool:
+        return self.key is not None and self.key.scale.static
+
+    @property
+    def is_scale_dynamic(self) -> bool:
+        return self.key is not None and not self.key.scale.static
+
+
+@dataclass(frozen=True)
+class FusedMoEQuantSchema:
+    """Static quantization and kernel-ABI description for one MoE layer."""
+
+    a1: FusedMoEStaticQuantDesc
+    a2: FusedMoEStaticQuantDesc
+    w1: FusedMoEStaticQuantDesc
+    w2: FusedMoEStaticQuantDesc
+
+    is_scale_swizzled: bool = True
+    is_scale_transposed: bool = False
+    mx_alignment: int = 0
+
+    gemm1_alpha: float | None = None
+    gemm1_beta: float | None = None
+    gemm1_clamp_limit: float | None = None
+
+    @property
+    def a1_key(self) -> QuantKey | None:
+        return self.a1.key
+
+    @property
+    def a2_key(self) -> QuantKey | None:
+        return self.a2.key
+
+    @property
+    def w1_key(self) -> QuantKey | None:
+        return self.w1.key
+
+    @property
+    def w2_key(self) -> QuantKey | None:
+        return self.w2.key
+
+    @property
+    def activation_key(self) -> QuantKey | None:
+        if self.a1_key != self.a2_key:
+            raise ValueError("activation roles use different quantization keys")
+        return self.a1_key
+
+    @property
+    def weight_key(self) -> QuantKey | None:
+        if self.w1_key != self.w2_key:
+            raise ValueError("weight roles use different quantization keys")
+        return self.w1_key
+
+    @property
+    def quant_dtype(self) -> torch.dtype | str | None:
+        activation_dtype = _legacy_quant_dtype(self.a1_key)
+        weight_dtype = _legacy_quant_dtype(self.w1_key)
+        if (
+            activation_dtype == FP8_DTYPE
+            and weight_dtype == "mxfp4"
+            and not _is_mxfp8_key(self.a1_key)
+        ):
+            return "fp8"
+        return activation_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return _legacy_quant_dtype(self.w1_key)
+
+    @property
+    def is_quantized(self) -> bool:
+        return self.a1_key is not None
+
+    @property
+    def is_per_act_token(self) -> bool:
+        return self.a1.legacy_group_shape == GroupShape.PER_TOKEN
+
+    @property
+    def per_act_token_quant(self) -> bool:
+        return self.is_per_act_token
+
+    @property
+    def per_out_ch_quant(self) -> bool:
+        return self.w1.legacy_group_shape == GroupShape.PER_TOKEN
+
+    @property
+    def is_per_tensor(self) -> bool:
+        return self.a1.legacy_group_shape == GroupShape.PER_TENSOR
+
+    @property
+    def block_shape(self) -> list[int] | None:
+        group_shape = self.a1.legacy_group_shape
+        if (
+            group_shape is not None
+            and group_shape != GroupShape.PER_TENSOR
+            and group_shape != GroupShape.PER_TOKEN
+        ):
+            return [group_shape.row, group_shape.col]
+        return None
+
+    @property
+    def is_block_quantized(self) -> bool:
+        return self.block_shape is not None
+
+    @property
+    def use_fp8_w8a8(self) -> bool:
+        return self.quant_dtype == current_platform.fp8_dtype()
+
+    @property
+    def use_int8_w8a8(self) -> bool:
+        return self.quant_dtype == torch.int8
+
+    @property
+    def use_int8_w8a16(self) -> bool:
+        return not self.is_quantized and self.weight_quant_dtype == torch.int8
+
+    @property
+    def use_fp8_w8a16(self) -> bool:
+        return (
+            not self.is_quantized
+            and self.weight_quant_dtype == current_platform.fp8_dtype()
+        )
+
+    @property
+    def use_int4_w4a16(self) -> bool:
+        return not self.is_quantized and self.weight_quant_dtype == "int4"
+
+    @property
+    def use_nvfp4_w4a16(self) -> bool:
+        return not self.is_quantized and self.weight_quant_dtype == "nvfp4"
+
+    @property
+    def ocp_mx_scheme(self) -> str | None:
+        activation_dtype = self.quant_dtype
+        weight_dtype = self.weight_quant_dtype
+        if (activation_dtype is not None and not isinstance(activation_dtype, str)) or (
+            weight_dtype is not None and not isinstance(weight_dtype, str)
+        ):
+            return None
+        scheme = OCP_MX_Scheme.from_quant_dtype(activation_dtype, weight_dtype)
+        return scheme.value if scheme is not None else None
+
+    @property
+    def use_mxfp4_w4a16(self) -> bool:
+        return not self.is_quantized and self.weight_quant_dtype == "mxfp4"
+
+    @property
+    def use_mxfp4_w4a4(self) -> bool:
+        return self.quant_dtype == "mxfp4" and self.weight_quant_dtype == "mxfp4"
+
+    @property
+    def use_nvfp4_w4a4(self) -> bool:
+        return self.quant_dtype == "nvfp4"
+
+    @property
+    def use_mxfp4_w4a8(self) -> bool:
+        return self.quant_dtype == "fp8" and self.weight_quant_dtype == "mxfp4"
+
+    def config_name(self, dtype: torch.dtype) -> str | None:
+        return _get_config_dtype_str(
+            use_fp8_w8a8=self.use_fp8_w8a8,
+            use_fp8_w8a16=self.use_fp8_w8a16,
+            use_int8_w8a16=self.use_int8_w8a16,
+            use_int4_w4a16=self.use_int4_w4a16,
+            ocp_mx_scheme=self.ocp_mx_scheme,
+            dtype=dtype,
+        )
+
+    def scale_shape(
+        self,
+        max_tokens: int,
+        hidden_dim: int,
+    ) -> tuple[int, int] | None:
+        if not self.is_quantized:
+            return None
+        if self.is_block_quantized:
+            assert self.block_shape is not None
+            _, block_k = self.block_shape
+            return (max_tokens, cdiv(hidden_dim, block_k))
+        if self.is_per_act_token:
+            return (max_tokens, 1)
+        return (1, 1)
+
+    def batched_scale_shape(
+        self,
+        num_experts: int,
+        max_tokens: int,
+        hidden_dim: int,
+    ) -> tuple[int, int, int] | None:
+        if not self.is_quantized:
+            return None
+        scale_shape = self.scale_shape(max_tokens, hidden_dim)
+        assert scale_shape is not None
+        return (num_experts, *scale_shape)
+
+
+def make_fused_moe_quant_schema(
+    *,
+    activation_key: QuantKey | None,
+    weight_key: QuantKey | None,
+    has_bias: bool = False,
+    has_zero_point: bool = False,
+    weight_alignment_shape: GroupShape | None = None,
+    is_scale_swizzled: bool = True,
+    is_scale_transposed: bool = False,
+    mx_alignment: int = 0,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
+) -> FusedMoEQuantSchema:
+    """Build a pre-selection schema using the same key for both GEMM roles."""
+    activation = FusedMoEStaticQuantDesc(key=activation_key)
+    weight = FusedMoEStaticQuantDesc(
+        key=weight_key,
+        alignment_shape=weight_alignment_shape,
+        has_bias=has_bias,
+        has_zero_point=has_zero_point,
+    )
+    return FusedMoEQuantSchema(
+        a1=activation,
+        a2=activation,
+        w1=weight,
+        w2=weight,
+        is_scale_swizzled=is_scale_swizzled,
+        is_scale_transposed=is_scale_transposed,
+        mx_alignment=mx_alignment,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
+
+
+def _is_fp4_key(key: QuantKey | None) -> bool:
+    return key is not None and key.dtype == FP4_DTYPE
+
+
+def _is_mxfp4_key(key: QuantKey) -> bool:
+    return (
+        _is_fp4_key(key)
+        and key.scale.group_shape == GroupShape(1, 32)
+        and key.scale2 is None
+    )
+
+
+def _is_nvfp4_key(key: QuantKey) -> bool:
+    return (
+        _is_fp4_key(key)
+        and key.scale.group_shape == GroupShape(1, 16)
+        and key.scale2 is not None
+    )
+
+
+def _is_mxfp8_key(key: QuantKey | None) -> bool:
+    return (
+        key is not None
+        and key.dtype == FP8_DTYPE
+        and key.scale.dtype == MXFP_SCALE_DTYPE
+        and key.scale.group_shape == GroupShape(1, 32)
+    )
+
+
+def _legacy_quant_dtype(key: QuantKey | None) -> torch.dtype | str | None:
+    if key is None:
+        return None
+    if _is_nvfp4_key(key):
+        return "nvfp4"
+    if _is_mxfp4_key(key):
+        return "mxfp4"
+    if _is_mxfp8_key(key):
+        return "mxfp8"
+
+    dtype = key.dtype
+    if isinstance(dtype, ScalarType):
+        if dtype in (INT4_DTYPE, scalar_types.uint4):
+            return "int4"
+        if dtype == scalar_types.float6_e3m2f:
+            return "mxfp6_e3m2"
+        if dtype == scalar_types.float6_e2m3f:
+            return "mxfp6_e2m3"
+    if dtype == INT4_DTYPE:
+        return "int4"
+    return dtype
+
+
+def _tensor_scale_dtype(desc: FusedMoEQuantDesc, default: torch.dtype) -> torch.dtype:
+    return desc.scale.dtype if isinstance(desc.scale, torch.Tensor) else default
+
+
+def _fp8_scale_group_shape(
+    desc: FusedMoEQuantDesc, *, is_activation: bool
+) -> GroupShape:
+    if desc.shape is not None:
+        if desc.shape == GroupShape.PER_TOKEN:
+            return GroupShape.PER_TOKEN if is_activation else GroupShape.PER_CHANNEL
+        if desc.shape != GroupShape.PER_TENSOR:
+            return desc.shape
+    return GroupShape.PER_TENSOR
+
+
+def _static_quant_key(
+    desc: FusedMoEQuantDesc, *, is_activation: bool
+) -> QuantKey | None:
+    dtype = desc.dtype
+    if dtype is None:
+        return None
+
+    static = not is_activation or isinstance(desc.scale, torch.Tensor)
+    symmetric = desc.zp is None
+
+    if isinstance(dtype, str):
+        if dtype == "nvfp4":
+            return QuantKey(
+                FP4_DTYPE,
+                ScaleDesc(FP8_DTYPE, static, GroupShape(1, 16)),
+                ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR),
+                symmetric,
+            )
+        if dtype == "mxfp4":
+            return QuantKey(
+                FP4_DTYPE,
+                ScaleDesc(MXFP_SCALE_DTYPE, static, GroupShape(1, 32)),
+                symmetric=symmetric,
+            )
+        if dtype == "mxfp8":
+            return QuantKey(
+                FP8_DTYPE,
+                ScaleDesc(MXFP_SCALE_DTYPE, static, GroupShape(1, 32)),
+                symmetric=symmetric,
+            )
+        if dtype == "mxfp6_e3m2":
+            return QuantKey(
+                scalar_types.float6_e3m2f,
+                ScaleDesc(MXFP_SCALE_DTYPE, static, GroupShape(1, 32)),
+                symmetric=symmetric,
+            )
+        if dtype == "mxfp6_e2m3":
+            return QuantKey(
+                scalar_types.float6_e2m3f,
+                ScaleDesc(MXFP_SCALE_DTYPE, static, GroupShape(1, 32)),
+                symmetric=symmetric,
+            )
+        if dtype == "int4":
+            group_shape = desc.shape or GroupShape(1, -1)
+            int4_dtype = scalar_types.uint4 if desc.zp is not None else INT4_DTYPE
+            return QuantKey(
+                int4_dtype,
+                ScaleDesc(
+                    _tensor_scale_dtype(desc, torch.float16),
+                    static,
+                    group_shape,
+                ),
+                symmetric=symmetric,
+            )
+        if dtype != "fp8":
+            # Opaque checkpoint codecs cannot be represented by QuantKey yet.
+            return None
+        key_dtype: torch.dtype | ScalarType = FP8_DTYPE
+    else:
+        key_dtype = dtype
+
+    if key_dtype == FP8_DTYPE:
+        return QuantKey(
+            FP8_DTYPE,
+            ScaleDesc(
+                _tensor_scale_dtype(desc, torch.float32),
+                static,
+                _fp8_scale_group_shape(desc, is_activation=is_activation),
+            ),
+            symmetric=symmetric,
+        )
+    if key_dtype == torch.int8:
+        if desc.shape is not None:
+            group_shape = (
+                GroupShape.PER_CHANNEL
+                if desc.shape == GroupShape.PER_TOKEN and not is_activation
+                else desc.shape
+            )
+        else:
+            group_shape = (
+                GroupShape.PER_TENSOR if is_activation else GroupShape.PER_CHANNEL
+            )
+        return QuantKey(
+            torch.int8,
+            ScaleDesc(_tensor_scale_dtype(desc, torch.float32), static, group_shape),
+            symmetric=symmetric,
+        )
+
+    group_shape = desc.shape or GroupShape(1, -1)
+    return QuantKey(
+        key_dtype,
+        ScaleDesc(_tensor_scale_dtype(desc, torch.float16), static, group_shape),
+        symmetric=symmetric,
+    )
+
+
+def _static_quant_desc(
+    desc: FusedMoEQuantDesc, *, is_activation: bool
+) -> FusedMoEStaticQuantDesc:
+    key = _static_quant_key(desc, is_activation=is_activation)
+    alignment_shape = None
+    if desc.shape is None and key is not None:
+        alignment_shape = _NO_GROUP_SHAPE
+    elif desc.shape is not None and (
+        key is None or desc.shape != key.scale.group_shape
+    ):
+        alignment_shape = desc.shape
+    return FusedMoEStaticQuantDesc(
+        key=key,
+        alignment_shape=alignment_shape,
+        has_bias=desc.bias is not None,
+        has_zero_point=desc.zp is not None,
+    )
+
+
+def _schema_from_legacy_config(config: "FusedMoEQuantConfig") -> FusedMoEQuantSchema:
+    return FusedMoEQuantSchema(
+        a1=_static_quant_desc(config._a1, is_activation=True),
+        a2=_static_quant_desc(config._a2, is_activation=True),
+        w1=_static_quant_desc(config._w1, is_activation=False),
+        w2=_static_quant_desc(config._w2, is_activation=False),
+        is_scale_swizzled=config.is_scale_swizzled,
+        is_scale_transposed=config.is_scale_transposed,
+        mx_alignment=config.mx_alignment,
+        gemm1_alpha=config.gemm1_alpha,
+        gemm1_beta=config.gemm1_beta,
+        gemm1_clamp_limit=config.gemm1_clamp_limit,
+    )
+
+
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
 @dataclass
@@ -264,7 +742,15 @@ class FusedMoEQuantConfig:
 
     mx_alignment: int = 0
 
+    # Transitional static reference. Removed once consumers use the schema
+    # directly instead of reading static properties through the runtime config.
+    _schema: FusedMoEQuantSchema | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
     def __post_init__(self):
+        if self._schema is None:
+            self._schema = _schema_from_legacy_config(self)
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
         )
@@ -275,11 +761,43 @@ class FusedMoEQuantConfig:
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        return self._a1.dtype
+        schema_dtype = self.quant_schema.quant_dtype
+        if self._a1.dtype is None and schema_dtype is not None:
+            return None
+        if self._a1.dtype is not None and schema_dtype is None:
+            return self._a1.dtype
+        return schema_dtype
 
     @property
     def weight_quant_dtype(self) -> torch.dtype | str | None:
-        return self._w1.dtype
+        schema_dtype = self.quant_schema.weight_quant_dtype
+        if self._w1.dtype is None and schema_dtype is not None:
+            return None
+        if self._w1.dtype is not None and schema_dtype is None:
+            return self._w1.dtype
+        return schema_dtype
+
+    @property
+    def quant_schema(self) -> FusedMoEQuantSchema:
+        assert self._schema is not None
+        if (
+            self._schema.is_scale_swizzled != self.is_scale_swizzled
+            or self._schema.is_scale_transposed != self.is_scale_transposed
+            or self._schema.mx_alignment != self.mx_alignment
+            or self._schema.gemm1_alpha != self.gemm1_alpha
+            or self._schema.gemm1_beta != self.gemm1_beta
+            or self._schema.gemm1_clamp_limit != self.gemm1_clamp_limit
+        ):
+            self._schema = replace(
+                self._schema,
+                is_scale_swizzled=self.is_scale_swizzled,
+                is_scale_transposed=self.is_scale_transposed,
+                mx_alignment=self.mx_alignment,
+                gemm1_alpha=self.gemm1_alpha,
+                gemm1_beta=self.gemm1_beta,
+                gemm1_clamp_limit=self.gemm1_clamp_limit,
+            )
+        return self._schema
 
     @property
     def is_quantized(self) -> bool:
@@ -287,34 +805,27 @@ class FusedMoEQuantConfig:
 
     @property
     def is_per_act_token(self) -> bool:
-        return self._a1.shape == GroupShape.PER_TOKEN
+        return self.quant_schema.is_per_act_token
 
     @property
     def per_act_token_quant(self) -> bool:
-        return self._a1.shape == GroupShape.PER_TOKEN
+        return self.quant_schema.per_act_token_quant
 
     @property
     def per_out_ch_quant(self) -> bool:
-        return self._w1.shape == GroupShape.PER_TOKEN
+        return self.quant_schema.per_out_ch_quant
 
     @property
     def is_per_tensor(self) -> bool:
-        return self._a1.shape == GroupShape.PER_TENSOR
+        return self.quant_schema.is_per_tensor
 
     @property
     def block_shape(self) -> list[int] | None:
-        if (
-            self._a1.shape is not None
-            and self._a1.shape != GroupShape.PER_TENSOR
-            and self._a1.shape != GroupShape.PER_TOKEN
-        ):
-            return [self._a1.shape.row, self._a1.shape.col]
-        else:
-            return None
+        return self.quant_schema.block_shape
 
     @property
     def is_block_quantized(self) -> bool:
-        return self.block_shape is not None
+        return self.quant_schema.is_block_quantized
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
@@ -380,76 +891,54 @@ class FusedMoEQuantConfig:
 
     @property
     def use_fp8_w8a8(self) -> bool:
-        return self.quant_dtype == current_platform.fp8_dtype()
+        return self.quant_schema.use_fp8_w8a8
 
     @property
     def use_int8_w8a8(self) -> bool:
-        return self.quant_dtype == torch.int8
+        return self.quant_schema.use_int8_w8a8
 
     @property
     def use_int8_w8a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == torch.int8
+        return self._w1.dtype is not None and self.quant_schema.use_int8_w8a16
 
     @property
     def use_fp8_w8a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == current_platform.fp8_dtype()
+        return self._w1.dtype is not None and self.quant_schema.use_fp8_w8a16
 
     @property
     def use_int4_w4a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == "int4"
+        return self._w1.dtype is not None and self.quant_schema.use_int4_w4a16
 
     @property
     def use_nvfp4_w4a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == "nvfp4"
+        return self._w1.dtype is not None and self.quant_schema.use_nvfp4_w4a16
 
     @property
     def ocp_mx_scheme(self) -> str | None:
-        if not hasattr(self, "_ocp_mx_scheme"):
-            if (self._a1.dtype is not None and not isinstance(self._a1.dtype, str)) or (
-                self._w1.dtype is not None and not isinstance(self._w1.dtype, str)
-            ):
-                self._ocp_mx_scheme = None
-            else:
-                ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
-                    self._a1.dtype, self._w1.dtype
-                )
-
-                if ocp_mx_scheme is not None:
-                    ocp_mx_scheme = ocp_mx_scheme.value
-
-                self._ocp_mx_scheme = ocp_mx_scheme
-
-        return self._ocp_mx_scheme
+        return self.quant_schema.ocp_mx_scheme
 
     @property
     def use_mxfp4_w4a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == "mxfp4"
+        return self._w1.dtype is not None and self.quant_schema.use_mxfp4_w4a16
 
     @property
     def use_mxfp4_w4a4(self) -> bool:
-        return self._a1.dtype == "mxfp4" and self._w1.dtype == "mxfp4"
+        return self.quant_schema.use_mxfp4_w4a4
 
     @property
     def use_nvfp4_w4a4(self) -> bool:
-        return self.quant_dtype == "nvfp4"
+        return self.quant_schema.use_nvfp4_w4a4
 
     @property
     def use_mxfp4_w4a8(self) -> bool:
-        return self._a1.dtype == "fp8" and self._w1.dtype == "mxfp4"
+        return self.quant_schema.use_mxfp4_w4a8
 
     def config_name(self, dtype: torch.dtype) -> str | None:
         """Return a string used to construct the filename that contains the
         tuning info for a particular quantization scheme.  See
         try_get_optimal_moe_config in fused_moe.py.
         """
-        return _get_config_dtype_str(
-            use_fp8_w8a8=self.use_fp8_w8a8,
-            use_fp8_w8a16=self.use_fp8_w8a16,
-            use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
-            ocp_mx_scheme=self.ocp_mx_scheme,
-            dtype=dtype,
-        )
+        return self.quant_schema.config_name(dtype)
 
     def scale_shape(
         self,
@@ -459,18 +948,7 @@ class FusedMoEQuantConfig:
         """Construct the proper activation scale shape for this
         config.
         """
-        if self.is_quantized:
-            if self.is_block_quantized:
-                assert self.block_shape is not None
-                _, block_k = self.block_shape
-                k_tiles = cdiv(hidden_dim, block_k)
-                return (max_tokens, k_tiles)
-            elif self.is_per_act_token:
-                return (max_tokens, 1)
-            else:
-                return (1, 1)
-        else:
-            return None
+        return self.quant_schema.scale_shape(max_tokens, hidden_dim)
 
     def batched_scale_shape(
         self,
@@ -481,12 +959,9 @@ class FusedMoEQuantConfig:
         """Construct the proper activation batched scale shape for this
         config, e.g. (num experts, *scale_shape).
         """
-        if self.is_quantized:
-            scale_shape = self.scale_shape(max_tokens, hidden_dim)
-            assert scale_shape is not None
-            return (num_experts, *scale_shape)
-        else:
-            return None
+        return self.quant_schema.batched_scale_shape(
+            num_experts, max_tokens, hidden_dim
+        )
 
     @staticmethod
     def make(

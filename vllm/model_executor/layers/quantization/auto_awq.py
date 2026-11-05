@@ -547,12 +547,16 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             raise ValueError("AutoAWQMoEMethod only supports 4bit now.")
         self.quant_type = scalar_types.uint4
         self.use_marlin = True
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=kInt4Static,
+            has_bias=True,
+            has_zero_point=self.quant_config.zero_point,
+        )
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
-            kInt4Static,
+            quant_schema,
             quant_config=self.quant_config,
-            may_have_zp=self.quant_config.zero_point,
-            may_have_bias=True,
             allow_tile_padding=True,
         )
 

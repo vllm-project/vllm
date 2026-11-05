@@ -12,10 +12,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
+    make_fused_moe_quant_schema,
 )
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
 )
 
 if TYPE_CHECKING:
@@ -31,6 +37,43 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
+        self._quant_schema: FusedMoEQuantSchema | None = None
+
+    @property
+    def quant_schema(self) -> FusedMoEQuantSchema:
+        if self._quant_schema is None:
+            raise AttributeError(
+                f"{type(self).__name__} has not initialized its quant schema"
+            )
+        return self._quant_schema
+
+    def _init_quant_schema(
+        self,
+        *,
+        activation_key: QuantKey | None,
+        weight_key: QuantKey | None,
+        has_bias: bool | None = None,
+        has_zero_point: bool = False,
+        weight_alignment_shape: GroupShape | None = None,
+        is_scale_swizzled: bool = True,
+        is_scale_transposed: bool = False,
+        mx_alignment: int = 0,
+    ) -> FusedMoEQuantSchema:
+        quant_schema = make_fused_moe_quant_schema(
+            activation_key=activation_key,
+            weight_key=weight_key,
+            has_bias=self.moe.has_bias if has_bias is None else has_bias,
+            has_zero_point=has_zero_point,
+            weight_alignment_shape=weight_alignment_shape,
+            is_scale_swizzled=is_scale_swizzled,
+            is_scale_transposed=is_scale_transposed,
+            mx_alignment=mx_alignment,
+            gemm1_alpha=self.moe.swiglu_alpha,
+            gemm1_beta=self.moe.swiglu_beta,
+            gemm1_clamp_limit=self.moe.swiglu_limit,
+        )
+        self._quant_schema = quant_schema
+        return quant_schema
 
     @property
     def supports_internal_mk(self) -> bool:

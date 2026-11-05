@@ -349,12 +349,16 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         self.pack_reorder = pack_method == "reorder"
 
         self.use_wna16_backend = True
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_quant_key,
+            weight_key=weight_quant_key,
+            has_bias=False,
+            has_zero_point=not self.is_symmetric,
+        )
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
-            weight_key=weight_quant_key,
+            quant_schema=quant_schema,
             quant_config=self.quant_config,
-            may_have_zp=not self.is_symmetric,
-            may_have_bias=False,
         )
 
     def create_weights(
@@ -687,10 +691,13 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         else:
             self.act_quant_group_shape = GroupShape.PER_TENSOR
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=self.weight_quant_key,
+        )
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=moe,
-            weight_key=self.weight_quant_key,
-            activation_key=self.activation_quant_key,
+            quant_schema=quant_schema,
         )
 
         self.model_type = getattr(
@@ -1063,6 +1070,11 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         self.int8_backend: Int8MoeBackend | None = None
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=self.weight_quant_key,
+        )
+
         # Dynamic-activation INT8 MoE goes through the oracle + modular kernel.
         # The modular TritonExperts kernel consumes float activations and
         # quantizes them to int8 itself, so it cannot apply a loaded static
@@ -1076,8 +1088,7 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             # weights with dynamic per-tensor activations.
             self.int8_backend, self.experts_cls = select_int8_moe_backend(
                 config=moe,
-                weight_key=self.weight_quant_key,
-                activation_key=self.activation_quant_key,
+                quant_schema=quant_schema,
             )
 
     def create_weights(
@@ -1412,6 +1423,10 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         activation_quant_key: QuantKey | None,
     ):
         super().__init__(moe, kInt4W4A8StaticChannelSym, activation_quant_key)
+        self._init_quant_schema(
+            activation_key=activation_quant_key,
+            weight_key=kInt4W4A8StaticChannelSym,
+        )
 
         assert rocm_aiter_ops.is_fused_moe_enabled(), (
             "W4A8 FP8 MoE requires ROCm AITER fused MoE support."
@@ -1623,19 +1638,26 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.static_input_scales = activation_quant_key == kFp8StaticTensorSym
 
+        quant_schema = self._init_quant_schema(
+            activation_key=activation_quant_key,
+            weight_key=weight_quant_key,
+        )
+
         # Select backend based on OCP MX scheme
         if self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, quant_schema
+            )
         elif self.ocp_mx_scheme == "w_mxfp4_a_fp8" and self.static_input_scales:
             # W4A8: MXFP4 weights + static FP8 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kFp8StaticTensorSym
+                moe, quant_schema
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
             # W4A4: MXFP4 weights + MXFP4 activations
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
+                moe, quant_schema
             )
 
         # Validation for unsupported schemes
@@ -2031,7 +2053,14 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
         if self.has_bias:
             raise NotImplementedError("Quark MXFP8 MoE does not support biases.")
         self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
-        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=self.weight_quant_key,
+        )
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            quant_schema=quant_schema,
+        )
         logger.info_once(
             "Using %s backend for Quark MXFP8 (W8A8) MoE.", self.mxfp8_backend.value
         )
@@ -2207,11 +2236,14 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         # Whether the selected backend reads the activation input scales.
         self.uses_input_scales = True
 
+        quant_schema = self._init_quant_schema(
+            activation_key=self.activation_quant_key,
+            weight_key=self.weight_quant_key,
+        )
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=self.weight_quant_key,
-            activation_key=self.activation_quant_key,
+            quant_schema=quant_schema,
         )
 
     def create_weights(

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
+    FusedMoEQuantSchema,
     RoutingMethodType,
     mxfp4_mxfp8_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
@@ -669,22 +670,23 @@ def _get_requested_backends(
 
 def select_mxfp4_moe_backend(
     config: FusedMoEConfig,
-    activation_key: QuantKey | None = None,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary MXFP4 MoE backend.
 
     Args:
         config: MoE configuration
-        activation_key: Optional activation quantization key declared by
-            the checkpoint. Backends that match it are preferred, with BF16
-            activation backends as a fallback.
-            Use kFp8StaticTensorSym for W4A8 scheme.
+        quant_schema: Static quantization schema for the layer. The activation
+            role determines which backends are preferred, with BF16 activation
+            backends as a fallback.
 
     Note: Shape-specific fallbacks may still occur at runtime.
 
     """
+    weight_key = quant_schema.weight_key
+    assert weight_key == kMxfp4Static
     runner_backend = config.moe_backend
-    requested_activation_key = _resolve_activation_key(activation_key)
+    requested_activation_key = _resolve_activation_key(quant_schema.activation_key)
 
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
@@ -717,7 +719,7 @@ def select_mxfp4_moe_backend(
                 selected = _return_or_raise(
                     requested_backend,
                     config,
-                    kMxfp4Static,
+                    weight_key,
                     act_key,
                     activation_format,
                 )
@@ -744,7 +746,7 @@ def select_mxfp4_moe_backend(
         )
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, act_key, activation_format
+                k_cls, config, weight_key, act_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend))
@@ -760,7 +762,7 @@ def select_mxfp4_moe_backend(
         return _return_or_raise(
             Mxfp4MoeBackend.XPU,
             config,
-            kMxfp4Static,
+            weight_key,
             None,
             activation_format,
         )
@@ -773,7 +775,7 @@ def select_mxfp4_moe_backend(
     )
     raise NotImplementedError(
         "No MXFP4 MoE backend supports the deployment configuration. "
-        f"weight_key=kMxfp4Static, activation_key={activation_key}. "
+        f"weight_key={weight_key}, activation_key={quant_schema.activation_key}. "
         f"Candidate backends were: "
         f"{[backend.value for backend in AVAILABLE_BACKENDS]}. "
         f"Unsupported reasons: {unsupported_log}. "
@@ -782,10 +784,14 @@ def select_mxfp4_moe_backend(
 
 def select_deepseek_v4_mxfp4_moe_backend(
     config: FusedMoEConfig,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
+    weight_key = quant_schema.weight_key
+    assert weight_key == kMxfp4Static
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
@@ -814,7 +820,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
                 return _return_or_raise(
                     requested_backend,
                     config,
-                    kMxfp4Static,
+                    weight_key,
                     _backend_activation_key(requested_backend),
                     activation_format,
                 )
@@ -841,7 +847,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
         activation_key = _backend_activation_key(backend)
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
-                k_cls, config, kMxfp4Static, activation_key, activation_format
+                k_cls, config, weight_key, activation_key, activation_format
             )
             if supported:
                 logger.info_once(_make_log_backend(backend), scope="local")

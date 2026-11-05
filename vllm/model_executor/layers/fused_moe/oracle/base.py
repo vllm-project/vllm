@@ -22,7 +22,7 @@ pre-class code.
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import Generic, TypeVar
 
 import torch
 
@@ -31,10 +31,8 @@ from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 BackendT = TypeVar("BackendT", bound=Enum)
 
@@ -78,20 +76,15 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     def select_backend(
         self,
         moe_config: FusedMoEConfig,
-        weight_key: "QuantKey | None" = None,
-        activation_key: "QuantKey | None" = None,
+        quant_schema: FusedMoEQuantSchema,
     ) -> tuple[BackendT, type[mk.FusedMoEExperts] | None]:
         """Primary entry point: choose the best supported backend for
         the given `moe_config`.
 
-        `weight_key` / `activation_key` carry the quantization scheme of
-        the weights and activations and are consumed by quantized oracles
-        (fp8, nvfp4, int8, ...) to disambiguate backends. The unquantized
-        oracle ignores them. Subclasses with additional selection inputs
-        (e.g. int_wna16 needs `weight_bits`, fp8 needs
-        `allow_vllm_cutlass`) widen the signature in their override; a
-        per-oracle config object is the longer-term target tracked in
-        the #37753 follow-up PRs.
+        `quant_schema` carries the static quantization roles used by oracles
+        (fp8, nvfp4, int8, ...) to disambiguate backends. Subclasses with
+        additional selection inputs (e.g. int_wna16 needs `weight_bits`, fp8
+        needs `allow_vllm_cutlass`) widen the signature in their override.
         """
 
     @abstractmethod

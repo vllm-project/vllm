@@ -9,7 +9,11 @@ import torch
 from torch.nn import Module
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -127,7 +131,14 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
-        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=kMxfp8Dynamic,
+            weight_key=kMxfp8Static,
+        )
+        self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            quant_schema=quant_schema,
+        )
 
     def create_weights(
         self,

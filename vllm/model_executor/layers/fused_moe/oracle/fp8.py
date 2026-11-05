@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
@@ -402,13 +403,15 @@ def resolve_fp8_moe_weight_block_shape(
 
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
+    quant_schema: FusedMoEQuantSchema,
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
+
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
 

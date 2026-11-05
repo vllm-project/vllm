@@ -26,6 +26,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -36,7 +40,14 @@ class INCMxfp8MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe) -> None:
         super().__init__(moe)
         self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
-        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        quant_schema = self._init_quant_schema(
+            activation_key=kMxfp8Dynamic,
+            weight_key=kMxfp8Static,
+        )
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            quant_schema=quant_schema,
+        )
 
     def create_weights(
         self,

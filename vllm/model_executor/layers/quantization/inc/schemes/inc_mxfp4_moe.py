@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.model_executor.utils import (
     move_parameter,
     replace_parameter,
@@ -73,14 +74,22 @@ class INCMxfp4MoEMethod(FusedMoEMethodBase):
         self.use_cutlass_mxfp4 = CutlassExpertsMxfp4._supports_current_device()
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=kMxfp4Static,
+        )
         if moe.moe_backend == "b12x":
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, quant_schema
+            )
             self.use_cutlass_mxfp4 = False
         elif self.use_cutlass_mxfp4:
             self.experts_cls = CutlassExpertsMxfp4
             logger.info_once("Using CutlassExpertsMxfp4 for AutoRound MXFP4 MoE")
         elif current_platform.is_xpu():
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, quant_schema
+            )
         else:
             self.experts_cls = MarlinExperts
             logger.info_once(

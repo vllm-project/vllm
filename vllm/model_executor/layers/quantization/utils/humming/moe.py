@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
     BatchedHummingGroupedExperts,
@@ -35,7 +36,6 @@ from vllm.model_executor.layers.quantization.utils.humming.schema import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP8_DTYPE,
     GroupShape,
-    QuantKey,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.import_utils import has_humming
@@ -202,14 +202,16 @@ def get_humming_moe_quant_config(
 
 def select_humming_moe_experts(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
+    quant_schema: FusedMoEQuantSchema,
 ) -> type[mk.FusedMoEExperts] | None:
     """Select the primary Humming MoE Experts class
     Note: Shape-specific fallbacks may still occur at runtime.
     """
     if not has_humming():
         return None
+
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_EXPERTS: list[type[mk.FusedMoEExperts]] = [

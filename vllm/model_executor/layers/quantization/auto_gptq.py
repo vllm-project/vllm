@@ -520,13 +520,17 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             raise ValueError("AutoGPTQMoEMethod only supports int4 and int8 now.")
         self.use_marlin = True
         weight_key = QuantKey(quant_type, scale)
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=weight_key,
+            has_bias=True,
+            has_zero_point=not self.quant_config.is_sym,
+        )
 
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
-            weight_key,
+            quant_schema,
             quant_config=self.quant_config,
-            may_have_zp=not self.quant_config.is_sym,
-            may_have_bias=True,
             allow_tile_padding=True,
         )
 

@@ -23,6 +23,9 @@ from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
 from vllm.model_executor.layers.fused_moe.activation import (  # noqa: E402
     MoEActivation,
 )
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E402
+    make_fused_moe_quant_schema,
+)
 from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
     _AITER_SWIGLU_ALPHA,
     _AITER_SWIGLU_BETA,
@@ -74,6 +77,13 @@ def _config(ep_size: int = 1):
             ),
         )
     return cfg
+
+
+def _quant_schema():
+    return make_fused_moe_quant_schema(
+        activation_key=kMxfp8Dynamic,
+        weight_key=kMxfp8Static,
+    )
 
 
 def _gfx950():
@@ -141,11 +151,11 @@ def test_explicit_moe_backend_aiter():
     ValueError when the aiter MoE runtime is disabled."""
     with _gfx950(), _aiter_moe_enabled(True):
         assert (
-            _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
+            _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1), _quant_schema())
             is AiterMxfp8Experts
         )
         assert (
-            _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(2))
+            _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(2), _quant_schema())
             is AiterMxfp8Experts
         )
     with (
@@ -153,7 +163,7 @@ def test_explicit_moe_backend_aiter():
         _aiter_moe_enabled(False),
         pytest.raises(ValueError, match="does not support current device"),
     ):
-        _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
+        _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1), _quant_schema())
 
 
 def test_gfx950_picks_aiter():
@@ -162,7 +172,7 @@ def test_gfx950_picks_aiter():
         patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=True),
         _aiter_moe_enabled(True),
     ):
-        backend, experts_cls = select_mxfp8_moe_backend(_config())
+        backend, experts_cls = select_mxfp8_moe_backend(_config(), _quant_schema())
     assert backend is Fp8MoeBackend.AITER_MXFP8
     assert experts_cls is AiterMxfp8Experts
 
@@ -171,6 +181,6 @@ def test_gfx942_picks_emulation():
     """Flydsl unusable (e.g. gfx942, no FlyDSL support) -> native Triton
     dot_scaled backend wins instead."""
     with patch(f"{_AITER_MOD}.current_platform.supports_mx", return_value=False):
-        backend, experts_cls = select_mxfp8_moe_backend(_config())
+        backend, experts_cls = select_mxfp8_moe_backend(_config(), _quant_schema())
     assert backend is Fp8MoeBackend.EMULATION
     assert experts_cls is Mxfp8EmulationTritonExperts

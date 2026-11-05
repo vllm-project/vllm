@@ -98,12 +98,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
 
         # Select WNA16 MoE backend via oracle.
+        quant_schema = self._init_quant_schema(
+            activation_key=None,
+            weight_key=weight_key,
+            has_bias=False,
+            has_zero_point=not self.symmetric,
+        )
         self.wna16_backend, self.experts_cls = select_wna16_moe_backend(
             config=self.moe,
-            weight_key=weight_key,
+            quant_schema=quant_schema,
             quant_config=self.weight_quant,
-            may_have_zp=not self.symmetric,
-            may_have_bias=False,
             allow_tile_padding=True,
         )
 

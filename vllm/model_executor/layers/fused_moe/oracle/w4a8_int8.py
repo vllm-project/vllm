@@ -15,10 +15,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
-    QuantKey,
 )
 from vllm.platforms import current_platform
 
@@ -71,20 +71,21 @@ def map_w4a8_int8_backend(runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
 
 def select_w4a8_int8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary W4A8 Int8 MoE backend.
 
     Args:
         config: MoE configuration
-        weight_key: Weight quantization key (should be one of kInt4W4A8Static*)
-        activation_key: Activation quantization key (currently unused for W4A8)
+        quant_schema: Static quantization schema. The weight key should be one
+            of kInt4W4A8Static*.
 
     Returns:
         Tuple of (backend, kernel_class)
 
     """
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     if not AVAILABLE_BACKENDS:

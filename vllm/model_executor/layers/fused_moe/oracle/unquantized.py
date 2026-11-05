@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -18,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
 )
 from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -27,9 +27,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -221,10 +218,14 @@ def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
 
 def select_unquantized_moe_backend(
     moe_config: FusedMoEConfig,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
     """Select the primary Unquantized MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    assert quant_schema.activation_key is None
+    assert quant_schema.weight_key is None
+
     if current_platform.is_tpu():
         return UnquantizedMoeBackend.TPU, None
 
@@ -588,14 +589,9 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     def select_backend(
         self,
         moe_config: FusedMoEConfig,
-        weight_key: "QuantKey | None" = None,
-        activation_key: "QuantKey | None" = None,
+        quant_schema: FusedMoEQuantSchema,
     ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
-        assert weight_key is None and activation_key is None, (
-            "Weights and activations will never be quantized for "
-            "UnquantizedMoEKernelOracle"
-        )
-        return select_unquantized_moe_backend(moe_config)
+        return select_unquantized_moe_backend(moe_config, quant_schema)
 
     def convert_to_kernel_format(
         self,

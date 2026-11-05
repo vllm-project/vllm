@@ -7,11 +7,16 @@ import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    RoutingMethodType,
+    make_fused_moe_quant_schema,
+)
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     backend_to_kernel_cls,
-    select_unquantized_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+    select_unquantized_moe_backend as _select_unquantized_moe_backend,
 )
 from vllm.platforms import CpuArchEnum, current_platform
 
@@ -19,6 +24,16 @@ skipif_not_cuda_rocm = pytest.mark.skipif(
     not (current_platform.is_cuda() or current_platform.is_rocm()),
     reason="Only supported on CUDA/ROCm platforms.",
 )
+
+
+def select_unquantized_moe_backend(*, moe_config):
+    return _select_unquantized_moe_backend(
+        moe_config=moe_config,
+        quant_schema=make_fused_moe_quant_schema(
+            activation_key=None,
+            weight_key=None,
+        ),
+    )
 
 
 @pytest.mark.parametrize(

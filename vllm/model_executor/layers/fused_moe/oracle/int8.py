@@ -15,13 +15,9 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    FusedMoEQuantSchema,
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kInt8DynamicTokenSym,
-    kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -101,12 +97,13 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
 
 def select_int8_moe_backend(
     config: FusedMoEConfig,
-    weight_key: QuantKey | None = kInt8StaticChannelSym,
-    activation_key: QuantKey | None = kInt8DynamicTokenSym,
+    quant_schema: FusedMoEQuantSchema,
 ) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
+    weight_key = quant_schema.weight_key
+    activation_key = quant_schema.activation_key
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
     activation_format = (

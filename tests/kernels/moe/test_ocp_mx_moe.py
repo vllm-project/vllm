@@ -18,6 +18,9 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
+from vllm.model_executor.layers.fused_moe.config import (
+    make_fused_moe_quant_schema,
+)
 from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
     activation_quant_dtype,
 )
@@ -2167,7 +2170,13 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
     )
 
     with pytest.raises(NotImplementedError, match="Unsupported reasons"):
-        mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
+        mxfp4_oracle.select_mxfp4_moe_backend(
+            moe_config,
+            make_fused_moe_quant_schema(
+                activation_key=None,
+                weight_key=mxfp4_oracle.kMxfp4Static,
+            ),
+        )
 
 
 @pytest.mark.parametrize("override", [None, "mxfp8"])
@@ -2228,7 +2237,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
     moe_config.moe_backend = moe_backend
 
     backend, _ = mxfp4_oracle.select_mxfp4_moe_backend(
-        moe_config, activation_key=kMxfp4Dynamic if w4a4 else None
+        moe_config,
+        make_fused_moe_quant_schema(
+            activation_key=kMxfp4Dynamic if w4a4 else None,
+            weight_key=mxfp4_oracle.kMxfp4Static,
+        ),
     )
 
     assert backend.name == expected
