@@ -4,11 +4,11 @@
 
 A speculator declares the plans it wants to verify (``SpecResources.plan_kind``).
 Each worker applies one rule to its layers after the attention backends are
-built: the model verifies trees when every target layer is full attention or
-has provider kernels for its kind, and chains otherwise. It reports the result
-with a reason for each layer kind or setting that lowers it
-(``SpecCapabilities``). The engine core reduces the reports of every rank, lets
-the speculator adapt its resources to them
+built: the model verifies trees when every target layer is full attention on a
+backend that verifies trees or has provider kernels for its kind, and chains
+otherwise. It reports the result with a reason for each layer kind or setting
+that lowers it (``SpecCapabilities``). The engine core reduces the reports of
+every rank, lets the speculator adapt its resources to them
 (``SpeculatorConfig.adapt_resources``) and hands the result to the scheduler and
 to every worker. A tree speculator on a model that cannot verify trees
 therefore runs as a chain.
@@ -152,8 +152,9 @@ def layer_spec_limits(
     """The plan kind caps of the target's layers, one per (layer kind, reason)
     with its layer count.
 
-    A model verifies trees when every target layer is full attention or has
-    provider kernels for its kind; otherwise it verifies chains. A layer
+    A model verifies trees when every target layer is full attention on a
+    backend that verifies trees (``AttentionBackend.serves_trees``) or
+    has provider kernels for its kind; otherwise it verifies chains. A layer
     verifies what the spec kernels it needs support for it
     (``KernelRegistry.plan_kind``; ``kernels`` defaults to the reference
     kernels). Other attention kinds, and recurrent layers (``MambaBase``) that
@@ -167,7 +168,7 @@ def layer_spec_limits(
         kernels = KernelRegistry()
     # (plan kind, what the layers are, why) -> number of layers
     num_layers: Counter[tuple[PlanKind, str, str]] = Counter()
-    for _, name, spec, layer in spec_layers(attn_groups, layers):
+    for group, name, spec, layer in spec_layers(attn_groups, layers):
         if isinstance(layer, MambaBase):
             variant = type(layer).spec_layer_variant
             if variant is None:
@@ -182,6 +183,10 @@ def layer_spec_limits(
             kind = attn_layer_kind(spec)
             if kind.variant != "full_attention" or _has_window(layer, spec):
                 num_layers[("chain", kind.key(), "not full attention")] += 1
+                continue
+            if not group.backend.serves_trees:
+                why = f"backend {group.backend.get_name()} verifies chains"
+                num_layers[("chain", kind.key(), why)] += 1
                 continue
             layout = attn_layout(layer, spec)
         plan_kind, why = kernels.plan_kind(

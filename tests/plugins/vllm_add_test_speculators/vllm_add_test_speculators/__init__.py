@@ -10,7 +10,6 @@ TEST_SPECULATORS = {
     "test_mtp_alternating_budget": "MTPAlternatingBudgetConfig",
     "test_ngram_budget_one_on_rank_zero": "NgramBudgetOneOnRankZeroConfig",
     "test_ngram_tree": "NgramTreeConfig",
-    "test_ngram_chain_as_tree": "NgramChainAsTreeConfig",
 }
 
 

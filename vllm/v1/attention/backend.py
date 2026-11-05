@@ -72,6 +72,11 @@ class AttentionBackend(ABC):
     # Can forward() run with key/value omitted after a fused op wrote the cache?
     supports_kv_cache_update_bypass: bool = False
 
+    # Does forward() verify tree plans: attend each plan row to the rows set in
+    # CommonAttentionMetadata.tree_ancestors, not causally? Without it, a full
+    # attention layer verifies chains.
+    serves_trees: bool = False
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,

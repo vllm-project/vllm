@@ -1125,6 +1125,9 @@ class DiffusionGemmaModelState(ModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             causal=causal,
+            positions=input_batch.positions,
+            tree_parents=input_batch.tree_parents,
+            tree_ancestors=input_batch.tree_ancestors,
         )
 
     num_new_sampled_tokens_per_step: int = 0

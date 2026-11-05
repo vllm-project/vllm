@@ -62,7 +62,3 @@ class NgramTreeConfig(NgramGPUSpeculatorConfig):
 
     def resources(self, max_num_seqs: int) -> SpecResources:
         return replace(super().resources(max_num_seqs), max_branching=2)
-
-
-class NgramChainAsTreeConfig(NgramTreeConfig):
-    speculator_class = f"{_SPECULATORS}.NgramChainAsTreeSpeculator"

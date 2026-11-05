@@ -33,6 +33,7 @@ from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.short_conv import ShortConv
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -103,16 +104,24 @@ def _mamba(layer_cls):
     return object.__new__(layer_cls)
 
 
-def _group(spec, layers):
-    return SimpleNamespace(kv_cache_spec=spec, layer_names=list(layers))
+class _TreeBackend(FlashAttentionBackend):
+    """A plugin backend that verifies trees."""
+
+    serves_trees = True
 
 
-def _model(*groups):
+def _group(spec, layers, backend):
+    return SimpleNamespace(
+        kv_cache_spec=spec, layer_names=list(layers), backend=backend
+    )
+
+
+def _model(*groups, backend=_TreeBackend):
     """``(attn_groups, layers)`` from ``(spec, {name: layer})``."""
     layers = {}
     attn_groups = []
     for spec, group_layers in groups:
-        attn_groups.append([_group(spec, group_layers)])
+        attn_groups.append([_group(spec, group_layers, backend)])
         layers.update(group_layers)
     return attn_groups, layers
 
@@ -167,8 +176,8 @@ def _layers(prefix, n, make):
     return {f"{prefix}.{i}": make() for i in range(n)}
 
 
-def _llama():
-    return _model((_FULL, _layers("attn", 4, _attn)))
+def _llama(backend=_TreeBackend):
+    return _model((_FULL, _layers("attn", 4, _attn)), backend=backend)
 
 
 def _gpt_oss():
@@ -286,6 +295,13 @@ def _gdn_reason(mode):
 # (model, state mode, with a provider, plan kind, reasons)
 _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
     "llama": (_llama, "slots", False, "tree", []),
+    "llama-in-tree-backend": (
+        lambda: _llama(FlashAttentionBackend),
+        "slots",
+        False,
+        "chain",
+        ["attn:full_attention, 4 layers: backend FLASH_ATTN verifies chains"],
+    ),
     "full-attention-features": (_full_attention_features, "slots", False, "tree", []),
     "draft-and-hidden-state": (_draft_and_hidden_layers, "slots", False, "tree", []),
     "gpt-oss": (_gpt_oss, "slots", False, "chain", [_SWA_REASON]),

@@ -155,9 +155,7 @@ def test_alternating_budget_on_hybrid():
     _check(HYBRID, got, "alternating_budget")
 
 
-# --- E4: a tree speculator on full attention -----------------------------------
-
-_CUDAGRAPH_MODES = ["FULL_AND_PIECEWISE", "NONE"]
+# --- E4: a tree speculator on a model that verifies chains -------------------
 
 
 def _backends():
@@ -167,49 +165,27 @@ def _backends():
     return backends
 
 
-def _tree_run(method, backend="FLASH_ATTN", cudagraph_mode="FULL_AND_PIECEWISE"):
-    kwargs = {
-        "attention_config": {"backend": backend},
-        "compilation_config": {"cudagraph_mode": cudagraph_mode},
-    }
-    got, drafted, acceptance = _run(DENSE, {"method": method, **NGRAM}, **kwargs)
-    assert drafted > 0
-    assert acceptance > 1
-    _check(DENSE, got, method, **kwargs)
-
-
-@pytest.mark.parametrize("cudagraph_mode", _CUDAGRAPH_MODES)
-@pytest.mark.parametrize("backend", _backends())
-def test_tree_plan_matches_plain_decode(backend, cudagraph_mode):
-    """A speculator with ``max_branching > 1`` on a model that verifies trees:
-    its plan is laid out, accepted by the tree walk and committed along the
-    accepted path. The plan is the n-gram chain, so a chain's mask is right."""
-    _tree_run("test_ngram_chain_as_tree", backend, cudagraph_mode)
-
-
-@pytest.mark.xfail(
-    reason="no in-tree attention backend reads tree_ancestors, but the startup "
-    "rule lets a full-attention model plan trees: siblings attend to each other"
+@pytest.mark.parametrize(
+    "model, backend, tp",
+    [(DENSE, backend, 1) for backend in _backends()]
+    + [(HYBRID, None, 1), (HYBRID, None, 2)],
 )
-def test_branching_tree_matches_plain_decode():
-    _tree_run("test_ngram_tree")
-
-
-# --- E5: a tree speculator on a hybrid without a provider ---------------------
-
-
-@pytest.mark.parametrize("tp", [1, 2])
-def test_tree_speculator_on_hybrid_runs_chains(tp, capfd):
-    """Without a recurrent tree kernel the hybrid lowers the tree to chains: it
-    starts, logs why once (the engine core logs the reduced limits of all
-    workers), drafts and decodes like no speculation."""
+def test_tree_speculator_runs_chains(model, backend, tp, capfd):
+    """No in-tree attention backend verifies trees, and the hybrid's GDN layers
+    have no tree kernel: a branching speculator starts, logs each reason once
+    (the engine core logs the reduced limits of all workers), runs as a chain
+    and decodes like no speculation."""
     _skip_if_insufficient_gpus_for_tp(tp)
+    kwargs = {"tensor_parallel_size": tp}
+    if backend is not None:
+        kwargs["attention_config"] = {"backend": backend}
     config = {"method": "test_ngram_tree", **NGRAM}
-    got, drafted, _ = _run(HYBRID, config, tensor_parallel_size=tp)
+    got, drafted, acceptance = _run(model, config, **kwargs)
     out, err = capfd.readouterr()
-    assert (out + err).count(LOWERED) == 1
-    assert drafted > 0
-    _check(HYBRID, got, "tree_on_hybrid", tensor_parallel_size=tp)
+    lowered = [line for line in (out + err).splitlines() if LOWERED in line]
+    assert lowered and len(lowered) == len(set(lowered))
+    assert drafted > 0 and acceptance > 1
+    _check(model, got, "tree_runs_chains", **kwargs)
 
 
 # --- E7: data parallel ranks at different budgets -----------------------------

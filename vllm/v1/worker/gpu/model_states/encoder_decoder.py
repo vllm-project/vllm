@@ -153,6 +153,9 @@ class EncoderDecoderModelState(ModelState):
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            positions=input_batch.positions,
+            tree_parents=input_batch.tree_parents,
+            tree_ancestors=input_batch.tree_ancestors,
         )
         return attn_metadata
 

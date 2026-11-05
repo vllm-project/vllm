@@ -179,13 +179,13 @@ _NEEDS_TRITON = pytest.mark.skipif(
 @_NEEDS_TRITON
 @pytest.mark.parametrize(
     "method, drafts",
-    [("test_ngram_budget_one", False), ("test_ngram_chain_as_tree", True)],
-    ids=["budget-one", "tree-plan"],
+    [("test_ngram_budget_one", False), ("test_ngram_tree", True)],
+    ids=["budget-one", "tree-runs-chains"],
 )
 def test_v2_round_contract_matches_baseline(baseline_refs, method, drafts):
-    """A budget of 1 is plain decode with no drafts; a tree speculator's plan
-    (the n-gram chain, laid out and committed as a tree) decodes like no
-    speculation and accepts drafts."""
+    """A budget of 1 is plain decode with no drafts; a tree speculator, on a
+    backend that verifies chains, runs as a chain, accepts drafts and decodes
+    like no speculation."""
     require_test_speculators()
     llm = _make_llm(speculative_config={"method": method, **_NGRAM})
     try:
