@@ -943,7 +943,9 @@ class Worker(WorkerBase):
 
     def get_spec_capabilities(self) -> "SpecCapabilities | None":
         # None without speculative decoding or on the V1 model runner.
-        spec_round = getattr(self.model_runner, "spec_round", None)
+        if not self.use_v2_model_runner:
+            return None
+        spec_round = cast("GPUModelRunnerV2", self.model_runner).spec_round
         return spec_round.capabilities if spec_round is not None else None
 
     def set_spec_resources(self, resources: "SpecResources") -> None:

@@ -161,30 +161,31 @@ class BaseSpeculator(ABC):
     def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
         """The rows the target verifies this step.
 
-        Called once per scheduled batch that carries drafts, before its inputs
-        are built, unless adaptive verification (which sets its own budget) is
-        enabled. Return None (the default) to verify every scheduled draft as a
-        chain. Otherwise return a plan whose tensors cover ``inputs``' batch rows
-        and stay valid until the step commits. Request ``r`` verifies
-        ``plan.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``); the drafts
-        past it leave the batch and count as rejected. A plan that is not a
-        chain needs ``SpecResources.max_branching > 1`` (in the bound
-        resources, see `bind_resources`) and a batch that is not
-        ``inputs.chain_only``.
+        Called once per scheduled batch that carries drafts, before its inputs are
+        built; adaptive verification (which sets its own budget) refuses a
+        speculator that overrides it. Called eagerly, outside any captured CUDA
+        graph: the runner copies the plan into its own static buffers, so the plan's
+        tensors need not be static. Return None (the default) to verify every
+        scheduled draft as a chain. Otherwise return a plan whose tensors cover
+        ``inputs``' batch rows and stay valid until the step commits. Request ``r``
+        verifies ``plan.rows[r]`` rows (at most ``inputs.scheduled_rows[r]``); the
+        drafts past it leave the batch and count as rejected. A plan that is not a
+        chain needs ``SpecResources.max_branching > 1`` (in the bound resources, see
+        `bind_resources`) and a batch that is not ``inputs.chain_only``.
         """
         return None
 
     def accept(self, plan: VerifyPlan, output: VerifyOutput) -> AcceptResult | None:
         """Which rows of each request the target confirmed.
 
-        Called on the sampler's stream for every verified plan that is not a
-        chain (vLLM's rejection sampler verifies chains), once per request range
-        when a large batch is verified in pieces; ``plan`` and ``output`` cover
-        that range. Return None (the default) to walk the tree on each row's
-        target token, which only greedy requests accept. Trees need this
-        override: without it the model verifies chains. The runner commits the
-        KV and the recurrent state along the returned path and takes each
-        committed token's logprobs from its path row.
+        Called on the sampler's stream for every verified plan that is not a chain
+        (vLLM's rejection sampler verifies chains), once per request range when a
+        large batch is verified in pieces; ``plan`` and ``output`` cover that range.
+        Called eagerly, outside any captured CUDA graph. Return None (the default)
+        to walk the tree on each row's target token, which only greedy requests
+        accept. Trees need this override: without it the model verifies chains. The
+        runner commits the KV and the recurrent state along the returned path and
+        takes each committed token's logprobs from its path row.
         """
         return None
 
