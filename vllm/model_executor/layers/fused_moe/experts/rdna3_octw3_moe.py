@@ -108,6 +108,13 @@ class Rdna3OctaveW3Experts(mk.FusedMoEExpertsModular):
         self._empty_topk_weights: torch.Tensor | None = None
 
     @staticmethod
+    def pack_weights(
+        w: torch.Tensor, scales: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Kernel-specific final layout of repacked codes and scales."""
+        return w, scales
+
+    @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 

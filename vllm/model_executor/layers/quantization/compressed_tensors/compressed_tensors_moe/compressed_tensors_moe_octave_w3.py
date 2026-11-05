@@ -4,7 +4,9 @@
 
 The config group carries ``num_bits: 3``, ``group_size: 32``, symmetric; the
 block Hadamard sizes live in ``quantization_config["octave_w3"]``
-(``had_gate_up``, ``had_down``). Only the RDNA3 HIP kernel runs it.
+(``had_gate_up``, ``had_down``). HIP kernels run the 3-bit codes directly on
+gfx1100 (WMMA) and gfx942 (MFMA); other devices dequantize each layer to fp16
+and run the Triton experts.
 """
 
 import torch
@@ -12,14 +14,24 @@ from compressed_tensors.quantization import QuantizationArgs
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts, SharedExperts
 from vllm.model_executor.layers.fused_moe.config import (
+    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEQuantConfig,
     int4_w4a16_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.experts.octw3_dequant_moe import (
+    OctaveW3DequantExperts,
+    octw3_dequant,
+    take_dense_budget,
+)
+from vllm.model_executor.layers.fused_moe.experts.octw3_mfma_moe import (
+    CdnaOctaveW3Experts,
 )
 from vllm.model_executor.layers.fused_moe.experts.rdna3_octw3_moe import (
     Rdna3OctaveW3Experts,
     octw3_repack,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
@@ -45,8 +57,14 @@ class CompressedTensorsOctaveW3MoEMethod(CompressedTensorsMoEMethod):
                 f"{OCTAVE_W3_FORMAT} needs num_bits 3, group_size 32, symmetric; "
                 f"got {weight_quant}"
             )
-        if not Rdna3OctaveW3Experts._supports_current_device():
-            raise ValueError(f"{OCTAVE_W3_FORMAT} MoE runs only on gfx1100")
+        self.code_experts_cls = next(
+            (
+                cls
+                for cls in (Rdna3OctaveW3Experts, CdnaOctaveW3Experts)
+                if cls._supports_current_device()
+            ),
+            None,
+        )
         if not moe.is_act_and_mul:
             raise ValueError(f"{OCTAVE_W3_FORMAT} MoE needs gated experts")
         self.had_w13 = int(octave_config.get("had_gate_up", 128))
@@ -96,22 +114,29 @@ class CompressedTensorsOctaveW3MoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        replace_parameter(
-            layer, "w13_weight_packed", octw3_repack(layer.w13_weight_packed.data)
-        )
-        replace_parameter(
-            layer, "w2_weight_packed", octw3_repack(layer.w2_weight_packed.data)
-        )
-        replace_parameter(
-            layer,
-            "w13_weight_scale",
-            layer.w13_weight_scale.data.transpose(1, 2).contiguous(),
-        )
-        replace_parameter(
-            layer,
-            "w2_weight_scale",
-            layer.w2_weight_scale.data.transpose(1, 2).contiguous(),
-        )
+        if self.code_experts_cls is not None:
+            for w_name, s_name in (
+                ("w13_weight_packed", "w13_weight_scale"),
+                ("w2_weight_packed", "w2_weight_scale"),
+            ):
+                w, scales = self.code_experts_cls.pack_weights(
+                    octw3_repack(getattr(layer, w_name).data),
+                    getattr(layer, s_name).data.transpose(1, 2).contiguous(),
+                )
+                replace_parameter(layer, w_name, w)
+                replace_parameter(layer, s_name, scales)
+        self.dense = False
+        if self.code_experts_cls is None:
+            E, N2, G3 = layer.w13_weight_packed.shape
+            K = G3 // 3 * 32
+            self.dense = take_dense_budget(3 * E * N2 * K)  # fp16 w13 + w2
+        if self.dense:
+            for name, scale, had in (
+                ("w13_weight_packed", layer.w13_weight_scale, self.had_w13),
+                ("w2_weight_packed", layer.w2_weight_scale, self.had_w2),
+            ):
+                dense = octw3_dequant(getattr(layer, name).data, scale.data, had)
+                replace_parameter(layer, name, dense)
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
 
@@ -131,19 +156,30 @@ class CompressedTensorsOctaveW3MoEMethod(CompressedTensorsMoEMethod):
             use_monolithic=False,
         )
         assert prepare_finalize is not None
-        self.moe_kernel = FusedMoEKernel(
-            prepare_finalize,
-            Rdna3OctaveW3Experts(
+        if self.code_experts_cls is not None:
+            experts = self.code_experts_cls(
                 moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 had_w13=self.had_w13,
                 had_w2=self.had_w2,
-            ),
-        )
+            )
+        elif self.dense:
+            experts = TritonExperts(self.moe, self.moe_quant_config)
+        else:
+            experts = OctaveW3DequantExperts(
+                self.moe,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                self.had_w13,
+                self.had_w2,
+            )
+        self.moe_kernel = FusedMoEKernel(prepare_finalize, experts)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        if self.code_experts_cls is None:
+            return FUSED_MOE_UNQUANTIZED_CONFIG
         # 16-bit activations; the descriptor only carries the group scales.
         return int4_w4a16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
