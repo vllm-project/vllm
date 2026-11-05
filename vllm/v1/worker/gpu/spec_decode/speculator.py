@@ -76,8 +76,6 @@ class BaseSpeculator(ABC):
     """
 
     num_query_per_req: int = 1
-    # Extra query slots reserved per request outside the regular queries.
-    num_extra_query_per_req: int = 0
     supports_mm_inputs: bool = False
     # Draft logits for probabilistic rejection sampling, or None for
     # greedy-draft verification and for speculators without a draft model.
@@ -751,3 +749,11 @@ class DraftModelSpeculator(BaseSpeculator):
         for groups in self.attn_groups:
             for group in groups:
                 group.update_draft_decode_metadata(attn_metadata)
+
+    def _map_kernel_block_tables(self) -> None:
+        """Refresh the persistent kernel block tables a FULL graph reads."""
+        for groups in self.attn_groups:
+            for group in groups:
+                group.map_to_kernel_block_table(
+                    self.block_tables.input_block_tables[group.kv_cache_group_id]
+                )

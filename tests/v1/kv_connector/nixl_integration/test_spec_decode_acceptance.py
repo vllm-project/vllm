@@ -91,7 +91,6 @@ def _get_mt_bench_prompts() -> list[str]:
         seed=42,
         no_oversample=False,
         endpoint_type="openai-chat",
-        backend="openai-chat",
         input_len=None,
         output_len=DEFAULT_OUTPUT_LEN,
         sharegpt_output_len=DEFAULT_OUTPUT_LEN,
