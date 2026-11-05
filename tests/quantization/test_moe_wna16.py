@@ -127,6 +127,34 @@ def test_moe_wna16_accepts_channelwise_gptq_activation_order():
             False,
             "group-wise scales",
         ),
+        (
+            WNA16MoEBackend.RDNA_HYBRID,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                symmetric=False,
+                dynamic=False,
+                group_size=128,
+            ),
+            True,
+            False,
+            "asymmetric",
+        ),
+        (
+            WNA16MoEBackend.RDNA_HYBRID,
+            QuantizationArgs(
+                num_bits=4,
+                type=QuantizationType.INT,
+                strategy=QuantizationStrategy.GROUP,
+                symmetric=True,
+                dynamic=False,
+                group_size=32,
+            ),
+            False,
+            False,
+            "group size",
+        ),
     ],
 )
 def test_wna16_oracle_rejects_incompatible_quant_structures(

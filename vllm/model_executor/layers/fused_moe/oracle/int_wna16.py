@@ -62,6 +62,7 @@ class WNA16MoEBackend(Enum):
     XPU = "XPU"
     EMULATION = "EMULATION"
     RDNA3 = "RDNA3"
+    RDNA_HYBRID = "RDNA_HYBRID"
 
 
 def backend_to_kernel_cls(
@@ -118,6 +119,12 @@ def backend_to_kernel_cls(
         )
 
         return [Rdna3WNA16Experts]
+    elif backend == WNA16MoEBackend.RDNA_HYBRID:
+        from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (  # noqa: E501
+            RDNAHybridW4A16Experts,
+        )
+
+        return [RDNAHybridW4A16Experts]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
@@ -132,6 +139,8 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     backends = [
         # Native HIP kernel, gated on gfx1100 by _supports_current_device().
         WNA16MoEBackend.RDNA3,
+        # HIP decode + Triton prefill, gated on gfx115x.
+        WNA16MoEBackend.RDNA_HYBRID,
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
@@ -184,6 +193,24 @@ def _backend_incompatibility_reason(
             return "group activation ordering is not supported"
         if quant_config.strategy != QuantizationStrategy.GROUP:
             return "only group-wise scales are supported"
+
+    if backend == WNA16MoEBackend.RDNA_HYBRID:
+        from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (  # noqa: E501
+            SUPPORTED_GROUP_SIZES,
+        )
+
+        if not isinstance(quant_config, QuantizationArgs):
+            return "only compressed-tensors checkpoints are supported"
+        if may_have_zp:
+            return "asymmetric checkpoints are not supported"
+        if may_have_bias:
+            return "expert bias is not supported"
+        if quant_config.actorder == "group":
+            return "group activation ordering is not supported"
+        if quant_config.strategy != QuantizationStrategy.GROUP:
+            return "only group-wise scales are supported"
+        if quant_config.group_size not in SUPPORTED_GROUP_SIZES:
+            return f"group size must be one of {SUPPORTED_GROUP_SIZES}"
 
     from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
     from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
@@ -268,6 +295,7 @@ def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
         "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
         "emulation": WNA16MoEBackend.EMULATION,
         "rdna3": WNA16MoEBackend.RDNA3,
+        "rdna_hybrid": WNA16MoEBackend.RDNA_HYBRID,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -445,6 +473,9 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.experts.rdna3_moe import (
         Rdna3WNA16Experts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rdna_hybrid_w4a16_moe import (
+        RDNAHybridW4A16Experts,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
@@ -466,6 +497,7 @@ def make_wna16_moe_kernel(
         ZentorchExpertsWNA16,
         Int4EmulationTritonExperts,
         Rdna3WNA16Experts,
+        RDNAHybridW4A16Experts,
     )
     if backend == WNA16MoEBackend.HUMMING:
         allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
@@ -890,6 +922,76 @@ def _process_weights_rdna3(
         w2_scale.transpose(1, 2).contiguous(),
         _qzeros(w13),
         _qzeros(w2),
+        None,  # w13_bias
+        None,  # w2_bias
+    )
+
+
+def _pad_rows_off_cache_cliff(w: torch.Tensor) -> torch.Tensor:
+    """Offset a 2048-byte skinny row stride by one cache line on gfx1151.
+
+    Rows (and experts) on power-of-2 byte strides collide in the L2/MALL
+    caches. Returns a view with the logical shape of ``w`` over a buffer padded
+    by 128 bytes per row; both hybrid kernels honor the row stride.
+    """
+    from vllm.platforms.rocm import on_gfx1151
+
+    E, N, k8 = w.shape
+    if not on_gfx1151() or (k8 * w.element_size()) % 2048 != 0:
+        return w
+    buf = torch.empty((E, N, k8 + 32), dtype=w.dtype, device=w.device)
+    buf[:, :, :k8].copy_(w)
+    return buf[:, :, :k8]
+
+
+def _process_weights_rdna_hybrid(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """RDNA hybrid W4A16 weight post-processing.
+
+    Re-packs the canonical N-first ``[E, N, K // 8]`` weights into the
+    ExLlama shuffle nibble order the skinny kernels read; the shape and the
+    ``[E, N, K // group_size]`` scales are kept. Symmetric only, so there are
+    no zero points.
+    """
+    from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import (  # noqa: E501
+        pack_int4_exllama_shuffle,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        unpack_quantized_values_into_int32,
+    )
+
+    def _repack(w: torch.Tensor) -> torch.Tensor:
+        # One expert at a time to bound the unpacked int32 temporary.
+        experts = [
+            pack_int4_exllama_shuffle(
+                unpack_quantized_values_into_int32(
+                    w[e], scalar_types.uint4, packed_dim=1
+                )
+            )
+            for e in range(w.size(0))
+        ]
+        return _pad_rows_off_cache_cliff(torch.stack(experts))
+
+    return (
+        _repack(w13),
+        _repack(w2),
+        w13_scale.contiguous(),
+        w2_scale.contiguous(),
+        None,  # w13_qzeros
+        None,  # w2_qzeros
         None,  # w13_bias
         None,  # w2_bias
     )
@@ -1589,6 +1691,8 @@ def convert_to_wna16_moe_kernel_format(
             w2_scale,
             quant_config.group_size,
         )
+    elif backend == WNA16MoEBackend.RDNA_HYBRID:
+        return _process_weights_rdna_hybrid(w13, w2, w13_scale, w2_scale)
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,

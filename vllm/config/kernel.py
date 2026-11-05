@@ -144,6 +144,7 @@ MoEBackend = Literal[
     "hpc",
     "emulation",
     "rdna3",
+    "rdna_hybrid",
 ]
 
 FLASHINFER_MOE_EP_CUTEDSL = "flashinfer_moe_ep_cutedsl"
@@ -350,6 +351,9 @@ class KernelConfig:
       (moe_gemm_a4w4) MoE kernel (ROCm gfx1250)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
     - "rdna3": Use the fused RDNA3 W4A16 HIP kernel (ROCm gfx1100 only)
+    - "rdna_hybrid": Use the hybrid W4A16 kernels, HIP skinny GEMM for decode
+      and Triton for prefill (ROCm gfx115x only, symmetric int4 with
+      group size 128)
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
