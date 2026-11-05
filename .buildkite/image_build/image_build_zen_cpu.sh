@@ -5,14 +5,6 @@
 # Build the AMD Zen CPU image (vLLM + zentorch) by layering docker/Dockerfile.zen
 # on top of a CPU base image that already has vLLM installed.
 #
-# To avoid recompiling vLLM from source, prefer reusing the shared CPU image that
-# the image-build-cpu step already builds and publishes for this commit
-# (`<repo>:<commit>-cpu`). It lives in public ECR, which allows anonymous pulls,
-# so no registry credentials are required. If the pull fails (e.g. the image
-# isn't published yet), fall back to building the base from docker/Dockerfile.cpu.
-#
-# The zen image is not pushed to a registry.
-#
 # See docker/Dockerfile.zen for the build workflow this mirrors.
 set -euo pipefail
 
@@ -73,3 +65,14 @@ docker build --file docker/Dockerfile.zen \
   --tag "$IMAGE" \
   --target vllm-zen-test \
   --progress plain .
+
+# Step 3: push the zen image so test nodes can pull it instead of rebuilding.
+# Only when a registry is provided (CI); local runs keep the image local.
+# Pushing to public ECR requires AWS credentials on the build agent; pulls are
+# anonymous.
+if [[ -n "${REGISTRY}" ]]; then
+  echo "--- :docker: Pushing Zen image: $IMAGE"
+  aws ecr-public get-login-password --region us-east-1 \
+    | docker login --username AWS --password-stdin "$REGISTRY"
+  docker push "$IMAGE"
+fi

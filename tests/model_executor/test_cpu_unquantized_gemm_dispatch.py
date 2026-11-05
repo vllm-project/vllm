@@ -148,6 +148,14 @@ def test_dispatch_cpu_unquantized_gemm_logs_zentorch_dispatch(monkeypatch):
 def test_dispatch_cpu_unquantized_gemm_remove_weight_keeps_dtype(
     monkeypatch, weight_dtype
 ):
+    # fp16 zentorch matmul needs AVX512-FP16 (AMD Venice / 6th Gen EPYC onwards)
+    if (
+        weight_dtype is torch.float16
+        and hasattr(torch.ops.zentorch, "zentorch_is_fp16_supported")
+        and not torch.ops.zentorch.zentorch_is_fp16_supported()
+    ):
+        pytest.skip("fp16 zentorch matmul needs AVX512-FP16 (Venice+); CPU lacks it")
+
     monkeypatch.setattr(current_platform, "is_zen_cpu", lambda: True)
 
     layer = torch.nn.Linear(16, 8, bias=False, dtype=weight_dtype)
