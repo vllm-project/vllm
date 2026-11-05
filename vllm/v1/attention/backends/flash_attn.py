@@ -598,6 +598,8 @@ def _maybe_symmetrize_window(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
+    kv_cache_spec: AttentionSpec
+
     # FA3/FA4:
     # Supports full cudagraphs for all cases.
     #
@@ -646,8 +648,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if not aot_schedule:
             return None
 
-        cache_dtype = self.cache_config.cache_dtype
-        if is_quantized_kv_cache(cache_dtype):
+        if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
             qkv_dtype = current_platform.fp8_dtype()
         else:
             qkv_dtype = self.kv_cache_dtype
