@@ -166,6 +166,8 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr = 0,
+    MIN_TILES_PER_SEGMENT: tl.constexpr = 1,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -275,13 +277,38 @@ def compute_tile_loop_bounds(
 
     if IS_3D and SLIDING_WINDOW > 0 and can_prune_sliding:
         # Split the pruned window, not the whole sequence, so that no segment
-        # idles outside it at long context. Use the segment count that
-        # reduce_segments derives from seq_len so that it reads every segment
-        # written here.
-        num_segments = cdiv_fn(seq_len, tiles_per_segment_or_0 * TILE_SIZE)
-        window_tiles_per_segment = cdiv_fn(
-            tl.maximum(tile_end - tile_start, 0), num_segments
-        )
+        # idles outside it at long context. reduce_segments reads
+        # cdiv(seq_len, tiles_per_segment * TILE_SIZE) segments, so these
+        # must cover the window.
+        window_tiles = tl.maximum(tile_end - tile_start, 0)
+        segment_len = tiles_per_segment_or_0 * TILE_SIZE
+        if NUM_SEGMENTS_PER_SEQ > 1 and MIN_TILES_PER_SEGMENT == 1:
+            # Divisions by a runtime value are emulated on AMD and, ahead of
+            # the tile loop, cost every program (~3% of a short decode).
+            # Since tiles_per_segment >= cdiv(seq_len, NUM_SEGMENTS_PER_SEQ *
+            # TILE_SIZE), the live segment count cdiv(seq_len, segment_len)
+            # is NUM_SEGMENTS_PER_SEQ iff seq_len > (NUM_SEGMENTS_PER_SEQ - 1)
+            # * segment_len, and at least HALF_SEGMENTS iff seq_len >
+            # (HALF_SEGMENTS - 1) * segment_len. Test that with multiplies and
+            # divide by the constant; tiles_per_segment covers the rest since
+            # window_tiles <= cdiv(seq_len, TILE_SIZE). Non-causal rows raise
+            # tiles_per_segment (fewer live segments), so divide exactly there.
+            HALF_SEGMENTS: tl.constexpr = NUM_SEGMENTS_PER_SEQ // 2
+            window_tiles_per_segment = tl.where(
+                seq_len > (NUM_SEGMENTS_PER_SEQ - 1) * segment_len,
+                cdiv_fn(window_tiles, NUM_SEGMENTS_PER_SEQ),
+                tl.where(
+                    seq_len > (HALF_SEGMENTS - 1) * segment_len,
+                    tl.minimum(
+                        cdiv_fn(window_tiles, HALF_SEGMENTS), tiles_per_segment_or_0
+                    ),
+                    tiles_per_segment_or_0,
+                ),
+            )
+        else:
+            window_tiles_per_segment = cdiv_fn(
+                window_tiles, cdiv_fn(seq_len, segment_len)
+            )
         loop_lo = tile_start + segm_idx_or_0 * window_tiles_per_segment
         loop_hi = tl.minimum(loop_lo + window_tiles_per_segment, tile_end)
     elif IS_3D:
