@@ -821,10 +821,8 @@ def _hip_skinny_reference(
         (4, 16384, 512, 128),
         (5, 21504, 512, 32),
         (5, 20992, 512, 128),
-        # 6..8 rows (gfx115x only) take one tile. The first group stays in
-        # LDS: 4096 * 8 fills it exactly, and 2560 is not a multiple of the K
-        # step, so it also hits the ragged tail. The second walks K in chunks,
-        # again with a short final chunk and a ragged tail (20992).
+        # 6..8 rows (gfx115x only): LDS-resident (4096 * 8 fills it), then
+        # K-chunked; 2560 and 20992 hit the ragged K tail.
         (6, 1024, 2048, 32),
         (7, 2048, 1024, 64),
         (8, 2048, 512, 128),

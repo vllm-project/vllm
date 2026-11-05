@@ -34,9 +34,7 @@ static constexpr int get_lds_size_int4() { return 64 * 1024; }
 
 // K must be a multiple of this; checked host-side in wvSplitK_int4_g_impl.
 static constexpr int kInt4KAlign = 16;
-// Widths up to this get the per-shape tuples below. Wider ones (6..8) take a
-// single tile, WVSPLIT_INT4G_WIDE, and are built and accepted on gfx115x only;
-// of those, only gfx1151 has been run, and the layer routes them there only.
+// Wider N_in (6..8) take WVSPLIT_INT4G_WIDE and are gfx115x-only.
 static constexpr int kInt4NarrowMaxN = 5;
 
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
@@ -69,8 +67,7 @@ inline bool on_gfx1151_int4() {
   #define UNREACHABLE_CODE assert(false);
 #endif
 
-// Opens each kernel body: the host rejects N_in above kInt4NarrowMaxN off
-// gfx115x, so other targets compile those widths to an empty body.
+// The host rejects wide N_in off gfx115x, so skip compiling those bodies.
 #if defined(__HIP__GFX115X__)
   #define INT4_SKIP_WIDE_N_OFF_GFX115X
 #else
@@ -1018,7 +1015,6 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   // only the medium kernel serves shapes past LDS, and within 1.2x of it.
   TORCH_CHECK(on_gfx115x_int4() || K_in * N_in <= (int64_t)(max_lds_len * 1.2),
               "K*N exceeds LDS capacity (medium limit). K=", K_in, " N=", N_in);
-  // Other targets build no device code for the wide widths.
   TORCH_CHECK(N_in <= kInt4NarrowMaxN || on_gfx115x_int4(), "N_in=", N_in,
               " is only supported on gfx115x");
 
@@ -1246,11 +1242,8 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
     }                                                                          \
   }
 
-// Widths above kInt4NarrowMaxN: YTILE = 4, UNRL = 1 for every shape. A sweep of
-// (YTILE, UNRL) over 15 shapes at 6..8 rows on gfx1151 put this tile within 7%
-// of the best tile on 14 of them (the exception is an output width of 512,
-// where YTILE = 2 was up to 9% ahead). The activation stays in LDS when it fits
-// and is walked in LDS-sized chunks of K when it does not.
+// One tile for every wide shape: within 7% of the best on 14 of 15 swept
+// gfx1151 shapes.
 #define WVSPLIT_INT4G_WIDE(__N, _HAS_ZP)         \
   if (K_in * N_in > max_lds_len) {               \
     WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP) \
