@@ -58,9 +58,6 @@ class SpecRound:
         plans: bool = False,
     ):
         self.vllm_config = vllm_config
-        # Whether the speculator overrides ``plan``. Without it every round is
-        # the scheduled chain, which commits nothing here and needs no result.
-        self.plans = plans
         self.max_num_reqs = max_num_reqs
         self.max_num_tokens = max_num_tokens
         self.max_rows = num_speculative_steps + 1
@@ -71,8 +68,12 @@ class SpecRound:
             parent=arange_table(max_num_reqs, self.max_rows, device, start=-1),
             is_chain=True,
         )
-        # The accepted path of every chain round, path[r, j] == j.
-        self.chain_path = arange_table(max_num_reqs, self.max_rows, device)
+        # The accepted path of every chain round, path[r, j] == j. Only with a
+        # speculator ``plan``: without one every round is the scheduled chain,
+        # which commits nothing here and needs no result.
+        self.chain_path = (
+            arange_table(max_num_reqs, self.max_rows, device) if plans else None
+        )
         self.layout: PlanLayout | None = None
         # What speculation holds (rows, decode graphs, branching), declared by
         # the speculator's config. Memory is sized for it; set_resources lowers
@@ -100,7 +101,7 @@ class SpecRound:
         built: the lowest plan kind of any target layer (draft layers do not
         count), lowered to ``"chain"`` by each runner setting that keeps rows in
         chain order."""
-        if runner.adaptive_verification is not None and runner.speculator_hooks:
+        if runner.adaptive_verification is not None and runner.speculator_plans:
             raise ValueError(
                 "Adaptive verification sets each request's verified drafts, so it "
                 "cannot run a speculator that overrides plan. Pass "
@@ -279,7 +280,7 @@ class SpecRound:
         """The accepted path: the speculator's accept chose it, or the chain
         sampler's arange (a view of a constant buffer). None without drafts or
         without a speculator ``plan``."""
-        if not self.plans or input_batch.verify_plan is None:
+        if self.chain_path is None or input_batch.verify_plan is None:
             return None
         return accept_result_of(sampler_output, self.chain_path)
 

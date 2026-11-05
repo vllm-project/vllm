@@ -204,9 +204,9 @@ logger = init_logger(__name__)
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
-    # The optional per-step hooks the speculator overrides (see
-    # BaseSpeculator.overridden_hooks); none without a speculator.
-    speculator_hooks: frozenset[str] = frozenset()
+    # Whether the speculator overrides ``plan`` (BaseSpeculator.overridden_hooks),
+    # read once at startup.
+    speculator_plans: bool = False
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -315,7 +315,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(
                     self.vllm_config, self.device, self.req_states
                 )
-                self.speculator_hooks = self.speculator.overridden_hooks()
+                self.speculator_plans = "plan" in self.speculator.overridden_hooks()
 
             self.use_aux_hidden_state_outputs = (
                 self.speculative_config.uses_aux_hidden_states
@@ -330,7 +330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens,
                 self.num_speculative_steps,
                 self.device,
-                plans="plan" in self.speculator_hooks,
+                plans=self.speculator_plans,
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
@@ -1435,7 +1435,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_toks = self.adaptive_verification.get_num_tokens(
                     num_tokens_per_req, draft_tokens
                 )
-            elif "plan" in self.speculator_hooks:
+            elif self.speculator_plans:
                 assert self.speculator is not None and self.spec_round is not None
                 idx_mapping, verify_plan, trimmed = self.spec_round.plan_batch(
                     self.speculator,

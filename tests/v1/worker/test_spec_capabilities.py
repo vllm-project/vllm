@@ -283,7 +283,7 @@ def _resolve(**settings):
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder, runner.adaptive_verification = None, None
-    runner.speculator_hooks = frozenset({"plan"})
+    runner.speculator_plans = True
     for setting, value in settings.items():
         setattr(runner, setting, value)
     spec_round = object.__new__(SpecRound)
