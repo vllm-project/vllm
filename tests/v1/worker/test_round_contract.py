@@ -128,7 +128,7 @@ def test_spec_round_checks_a_plans_shape(is_chain, max_rows, rows, match):
     spec_round.max_rows = max_rows
     plan = _plan(_PARENT, [4])
     plan.is_chain = is_chain
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(AssertionError, match=match):
         spec_round._check_plan(plan, np.array(rows))
 
 

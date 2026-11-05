@@ -184,9 +184,7 @@ class KvCompactor(SpecKernel):
         by_layout: dict[KvCacheLayout, tuple[list[int], ...]] = {}
         for layer in layers:
             cache, table = layer.module.kv_cache, layer.block_table
-            assert table is not None
-            if table.dtype != torch.int32:
-                raise ValueError("block tables must be int32")
+            assert table is not None and table.dtype == torch.int32
             layout = kv_cache_layout(cache, layer.num_blocks)
             ptrs = by_layout.setdefault(layout, ([], [], [], []))
             ptrs[0].append(cache.data_ptr())

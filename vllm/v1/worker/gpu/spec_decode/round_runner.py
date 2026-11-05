@@ -210,11 +210,10 @@ class SpecRound:
             return idx_mapping, None, None
         rows = verify_plan.rows
         self._check_plan(verify_plan, num_draft_tokens + 1 if rows is None else rows)
-        if not verify_plan.is_chain and chain_only:
-            raise ValueError(
-                "the speculator returned a plan that is not a chain for a batch "
-                "that can only verify chains (PlanInputs.chain_only)"
-            )
+        assert verify_plan.is_chain or not chain_only, (
+            "the speculator returned a plan that is not a chain for a batch "
+            "that can only verify chains (PlanInputs.chain_only)"
+        )
         if rows is None:
             return idx_mapping, verify_plan, None
         # Unverified drafts leave the batch; they count as rejected.
@@ -241,17 +240,14 @@ class SpecRound:
 
     def _check_plan(self, plan: VerifyPlan, rows: np.ndarray) -> None:
         num_reqs, width = plan.parent.shape
-        if width > self.max_rows:
-            raise ValueError(
-                f"a plan has {width} rows per request, above "
-                f"num_speculative_tokens + 1 = {self.max_rows}"
-            )
-        if num_reqs < len(rows):
-            raise ValueError("a plan must cover every request of the batch")
-        if len(rows) and width < rows.max():
-            raise ValueError(
-                f"a plan has {width} rows per request but verifies up to {rows.max()}"
-            )
+        assert width <= self.max_rows, (
+            f"a plan has {width} rows per request, above "
+            f"num_speculative_tokens + 1 = {self.max_rows}"
+        )
+        assert num_reqs >= len(rows), "a plan must cover every request of the batch"
+        assert not len(rows) or width >= rows.max(), (
+            f"a plan has {width} rows per request but verifies up to {rows.max()}"
+        )
 
     def lay_out(self, input_batch: "InputBatch") -> None:
         """Lay out the batch's plan: move its rows' positions to
@@ -378,11 +374,10 @@ def trim_draft_tokens(
     in_range = num_verified_drafts.shape == num_draft_tokens.shape and bool(
         ((num_verified_drafts >= 0) & (num_verified_drafts <= num_draft_tokens)).all()
     )
-    if not in_range:
-        raise ValueError(
-            "a plan must verify, for each request, between 1 and its scheduled "
-            f"rows; got {num_verified_drafts + 1} for {num_draft_tokens + 1}."
-        )
+    assert in_range, (
+        "a plan must verify, for each request, between 1 and its scheduled "
+        f"rows; got {num_verified_drafts + 1} for {num_draft_tokens + 1}."
+    )
     num_trimmed = num_draft_tokens - num_verified_drafts
     return num_scheduled_tokens - num_trimmed, num_verified_drafts
 
