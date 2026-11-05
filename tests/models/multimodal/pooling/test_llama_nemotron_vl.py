@@ -57,6 +57,50 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 MODELS = ["nvidia/llama-nemotron-embed-vl-1b-v2"]
 
 
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    ("async_scheduling", "long_prefill_token_threshold"),
+    [(True, 0), (False, 128)],
+    ids=["async-encoder-cache-pressure", "sync-prefill-threshold"],
+)
+def test_image_embeddings_without_chunked_prefill(
+    vllm_runner, model, monkeypatch, async_scheduling, long_prefill_token_threshold
+):
+    """Encoder pressure and prefill caps must preserve whole bidirectional prompts."""
+    # Queue both requests before scheduling, independent of arrival timing.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    images = [Image.new("RGB", (512, 512), color=color) for color in ("red", "blue")]
+    prompts = [f"{PASSAGE_PREFIX}<image>"] * len(images)
+    # The 384-token encoder cache fits one 256-token image, but not both.
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype="half",
+        max_model_len=384,
+        max_num_batched_tokens=384,
+        max_num_seqs=2,
+        async_scheduling=async_scheduling,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"max_dynamic_patch": 1, "use_thumbnail": False},
+        **ROCM_ENGINE_KWARGS,
+    ) as vllm_model:
+        batched = vllm_model.embed(prompts, images=images)
+        individual = [
+            vllm_model.embed([prompt], images=[image])[0]
+            for prompt, image in zip(prompts, images)
+        ]
+    check_embeddings_close(
+        embeddings_0_lst=individual,
+        embeddings_1_lst=batched,
+        name_0="individual",
+        name_1="batch",
+    )
+
+
 @pytest.mark.usefixtures("default_vllm_config")
 def test_device_normalization_matches_cpu_transform() -> None:
     device = current_platform.device_type
