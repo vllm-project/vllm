@@ -9,7 +9,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -52,7 +52,7 @@ from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
@@ -393,6 +393,63 @@ def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ..
     return tuple(dict.fromkeys(token_counts))
 
 
+def _run_flashinfer_autotune_mm_encoder(
+    runner: "GPUModelRunner", *, cache_hit: bool
+) -> None:
+    if (
+        not runner.supports_mm_inputs
+        or not runner.vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
+        or not runner.vllm_config.use_v2_model_runner
+    ):
+        return
+
+    if cache_hit:
+        return
+
+    mm_config = runner.model_config.multimodal_config
+    if mm_config is None or mm_config.skip_mm_profiling:
+        return
+
+    from flashinfer.autotuner import (
+        get_autotune_process_group,
+        set_autotune_process_group,
+    )
+
+    from vllm.distributed.parallel_state import get_pp_group
+    from vllm.multimodal.encoder_budget import MultiModalBudget
+
+    if not get_pp_group().is_first_rank:
+        return
+    budget = MultiModalBudget(
+        runner.vllm_config, runner.mm_registry, enable_cache=False
+    )
+
+    if budget.get_encoder_budget() <= 0 or not budget.mm_max_toks_per_item:
+        return
+
+    encoder_runner = runner.model_state.encoder_runner
+
+    # Data-parallel towers can run different shapes on each rank. Keep the
+    # whole encoder call local, including any tensor-parallel projectors.
+    group = get_autotune_process_group()
+    if mm_config.mm_encoder_tp_mode == "data":
+        set_autotune_process_group(None)
+    try:
+        for modality in budget.mm_max_toks_per_item:
+            dummy_inputs = budget.get_dummy_encoder_profile_inputs(modality)
+            logger.info(
+                "Running FlashInfer autotune for the %s encoder with %d items.",
+                modality,
+                len(dummy_inputs),
+            )
+            # Keep FlashInfer's per-op buckets: raw vision token counts can
+            # exceed the budget for projected multimodal embeddings.
+            outputs = encoder_runner.execute_mm_encoder(dummy_inputs)
+            del outputs
+    finally:
+        set_autotune_process_group(group)
+
+
 def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
@@ -478,7 +535,7 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     return loaded
 
 
-def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) -> None:
+def flashinfer_autotune(runner: Any, *, skip_attn: bool = False) -> None:
     """Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
     autotuning runs benchmarks for each implementation and stores
@@ -570,6 +627,9 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
+            # Rank-local encoder entries must not affect cache hits in
+            # any subsequent collective-using tuning phase.
+            _run_flashinfer_autotune_mm_encoder(runner, cache_hit=cache_hit)
     finally:
         set_autotune_process_group(None)
 

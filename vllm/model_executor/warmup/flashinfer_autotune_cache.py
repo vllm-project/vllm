@@ -6,11 +6,12 @@ import hashlib
 import os
 import tempfile
 from contextlib import suppress
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, VllmConfig, replace
+from vllm.config import CacheConfig, MultiModalConfig, VllmConfig, replace
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -29,12 +30,48 @@ def _normalize_cache_config_for_hash(cache_config: CacheConfig) -> CacheConfig:
     return normalized
 
 
+def _flashinfer_mm_encoder_autotune_hash(mm_config: MultiModalConfig) -> str:
+    if mm_config.skip_mm_profiling:
+        return ""
+
+    from vllm.multimodal.hasher import MultiModalHasher
+
+    def sort_dicts(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: sort_dicts(item) for key, item in sorted(value.items())}
+        if isinstance(value, (list, tuple)):
+            return [sort_dicts(item) for item in value]
+        return value
+
+    return MultiModalHasher.hash_kwargs(
+        "sha256",
+        encoder_config=mm_config.compute_hash(),
+        mm_processor_kwargs=sort_dicts(mm_config.mm_processor_kwargs or {}),
+        limit_per_prompt=sort_dicts(
+            {
+                modality: asdict(opts)
+                for modality, opts in mm_config.limit_per_prompt.items()
+            }
+        ),
+    )
+
+
 def flashinfer_autotune_cache_hash(runner: "GPUModelRunner") -> str:
     vllm_config: VllmConfig = runner.vllm_config
     cache_config = _normalize_cache_config_for_hash(vllm_config.cache_config)
     if cache_config is not vllm_config.cache_config:
         vllm_config = replace(vllm_config, cache_config=cache_config)
     config_hash = vllm_config.compute_hash(include_version=False)
+    model_config = vllm_config.model_config
+    if (
+        model_config is not None
+        and model_config.supports_multimodal_inputs
+        and vllm_config.kernel_config.enable_flashinfer_mm_encoder_autotune
+        and vllm_config.use_v2_model_runner
+    ):
+        config_hash += _flashinfer_mm_encoder_autotune_hash(
+            model_config.get_multimodal_config()
+        )
     return hashlib.sha256(config_hash.encode()).hexdigest()
 
 

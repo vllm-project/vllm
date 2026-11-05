@@ -186,6 +186,25 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
+- label: ":nvidia: (B200) Multimodal FlashInfer Autotuning"
+  key: multi-modal-flashinfer-autotuning
+  device: b200-k8s
+  num_devices: 2
+  timeout_in_minutes: 30
+  env:
+    VLLM_WORKER_MULTIPROC_METHOD: spawn
+  source_file_dependencies:
+  - vllm/config/kernel.py
+  - vllm/model_executor/warmup/
+  - vllm/model_executor/kernels/linear/nvfp4/
+  - vllm/multimodal/encoder_budget.py
+  - vllm/model_executor/models/pixtral.py
+  - vllm/utils/flashinfer.py
+  - vllm/v1/worker/gpu/
+  - tests/models/multimodal/test_nemotron_embed.py
+  commands:
+    - pytest -v -s models/multimodal/test_nemotron_embed.py::test_flashinfer_autotune_vision_gemms
+
 - label: ":nvidia: (H200 MIG 35GB) [Nightly] Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1

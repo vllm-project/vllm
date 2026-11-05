@@ -287,6 +287,12 @@ class KernelConfig:
     """Benchmark FlashInfer kernel implementations during warmup and use the
     fastest. Enabled by default except at `-O0`; disable for faster startup."""
 
+    enable_flashinfer_mm_encoder_autotune: bool = False
+    """Include multimodal encoders and projectors in FlashInfer autotuning.
+    Disabled by default because profiling can increase startup time. Requires
+    enable_flashinfer_autotune and Model Runner V2. Skipped when
+    skip_mm_profiling is set."""
+
     enable_rocm_segmented_attn_autotune: bool = False
     """If True, autotune ROCm segmented attention during kernel warmup on RDNA GPUs."""
 
@@ -459,6 +465,7 @@ class KernelConfig:
             "enable_cutedsl_warmup",
             "enable_jit_warmup",
             "enable_flashinfer_autotune",
+            "enable_flashinfer_mm_encoder_autotune",
             "enable_rocm_segmented_attn_autotune",
             "ir_op_priority",  # handled separately below
         }

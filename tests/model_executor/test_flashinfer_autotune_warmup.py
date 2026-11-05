@@ -11,11 +11,16 @@ from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import Mock, call, patch
 
+import numpy as np
 import pytest
 import torch
 
 import vllm.model_executor.warmup.kernel_warmup as warmup
 import vllm.utils.flashinfer as fi_utils
+from vllm.config import MultiModalConfig
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    _flashinfer_mm_encoder_autotune_hash,
+)
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
@@ -23,6 +28,70 @@ from vllm.model_executor.warmup.kernel_warmup import (
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"mm_processor_cache_gb": 0}, {"mm_tensor_ipc": "torch_shm"}]
+)
+def test_encoder_autotune_identity_ignores_processor_cache_and_ipc(overrides):
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(**overrides)
+    ) == _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"mm_processor_kwargs": {"size": {"longest_edge": 256}}},
+        {"limit_per_prompt": {"image": {"count": 1, "width": 256}}},
+        {"limit_per_prompt": {"video": {"count": 1, "num_frames": 4}}},
+        {"mm_encoder_tp_mode": "data"},
+        {"mm_encoder_attn_backend": "TORCH_SDPA"},
+    ],
+)
+def test_encoder_autotune_identity_covers_profiling_inputs(overrides):
+    assert _flashinfer_mm_encoder_autotune_hash(
+        MultiModalConfig(**overrides)
+    ) != _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
+
+
+@pytest.mark.parametrize(
+    "original,equivalent,changed",
+    [
+        (torch.bfloat16, torch.bfloat16, torch.float16),
+        (np.array([224, 224]), np.array([224, 224]), np.array([448, 448])),
+        (torch.tensor([0.5]), torch.tensor([0.5]), torch.tensor([0.25])),
+    ],
+)
+def test_encoder_autotune_identity_hashes_non_json_kwargs(
+    original, equivalent, changed
+):
+    def cache_hash(value):
+        return _flashinfer_mm_encoder_autotune_hash(
+            MultiModalConfig(mm_processor_kwargs={"images_kwargs": {"value": value}})
+        )
+
+    assert cache_hash(original) == cache_hash(equivalent)
+    assert cache_hash(original) != cache_hash(changed)
+
+
+def test_encoder_autotune_identity_ignores_nested_dictionary_order():
+    def cache_hash(size):
+        return _flashinfer_mm_encoder_autotune_hash(
+            MultiModalConfig(mm_processor_kwargs={"images_kwargs": {"size": size}})
+        )
+
+    assert cache_hash({"height": 224, "width": 448}) == cache_hash(
+        {"width": 448, "height": 224}
+    )
+
+
+def test_encoder_autotune_identity_is_empty_when_profiling_is_skipped():
+    assert (
+        _flashinfer_mm_encoder_autotune_hash(MultiModalConfig(skip_mm_profiling=True))
+        == ""
+    )
+    assert _flashinfer_mm_encoder_autotune_hash(MultiModalConfig())
 
 
 class _FakeMoERunner:
@@ -44,6 +113,7 @@ def _make_moe(*, max_deferred_tokens: int = 128, enabled: bool = True):
 def _make_runner(modules, *, max_tokens: int = 8192):
     """Create a runner carrying only the state used by FlashInfer warmup."""
     return SimpleNamespace(
+        supports_mm_inputs=False,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=max_tokens),
         vllm_config=SimpleNamespace(
             attention_config=SimpleNamespace(hisparse_config=None),

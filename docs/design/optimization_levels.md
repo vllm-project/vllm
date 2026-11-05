@@ -12,6 +12,13 @@ vLLM provides 4 optimization levels (`-O0`, `-O1`, `-O2`, `-O3`) that allow user
 All optimization level defaults can be achieved by manually setting the underlying flags.
 User-set flags take precedence over optimization level defaults.
 
+FlashInfer autotuning skips multimodal encoders and projectors by default to
+avoid increasing startup time. To include them, pass
+`--kernel-config '{"enable_flashinfer_mm_encoder_autotune": true}'`.
+This tunes vision GEMMs with their own token counts, which can differ from the
+language model's token budget. It requires FlashInfer autotuning to be enabled
+and Model Runner V2. It is skipped when `--skip-mm-profiling` is set.
+
 ## Level Summaries and Usage Examples
 
 ```bash
