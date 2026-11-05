@@ -583,9 +583,10 @@ def test_kv_commit_binds_the_layers_it_moves(case):
         runner = _runner(specs, modules, 16, 4)
 
     layers = spec_kernel_layers(runner)
-    registry = _reference_kernels()
-    registry.bind(_kernel_context(), layers)
-    compactor = registry.get(("layout:paged_token", "commit"))
+    reference = pytest.importorskip("vllm_add_test_speculators.reference")
+    kernels = reference.reference_kernels()
+    KernelRegistry(kernels).bind(_kernel_context(), layers)
+    compactor = kernels[("layout:paged_token", "commit")]
 
     [layout] = compactor.layouts
     if case == "hybrid_group_blocks":

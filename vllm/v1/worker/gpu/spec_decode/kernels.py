@@ -185,10 +185,6 @@ class KernelRegistry:
         name = speculative_config.speculator_config.spec_kernels
         return cls(resolve_obj_by_qualname(name)(vllm_config) if name else None)
 
-    def get(self, key: KernelKey) -> SpecKernel | None:
-        """The kernel that won ``key``, None when nothing provides it."""
-        return self._kernels.get(key)
-
     @staticmethod
     def required_keys(layer: SpecLayerSpec) -> list[KernelKey]:
         """The kernels ``layer`` needs to verify trees."""
