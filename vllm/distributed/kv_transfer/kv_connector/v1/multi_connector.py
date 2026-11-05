@@ -456,12 +456,18 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 results.finished_recving.update(child_results.finished_recving)
                 results.failed_recving.update(child_results.failed_recving)
             else:
+                for req_id in child_results.failed_recving:
+                    progress = self._async_load_progress.get(req_id)
+                    if (
+                        progress is not None
+                        and i in progress.unfinished_connector_indices
+                    ):
+                        progress.has_error = True
                 for req_id in child_results.finished_recving:
                     progress = self._async_load_progress.get(req_id)
                     if progress is not None:
                         if i not in progress.unfinished_connector_indices:
                             continue
-                        progress.has_error |= req_id in child_results.failed_recving
                         progress.unfinished_connector_indices.remove(i)
                         if progress.unfinished_connector_indices:
                             continue
@@ -573,7 +579,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             )
             plan = replace(plan, assignments=assignments)
             plan = self._assign_windows(request, plan) or self._single_load_plan(
-                request, plan.fallback_index, start, end_token, plan.load_modes
+                request,
+                plan.fallback_index,
+                start,
+                end_token,
+                plan.load_modes,
+                validate_windows=True,
             )
             self._load_plans[request.request_id] = plan
         return plan.loaded_group_ids
@@ -644,16 +655,30 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         start: int,
         end: int,
         load_modes: tuple[bool, ...],
+        *,
+        validate_windows: bool = False,
     ) -> RequestLoadPlan:
         child = self._connectors[index]
+        loaded_groups = child.get_loaded_kv_cache_group_ids_for_prefix(request, end)
+        if validate_windows:
+            windows = child.get_loadable_window_group_ids(request, end)
+            loaded_groups = tuple(
+                group_id
+                for group_id in loaded_groups
+                if group_id in windows
+                or not any(
+                    isinstance(spec, SlidingWindowSpec)
+                    for spec in iter_layer_specs(
+                        self._kv_cache_config.kv_cache_groups[group_id].kv_cache_spec
+                    )
+                )
+            )
         return RequestLoadPlan(
             assignments=(ConnectorLoad(index, KVLoadRange(start, end), False),),
             is_async=load_modes[index],
             fallback_index=index,
             load_modes=load_modes,
-            loaded_group_ids=child.get_loaded_kv_cache_group_ids_for_prefix(
-                request, end
-            ),
+            loaded_group_ids=loaded_groups,
         )
 
     def _effective_load_range_alignment(self, connector: KVConnectorBase_V1) -> int:
