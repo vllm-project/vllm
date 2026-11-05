@@ -564,6 +564,7 @@ class HiSparseCoordinator:
         if self._sized_import is not None and self._sized_import[0] == request_id:
             self._import_pages[request_id] = self._sized_import[1]
         self._sized_import = None
+        assert self.host_manager is not None
         state = self._get_request_state(request_id)
         state.num_unmirrored_pages = cdiv(num_tokens, self.host_manager.block_size)
 
