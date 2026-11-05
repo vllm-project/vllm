@@ -77,7 +77,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.token_buffer import extend_from_slice
+from vllm.v1.token_buffer import TokenBuffer, extend_from_slice
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
@@ -2041,9 +2041,9 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_manager.free(session)
         self._inflight_prefills.discard(session)
 
-        prompt_token_ids = list(update.prompt_token_ids or ())
+        prompt_token_ids = TokenBuffer(update.prompt_token_ids or ())
         session.prompt_token_ids = prompt_token_ids
-        # In place: `all_token_ids` is a read-only view of this list.
+        # In place: `all_token_ids` is a read-only view of this buffer.
         session._all_token_ids[:] = prompt_token_ids
         session._output_token_ids.clear()
         session.num_prompt_tokens = len(prompt_token_ids)
@@ -2061,6 +2061,7 @@ class Scheduler(SchedulerInterface):
 
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        session.prefix_cache_hit_limit = session.get_prefix_cache_hit_limit()
         session.max_tokens = update.max_tokens
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
