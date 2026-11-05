@@ -11,6 +11,8 @@ from vllm.model_executor.layers.dash_attention import (
     route_blocks,
 )
 
+pytest.importorskip("flashinfer")
+
 
 def test_page_coordinates_continue_across_prompt_and_response():
     roles = torch.tensor([0, 2, 1, 1, 2, 1, 1, 1, 0, 2, 0, 0, 2, 0])

@@ -7,6 +7,8 @@ from PIL import Image, ImageDraw, ImageFont
 from vllm import SamplingParams
 from vllm.exceptions import VLLMValidationError
 
+pytest.importorskip("flashinfer")
+
 
 def _attention_class_names(model):
     from vllm.model_executor.layers.attention import Attention
