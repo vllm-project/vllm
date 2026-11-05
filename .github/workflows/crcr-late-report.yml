@@ -1,0 +1,83 @@
+name: CRCR late report
+
+# Adds the AI triage verdicts that pytorch/test-infra's "vLLM torch-nightly triage"
+# produces to the CRCR rows crcr-report.sh reported. The triage finishes long after
+# that report, and the relay takes a repo's late reports only from that repo.
+# A manual run takes the run id of a past triage run.
+
+on:
+  # Enable after a manual run has been checked. The triage starts at 17:00 UTC on
+  # Tue/Wed/Fri and takes up to ~1.5 hours; once a day, a missed run is sent by hand.
+  # schedule:
+  #   - cron: '30 19 * * *'
+  workflow_dispatch:
+    inputs:
+      triage_run_id:
+        description: "Run id of the vLLM torch-nightly triage run in pytorch/test-infra (default: the newest)"
+        required: false
+        type: string
+
+permissions: {}
+
+jobs:
+  late-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # the OIDC token the CRCR relay authenticates this repo by
+    steps:
+      - name: Find the triage run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.triage_run_id }}
+          # The schedule interval: older artifacts were sent by an earlier run.
+          LOOKBACK_HOURS: 24
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUN_ID}" ]]; then
+            since="$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)"
+            RUN_ID="$(gh api \
+              'repos/pytorch/test-infra/actions/artifacts?name=vllm-torch-nightly-late-reports&per_page=20' \
+              --jq "[.artifacts[]
+                     | select(.expired == false
+                              and .workflow_run.head_branch == \"main\"
+                              and .created_at >= \"${since}\")]
+                    | sort_by(.created_at) | last | .workflow_run.id // empty")"
+            if [[ -z "${RUN_ID}" ]]; then
+              echo "No triage reports in the last ${LOOKBACK_HOURS} hours."
+              exit 0
+            fi
+          fi
+          if [[ ! "${RUN_ID}" =~ ^[0-9]+$ ]]; then
+            echo "::error::triage_run_id must be a number"
+            exit 1
+          fi
+          # Only take reports from the triage workflow on pytorch/test-infra's main.
+          read -r path branch event < <(gh api \
+            "repos/pytorch/test-infra/actions/runs/${RUN_ID}" \
+            --jq '[.path, .head_branch, .event] | @tsv')
+          if [[ "${path}" != ".github/workflows/vllm-torch-nightly-triage.yml" \
+                || "${branch}" != "main" \
+                || ! "${event}" =~ ^(schedule|workflow_dispatch)$ ]]; then
+            echo "::error::Run ${RUN_ID} is not a main-branch run of the vLLM torch-nightly triage workflow (${path} on ${branch}, ${event})"
+            exit 1
+          fi
+          echo "Sending the reports of triage run ${RUN_ID}."
+          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        if: steps.run.outputs.run_id != ''
+        with:
+          name: vllm-torch-nightly-late-reports
+          repository: pytorch/test-infra
+          run-id: ${{ steps.run.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/late-reports
+
+      - name: Add the verdicts to the CRCR rows
+        if: steps.run.outputs.run_id != ''
+        uses: pytorch/test-infra/.github/actions/cross-repo-ci-relay-callback@e9b5b0a4c36ebfde49dec880ae77705038009471 # main
+        with:
+          event-type: late-report
+          triage-verdict-list: "@${{ runner.temp }}/late-reports/late-reports.json"
