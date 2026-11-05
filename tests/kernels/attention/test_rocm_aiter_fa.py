@@ -1143,7 +1143,8 @@ def test_aiter_paged_decode_over_window_trimmed_block_table_matches_reference():
         value_cache,
         scale,
         swa_table,
-        torch.arange(num_seqs, device=device, dtype=torch.int32),
+        # The kernel reads query_start_loc[i + 1], so slice it like the backend.
+        torch.arange(num_seqs + 1, device=device, dtype=torch.int32)[:num_seqs],
         swa_lens,
         swa_max_len,
         None,
