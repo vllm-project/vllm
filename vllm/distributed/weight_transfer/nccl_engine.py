@@ -276,7 +276,7 @@ class NCCLWeightTransferEngine(
                 # No rollback: the model is mid-reload, as after any failed
                 # start. Later updates go through load_weights, which repairs
                 # it; planning again needs a new init.
-                self._plan_metadata = None
+                self._plan_metadata = self._plan_manifest = None
                 e.add_note(
                     "NCCL weight transfer: load planning failed after "
                     "start_reload, so the model is mid-reload; later updates "

@@ -479,7 +479,7 @@ def test_value_read_reruns_without_the_name():
 
 def test_meta_failure_is_not_called_a_value_read():
     """An op that fails on meta stops the bake like a value read, but the
-    fallback reason is the error, not "reads tensor values"."""
+    fallback reason names the failing op, not "reads tensor values"."""
 
     def loader(model, param, loaded):
         # A shape error. On the real path the loader swallows it; under the
