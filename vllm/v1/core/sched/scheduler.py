@@ -17,6 +17,7 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -264,6 +265,7 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
+        self._ec_metadata_resolver: PlaceholderMetadataResolver | None = None
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -2081,6 +2083,33 @@ class Scheduler(SchedulerInterface):
         self.encoder_cache_mismatch_reqs.add(request.request_id)
         return True
 
+    def _reject_on_missing_encoder_input(self, request: Request, input_id: int) -> bool:
+        """Fail a request whose item would be encoded here with no input.
+
+        A metadata-only item (the consumer side of EPD) can only be served from
+        the EC connector. When the connector does not have it, scheduling a local
+        encode would hand the model no pixels and kill the engine core.
+        """
+        if self.ec_connector is None or self.is_encoder_decoder:
+            return False
+        if self._ec_metadata_resolver is None:
+            self._ec_metadata_resolver = PlaceholderMetadataResolver(
+                self.vllm_config.model_config
+            )
+        feature = request.mm_features[input_id]
+        if self._ec_metadata_resolver.has_encoder_input(feature):
+            return False
+        logger.warning(
+            "Request %s input %d (identifier %r) has only placeholder metadata "
+            "and the EC connector does not hold its embedding; failing the "
+            "request instead of encoding it with no input.",
+            request.request_id,
+            input_id,
+            feature.identifier,
+        )
+        self.encoder_cache_mismatch_reqs.add(request.request_id)
+        return True
+
     def _allocate_encoder_inputs(
         self,
         request: Request,
@@ -2277,6 +2306,9 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input.append(i)
                 num_embeds_to_schedule += num_encoder_embeds
                 continue
+
+            if self._reject_on_missing_encoder_input(request, i):
+                return [], 0, encoder_compute_budget, [], []
 
             num_embeds_to_schedule += num_encoder_embeds
             encoder_compute_budget -= num_encoder_embeds

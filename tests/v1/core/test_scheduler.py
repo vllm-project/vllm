@@ -28,6 +28,7 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxRequestOutput,
 )
 from vllm.distributed.ec_transfer.ec_connector.metrics import ECConnectorStats
+from vllm.distributed.ec_transfer.ec_connector.utils import PlaceholderMetadataResolver
 from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.connector import (
     HiSparseConnector,
     HiSparseConnectorScheduler,
@@ -6055,6 +6056,49 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
 
     # Scheduled encoder input should be empty; no mm to compute
     _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_cache_miss_fails_metadata_only_item(use_kv_connector):
+    """An item with only placeholder metadata cannot be encoded locally.
+
+    On an EC miss the request must finish with an error rather than hand the
+    vision encoder an item with no pixels.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    request = create_requests(
+        num_requests=1,
+        num_tokens=200,
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],
+    )[0]
+    grid = MultiModalFieldElem(
+        data=torch.tensor([1, 10, 10]), field=MultiModalBatchedField()
+    )
+    request.mm_features[0].data = MultiModalKwargsItem({"image_grid_thw": grid})
+    resolver = PlaceholderMetadataResolver(scheduler.vllm_config.model_config)
+    resolver._cache["image"] = {"image_grid_thw"}
+    scheduler._ec_metadata_resolver = resolver
+    scheduler.ec_connector.has_cache_item = Mock(return_value=False)
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert request.request_id not in output.num_scheduled_tokens
+    assert not output.scheduled_encoder_inputs
+
+    engine_core_outputs = scheduler.update_from_output(
+        output, make_empty_encoder_model_runner_output(output)
+    )
+    assert request.status == RequestStatus.FINISHED_ERROR
+    (error,) = engine_core_outputs[0].outputs
+    assert error.request_id == request.request_id
+    assert error.finish_reason == FinishReason.ERROR
+    assert request.request_id not in scheduler.requests
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
