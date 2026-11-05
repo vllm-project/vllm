@@ -1515,16 +1515,6 @@ class EngineCoreProc(EngineCore):
             addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
-            # Hash the parallel config as started, before engine
-            # initialization. KV cache planning resolves derived settings
-            # (the NIXL DCP interleave size) on the engine side only, and
-            # the front-end validates this hash against its own
-            # ParallelConfig, which never sees them.
-            parallel_config_hash = (
-                vllm_config.parallel_config.compute_hash()
-                if vllm_config.parallel_config.data_parallel_size > 1
-                else None
-            )
             yield addresses
 
             # Send ready message.
@@ -1534,8 +1524,10 @@ class EngineCoreProc(EngineCore):
                 "headless": headless,
             }
             # Include config hash for DP configuration validation
-            if parallel_config_hash is not None:
-                ready_msg["parallel_config_hash"] = parallel_config_hash
+            if vllm_config.parallel_config.data_parallel_size > 1:
+                ready_msg["parallel_config_hash"] = (
+                    vllm_config.parallel_config.compute_hash()
+                )
             if vllm_config.parallel_config.enable_elastic_ep:
                 ready_msg["coord_store_port"] = (
                     vllm_config.parallel_config._coord_store_port
