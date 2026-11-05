@@ -1167,8 +1167,7 @@ def test_select_mxfp4_moe_backend_relu2_dispatches_to_aiter(
     backend, kernel_cls = select_mxfp4_moe_backend(moe_config)
 
     assert backend == Mxfp4MoeBackend.AITER_MXFP4_BF16, (
-        f"relu2 MXFP4 MoE on ROCm must dispatch through AITER_MXFP4_BF16, "
-        f"got {backend}"
+        f"relu2 MXFP4 MoE on ROCm must dispatch through AITER_MXFP4_BF16, got {backend}"
     )
     assert kernel_cls is AiterMxfp4Experts, (
         f"relu2 MXFP4 MoE must select AiterMxfp4Experts as the kernel "
