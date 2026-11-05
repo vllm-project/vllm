@@ -416,6 +416,11 @@ class MultiModalConfig:
     """Safety margin multiplied onto scales when auto-saving. A value > 1
     leaves headroom so that inputs with larger activations than the
     calibration set do not overflow FP8 range. Default 1.5."""
+    mm_encoder_fp8_scale_save_every_wrap: bool = False
+    """With `mm_encoder_fp8_scale_save_path`, rewrite the scale file every
+    time the amax history wraps instead of only the first time, so the file
+    ends with the scales of the last window (e.g. the images of an evaluation
+    that follows warm-up traffic)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -538,6 +543,14 @@ class MultiModalConfig:
             raise ValueError(
                 "'mm_encoder_fp8_scale_save_path' cannot be used with "
                 "'mm_encoder_fp8_scale_path' (saving requires dynamic scaling)."
+            )
+        if (
+            self.mm_encoder_fp8_scale_save_every_wrap
+            and self.mm_encoder_fp8_scale_save_path is None
+        ):
+            raise ValueError(
+                "'mm_encoder_fp8_scale_save_every_wrap' requires "
+                "'mm_encoder_fp8_scale_save_path'."
             )
 
         # Validate file paths exist.
