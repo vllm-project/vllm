@@ -36,7 +36,11 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import replace_parameter, retire_parameter
+from vllm.model_executor.utils import (
+    mark_experts_loaded,
+    replace_parameter,
+    retire_parameter,
+)
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -136,7 +140,7 @@ class _ToyModel(torch.nn.Module):
             parent.register_parameter(local, param)
 
     def load_weights(self, weights):
-        params = dict(self.named_parameters())
+        params = dict(self.named_parameters(remove_duplicate=False))
         loaded = set()
         for name, weight in weights:
             param = params[name]
@@ -284,13 +288,28 @@ class TestUnsent:
         _reload(model, _checkpoint())  # a new full update repairs it
         _assert_same(_state(model), before)
 
-    def test_first_update_after_dummy_start_sets_the_required_set(self):
+    def test_first_update_after_dummy_start_is_checked(self, monkeypatch):
         with _DEVICE:
             model = _ToyModel()
+        model.engram.weight.dummy_weight_value = 1.0  # e.g. a norm: may stay
         track_loaded_params(model)  # a dummy cold start loads nothing
         process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        partial = {n: t for n, t in _checkpoint().items() if n != "proj.weight"}
+        with pytest.raises(RuntimeError, match="proj.weight"):
+            _reload(model, partial)
+
+        def fail(layer):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(model.nvfp4.quant_method, "fn", fail)
+        with pytest.raises(ValueError, match="boom"):
+            _reload(model, _checkpoint())
+        assert model._required_params is None  # recorded only once PWAL succeeds
+        monkeypatch.undo()
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+        _reload(model, {n: t for n, t in _checkpoint().items() if n != "engram.weight"})
         _reload(model, _checkpoint())
-        begin_direct_reload(model)
+        begin_direct_reload(model)  # later updates: what the first one loaded
         model.load_weights(list(_checkpoint().items())[1:])
         with pytest.raises(RuntimeError, match="attn.kv_b.weight"):
             finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
@@ -310,6 +329,94 @@ class TestUnsent:
         _assert_same(after, before, names=["attn.kv_b.weight"], addresses=True)
         expected = dict(new, **{"attn.kv_b.weight": old["attn.kv_b.weight"]})
         _assert_same(after, _state(_cold_start(expected)))
+
+
+class _Variants(_ToyModel):
+    """Loads ``proj.weight`` from two halves too, ``engram.weight`` under a
+    tied alias, and a 3-expert MoE parameter one expert per tensor."""
+
+    def __init__(self):
+        super().__init__()
+        self.tied = _Layer(None)
+        self.tied.weight = self.engram.weight
+        self.moe = _Layer(None)
+        self.moe.w13 = torch.nn.Parameter(torch.empty(3, 2, 4), False)
+
+    def load_weights(self, weights):
+        loaded, rest, halves = set(), [], {}
+        for name, weight in weights:
+            if name.startswith("moe."):  # moe.<expert>.w13
+                expert = int(name.split(".")[1])
+                self.moe.w13.data[expert].copy_(weight)
+                mark_experts_loaded(self.moe.w13, (expert,), "w1")
+                loaded.add("moe.w13")
+            elif name.startswith("proj.half"):
+                halves[name] = weight
+                if len(halves) == 2:
+                    rest.append(("proj.weight", torch.cat(list(halves.values()))))
+            else:
+                rest.append((name, weight))
+        return loaded | super().load_weights(rest)
+
+
+def _variant_checkpoint(scale: float = 1.0, renamed: bool = False):
+    weights = _checkpoint(scale)
+    weights.update({f"moe.{e}.w13": torch.full((2, 4), e * scale) for e in range(3)})
+    if renamed:
+        proj = weights.pop("proj.weight")
+        weights.update({"proj.half0": proj[:2], "proj.half1": proj[2:]})
+        weights["tied.weight"] = weights.pop("engram.weight")
+    return weights
+
+
+class TestParts:
+    def test_renamed_and_tied_names_count_as_their_parameter(self):
+        with _DEVICE:
+            model = _Variants()
+        track_loaded_params(model)
+        model.load_weights(_variant_checkpoint().items())
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        before = _state(model)
+        _reload(model, _variant_checkpoint(renamed=True))
+        _assert_same(_state(model), before)
+
+    def test_missing_expert_raises(self):
+        with _DEVICE:
+            model = _Variants()
+        track_loaded_params(model)
+        model.load_weights(_variant_checkpoint().items())
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        weights = _variant_checkpoint(1.01)
+        del weights["moe.1.w13"]
+        with pytest.raises(RuntimeError, match=r"moe\.w13 experts \[\(1, 'w1'\)\]"):
+            _reload(model, weights)
+
+    @pytest.mark.usefixtures("dist_init")
+    def test_missing_stacked_shard_raises(self):
+        from vllm.model_executor.layers.linear import QKVParallelLinear
+
+        class _QKV(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.qkv = QKVParallelLinear(8, 2, 2, 1, bias=False)
+
+            def load_weights(self, weights):
+                return {f"qkv.{n}" for n in self.qkv.load_weights(weights)}
+
+        def shard(rows, shard_id):
+            weight = torch.rand(rows, 8)
+            weight.shard_id = shard_id
+            return "weight", weight
+
+        with _DEVICE:
+            model = _QKV()
+        track_loaded_params(model)
+        model.load_weights([shard(4, "q"), shard(2, "k"), shard(2, "v")])
+        process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+        begin_direct_reload(model)
+        model.load_weights([shard(4, "q"), shard(2, "k")])
+        with pytest.raises(RuntimeError, match=r"qkv\.weight\.v"):
+            finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
 
 
 class TestRefusals:

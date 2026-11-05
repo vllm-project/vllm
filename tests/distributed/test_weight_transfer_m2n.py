@@ -735,6 +735,7 @@ class TestWireTypes:
             def __init__(self):
                 self.calls = 0
                 self.loaded = []
+                self._loaded_params: set[str] = set()  # direct reload collecting
 
             def load_weights(self, weights):
                 self.calls += 1
@@ -782,6 +783,7 @@ class TestWireTypes:
         assert [name for name, _ in model.loaded] == ["pair.weight", "pair.scale"]
         assert [tensor.item() for _, tensor in model.loaded] == [1, 3]
         assert direct.item() == 2
+        assert model._loaded_params == {"direct"}  # written in place, reported
         assert reshard_order == ["pair.weight", "direct", "pair.scale"]
         assert stream.synchronize.call_count == 2
 
