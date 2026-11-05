@@ -388,6 +388,10 @@ def _make_partial_tail_request(
     request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(num_tokens // 4)]
     request.all_token_ids = list(range(num_tokens))
     request.lora_request = None
+    request.mm_features = []
+    request.cache_salt = None
+    request.prompt_embeds = None
+    request._prompt_embeds_per_block_hashes = {}
     request.skip_reading_external_kv = False
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
@@ -1700,6 +1704,10 @@ def test_recurrent_group_unhashed_block_does_not_truncate_load_boundary():
     request.block_hashes = [BlockHash(f"b{i}".encode()) for i in range(16)]
     request.all_token_ids = list(range(64))
     request.lora_request = None
+    request.mm_features = []
+    request.cache_salt = None
+    request.prompt_embeds = None
+    request._prompt_embeds_per_block_hashes = {}
     request.is_finished.return_value = False
     scheduler.on_new_request(request)
 
@@ -6571,6 +6579,10 @@ class TestEagle:
         request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(150)]
         request.all_token_ids = list(range(1200))
         request.lora_request = None
+        request.mm_features = []
+        request.cache_salt = None
+        request.prompt_embeds = None
+        request._prompt_embeds_per_block_hashes = {}
         request.shared_prefix_boundary = 0
         request.status = RequestStatus.RUNNING
         request.is_finished.return_value = False
@@ -7249,6 +7261,10 @@ class TestMambaHybridOffloadServing:
             ]
             request.all_token_ids = list(range(self.PROMPT_TOKENS))
             request.lora_request = None
+            request.mm_features = []
+            request.cache_salt = None
+            request.prompt_embeds = None
+            request._prompt_embeds_per_block_hashes = {}
             request.is_finished.return_value = False
             request.status = None
             scheduler.on_new_request(request)
