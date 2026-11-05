@@ -40,7 +40,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.ubatch_common import UBatchSlice
-from vllm.v1.worker.gpu.ubatch_utils import (
+from vllm.v1.worker.gpu.ubatch_runner import (
     UBatchRunner,
     UBatchState,
     _slice_input_batch,
