@@ -92,6 +92,10 @@ ROUTED_FC2_CTA_K = 256
 ROUTED_FC1_STAGES = 8
 ROUTED_FC2_STAGES = 4
 ROUTED_CTAS: int | None = None
+# Above this many rows FC2 starts on each token tile as FC1 completes it;
+# up to it, after the FC1 grid. B300, 12 real layers: per tile 1.6-2.2 us
+# faster at 12-32 rows and 1.1-1.3 us slower at 1-3 rows (even at 8).
+OVERLAP_ROWS = 8
 SHARED_FC1_STAGES = 6
 # Persistent CTAs of the shared expert's GEMMs (144 and 48 work items), which
 # leave SMs to the routed GEMMs beside them (the critical path). On B300 at
@@ -150,6 +154,9 @@ class LowBatchFfn:
         # Compile the kernels now, not inside a CUDA graph capture.
         for built in WIDTHS:
             _front(self.device_index, built)
+        for overlap in (False, True):
+            _fc1(self.device_index, overlap)
+            _fc2(self.device_index, overlap)
         for compile_kernel in _KERNELS:
             compile_kernel(self.device_index)
         self.aux = aux_stream()
@@ -222,7 +229,8 @@ class LowBatchFfn:
             Int32(rows),
             stream,
         )
-        _fc1(self.device_index)(
+        overlap = rows > OVERLAP_ROWS
+        _fc1(self.device_index, overlap)(
             _ptr(cutlass.Float4E2M1FN, self.w13, 32),
             _ptr(cutlass.Float8E4M3FN, self.w13_scale),
             _ptr(cutlass.Float4E2M1FN, x_quant, 32),
@@ -243,7 +251,7 @@ class LowBatchFfn:
             ctas,
             stream,
         )
-        _fc2(self.device_index)(
+        _fc2(self.device_index, overlap)(
             _ptr(cutlass.Float4E2M1FN, self.w2, 32),
             _ptr(cutlass.Float8E4M3FN, self.w2_scale),
             _ptr(cutlass.Float4E2M1FN, h_quant, 32),
@@ -379,10 +387,12 @@ def _front(device_index: int, built: int):
 
 
 @cache
-def _fc1(device_index: int):
+def _fc1(device_index: int, overlap: bool):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedFc1(HIDDEN, INTERMEDIATE, ROUTED_FC1_CTA_K, ROUTED_FC1_STAGES),
+            RoutedFc1(
+                HIDDEN, INTERMEDIATE, overlap, ROUTED_FC1_CTA_K, ROUTED_FC1_STAGES
+            ),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
@@ -406,13 +416,14 @@ def _fc1(device_index: int):
 
 
 @cache
-def _fc2(device_index: int):
+def _fc2(device_index: int, overlap: bool):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
             RoutedFc2(
                 HIDDEN,
                 INTERMEDIATE,
-                2 * INTERMEDIATE // 128,  # FC1's m tiles: a tile's ready count
+                # FC1's m tiles: a tile's ready count.
+                2 * INTERMEDIATE // 128 if overlap else 0,
                 ROUTED_FC2_CTA_K,
                 ROUTED_FC2_STAGES,
             ),
@@ -498,8 +509,6 @@ def _shared_fc2(device_index: int):
 
 
 _KERNELS = (
-    _fc1,
-    _fc2,
     _shared_input,
     _shared_fc1,
     _shared_act,

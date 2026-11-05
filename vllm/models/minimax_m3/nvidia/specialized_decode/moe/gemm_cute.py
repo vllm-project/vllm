@@ -207,22 +207,28 @@ class RoutedFc1(RoutedExpertGemm):
     the tile's ``done`` word (acquire-release); the item that completes the
     count quantizes the tile's rows (:func:`quantize_h_tile`) before the
     base's ready word counts it, so a tile's ready count reaches 12 only once
-    FC2's input of the tile is stored, and FC2 waits for that count per item
-    (``RoutedExpertGemm.signal_ready``)."""
+    FC2's input of the tile is stored. With ``overlap``, FC1 signals those
+    counts and FC2 waits for them per item (``RoutedExpertGemm.signal_ready``);
+    without, FC2 waits for the FC1 grid."""
 
     # Wait for the front before launching what follows: FC2 reads the routing
     # record and the fused boundary kernel the routing weights before their own
     # waits.
     route_before_wait = False
     gather_b = True
-    signal_ready = True
 
     def __init__(
-        self, hidden: int, intermediate: int, cta_k: int = 256, num_ab_stage: int = 8
+        self,
+        hidden: int,
+        intermediate: int,
+        overlap: bool,
+        cta_k: int = 256,
+        num_ab_stage: int = 8,
     ) -> None:
         super().__init__(
             2 * intermediate, 2 * intermediate // 128, hidden, cta_k, num_ab_stage
         )
+        self.signal_ready = overlap
         self.sf_vec_size = SF_VEC
         self.intermediate = intermediate
         # A stage of a row is one or two 128-byte swizzle atoms.
@@ -479,7 +485,8 @@ class RoutedFc1(RoutedExpertGemm):
 class RoutedFc2(RoutedExpertGemm):
     """FC2 (module docstring). B is the quantized ``h``; its scales, one
     128-row atom per 8-row tile, are loaded with TMA once FC1 has counted all
-    its items of the tile (``ready_target``, FC1's m tiles)."""
+    its items of the tile (``fc1_m_tiles``, the ready target), or, with 0,
+    after the FC1 grid."""
 
     def __init__(
         self,
