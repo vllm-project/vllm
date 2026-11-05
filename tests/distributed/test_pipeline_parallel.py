@@ -171,7 +171,6 @@ MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
-    "ibm-granite/granite-vision-4.1-4b": PPTestSettings.fast(load_format="dummy"),
     "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
@@ -200,7 +199,6 @@ TEST_MODELS = [
     "vllm-project/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
-    "ibm-granite/granite-vision-4.1-4b",
     "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
@@ -460,4 +458,40 @@ def test_pp_mixed_precision_kv_cache():
         env,
         env,
         method="generate_close",
+    )
+
+
+@create_new_process_for_each_test()
+def test_pp_granite4_vision_deepstack(num_gpus_available):
+    """A later PP stage must receive the deepstack features of its layers."""
+    if num_gpus_available < 2:
+        pytest.skip("Need at least 2 GPUs")
+    # With 4 layers, deepstack layers 0 and 3 land on different PP stages.
+    text_config = {
+        "num_hidden_layers": 4,
+        "hidden_size": 512,
+        "intermediate_size": 800,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,
+    }
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--load-format",
+        "dummy",
+        "--hf-overrides",
+        json.dumps({"text_config": text_config}),
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "4",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    compare_two_settings(
+        "ibm-granite/granite-vision-4.1-4b",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        method="generate_with_image",
     )
