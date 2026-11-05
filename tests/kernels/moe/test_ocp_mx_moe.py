@@ -2170,6 +2170,24 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
 
 
+@pytest.mark.parametrize("override", [None, "mxfp8"])
+def test_moe_activation_override_wins_over_checkpoint(monkeypatch, override):
+    """An explicit `moe.activation`, `null` (BF16) included, overrides the
+    checkpoint's activation."""
+    import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
+    from vllm.config.quantization import QUANT_KEY_NAMES
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8StaticTensorSym,
+    )
+
+    key = None if override is None else QUANT_KEY_NAMES[override]
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: key)
+    monkeypatch.setattr(
+        mxfp4_oracle, "_user_moe_activation_override_is_set", lambda: True
+    )
+    assert mxfp4_oracle._resolve_activation_key(kFp8StaticTensorSym) == key
+
+
 @pytest.mark.parametrize(
     "moe_backend,w4a4,supported,expected",
     [
