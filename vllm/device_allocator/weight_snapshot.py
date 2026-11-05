@@ -57,7 +57,7 @@ def _walk(value, key: str, depth: int) -> Iterator[tuple[str, object]]:
 def collect_state(
     roots: dict[str, nn.Module],
 ) -> tuple[list[tuple[str, torch.Tensor]], dict[str, object]]:
-    """CUDA tensors (deduplicated by storage view) and scalars, in a stable
+    """CUDA and pinned host tensors (deduplicated by view) and scalars, in a stable
     order keyed by module path and attribute name."""
     tensors: list[tuple[str, torch.Tensor]] = []
     scalars: dict[str, object] = {}
@@ -70,7 +70,7 @@ def collect_state(
                 base = f"{root_name}/{mod_name}/{attr}"
                 for key, v in _walk(value, base, depth=2):
                     if isinstance(v, torch.Tensor):
-                        if not v.is_cuda or v.numel() == 0:
+                        if not (v.is_cuda or v.is_pinned()) or v.numel() == 0:
                             continue
                         ident = (v.data_ptr(), v.nbytes, tuple(v.shape), v.dtype)
                         if ident in seen:
