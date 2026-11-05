@@ -5,7 +5,6 @@
 import functools
 import math
 from collections.abc import Iterable
-from dataclasses import replace
 
 import torch
 import torch.nn.functional as F
@@ -876,13 +875,17 @@ class MuseSpark1xDecoderLayer(nn.Module):
 
 def _drop_gate_up_stacking(base: WeightsMapper) -> WeightsMapper:
     """Keep Quark's per-expert gate/up names unstacked for ``RoutedExperts``."""
-    return replace(
-        base,
+    return WeightsMapper(
+        orig_to_new_renaming=base.orig_to_new_renaming,
+        orig_to_new_regex=base.orig_to_new_regex,
+        orig_to_new_substr=base.orig_to_new_substr,
         orig_to_new_stacked={
             source: target
             for source, target in base.orig_to_new_stacked.items()
             if source not in (".gate_proj", ".up_proj")
         },
+        orig_to_new_prefix=base.orig_to_new_prefix,
+        orig_to_new_suffix=base.orig_to_new_suffix,
     )
 
 

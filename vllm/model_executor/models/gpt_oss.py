@@ -3,7 +3,6 @@
 import typing
 from collections.abc import Callable, Iterable
 
-import regex as re
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -1374,10 +1373,6 @@ class GptOssForCausalLM(
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
-        # `.attn` is `OAIAttention`, which holds the `Attention` with the KV scales.
-        orig_to_new_regex={
-            re.compile(r"\.self_attn\.([qkv]_(?:scale|zero_point))$"): r".attn.attn.\1"
-        },
         orig_to_new_substr={
             ".self_attn.": ".attn.",
         },

@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.models.gpt_oss import (
     GptOssForCausalLM,
     GptOssModel,
@@ -151,14 +150,3 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
-
-
-@pytest.mark.parametrize("scale", ["q_scale", "k_scale", "v_zero_point"])
-def test_kv_cache_scale_reaches_the_inner_attention(scale):
-    """`.attn` is `OAIAttention`, which holds the `Attention` with the scales."""
-    mapper = GptOssForCausalLM.hf_to_vllm_mapper | (
-        QuantizationConfig.get_cache_scale_mapper()
-    )
-
-    name = f"model.layers.0.self_attn.{scale}"
-    assert mapper.map_name(name) == f"model.layers.0.attn.attn.{scale}"

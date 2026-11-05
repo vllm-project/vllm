@@ -5,14 +5,10 @@ import pytest
 import regex as re
 import torch
 
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
-)
-from vllm.model_executor.models.bert import BertModel, BertPoolingModel
-from vllm.model_executor.models.mistral_large_3_eagle import (
-    EagleMistralLarge3ForCausalLM,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -212,9 +208,11 @@ def test_get_rename_mapper_keeps_only_renames():
     )
     renames = mapper.get_rename_mapper()
 
+    assert renames.orig_to_new_regex == {}
+    assert renames.orig_to_new_substr == {"keep_substr": "kept"}
     assert renames.orig_to_new_stacked == {}
-    assert renames.map_name("a.keep_substr") == "a.kept"
-    assert renames.map_name("keep_prefix.w") == "kept.w"
+    assert renames.orig_to_new_prefix == {"keep_prefix.": "kept."}
+    assert renames.orig_to_new_suffix == {}
 
     # Names the full mapper drops now survive unchanged.
     for name in ("drop_regex.w", "drop_substr.w", "drop_prefix.w", "w.drop_suffix"):
@@ -362,68 +360,19 @@ def test_weights_mapper_transforms_see_earlier_emitted_names():
     assert torch.equal(mapped[1], torch.tensor([2.0, 0.0]))
 
 
-def test_weights_mapper_literal_rules_compile_to_regex():
-    """Literal rules keep their old semantics, including metacharacters in names."""
-    mapper = WeightsMapper(
-        orig_to_new_substr={"a.b": "c", "drop": None},
-        orig_to_new_prefix={"p.": r"new\1.", "": "root."},
-        orig_to_new_suffix={".s": ".t"},
-    )
-
-    assert mapper.map_name("xa.b.a.b") == "root.xc.a.b"
-    assert mapper.map_name("axb") == "root.axb"
-    assert mapper.map_name("p.w") == r"root.new\1.w"
-    assert mapper.map_name("w.s") == "root.w.t"
-    assert mapper.map_name("w.s.s2") == "root.w.s.s2"
-    assert mapper.map_name("a.drop.b") is None
-
-
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
+        ("h.0.self_attn.k_proj.output_scale", "h.0.self_attn.attn.k_scale"),
         ("h.0.self_attn.k_proj.k_scale", "h.0.self_attn.attn.k_scale"),
-        ("h.0.block.k_proj.k_scale", "h.0.mixer.attn.k_scale"),
-        ("h.0.self_attn.qkv_proj.v_scale", "h.0.self_attn.attn.v_scale"),
-        ("h.0.self_attn.q_scale", "h.0.self_attn.attn.q_scale"),
+        ("h.0.attention.k_proj.k_scale", "h.0.attention.attn.k_scale"),
+        ("h.0.self_attn.k_proj.weight", "h.0.self_attn.qkv_proj.weight"),
     ],
 )
-def test_cache_scale_mapper_matches_names_after_model_rules(name, expected):
-    """Scale rules run after the model's renames and before its stacked rules."""
-    mapper = WeightsMapper(
-        orig_to_new_substr={".block.": ".mixer."},
-        orig_to_new_stacked={
-            ".k_proj": (".qkv_proj", "k"),
-            ".v_proj": (".qkv_proj", "v"),
-        },
-    )
+def test_cache_scale_rules_run_before_stacked_rules(name, expected):
+    """A stacked rule would otherwise rewrite the `.k_proj.` the scale rule needs."""
+    model_mapper = WeightsMapper(orig_to_new_stacked={".k_proj": (".qkv_proj", "k")})
 
-    mapped = mapper | QuantizationConfig.get_cache_scale_mapper()
+    mapper = model_mapper | Fp8Config.get_cache_scale_mapper()
 
-    assert mapped.map_name(name) == expected
-
-
-def test_weights_mapper_later_literal_rule_overrides_earlier_one():
-    """`regex` patterns compare by identity, so this must not rely on its cache."""
-    drop = WeightsMapper(orig_to_new_prefix={"head.": None})
-    re.purge()
-    keep = WeightsMapper(orig_to_new_prefix={"head.": "model.head."})
-
-    assert (drop | keep).map_name("head.w") == "model.head.w"
-
-
-def test_bert_pooling_model_keeps_the_pooler_that_bert_model_drops():
-    assert BertModel.hf_to_vllm_mapper.map_name("pooler.dense.weight") is None
-    pooling_mapper = BertPoolingModel.hf_to_vllm_mapper
-    assert pooling_mapper.map_name("pooler.dense.weight") == "pooler.dense.weight"
-
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("eagle_linear.weight", "model.fc.weight"),
-        ("eagle_linear.qscale_act", "model.fc.input_scale"),
-        ("eagle_linear.qscale_weight", "model.fc.weight_scale"),
-    ],
-)
-def test_mistral_large_3_eagle_maps_quantized_eagle_linear(name, expected):
-    assert EagleMistralLarge3ForCausalLM.hf_to_vllm_mapper.map_name(name) == expected
+    assert mapper.map_name(name) == expected

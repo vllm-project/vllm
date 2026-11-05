@@ -131,7 +131,7 @@ def test_lora_weights_mapping(baichuan_lora_files):
         weights_mapper=hf_to_vllm_mapper,
     )
     for name in lora_model.loras:
-        assert name.startswith(hf_to_vllm_mapper.map_name("model."))
+        assert name.startswith(hf_to_vllm_mapper.orig_to_new_prefix["model."])
         assert ".baichuan_layers." in name
 
 
