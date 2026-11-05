@@ -290,6 +290,7 @@ def test_simple_cpu_offload_with_auto_numa(monkeypatch, enable_pickle):
         kv_cache_memory_bytes=128 << 20,
         max_model_len=1024,
         distributed_executor_backend="mp",
+        served_model_name=model,
         enforce_eager=True,
         disable_log_stats=False,
     )

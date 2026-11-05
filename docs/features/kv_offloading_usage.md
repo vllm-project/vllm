@@ -489,7 +489,9 @@ pages. Populating HugeTLB pages requires Linux 5.14 or newer.
 The mapping inherits the worker's NUMA memory policy, including policies set
 by an external launcher. Use vLLM's `--numa-bind` or `--numa-bind-nodes` options
 to control placement. The mapping is excluded from forked child processes and
-pinned in chunks of at most 1 GiB.
+pinned in chunks of at most 1 GiB. Registration boundaries must align with both
+KV blocks and backing pages. If a layout cannot meet both constraints with
+1 GiB HugeTLB pages, use 2 MiB pages instead.
 When explicit HugeTLB pages are disabled, `THP_MEM_ALLOC_ENABLE=1` requests
 transparent huge pages with `MADV_HUGEPAGE`; the kernel decides whether to
 provide them. These settings apply to the CPU backend.

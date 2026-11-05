@@ -287,7 +287,10 @@ class SimpleCPUOffloadWorker:
             registered = []
             try:
                 for offset, end in host_registration_ranges(
-                    layer_bytes, self.num_cpu_blocks, buf.nbytes
+                    layer_bytes,
+                    self.num_cpu_blocks,
+                    buf.nbytes,
+                    page_size=buf.page_size,
                 ):
                     if offset:
                         time.sleep(0)

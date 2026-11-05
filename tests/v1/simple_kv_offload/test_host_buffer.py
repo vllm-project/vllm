@@ -80,10 +80,10 @@ def test_buffer_rounds_up_populates_and_skips_fork(
     assert ("hg" in flags) == (thp_enabled and not hugepages)
 
 
-def test_hugepage_buffer_fails_closed_when_pool_is_short():
-    page = 1 << 30
+@pytest.mark.parametrize("page", [2 << 20, 1 << 30])
+def test_hugepage_buffer_fails_closed_when_pool_is_short(page: int):
     free = free_hugepages(page)
     if free < 0:
-        pytest.skip("no 1 GiB hugepage pool")
+        pytest.skip(f"no {page >> 20} MiB hugepage pool")
     with pytest.raises(RuntimeError, match="Cannot map"):
         HostBuffer((free + 1) * page, page)

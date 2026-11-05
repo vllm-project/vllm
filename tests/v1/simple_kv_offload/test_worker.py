@@ -837,13 +837,14 @@ def test_register_cpu_caches_in_one_host_buffer(hugepages: bool):
     layer_names = [f"layer.{i}" for i in range(num_layers)]
     worker = SimpleCPUOffloadWorker(
         vllm_config=None,
-        kv_cache_config=MagicMock(
+        kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[
                 dense_kv_cache_tensor(
                     raw, spec, num_blocks, num_layers, layout, layer_names
                 )
             ],
+            kv_cache_groups=[],
         ),
         cpu_capacity_bytes=raw.nbytes,
         cpu_hugepage_size=page,
@@ -854,7 +855,8 @@ def test_register_cpu_caches_in_one_host_buffer(hugepages: bool):
     )
 
     buf = worker._host_buffer
-    assert buf is not None and (buf.page_size == page if page else True)
+    assert buf is not None
+    assert buf.page_size == (page or mmap.PAGESIZE)
     assert worker.cpu_kv_caches is not None and worker.gpu_kv_caches is not None
     assert worker.cpu_kv_caches.keys() == worker.gpu_kv_caches.keys()
     base = buf.tensor.data_ptr()

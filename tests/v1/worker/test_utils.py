@@ -447,22 +447,21 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
     assert pool.registered is region.base_tensor
 
 
-def test_hisparse_registration_chunks_end_between_host_blocks():
-    """Registration seams must not bisect a DMA-addressable host block."""
-    page = mmap.PAGESIZE
+@pytest.mark.parametrize(
+    ("page_size", "split"),
+    [(mmap.PAGESIZE, (12 << 20) - 65536), (2 << 20, 6 << 20)],
+)
+def test_hisparse_registration_chunks_end_between_host_blocks(page_size, split):
+    """Registrations must cover whole backing pages and whole host blocks."""
     ranges = hisparse_runtime_module.host_registration_ranges(
-        tensor_sizes=[4 * 3 * page, 4 * 5 * page],
-        num_blocks=4,
-        total_size=32 * page,
-        max_chunk_bytes=10 * page,
+        tensor_sizes=[6 << 20, 10 << 20],
+        num_blocks=32,
+        total_size=16 << 20,
+        max_chunk_bytes=12 << 20,
+        page_size=page_size,
     )
 
-    assert ranges == (
-        (0, 9 * page),
-        (9 * page, 17 * page),
-        (17 * page, 27 * page),
-        (27 * page, 32 * page),
-    )
+    assert ranges == ((0, split), (split, 16 << 20))
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():

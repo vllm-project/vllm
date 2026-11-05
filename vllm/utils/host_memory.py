@@ -29,14 +29,17 @@ def host_registration_ranges(
     num_blocks: int,
     total_size: int,
     max_chunk_bytes: int = 1 << 30,
+    *,
+    page_size: int = mmap.PAGESIZE,
 ) -> tuple[tuple[int, int], ...]:
     """Split a shared pool without bisecting any tensor's host block.
 
-    CUDA batch copies reject descriptors spanning adjacent registrations.
+    Keep registration boundaries aligned to the backing pages. CUDA batch
+    copies reject descriptors spanning adjacent registrations.
     """
-    if total_size % mmap.PAGESIZE:
-        raise ValueError("Host pool must be OS-page aligned.")
-    if max_chunk_bytes < mmap.PAGESIZE:
+    if total_size % page_size:
+        raise ValueError("Host pool must be page aligned.")
+    if max_chunk_bytes < page_size:
         raise ValueError("Host registration chunks must span at least one page.")
 
     tensors: list[tuple[int, int, int]] = []
@@ -60,14 +63,14 @@ def host_registration_ranges(
             last_block = min(num_blocks, (min(upper, end) - start) // block_bytes)
             if first_block > last_block:
                 continue
-            divisor = math.gcd(block_bytes, mmap.PAGESIZE)
+            divisor = math.gcd(block_bytes, page_size)
             if start % divisor:
                 continue
-            period = mmap.PAGESIZE // divisor
+            period = page_size // divisor
             if period == 1:
                 residue = 0
             else:
-                # Find block boundaries that are also OS-page boundaries.
+                # Find block boundaries that are also backing-page boundaries.
                 residue = (
                     (-start // divisor) * pow(block_bytes // divisor, -1, period)
                 ) % period
@@ -77,7 +80,7 @@ def host_registration_ranges(
                 best = candidate if best is None else max(best, candidate)
 
         if upper >= tensor_start:
-            candidate = upper // mmap.PAGESIZE * mmap.PAGESIZE
+            candidate = upper // page_size * page_size
             if candidate >= tensor_start and candidate > lower:
                 best = candidate if best is None else max(best, candidate)
         return best
@@ -88,7 +91,7 @@ def host_registration_ranges(
         end = last_safe_boundary(start, start + max_chunk_bytes)
         if end is None:
             raise ValueError(
-                "A host block is too large for the registration chunk limit."
+                "No block and page boundary fits the registration chunk limit."
             )
         ranges.append((start, end))
         start = end
