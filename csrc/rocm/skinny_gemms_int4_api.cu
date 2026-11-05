@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+//
 // Entry point of the int4 skinny GEMM. The kernels are instantiated one unit
 // per N_in (see skinny_gemms_int4_n<n>.cu); this unit only dispatches, so it
 // includes the declaration header rather than the kernel header.

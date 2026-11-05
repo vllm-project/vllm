@@ -8,7 +8,6 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 
-#include <stdexcept>
 #include <algorithm>
 #include <type_traits>
 #include <utility>  // std::in_range
@@ -37,7 +36,9 @@ static constexpr int get_lds_size_int4() { return 64 * 1024; }
 static constexpr int kInt4KAlign = 16;
 
 // Host-side twin of __HIP__GFX115X__, for the tuple choices the dispatch makes.
-static bool on_gfx115x_int4() {
+// inline, not static: the five N_in units then share one cached answer, as they
+// did when this was a single translation unit.
+inline bool on_gfx115x_int4() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     return std::string(dprops->gcnArchName).find("gfx115") != std::string::npos;
@@ -46,7 +47,7 @@ static bool on_gfx115x_int4() {
 }
 
 // Callers check it before on_gfx115x_int4(), which matches gfx1151 too.
-static bool on_gfx1151_int4() {
+inline bool on_gfx1151_int4() {
   static const bool result = [] {
     const auto* dprops = at::cuda::getCurrentDeviceProperties();
     return std::string(dprops->gcnArchName).find("gfx1151") !=
@@ -912,10 +913,8 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   auto M_in = in_a.size(0);
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
-  // Internal guard: the API unit dispatches on N_in, so this only fires if a
-  // future caller reaches the wrong instantiation.
-  TORCH_CHECK(N_in == N, "wvSplitK_int4_g_impl<", N,
-              "> called with N_in=", N_in);
+  // Internal tripwire: the API unit derives N from the same in_b.size(0).
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(N_in == N);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
