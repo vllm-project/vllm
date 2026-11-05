@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -23,6 +23,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
 
 logger = init_logger(__name__)
 
@@ -315,6 +320,28 @@ class FusedMoEQuantConfig:
     @property
     def is_block_quantized(self) -> bool:
         return self.block_shape is not None
+
+    def act_scale_is_tensor_wide(self, scale: torch.Tensor | None) -> bool:
+        """Whether ``scale`` is a runtime-reduced, tensor-wide act scale.
+
+        Only native fp8/int8 per-tensor quantization derives its scale from
+        every element of the activation, so only that scheme is affected by
+        rows that hold no route (e.g. ``PaddedStandard`` padding) and must be
+        masked out of the reduction. Per-token and block scales are row-local,
+        and a static scale does not depend on the data at all.
+
+        Args:
+            scale: Configured a1 or a2 activation scale.
+
+        Returns:
+            True if the scale has to be computed over routed rows only.
+
+        """
+        return (
+            scale is None
+            and self.is_per_tensor
+            and (self.use_fp8_w8a8 or self.use_int8_w8a8)
+        )
 
     @property
     def a1_scale(self) -> torch.Tensor | None:
@@ -1067,10 +1094,6 @@ class FusedMoEParallelConfig:
         )
 
     @property
-    def use_batched_activation_format(self):
-        return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
-
-    @property
     def needs_round_robin_routing_tables(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
@@ -1436,6 +1459,29 @@ class FusedMoEConfig:
             raise NotImplementedError(
                 "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
             )
+
+    @property
+    def use_batched_activation_format(self):
+        return self.activation_format.is_batched
+
+    @property
+    def activation_format(self) -> "FusedMoEActivationFormat":
+        """The all2all activation format."""
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+
+        conf = self.moe_parallel_config
+        if (
+            conf.use_deepep_ll_kernels
+            or conf.use_nixl_ep_kernels
+            or self.moe_backend == "batched_triton"
+        ):
+            return FusedMoEActivationFormat.BatchedExperts
+        elif conf.use_deepep_v2_kernels:
+            return FusedMoEActivationFormat.PaddedStandard
+        else:
+            return FusedMoEActivationFormat.Standard
 
     @property
     def is_act_and_mul(self) -> bool:

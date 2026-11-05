@@ -76,11 +76,7 @@ def select_w4a8_moe_backend(
             )
         backends = [backend_map[config.moe_backend]]
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     reasons = []
     for backend in backends:
