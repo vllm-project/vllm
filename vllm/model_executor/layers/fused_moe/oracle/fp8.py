@@ -624,22 +624,12 @@ def convert_to_fp8_moe_kernel_format(
     elif fp8_backend == Fp8MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
-        # Online quantization has not installed the quantized tensors yet.
-        scale_name = (
-            "weight_scale_inv"
-            if hasattr(layer, "w13_weight_scale_inv")
-            else "weight_scale"
+        scale_name = stage_moe_weights_for_humming(
+            layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
-        for prefix, weight, scale, input_scale in (
-            ("w13", w13, w13_scale, w13_input_scale),
-            ("w2", w2, w2_scale, w2_input_scale),
-        ):
-            replace_parameter(layer, f"{prefix}_weight", weight)
-            replace_parameter(layer, f"{prefix}_{scale_name}", scale)
-            if input_scale is not None:
-                replace_parameter(layer, f"{prefix}_input_scale", input_scale)
 
         convert_to_humming_moe_kernel_format(
             layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)

@@ -21,9 +21,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
-
-with contextlib.suppress(ImportError):
-    import vllm._qutlass_C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
@@ -241,7 +238,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        """Import CUDA kernel extensions (_C_stable_libtorch)."""
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
@@ -250,8 +247,6 @@ class CudaPlatformBase(Platform):
             )
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        with contextlib.suppress(ImportError):
-            import vllm._qutlass_C  # noqa: F401
 
     @classmethod
     def check_runner_kv_caches_multi_layer(cls) -> None:
@@ -702,7 +697,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     @cache
-    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+    def is_integrated_gpu(cls, device_id: int | None = 0) -> bool:
         return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod

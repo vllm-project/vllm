@@ -1451,9 +1451,6 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
-    # Only the 1-stage kernel has a size- and rank-independent reduction order.
-    os.environ["VLLM_CUSTOM_ALLREDUCE_ALGO"] = "1stage"
-
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
     if current_platform.is_rocm():
