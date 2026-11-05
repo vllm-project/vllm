@@ -2049,8 +2049,7 @@ class MooncakeStoreWorker:
             assert isinstance(v, torch.Tensor | list)
             return [v] if isinstance(v, torch.Tensor) else v
 
-        assert self.cache_config.num_gpu_blocks is not None
-        self.num_blocks = self.cache_config.num_gpu_blocks
+        self.num_blocks = self._kv_cache_config.num_blocks
         use_group_regions = self._kv_cache_config.hisparse_host_num_blocks is not None
 
         if not use_group_regions:

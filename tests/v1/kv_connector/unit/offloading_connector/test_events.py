@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -47,6 +49,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.request import Request
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
@@ -351,6 +354,93 @@ def test_take_events_forwards_locality_to_remove():
     assert len(events) == 1
     assert isinstance(events[0], BlockRemoved)
     assert events[0].locality == "LOCAL"
+
+
+@pytest.mark.parametrize("record_snapshot", [False, True])
+def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[1], group_config.group_idx)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker()
+    tracker.num_hash_lookahead_tokens = 5
+    tracker.on_new_request(context, request, (group_config,))
+    if record_snapshot:
+        tracker.record_store(request, group_config, 0, key)
+        # Reuse the existing snapshot instead of rebuilding from the request.
+        tracker._pending_event_metadata[key].token_ids = ()
+    request_ref = weakref.ref(request)
+    del request
+    gc.collect()
+    assert request_ref() is None
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key],
+                medium=Medium.CPU,
+                removed=False,
+                removal_expected=True,
+                req_context=context,
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert stored.token_ids == ([] if record_snapshot else list(range(1, 9)))
+    assert stored.block_size == 4
+    assert stored.lookahead_token_ids == [
+        list(range(5, 10)),
+        list(range(9, 14)),
+    ]
+    assert key in tracker._pending_event_metadata
+
+    [removed] = tracker.take_events(
+        [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
+    )
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert key not in tracker._pending_event_metadata
+
+
+def test_mamba_store_uses_request_context():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[3], group_config.group_idx)
+    context.set_offload_key_position(key, 16)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(block_hashes[3])]
+    assert stored.parent_block_hash == _wire_hash(block_hashes[1])
+    assert stored.token_ids == []
+    assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 
 
 def test_take_events_publishes_routable_block_stored():
@@ -720,7 +810,10 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
     primary.complete_store([key], ctx, success=success)
-    events = list(tracker.take_events(primary.take_events()))
+    raw_events = list(primary.take_events())
+    if success:
+        assert raw_events[0].removal_expected
+    events = list(tracker.take_events(raw_events))
     if success:
         assert primary.lookup(key, ctx) is LookupResult.HIT
         assert len(events) == 1 and isinstance(events[0], BlockStored)

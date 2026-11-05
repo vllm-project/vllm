@@ -22,6 +22,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
+from vllm.v1.token_buffer import TokenIdsView
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -335,20 +336,18 @@ class StructuredOutputManager:
                     return ConstraintBounds(end.offset, constraint_start)
                 return ConstraintBounds(constraint_start, constraint_start)
 
-        # Fallback: the grammar starts after the end token.
-        # TODO: Build a read-only Sequence view over all_token_ids
-        # instead of copying the entire all_token_ids into input_ids.
+        # Fallback: the grammar starts after the end token. A view, not a copy,
+        # of all_token_ids: most parsers don't read it every step.
         if spec_tokens_committed:
             if not spec_tokens or not reasoner.is_reasoning_end_streaming(
                 request.all_token_ids, spec_tokens
             ):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
 
-            input_ids = request.all_token_ids.copy()
+            input_ids = TokenIdsView(request._all_token_ids)
             delta_ids = list(spec_tokens)
         else:
-            input_ids = request.all_token_ids.copy()
-            input_ids.extend(spec_tokens)
+            input_ids = TokenIdsView(request._all_token_ids, spec_tokens)
             if not reasoner.is_reasoning_end_streaming(input_ids, spec_tokens):
                 return ConstraintBounds(num_spec_tokens + 1, num_spec_tokens + 1)
             delta_ids = list(spec_tokens)
