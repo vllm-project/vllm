@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_swiglustep_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -86,6 +87,27 @@ class TrtLlmBf16ExpertsBase:
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.gemm1_activation_params: dict[str, torch.Tensor] = {}
+        if moe_config.activation == MoEActivation.SWIGLUSTEP:
+            if any(
+                value is not None
+                for value in (
+                    quant_config.gemm1_alpha,
+                    quant_config.gemm1_beta,
+                    moe_config.swiglu_alpha,
+                    moe_config.swiglu_beta,
+                )
+            ):
+                raise ValueError("SWIGLUSTEP does not support swiglu alpha/beta")
+            limit = quant_config.gemm1_clamp_limit
+            if limit is None:
+                limit = moe_config.swiglu_limit
+            self.gemm1_activation_params["gemm1_clamp_limit"] = torch.full(
+                (self.local_num_experts,),
+                7.0 if limit is None else float(limit),
+                dtype=torch.float32,
+                device=moe_config.device,
+            )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -116,7 +138,8 @@ class TrtLlmBf16ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU (gated) and RELU^2 (non-gated) activations."""
+        if activation == MoEActivation.SWIGLUSTEP:
+            return has_flashinfer_swiglustep_activation()
         return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
@@ -205,6 +228,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         from flashinfer.fused_moe import WeightLayout
 
         topk_ids = topk_ids.to(dtype=torch.int32)
+        defer = self._uses_post_gemm2_hook(topk_ids.shape[0])
 
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=(topk_ids, topk_weights),
@@ -222,9 +246,21 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             routing_method_type=1,  # not used
             use_shuffled_weight=True,
             weight_layout=WeightLayout.BlockMajorK,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
+            **self.gemm1_activation_params,
         )
+        if defer:
+            self._run_post_gemm2_hook(
+                convert_flashinfer_moe_output(
+                    result,
+                    do_finalize=False,
+                    num_tokens=topk_ids.shape[0],
+                    top_k=topk_ids.size(1),
+                ),
+                output,
+            )
+            return
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
 
@@ -277,12 +313,13 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert self._supports_activation(activation)
 
         num_tokens = hidden_states.shape[0]
+        hooked = self._uses_post_gemm2_hook(num_tokens)
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        defer = hooked or self.moe_config.should_defer_moe_finalize(num_tokens)
 
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
@@ -303,6 +340,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
             do_finalize=not defer,
+            **self.gemm1_activation_params,
         )
         routed_output = convert_flashinfer_moe_output(
             flashinfer_output,
@@ -310,4 +348,6 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             num_tokens=num_tokens,
             top_k=self.topk,
         )
+        if hooked:
+            return self._run_post_gemm2_hook(routed_output)
         return routed_output

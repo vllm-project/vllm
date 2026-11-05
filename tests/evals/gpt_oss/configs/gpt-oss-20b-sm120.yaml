@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 model_name: "openai/gpt-oss-20b"
+# DGX Spark's GPU memory is unified with system RAM, and free memory on the CI
+# Spark varies by a few GiB around the 0.92 request (111.95 GiB), so the default
+# utilization can fail the startup check. 0.6 leaves plenty of headroom. The
+# MI355 GPQA step runs the same models-spark.txt and picks this up too, so
+# don't tune it for Spark alone.
+server_args: "--gpu-memory-utilization 0.6"
 metric_threshold: 0.568
 reasoning_effort: "low"

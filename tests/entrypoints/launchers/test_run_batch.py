@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter
+from starlette.responses import StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -21,6 +24,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.launchers import run_batch as run_batch_module
 from vllm.entrypoints.launchers.run_batch import (
     BatchProgressTracker,
+    BatchRequestInput,
     BatchRequestOutput,
     BatchTranscriptionRequest,
     batch_output_writer,
@@ -31,19 +35,27 @@ from vllm.entrypoints.launchers.run_batch import (
     make_arg_parser,
     make_transcription_wrapper,
     open_batch_input,
+    run_request,
     upload_data,
     url_matches,
     validate_batch,
     validate_run_batch_args,
 )
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
-from vllm.exceptions import VLLMValidationError
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
+from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingResponse,
+    EmbeddingResponseData,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
+from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
 
-CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
+CHAT_MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+EMBEDDING_MODEL_NAME = "vllm-project/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"
@@ -131,6 +143,32 @@ INPUT_BATCH = "\n".join(
                     {"role": "user", "content": "Hello world!"},
                 ],
                 "max_tokens": 1000,
+            },
+        },
+    ]
+)
+
+INPUT_COMPLETIONS_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": "Hello world!",
+                "max_tokens": 10,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "prompt": ["The capital of France is", "One plus one is"],
+                "max_tokens": 10,
             },
         },
     ]
@@ -525,6 +563,52 @@ def test_completions():
             BatchRequestOutput.model_validate_json(line)
 
 
+def test_completions_endpoint():
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        # A chat line rides along: /v1/chat/completions and /v1/completions
+        # share their last URL segment, so each must reach its own handler.
+        chat_line = json.dumps(
+            json.loads(INPUT_BATCH.strip().split("\n")[0]) | {"custom_id": "chat-1"}
+        )
+        input_file.write(INPUT_COMPLETIONS_BATCH + "\n" + chat_line)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                CHAT_MODEL_NAME,
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        outputs = {
+            output.custom_id: output
+            for output in map(
+                BatchRequestOutput.model_validate_json, contents.strip().split("\n")
+            )
+        }
+        assert len(outputs) == 3
+        for output in outputs.values():
+            assert output.error is None
+        assert isinstance(outputs["request-1"].response.body, CompletionResponse)
+        # A list prompt returns one choice per prompt.
+        completion = outputs["request-2"].response.body
+        assert isinstance(completion, CompletionResponse)
+        assert len(completion.choices) == 2
+        assert isinstance(outputs["chat-1"].response.body, ChatCompletionResponse)
+
+
 def test_completions_invalid_input():
     """Ensure that we fail when the input doesn't conform to the openai api."""
     with (
@@ -550,6 +634,46 @@ def test_completions_invalid_input():
         assert proc.returncode != 0, f"{proc=}"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_factory", [JSONResponse, create_json_response])
+async def test_batch_embedding_json_responses(response_factory):
+    expected = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[EmbeddingResponseData(index=0, embedding=[0.25, -0.5])],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    )
+
+    async def handler(request):
+        return response_factory(expected.model_dump())
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.custom_id == request.custom_id
+    assert result.error is None
+    assert result.response is not None
+    assert result.response.status_code == 200
+    assert result.response.body == expected
+
+
+@pytest.mark.asyncio
+async def test_batch_rejects_json_stream():
+    async def handler(request):
+        return StreamingResponse(iter([b"{}"]), media_type="application/json")
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert result.error == "Request must not be sent in stream mode"
+
+
 def test_embeddings():
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
@@ -573,11 +697,26 @@ def test_embeddings():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
-        for line in contents.strip().split("\n"):
-            # Ensure that the output format conforms to the openai api.
-            # Validation should throw if the schema is wrong.
+        outputs = [
             BatchRequestOutput.model_validate_json(line)
+            for line in output_file.read().splitlines()
+        ]
+        assert [output.custom_id for output in outputs] == [
+            "request-1",
+            "request-2",
+            "request-3",
+            "request-4",
+        ]
+        for output in outputs[:3]:
+            assert output.error is None
+            assert output.response is not None
+            assert output.response.status_code == 200
+            assert isinstance(output.response.body, EmbeddingResponse)
+            assert len(output.response.body.data) == 1
+            assert len(output.response.body.data[0].embedding) == 384
+        assert outputs[3].response is not None
+        assert outputs[3].response.status_code == 404
+        assert outputs[3].error is not None
 
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
@@ -992,6 +1131,42 @@ async def test_download_bytes_backslash_bypass():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("is_translation", [False, True])
+@pytest.mark.parametrize(
+    "error, status_code, error_type",
+    [
+        (EngineDeadError(), 500, "InternalServerError"),
+        (RetryableRequestError("Engine is busy"), 503, "ServiceUnavailableError"),
+        (VLLMValidationError("Invalid audio"), 400, "BadRequestError"),
+    ],
+)
+async def test_batch_audio_preserves_handler_error_status(
+    is_translation, error, status_code, error_type
+):
+    operation = "translations" if is_translation else "transcriptions"
+    request = BatchRequestInput(
+        custom_id="audio-error",
+        method="POST",
+        url=f"/v1/audio/{operation}",
+        body={
+            "model": SPEECH_LARGE_MODEL_NAME,
+            "file_url": "data:audio/wav;base64,AA==",
+        },
+    )
+    handler = AsyncMock(side_effect=error)
+    wrapped_handler = make_transcription_wrapper(is_translation)(handler)
+
+    output = await run_request(wrapped_handler, request)
+
+    assert output.response is not None
+    assert output.response.status_code == status_code
+    assert output.error is not None
+    assert output.error.error.code == status_code
+    assert output.error.error.type == error_type
+    handler.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_transcription_wrapper_rejects_oversized_data_url_before_decode(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1175,6 +1350,43 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         pytest.raises(ValueError, match=f"line {bad_line}:"),
     ):
         validate_batch(f)
+
+
+@pytest.mark.asyncio
+async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
+    """Building a TypeAdapter rebuilds its schema, too slow to do per request."""
+    type_adapter = MagicMock(wraps=TypeAdapter)
+    monkeypatch.setattr(run_batch_module, "TypeAdapter", type_adapter)
+
+    fallback_line = json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/unknown",
+            "body": {"model": EMBEDDING_MODEL_NAME, "input": "Hello world!"},
+        }
+    )
+    lines = [
+        *INPUT_EMBEDDING_BATCH.split("\n"),
+        *INPUT_SCORE_BATCH.split("\n"),
+        fallback_line,
+    ]
+    requests = [BatchRequestInput.model_validate_json(line) for line in lines]
+
+    async def handler(_body):
+        error = {"message": "bad", "type": "BadRequestError", "code": 400}
+        return JSONResponse(content={"error": error}, status_code=400)
+
+    output = await run_request(handler, requests[0])
+
+    assert [type(r.body).__name__ for r in requests] == [
+        *["EmbeddingCompletionRequest"] * 4,
+        *["ScoreQueriesDocumentsRequest"] * 2,
+        "EmbeddingCompletionRequest",
+    ]
+    assert isinstance(output.error, ErrorResponse)
+    assert output.response.status_code == 400
+    type_adapter.assert_not_called()
 
 
 @pytest.mark.asyncio

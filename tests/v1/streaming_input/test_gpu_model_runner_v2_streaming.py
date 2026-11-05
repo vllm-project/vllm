@@ -36,6 +36,7 @@ def mock_model_runner_with_req_states():
     runner.model_state = Mock()
     runner.block_tables = Mock()
     runner.lora_state = Mock()
+    runner.draft_tokens_handler = Mock()
     runner.pp_handler = None
     runner.sampler = None
     runner.prompt_logprobs_worker = None
@@ -43,6 +44,7 @@ def mock_model_runner_with_req_states():
     runner.pooling_runner = None
     runner.adaptive_verification = None
     runner.speculative_config = None
+    runner.speculator = None
 
     # Mock staged writes — they use Triton kernels that require GPU
     runner.req_states.apply_staged_writes = Mock()

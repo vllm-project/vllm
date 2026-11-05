@@ -10,15 +10,72 @@ set -euo pipefail
 
 TARGET="${1:-all}"
 case "${TARGET}" in
-  cuda-13-0 | cuda-13-0-ubuntu-24-04 | rocm | rocm72 | xpu | cpu | all) ;;
+  cuda-13-0 | cuda-13-0-efa | rocm | xpu | cpu | all) ;;
   *)
-    echo "Usage: $0 {cuda-13-0|cuda-13-0-ubuntu-24-04|rocm|rocm72|xpu|cpu|all}"
+    echo "Usage: $0 {cuda-13-0|cuda-13-0-efa|rocm|xpu|cpu|all}"
     exit 2
     ;;
 esac
 
 target_enabled() {
   [ "${TARGET}" = "all" ] || [ "${TARGET}" = "$1" ]
+}
+
+# Promote one image family from ECR staging to DockerHub: per-arch tags plus the
+# latest and versioned multi-arch manifests. $1 is the tag suffix shared by both
+# registries: "" for the default CUDA family, else e.g. "-efa".
+publish_image_family() {
+  local suffix="$1" arch
+  local staging="public.ecr.aws/q9t5s3a7/vllm-release-repo"
+  local latest="vllm/vllm-openai:latest${suffix}"
+  local versioned="vllm/vllm-openai:v${RELEASE_VERSION}${suffix}"
+
+  for arch in x86_64 aarch64; do
+    docker pull "${staging}:${COMMIT}-${arch}${suffix}"
+  done
+
+  for arch in x86_64 aarch64; do
+    docker tag "${staging}:${COMMIT}-${arch}${suffix}" "vllm/vllm-openai:latest-${arch}${suffix}"
+    docker tag "${staging}:${COMMIT}-${arch}${suffix}" "vllm/vllm-openai:v${RELEASE_VERSION}-${arch}${suffix}"
+    docker push "vllm/vllm-openai:latest-${arch}${suffix}"
+    docker push "vllm/vllm-openai:v${RELEASE_VERSION}-${arch}${suffix}"
+  done
+
+  docker manifest rm "${latest}" || true
+  docker manifest rm "${versioned}" || true
+  docker manifest create "${latest}" \
+    "vllm/vllm-openai:latest-x86_64${suffix}" \
+    "vllm/vllm-openai:latest-aarch64${suffix}"
+  docker manifest create "${versioned}" \
+    "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64${suffix}" \
+    "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64${suffix}"
+  docker manifest push "${latest}"
+  docker manifest push "${versioned}"
+}
+
+# Publish an opt-in family all-or-nothing, like the CPU images below: skip when
+# neither arch was built, fail on a partial build so it is not silenced.
+publish_optional_family() {
+  local suffix="$1" arch missing=() present=()
+  local staging="public.ecr.aws/q9t5s3a7/vllm-release-repo"
+
+  for arch in x86_64 aarch64; do
+    if docker manifest inspect "${staging}:${COMMIT}-${arch}${suffix}" >/dev/null 2>&1; then
+      present+=("${arch}")
+    else
+      missing+=("${arch}")
+    fi
+  done
+
+  if [ "${#present[@]}" -eq 0 ]; then
+    echo "WARNING: no ${suffix} images found in ECR for ${COMMIT}, skipping the ${suffix} publish"
+  elif [ "${#missing[@]}" -eq 0 ]; then
+    publish_image_family "${suffix}"
+  else
+    echo "ERROR: partial ${suffix} build (present: ${present[*]}; missing: ${missing[*]})." >&2
+    echo "       Refusing to publish to avoid per-arch and multi-arch tags disagreeing." >&2
+    exit 1
+  fi
 }
 
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version --default "" | sed 's/^v//')
@@ -41,25 +98,7 @@ aws ecr-public get-login-password --region us-east-1 | \
 # ---- CUDA (default: 13.0) ----
 
 if target_enabled cuda-13-0; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" vllm/vllm-openai:latest-x86_64
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
-  docker push vllm/vllm-openai:latest-x86_64
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" vllm/vllm-openai:latest-aarch64
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-  docker push vllm/vllm-openai:latest-aarch64
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-
-  docker manifest rm vllm/vllm-openai:latest || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}" || true
-  docker manifest create vllm/vllm-openai:latest vllm/vllm-openai:latest-x86_64 vllm/vllm-openai:latest-aarch64
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64"
-  docker manifest push vllm/vllm-openai:latest
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}"
+  publish_image_family ""
 
   ZSTD_DIGEST=$(docker buildx imagetools inspect \
     "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64" \
@@ -69,60 +108,46 @@ if target_enabled cuda-13-0; then
     "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-zstd"
 fi
 
-# ---- Ubuntu 24.04 (CUDA 13.0) ----
+# ---- AWS EFA variant (docker/Dockerfile.efa) ----
+# No cu134 entry: Rubin CUDA 13.4 is nightly-only and is not promoted to
+# DockerHub for the base variant either.
 
-if target_enabled cuda-13-0-ubuntu-24-04; then
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404"
-  docker pull "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-x86_64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404"
-
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker tag "public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-aarch64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker push vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker push "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-
-  docker manifest rm vllm/vllm-openai:latest-ubuntu2404 || true
-  docker manifest rm "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" || true
-  docker manifest create vllm/vllm-openai:latest-ubuntu2404 vllm/vllm-openai:latest-x86_64-ubuntu2404 vllm/vllm-openai:latest-aarch64-ubuntu2404
-  docker manifest create "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-ubuntu2404" "vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-ubuntu2404"
-  docker manifest push vllm/vllm-openai:latest-ubuntu2404
-  docker manifest push "vllm/vllm-openai:v${RELEASE_VERSION}-ubuntu2404"
+if target_enabled cuda-13-0-efa; then
+  publish_optional_family "-efa"
 fi
 
 # ---- ROCm ----
-# Each ROCm stack is identified by its base Dockerfile (see rocm/stack.sh). The
-# default stack also owns the plain :latest / :v<ver> tags.
+# Copied from ECR (publish.sh). The default stack (rocm) also owns the plain :latest / :v<ver> tags.
+
+# pin_rocm <ref>  — <ref>@<digest>, so what was checked is what is published
+pin_rocm() {
+  local d
+  d=$(docker buildx imagetools inspect "$1" | awk '$1 == "Digest:" { print $2; exit }')
+  [[ $d =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "cannot resolve the digest of $1" >&2; return 1; }
+  echo "$1@$d"
+}
 
 publish_rocm_stack() {
-  local base_dockerfile="$1" default="$2" suffix
-  (
-    # shellcheck source=.buildkite/scripts/rocm/stack.sh
-    source .buildkite/scripts/rocm/stack.sh "$base_dockerfile"
-    local suffixes=("-${ROCM_STACK_VARIANT}")
-    [[ "$default" == "1" ]] && suffixes=("" "-${ROCM_STACK_VARIANT}")
-    docker pull "$ROCM_STACK_ECR_IMAGE"
-    docker pull "$ROCM_STACK_ECR_BASE"
-    for suffix in "${suffixes[@]}"; do
-      for tag in "latest${suffix}" "v${RELEASE_VERSION}${suffix}"; do
-        docker tag "$ROCM_STACK_ECR_IMAGE" "vllm/vllm-openai-rocm:${tag}"
-        docker tag "$ROCM_STACK_ECR_BASE" "vllm/vllm-openai-rocm:${tag}-base"
-        docker push "vllm/vllm-openai-rocm:${tag}"
-        docker push "vllm/vllm-openai-rocm:${tag}-base"
-      done
-    done
-  )
+  local v s sfx img base ver ecr=public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT} hub=vllm/vllm-openai-rocm
+  v=$(buildkite-agent meta-data get "rocm-$1-variant")
+  img=$(pin_rocm "$ecr-$v")
+  base=$(pin_rocm "$ecr-$v-base")
+  # Another build of this commit (e.g. a branch push) may have retagged it with its own version.
+  ver=$(docker buildx imagetools inspect "$img" \
+    --format '{{index .Image.Config.Labels "org.opencontainers.image.version"}}')
+  if [[ ${ver%%+*} != "$RELEASE_VERSION" ]]; then
+    echo "ERROR: $img is version '$ver', not $RELEASE_VERSION" >&2
+    exit 1
+  fi
+  sfx=("-$v"); if [[ $1 == rocm ]]; then sfx+=(""); fi
+  for s in "${sfx[@]}"; do
+    docker buildx imagetools create -t "$hub:latest$s" -t "$hub:v${RELEASE_VERSION}$s" "$img"
+    docker buildx imagetools create -t "$hub:latest$s-base" -t "$hub:v${RELEASE_VERSION}$s-base" "$base"
+  done
 }
 
 if target_enabled rocm; then
-  publish_rocm_stack docker/Dockerfile.rocm_base 1
-fi
-
-if target_enabled rocm72; then
-  publish_rocm_stack docker/Dockerfile.rocm_72_base 0
+  publish_rocm_stack rocm
 fi
 
 # ---- XPU ----

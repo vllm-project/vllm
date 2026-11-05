@@ -1,138 +1,160 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for MiniMax-M3 VL ``max_long_side_pixel`` resize support.
+"""Unit tests for MiniMax-M3 VL preprocessing (sglang-aligned size spec).
 
-These exercise the vendored processor directly (no checkpoint / GPU needed), so
-they validate the long-side resize spec and the resulting prompt-token counts
-deterministically.
+These exercise the vendored processor directly (no checkpoint / GPU needed) and
+pin the ``compute_aligned_size`` / ``resolve_max_long_side_pixel`` contract
+against the sglang reference algorithm
+(``python/sglang/srt/multimodal/processors/minimax_m3_vl.py``).
 """
 
 import pytest
 import torch
 
 from vllm.transformers_utils.processors.minimax_m3 import (
-    IMAGE_MAX_TOTAL_PIXELS,
     MIN_SHORT_SIDE_PIXEL,
-    VIDEO_MAX_TOTAL_PIXELS,
     MiniMaxM3VLImageProcessor,
     MiniMaxM3VLVideoProcessor,
-    smart_resize,
+    compute_aligned_size,
+    resolve_max_long_side_pixel,
 )
 
-# Long sides are multiples of patch_size*merge_size (28) so the rounding is
-# exact and the expected token counts are unambiguous.
-LONG_SIDES = [252, 504, 1008]
+FACTOR = 28  # patch_size * merge_size
+PATCH_SIZE = 14
 MERGE2 = 2**2  # merge_size ** 2
 
-
-def _image_tokens(grid_thw) -> int:
-    g = list(grid_thw)
-    return int(g[0] * g[1] * g[2]) // MERGE2
-
-
-# --------------------------------------------------------------------------- #
-# smart_resize: the long-side spec (a) shrink / (b) enlarge / (c) hard cap
-# --------------------------------------------------------------------------- #
-def test_smart_resize_long_side_shrink():
-    # (a) long side exceeds the cap -> shrink so the long side equals the cap.
-    h, w = smart_resize(
-        2048, 1024, factor=28, max_long_side_pixel=1008, max_total_pixels=10**9
-    )
-    assert max(h, w) == 1008
-    assert (h, w) == (1008, 504)  # aspect ratio preserved
+# detail -> max_long_side_pixel, per the size spec.
+IMAGE_DETAIL_CAPS = {"low": 672, "auto": 2016, "high": 3584}
+VIDEO_DETAIL_CAPS = {"low": 504, "auto": 672, "high": 2188}
 
 
-def test_smart_resize_short_side_enlarge():
-    # (b) long side within the cap but short side below the floor -> enlarge so
-    # the short side reaches min_short_side_pixel.
-    h, w = smart_resize(
-        200, 40, factor=28, max_long_side_pixel=1008, max_total_pixels=10**9
-    )
-    assert min(h, w) == MIN_SHORT_SIDE_PIXEL  # 112
-
-
-def test_smart_resize_total_pixels_raises():
-    # (c) still over the area cap after resizing -> raise instead of inferring.
-    with pytest.raises(ValueError, match="max_total_pixels"):
-        smart_resize(
-            5000,
-            5000,
-            factor=28,
-            max_long_side_pixel=4000,
-            max_total_pixels=IMAGE_MAX_TOTAL_PIXELS,
-        )
-
-
-def test_smart_resize_backward_compatible_area_bound():
-    # Without max_long_side_pixel the original Qwen-style area bound is used.
-    assert smart_resize(2048, 2048, factor=28, max_pixels=451584) == (672, 672)
+def _merged_tokens(grid_thw) -> int:
+    return int(grid_thw.prod()) // MERGE2
 
 
 # --------------------------------------------------------------------------- #
-# Image processor: monotonic prompt-token counts for 252 < 504 < 1008
+# compute_aligned_size: floor layers / ceil-align / long-side cap
 # --------------------------------------------------------------------------- #
-def test_image_tokens_increase_with_max_long_side_pixel():
+def test_compute_aligned_size_enlarges_short_side():
+    # (200, 40) hits both floors: area 8000 < 168**2 scales to (376, 76); the
+    # short-side floor then scales by 168/76, where ceil(76 * 168/76) = 169
+    # (float overshoot) aligns up to 196, and 832 aligns up to 840.
+    h, w = compute_aligned_size(200, 40, FACTOR, max_long_side_pixel=1008)
+    assert (h, w) == (840, 196)
+    assert h % FACTOR == 0 and w % FACTOR == 0
+
+
+def test_compute_aligned_size_shrinks_over_cap_isotropically():
+    # Long side 2048 ceil-aligns to 2072 > cap -> integer aspect-ratio
+    # scale-back to (1008, 504), already factor-aligned.
+    h, w = compute_aligned_size(2048, 1024, FACTOR, max_long_side_pixel=1008)
+    assert (h, w) == (1008, 504)
+
+
+def test_compute_aligned_size_rejects_extreme_aspect_ratio():
+    with pytest.raises(ValueError, match="aspect ratio"):
+        compute_aligned_size(20001, 100, FACTOR, max_long_side_pixel=1008)
+
+
+# --------------------------------------------------------------------------- #
+# resolve_max_long_side_pixel: detail tiers and explicit override
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [("low", 672), ("auto", 2016), ("high", 3584), (None, 2016)],
+)
+def test_resolve_max_long_side_pixel_image(detail, expected):
+    assert resolve_max_long_side_pixel(detail, None, modality="image") == expected
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [("low", 504), ("auto", 672), ("high", 2188), (None, 672)],
+)
+def test_resolve_max_long_side_pixel_video(detail, expected):
+    assert resolve_max_long_side_pixel(detail, None, modality="video") == expected
+
+
+@pytest.mark.parametrize("modality", ["image", "video"])
+def test_resolve_max_long_side_pixel_explicit_overrides_detail(modality):
+    assert resolve_max_long_side_pixel("high", 1024, modality=modality) == 1024
+    assert resolve_max_long_side_pixel(None, 1024, modality=modality) == 1024
+
+
+def test_processor_default_caps():
+    assert MIN_SHORT_SIDE_PIXEL == 168
+    assert MiniMaxM3VLImageProcessor().max_long_side_pixel == 2016
+    assert MiniMaxM3VLVideoProcessor().max_long_side_pixel == 672
+
+
+# --------------------------------------------------------------------------- #
+# Image processor end to end: grid/patch-counter consistency and token counts
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def square_image() -> torch.Tensor:
+    # 4096x4096 so detail="high" actually reaches the 3584 cap (a 2048x2048
+    # image only ceil-aligns to 2072 and never upscales).
+    g = torch.Generator().manual_seed(0)
+    return torch.randint(0, 255, (3, 4096, 4096), dtype=torch.uint8, generator=g)
+
+
+@pytest.mark.parametrize("detail", ["low", "auto", "high"])
+def test_image_preprocess_grid_matches_patch_counter(detail, square_image):
     proc = MiniMaxM3VLImageProcessor()
-    counts = []
-    for long_side in LONG_SIDES:
-        patches = proc.get_number_of_image_patches(
-            2048, 2048, images_kwargs={"max_long_side_pixel": long_side}
-        )
-        counts.append(patches // MERGE2)
+    cap = IMAGE_DETAIL_CAPS[detail]
 
-    assert counts == [81, 324, 1296]
+    out = proc.preprocess([square_image], detail=detail, return_tensors="pt")
+    grid_thw = out["image_grid_thw"][0]
+
+    patches = proc.get_number_of_image_patches(
+        4096, 4096, images_kwargs={"max_long_side_pixel": cap}
+    )
+    assert int(grid_thw.prod()) == patches
+
+    # Cross-check against compute_aligned_size: the square long side lands
+    # exactly on the cap, giving (cap / patch_size) ** 2 patches.
+    assert compute_aligned_size(4096, 4096, FACTOR, max_long_side_pixel=cap) == (
+        cap,
+        cap,
+    )
+    assert patches == (cap // PATCH_SIZE) ** 2
+
+
+def test_image_tokens_increase_with_detail(square_image):
+    proc = MiniMaxM3VLImageProcessor()
+    counts = [
+        _merged_tokens(
+            proc.preprocess([square_image], detail=detail, return_tensors="pt")[
+                "image_grid_thw"
+            ][0]
+        )
+        for detail in ("low", "auto", "high")
+    ]
+    # (cap / patch_size) ** 2 / merge_size**2 for caps 672 / 2016 / 3584.
+    assert counts == [576, 5184, 16384]
     assert counts[0] < counts[1] < counts[2]
 
 
-def test_image_processor_defaults_match_spec():
+def test_image_preprocess_explicit_cap_overrides_detail(square_image):
     proc = MiniMaxM3VLImageProcessor()
-    assert proc.max_long_side_pixel is None  # opt-in
-    assert proc.min_short_side_pixel == MIN_SHORT_SIDE_PIXEL
-    assert proc.max_total_pixels == IMAGE_MAX_TOTAL_PIXELS
-
-
-def test_image_preprocess_pipeline_monotonic():
-    proc = MiniMaxM3VLImageProcessor()
-    image = torch.randint(0, 255, (3, 2048, 2048), dtype=torch.uint8)
-    counts = []
-    for long_side in LONG_SIDES:
-        out = proc.preprocess(
-            [image],
-            do_resize=True,
-            max_long_side_pixel=long_side,
-            return_tensors="pt",
-        )
-        counts.append(_image_tokens(out["image_grid_thw"][0]))
-    assert counts == [81, 324, 1296]
+    out = proc.preprocess(
+        [square_image],
+        detail="high",
+        max_long_side_pixel=672,
+        return_tensors="pt",
+    )
+    # The explicit cap wins over detail="high" -> same grid as detail="low".
+    assert _merged_tokens(out["image_grid_thw"][0]) == 576
 
 
 # --------------------------------------------------------------------------- #
-# Video processor: same monotonic behavior + volumetric (w*h*frames) cap
+# Video processor: volumetric (frames * h * w) cap raises unconditionally
 # --------------------------------------------------------------------------- #
-def test_video_tokens_increase_with_max_long_side_pixel():
+def test_video_volume_cap_raises_by_default():
     proc = MiniMaxM3VLVideoProcessor()
-    assert proc.max_total_pixels == VIDEO_MAX_TOTAL_PIXELS
-    video = torch.randint(0, 255, (4, 3, 2048, 2048), dtype=torch.uint8)
-    counts = []
-    for long_side in LONG_SIDES:
-        out = proc.preprocess(
-            videos=[video],
-            do_resize=True,
-            max_long_side_pixel=long_side,
-            return_tensors="pt",
-        )
-        counts.append(_image_tokens(out["video_grid_thw"][0]))
-    assert counts[0] < counts[1] < counts[2]
-
-
-def test_video_volumetric_cap_raises():
-    proc = MiniMaxM3VLVideoProcessor()
-    # 400 frames at a 1008-long-side square: 1008*1008*400 >> 301,056,000.
-    video = torch.randint(0, 255, (400, 3, 2048, 2048), dtype=torch.uint8)
+    # Default cap 672: 700 frames * 672 * 672 = 316,108,800 > 301,056,000.
+    # The volumetric cap raises even without any detail/max_long_side_pixel
+    # override.
+    video = torch.randint(0, 255, (700, 3, 672, 672), dtype=torch.uint8)
     with pytest.raises(ValueError, match="max_total_pixels"):
-        proc.preprocess(
-            videos=[video],
-            do_resize=True,
-            max_long_side_pixel=1008,
-            return_tensors="pt",
-        )
+        proc.preprocess(videos=[video], return_tensors="pt")
