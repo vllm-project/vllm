@@ -352,7 +352,7 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     # load_state_dict skips the weight loaders and the non-persistent decode
     # conv weight; vLLM's loaders end with this hook.
     for layer in layers.values():
-        layer.process_weights_after_loading(vllm_config.model_config.dtype)
+        layer.process_weights_after_loading()
     # get_state_shape orients the conv state by the process-wide layout: (dim,
     # state_len) per slot when dim-first (DS), else (state_len, dim) (SD).
     conv_shape, state_shape = stock.get_state_shape()

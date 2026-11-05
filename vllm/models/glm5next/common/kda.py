@@ -474,7 +474,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             weight.view(3, self.local_projection_size, self.conv_size).transpose(1, 2)
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         # The weight cache IPC loader maps the buffer the daemon already filled.
         if not is_weights_pre_processed():
             self._copy_decode_conv1d_weight()
