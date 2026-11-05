@@ -168,9 +168,9 @@ Key files involved in the nightly wheel mechanism:
 Docker publishing and nightly cleanup use the Buildkite secret
 `VLLM_DOCKERHUB_TOKEN`, mapped to `RELEASE_DOCKERHUB_TOKEN` on publishing
 steps. Use Docker Hub organization username `vllm` with an organization access
-token granting Image Push and Tag Admin on `vllm/vllm-openai`,
+token granting Image Push, Image Delete, and Tag Admin on `vllm/vllm-openai`,
 `vllm/vllm-openai-cpu`, `vllm/vllm-openai-rocm`, and `vllm/vllm-openai-xpu`.
-Tag Admin is needed to list and delete old nightly tags. Do not grant
+Tag Admin and Image Delete are needed for nightly tag cleanup. Do not grant
 organization administration or access to unrelated repositories.
 
 Store the secret in the dedicated vLLM Release cluster and restrict its access
