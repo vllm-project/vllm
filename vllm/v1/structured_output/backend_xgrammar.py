@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +102,12 @@ class XgrammarBackend(StructuredOutputBackend):
         # Some work on xgrammar side has been started:
         # https://github.com/mlc-ai/xgrammar/issues/832
 
+        # Kept for the uncached retry compilers (xgrammar#957, see compile_grammar).
+        self._tokenizer_info = tokenizer_info
+        self._full_vocab_tokenizer_info = full_vocab_tokenizer_info
+        self._uncached_compilers: tuple | None = None
+        self._uncached_lock = threading.Lock()
+
         # Compiler for json. Must NOT accept any special tokens.
         self.compiler = self._create_compiler(tokenizer_info)
 
@@ -142,34 +149,87 @@ class XgrammarBackend(StructuredOutputBackend):
         # and will be available in next release.
         # So, remove this comment once xgrammar updates to v0.2.9
         separators = (",", ":") if self.disable_any_whitespace else None
+        try:
+            ctx = self._compile_ctx(
+                self.compiler,
+                self.full_vocab_compiler,
+                request_type,
+                grammar_spec,
+                separators,
+            )
+        except RuntimeError as e:
+            # xgrammar 0.2.8 fails some cached compiles with
+            # "grammar_functor.cc ... per_rule_fsm_hashes ... Check failed"
+            # (bounded regex repetitions, e.g. JSON-schema `pattern` with
+            # {m,n}); the same grammar compiles without the compiler cache.
+            # Fixed upstream in xgrammar#963 (after 0.2.8). Retry this one
+            # request with uncached compilers instead of failing it.
+            if not vllm.envs.VLLM_XGRAMMAR_UNCACHED_RETRY:
+                raise
+            logger.warning(
+                "xgrammar cached compile failed (%s); retrying without the "
+                "compiler cache (xgrammar#957)",
+                str(e).strip().splitlines()[0][:200]
+                if str(e).strip()
+                else type(e).__name__,
+            )
+            compiler, full_vocab_compiler = self._get_uncached_compilers()
+            ctx = self._compile_ctx(
+                compiler, full_vocab_compiler, request_type, grammar_spec, separators
+            )
+
+        return self._make_grammar(ctx, stop_token_ids)
+
+    def _get_uncached_compilers(self) -> tuple:
+        with self._uncached_lock:
+            if self._uncached_compilers is None:
+                compiler = self._create_compiler(
+                    self._tokenizer_info, cache_enabled=False
+                )
+                full = (
+                    compiler
+                    if self._full_vocab_tokenizer_info is None
+                    else self._create_compiler(
+                        self._full_vocab_tokenizer_info, cache_enabled=False
+                    )
+                )
+                self._uncached_compilers = (compiler, full)
+            return self._uncached_compilers
+
+    def _compile_ctx(
+        self,
+        compiler: "xgr.GrammarCompiler",
+        full_vocab_compiler: "xgr.GrammarCompiler",
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        separators,
+    ):
         if request_type == StructuredOutputOptions.JSON:
-            ctx = self.compiler.compile_json_schema(
+            return compiler.compile_json_schema(
                 grammar_spec,
                 any_whitespace=not self.disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
-            ctx = self.compiler.compile_json_schema(
+            return compiler.compile_json_schema(
                 '{"type": "object"}',
                 any_whitespace=not self.disable_any_whitespace,
                 separators=separators,
             )
         elif request_type == StructuredOutputOptions.GRAMMAR:
             if grammar_is_likely_lark(grammar_spec):
-                ctx = self.full_vocab_compiler.compile_lark(grammar_spec)
+                return full_vocab_compiler.compile_lark(grammar_spec)
             else:
-                ctx = self.compiler.compile_grammar(grammar_spec)
+                return compiler.compile_grammar(grammar_spec)
         elif request_type == StructuredOutputOptions.REGEX:
-            ctx = compile_regex_with_timeout(
-                self.compiler.compile_regex,
+            return compile_regex_with_timeout(
+                compiler.compile_regex,
                 grammar_spec,
             )
         elif request_type == StructuredOutputOptions.CHOICE:
             # xgrammar has no choice type. Python request validation rewrites
             # `choice` into this grammar, but other frontends send it as is.
-            ctx = self.compiler.compile_grammar(
-                choice_as_grammar(json.loads(grammar_spec))
-            )
+            return compiler.compile_grammar(choice_as_grammar(json.loads(grammar_spec)))
         elif request_type == StructuredOutputOptions.STRUCTURAL_TAG:
             s_tag = json.loads(grammar_spec)
             if "structures" in s_tag:
@@ -182,11 +242,11 @@ class XgrammarBackend(StructuredOutputBackend):
                     )
                     for s in s_tag["structures"]
                 ]
-                ctx = self.full_vocab_compiler.compile_structural_tag(
+                return full_vocab_compiler.compile_structural_tag(
                     tags, s_tag["triggers"]
                 )
             else:
-                ctx = self.full_vocab_compiler.compile_structural_tag(grammar_spec)
+                return full_vocab_compiler.compile_structural_tag(grammar_spec)
         else:
             logger.error(
                 "Validation should have already occurred. Please file an issue."
@@ -195,6 +255,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 f"grammar is not of valid supported types. ({request_type!s})"
             )
 
+    def _make_grammar(self, ctx, stop_token_ids):
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
                 ctx,
@@ -215,11 +276,12 @@ class XgrammarBackend(StructuredOutputBackend):
     @staticmethod
     def _create_compiler(
         tokenizer_info: "xgr.TokenizerInfo",
+        cache_enabled: bool = True,
     ) -> "xgr.GrammarCompiler":
         return xgr.GrammarCompiler(
             tokenizer_info,
             max_threads=8,
-            cache_enabled=True,
+            cache_enabled=cache_enabled,
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
