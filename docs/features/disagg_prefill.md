@@ -66,6 +66,14 @@ single child with the longest hit. The scheduler may shorten that hit before
 allocation. Async requests wait for every selected source, including after
 cancellation or a transfer failure.
 
+In both default and range-aware loading, with
+`kv_load_failure_policy="recompute"`, a request-level receive failure
+disables further external KV lookups for that request. After all selected
+sources finish, it resumes local computation instead of repeatedly loading a
+source whose lookup still reports a hit. Other requests may still load remote
+KV, and local prefix-cache reuse remains enabled. The `"fail"` policy still
+terminates the failed request.
+
 ### Hybrid cache and bounded replay
 
 Ranges describe full-attention token positions in the complete allocated block
@@ -80,6 +88,9 @@ When the scheduler shortens a prefix, it finalizes the plan at that endpoint
 before allocation through `get_loaded_kv_cache_group_ids_for_prefix`. Window
 sources are selected again for the new endpoint. The default implementation of
 this hook preserves existing connectors' loaded-group declarations.
+For a shortened single-source fallback, SWA groups additionally require a
+complete window reported at the adopted endpoint; an original-endpoint group
+declaration alone must not suppress bounded replay.
 
 Missing complete windows, legacy hybrid loaders, recurrent state, or incompatible
 load modes use the existing single-source load interface instead. Single-source
