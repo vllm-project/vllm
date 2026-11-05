@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
@@ -693,11 +694,23 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.indexer is None or not current_platform.enable_multi_stream_overlap(
-            self.aux_stream_list, get_forward_context().attn_metadata
+        if (
+            self.indexer is None
+            or not current_platform.enable_multi_stream_overlap(
+                self.aux_stream_list, get_forward_context().attn_metadata
+            )
+            or (
+                hidden_states.shape[0] > envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD
+                and torch.cuda.is_current_stream_capturing()
+            )
         ):
             # Sequential fallback: no forks outside the capture region, where
-            # HIP event sync is unreliable.
+            # HIP event sync is unreliable. Graphs above the multi-stream GEMM
+            # token threshold do not fork either, as in
+            # _run_parallel_input_projections. The eager profile run still
+            # forks at any size: it creates the side streams' hipBLASLt
+            # handles, which hipblasLtCreate cannot do inside a graph capture
+            # (it deadlocks), and it accounts their memory.
             aux_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
