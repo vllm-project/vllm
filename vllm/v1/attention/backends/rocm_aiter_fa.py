@@ -56,6 +56,10 @@ _PAGED_MTP_MODE = os.environ.get("VLLM_ROCM_AITER_FA_PAGED_MTP", "0").strip().lo
 # Full-attention extends with an fp8 cache: one fp8 paged kernel over context + new
 # tokens instead of the 32K-slice gather/dequant + varlen + merge loop.
 _FP8_CTX_ATTN = os.environ.get("VLLM_ROCM_MUSE_FP8_CTX_ATTN", "0") == "1"
+# Full-attention spec-decode verify batches of at least _FP8_DECODE_MIN_SEQS requests
+# take the same kernel at decode width; smaller batches stay on paged_attention_v1.
+_FP8_DECODE_ATTN = os.environ.get("VLLM_ROCM_MUSE_FP8_DECODE_ATTN", "0") == "1"
+_FP8_DECODE_MIN_SEQS = int(os.environ.get("VLLM_ROCM_MUSE_FP8_DECODE_MIN_SEQS", "8"))
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 
@@ -1038,9 +1042,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.use_fp8_paged_extend = (
-            _FP8_CTX_ATTN
-            and is_quantized_kv_cache(kv_cache_dtype)
+        fp8_paged = (
+            is_quantized_kv_cache(kv_cache_dtype)
             and self.sliding_window[0] == -1
             and alibi_slopes is None
             and sinks is None
@@ -1048,6 +1051,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
             and fp8_paged_extend_supported(num_heads, num_kv_heads, head_size)
         )
+        self.use_fp8_paged_extend = _FP8_CTX_ATTN and fp8_paged
+        self.use_fp8_paged_decode = _FP8_DECODE_ATTN and fp8_paged
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
@@ -1450,7 +1455,31 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # Single-token SWA decode on the trimmed block table is ~2x
             # faster on the paged kernel than unified_attention.
             decode_md = attn_metadata.decode_metadata
-
+            if (
+                self.use_fp8_paged_decode
+                and num_decodes >= _FP8_DECODE_MIN_SEQS
+                and decode_max_query_len > 1
+                and decode_md.uniform_query_len
+                and attn_metadata.causal
+            ):
+                q_fp8, q_descale = _per_tensor_quant_rows(query[:num_decode_tokens])
+                fp8_paged_extend_attention(
+                    q_fp8,
+                    key_cache,
+                    value_cache,
+                    output[:num_decode_tokens],
+                    attn_metadata.query_start_loc[: num_decodes + 1],
+                    attn_metadata.seq_lens[:num_decodes],
+                    attn_metadata.block_table[:num_decodes],
+                    decode_max_query_len,
+                    attn_metadata.max_seq_len,
+                    q_descale,
+                    layer._k_scale,
+                    layer._v_scale,
+                    self.scale,
+                    decode=True,
+                )
+                return output
             # paged_attention_v1 takes uniform multi-token decodes (spec-decode
             # verify batches) as one mtp launch: at 150K context it is ~10x the
             # triton unified kernel on fp8 caches.

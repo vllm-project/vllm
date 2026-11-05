@@ -19,6 +19,9 @@ from vllm.utils.platform_utils import num_compute_units
 _P_SHIFT = 8.0
 _L_COLS = 32
 _BLOCK_M = 256
+# Verify-width decode: 8 tokens x GQA 8 rows a program, context split a fixed 64 ways.
+_DECODE_BLOCK_M = 64
+_DECODE_NSPLIT = 64
 _BLOCK_N = 128
 
 
@@ -210,7 +213,8 @@ def _fp8_paged_extend_kernel(
 
     l_i = tl.sum(l_acc, 1) * (1.0 / L_COLS)
     if NSPLIT == 1:
-        o = acc * (tl.load(VDesc) / l_i)[:, None]
+        # Rows with no visible key (padded graph slots) write zeros, not NaN.
+        o = acc * (tl.load(VDesc) / tl.where(l_i > 0, l_i, 1.0))[:, None]
         tl.store(
             Out
             + (q_start + tok).to(tl.int64)[:, None] * o_s0
@@ -250,6 +254,7 @@ def _merge_splits_kernel(
     m = tl.full([H], float("-inf"), tl.float32)
     for sp in tl.static_range(NSPLIT):
         m = tl.maximum(m, tl.load(PartL + (sp * num_tokens + t) * H + h))
+    m = tl.where(m == float("-inf"), 0.0, m)
     w_sum = tl.zeros([H], tl.float32)
     o = tl.zeros([H, D], tl.float32)
     for sp in tl.static_range(NSPLIT):
@@ -257,7 +262,7 @@ def _merge_splits_kernel(
         w = tl.math.exp2(tl.load(PartL + row) - m)
         w_sum += w
         o += w[:, None] * tl.load(PartO + row[:, None] * D + d[None, :])
-    o = o * (tl.load(VDesc) / w_sum)[:, None]
+    o = o * (tl.load(VDesc) / tl.where(w_sum > 0, w_sum, 1.0))[:, None]
     tl.store(
         Out + t * o_s0 + h[:, None] * o_s1 + d[None, :], o.to(Out.dtype.element_ty)
     )
@@ -271,7 +276,7 @@ def fp8_paged_extend_supported(
         num_heads % num_kv_heads == 0
         and num_heads & (num_heads - 1) == 0
         and gqa & (gqa - 1) == 0
-        and gqa <= _BLOCK_M
+        and gqa <= _DECODE_BLOCK_M
         and head_size == 64
     )
 
@@ -300,6 +305,7 @@ def fp8_paged_extend_attention(
     k_descale: torch.Tensor,
     v_descale: torch.Tensor,
     softmax_scale: float,
+    decode: bool = False,
 ) -> torch.Tensor:
     """Causal attention of each request's new tokens over its whole KV sequence.
 
@@ -318,6 +324,9 @@ def fp8_paged_extend_attention(
         k_descale: Per-tensor fp32 scale of k_cache, one element.
         v_descale: Per-tensor fp32 scale of v_cache, one element.
         softmax_scale: Scale applied to q.k.
+        decode: Uniform multi-token decode (spec-decode verify): 64-row tiles,
+            2 warps and a fixed split count, so the launch depends only on the
+            batch size and can be captured in a CUDA graph.
 
     Returns:
         out.
@@ -326,9 +335,13 @@ def fp8_paged_extend_attention(
     num_tokens, num_heads, head_size = q.shape
     num_kv_heads = k_cache.shape[2]
     gqa = num_heads // num_kv_heads
-    block_t = _BLOCK_M // gqa
+    block_m, num_warps = (_DECODE_BLOCK_M, 2) if decode else (_BLOCK_M, 8)
+    block_t = block_m // gqa
     q_blocks = triton.cdiv(max_query_len, block_t)
-    nsplit = _num_splits(q_blocks * seq_lens.numel() * num_kv_heads, max_seq_len)
+    if decode:
+        nsplit = _DECODE_NSPLIT
+    else:
+        nsplit = _num_splits(q_blocks * seq_lens.numel() * num_kv_heads, max_seq_len)
     if nsplit > 1:
         part_o = torch.empty(
             nsplit,
@@ -379,7 +392,7 @@ def fp8_paged_extend_attention(
         P_SHIFT=_P_SHIFT,
         L_COLS=_L_COLS,
         NSPLIT=nsplit,
-        num_warps=8,
+        num_warps=num_warps,
         num_stages=3,
         waves_per_eu=2,
         matrix_instr_nonkdim=32,
