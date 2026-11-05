@@ -873,6 +873,7 @@ def _resample_kernel(
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
     SKIP_MASKED_BLOCKS: tl.constexpr,
+    SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -939,9 +940,13 @@ def _resample_kernel(
             & (temp != 0.0)
         )
 
-    if is_bonus or not is_valid_rejected_draft:
+    if is_bonus or not is_valid_rejected_draft or SYNTHETIC_MODE:
         # Bonus token (no rejections) or -1 placeholder token. In either case,
         # directly use the target logits.
+        # Synthetic acceptance rejects by a seeded coin flip rather than p/q,
+        # so max(p - q, 0) is not the right conditional there: it drops the
+        # mass the draft agrees with and over-samples what the draft
+        # under-weights. Sample from the target instead.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
@@ -1442,6 +1447,7 @@ def rejection_sample(
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
         SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
     )
 
     # Insert the resampled tokens into the output sampled.
