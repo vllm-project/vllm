@@ -14,6 +14,7 @@ from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
     AllReduceFusionPass,
     RocmAiterAllReduceFusionPass,
+    _force_two_shot_for_fp16_mnnvl,
     _fused_ar_workspace_hidden_dim,
     _select_flashinfer_allreduce_use_oneshot,
 )
@@ -79,6 +80,50 @@ def test_select_flashinfer_allreduce_use_oneshot(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("workspace_backend", "dtype", "selected", "expected"),
+    [
+        ("mnnvl", torch.float16, None, False),  # AUTO -> forced two-shot
+        ("mnnvl", torch.float16, True, False),  # one-shot -> forced two-shot
+        ("mnnvl", torch.float16, False, False),  # already two-shot
+        ("mnnvl", torch.bfloat16, None, None),  # bf16 cannot overflow
+        ("mnnvl", torch.bfloat16, True, True),
+        ("trtllm", torch.float16, None, None),  # trtllm squares in fp32
+        ("trtllm", torch.float16, True, True),
+    ],
+)
+def test_force_two_shot_for_fp16_mnnvl(
+    workspace_backend: str,
+    dtype: torch.dtype,
+    selected: bool | None,
+    expected: bool | None,
+):
+    """flashinfer#6817: fp16 MNNVL one-shot fused AR+RMSNorm overflows and
+    silently zeroes tokens; vLLM must force the (correct) two-shot kernel."""
+    assert _force_two_shot_for_fp16_mnnvl(workspace_backend, dtype, selected) is expected
+
+
+@pytest.mark.parametrize(
+    ("installed", "expected"),
+    [
+        ("0.7.2.post1", False),  # the version vLLM pins: has the bug
+        ("0.7.3", True),  # first release with flashinfer#6818
+        ("0.8.0", True),
+    ],
+)
+def test_flashinfer_mnnvl_oneshot_fp16_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+    installed: str,
+    expected: bool,
+):
+    import importlib.metadata
+
+    import vllm.compilation.passes.fusion.allreduce_rms_fusion as arf
+
+    monkeypatch.setattr(importlib.metadata, "version", lambda _: installed)
+    assert arf._flashinfer_mnnvl_oneshot_fp16_fixed() is expected
 
 
 def _make_workspace_hidden_config(

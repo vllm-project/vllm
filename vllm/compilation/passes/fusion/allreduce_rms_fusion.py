@@ -176,6 +176,49 @@ def _select_flashinfer_allreduce_use_oneshot(
     return max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
 
 
+def _force_two_shot_for_fp16_mnnvl(
+    workspace_backend: str,
+    dtype: torch.dtype,
+    use_oneshot: bool | None,
+) -> bool | None:
+    """Work around flashinfer-ai/flashinfer#6817.
+
+    The MNNVL *one-shot* fused all-reduce + RMSNorm kernel squares activations
+    in the input dtype. With fp16, any activation |x| > 256 overflows to inf,
+    rsqrt(inf) == 0, and the whole token's norm output is silently zeroed,
+    which corrupts generation (e.g. Qwen2/Qwen2.5 fp16 models emit `!!!!!`).
+    The MNNVL two-shot kernel and the trtllm backend convert to fp32 before
+    squaring and are correct; bf16 cannot overflow. Fixed upstream by
+    flashinfer-ai/flashinfer#6818, first released in flashinfer v0.7.3
+    (2026-11-04); vLLM still pins 0.7.2.post1, so force the two-shot kernel
+    for fp16 on MNNVL while the pinned flashinfer is older than 0.7.3.
+    """
+    if (
+        workspace_backend == "mnnvl"
+        and dtype == torch.float16
+        and use_oneshot is not False
+    ):
+        return False
+    return use_oneshot
+
+
+def _flashinfer_mnnvl_oneshot_fp16_fixed() -> bool:
+    """Whether the installed flashinfer includes flashinfer-ai/flashinfer#6818
+    (fp32 square in the MNNVL one-shot fused all-reduce + RMSNorm kernel),
+    first released in flashinfer v0.7.3."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        from packaging.version import Version
+
+        return Version(version("flashinfer-python")) >= Version("0.7.3")
+    except PackageNotFoundError:
+        return False
+
+
+_FLASHINFER_MNNVL_ONESHOT_FP16_FIXED = _flashinfer_mnnvl_oneshot_fp16_fixed()
+
+
 if flashinfer_comm is not None:
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         destroy_fi_ar_workspace,
@@ -246,6 +289,12 @@ if flashinfer_comm is not None:
             world_size,
             current_tensor_size,
         )
+        if not _FLASHINFER_MNNVL_ONESHOT_FP16_FIXED:
+            use_oneshot = _force_two_shot_for_fp16_mnnvl(
+                workspace.backend,
+                allreduce_in.dtype,
+                use_oneshot,
+            )
         assert flashinfer_comm is not None
         if norm_out is None:
             norm_out = allreduce_in
