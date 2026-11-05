@@ -15,12 +15,13 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
-use futures::{Stream, StreamExt as _, pin_mut};
+use futures::{Stream, StreamExt as _, future, pin_mut};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_llm::WeightVersionSpan;
 use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, SampledDelta, TextOutputStream,
@@ -42,11 +43,12 @@ use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionResponse, CompletionSseChunk, CompletionStreamChoice,
     CompletionStreamResponse,
 };
+use crate::routes::openai::utils::choices::{ChoiceChunk, merge_choice_chunk_streams};
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::usage::ContinuousUsage;
-use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
-use crate::routes::output_log::{LoggedOutput, log_output};
+use crate::routes::openai::utils::{validate_max_output_tokens, validate_n_limit};
+use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context, sse_response, unix_timestamp};
 
@@ -82,12 +84,31 @@ pub async fn completions(
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = validate_n_limit(prepared.n.get(), state.api_server_options.max_n_sequences)
+    {
+        return error.into_response();
+    }
     if let Err(error) = validate_max_output_tokens(
         "max_tokens",
         prepared.text_request.sampling_params.max_tokens,
-        state.chat.engine_core_client().max_model_len(),
+        state.llm().info().max_model_len,
     ) {
         return error.into_response();
+    }
+    // Without a tokenizer, string-form logprobs would key every candidate by
+    // the same empty token string. The token-ID form needs no tokenizer.
+    if !state.chat.text().has_tokenizer()
+        && prepared.options.requested_logprobs.is_some()
+        && !prepared
+            .options
+            .return_tokens_as_token_ids
+            .unwrap_or(state.api_server_options.default_return_tokens_as_token_ids)
+    {
+        return text_submit_error(
+            "invalid completion request",
+            vllm_text::Error::TokenizerUnavailable,
+        )
+        .into_response();
     }
     let request_span = tracing::info_span!(
         "completions",
@@ -97,48 +118,95 @@ pub async fn completions(
 
     let created = unix_timestamp();
     let api_server_options = state.api_server_options;
-    let text_stream = match state
+    let text_streams = match state
         .chat
         .text()
-        .generate(prepared.text_request)
+        .generate_n(prepared.text_request, prepared.n)
         .instrument(request_span.clone())
         .await
     {
-        Ok(stream) => stream,
+        Ok(streams) => streams,
         Err(error) => {
             return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
     if stream {
-        let chunk_stream = completion_chunk_stream(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        );
-        let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
+        let chunk_streams = text_streams
+            .into_iter()
+            .map(|text_stream| {
+                completion_chunk_stream(
+                    text_stream,
+                    prepared.request_id.clone(),
+                    prepared.response_model.clone(),
+                    created,
+                    api_server_options,
+                    prepared.options.clone(),
+                )
+            })
+            .collect();
+        let sse_stream = completion_sse_stream(merge_choice_chunk_streams(chunk_streams))
+            .instrument(request_span);
 
         sse_response(sse_stream, api_server_options.sse_keep_alive_interval)
     } else {
-        let response = match collect_completion(
-            text_stream,
-            prepared.request_id,
-            prepared.response_model,
-            created,
-            api_server_options,
-            prepared.options,
-        )
+        let responses = future::try_join_all(text_streams.into_iter().map(|text_stream| {
+            collect_completion(
+                text_stream,
+                prepared.request_id.clone(),
+                prepared.response_model.clone(),
+                created,
+                api_server_options,
+                prepared.options.clone(),
+            )
+        }))
         .instrument(request_span.clone())
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => return error.into_response(),
-        };
+        .await;
+        match responses {
+            Ok(responses) => Json(merge_choice_responses(responses)).into_response(),
+            Err(error) => error.into_response(),
+        }
+    }
+}
 
-        Json(response).into_response()
+/// Merge the responses of a request's choices, in index order, like Python's
+/// non-streaming response for `n > 1`: the prompt-level fields come from the
+/// first choice, usage adds up per [`Usage::add_choice`], and per-request
+/// metrics, which describe a single sample, are reported only for `n = 1`.
+fn merge_choice_responses(responses: Vec<CompletionResponse>) -> CompletionResponse {
+    let mut responses = responses.into_iter();
+    let mut merged = responses.next().expect("a request has at least one choice");
+    for (index, response) in (1..).zip(responses) {
+        merged.metrics = None;
+        if let (Some(usage), Some(other)) = (&mut merged.usage, &response.usage) {
+            usage.add_choice(other);
+        }
+        merged.choices.extend(response.choices.into_iter().map(|mut choice| {
+            choice.index = index;
+            choice
+        }));
+    }
+    merged
+}
+
+impl ChoiceChunk for CompletionSseChunk {
+    fn set_choice_index(&mut self, index: u32) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        for choice in &mut chunk.choices {
+            choice.index = index;
+        }
+    }
+
+    fn final_usage_mut(&mut self) -> Option<&mut Usage> {
+        match self {
+            Self::Chunk(_) => None,
+            Self::Usage(chunk) => chunk.usage.as_mut(),
+        }
+    }
+
+    fn clear_metrics(&mut self) {
+        let (Self::Chunk(chunk) | Self::Usage(chunk)) = self;
+        chunk.metrics = None;
     }
 }
 
@@ -166,6 +234,7 @@ async fn collect_completion(
         include_prompt_logprobs,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
 ) -> Result<CompletionResponse, ApiError> {
     let return_tokens_as_token_ids =
@@ -183,7 +252,7 @@ async fn collect_completion(
         let prompt = echo.as_deref().ok_or_else(|| {
             server_error!("prompt-only completion response missing echoed prompt")
         })?;
-        Some(prompt_only_logprobs_to_openai(
+        Some(echoed_prompt_logprobs_to_openai(
             collected.prompt_logprobs.as_ref(),
             prompt,
             collected.prompt_token_ids.as_ref(),
@@ -215,7 +284,7 @@ async fn collect_completion(
         } else {
             (collected.text.as_str(), collected.token_ids.as_slice())
         };
-        log_output(
+        log_outputs.log(
             LoggedOutput::Response,
             output,
             Some(token_ids),
@@ -233,7 +302,7 @@ async fn collect_completion(
         collected.usage.output_token_count,
         collected.spec_decode_metrics,
     );
-    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
+    let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None);
 
     if enable_log_requests {
         info!(
@@ -260,7 +329,7 @@ async fn collect_completion(
             token_ids: return_token_ids.then(|| collected.token_ids.clone()),
             prompt_token_ids: return_token_ids.then(|| collected.prompt_token_ids.to_vec()),
             routed_experts: None,
-            weight_versions: None,
+            weight_versions: collected.weight_versions.filter(|_| return_weight_versions),
         }],
         service_tier: None,
         usage: Some(usage),
@@ -296,6 +365,7 @@ async fn completion_chunk_stream(
         include_prompt_logprobs: _,
         return_token_ids,
         return_tokens_as_token_ids,
+        return_weight_versions,
     }: ResponseOptions,
     mut y: TryYielder<CompletionSseChunk, ApiError>,
 ) -> Result<(), ApiError> {
@@ -345,9 +415,10 @@ async fn completion_chunk_stream(
                 debug!("completion stream started");
                 continuous_usage.set_prompt_tokens(prompt_token_ids.len());
                 if let Some(prompt) = echo.as_ref() {
-                    next_text_offset = text_len(prompt);
-                    let logprobs = if prompt_only && requested_logprobs.is_some() {
-                        Some(prompt_only_logprobs_to_openai(
+                    // Like Python, the echoed prompt carries its own logprobs, and
+                    // generated tokens continue from the offsets they report.
+                    let logprobs = if requested_logprobs.is_some() {
+                        Some(echoed_prompt_logprobs_to_openai(
                             prompt_logprobs.as_ref(),
                             prompt,
                             prompt_token_ids.as_ref(),
@@ -356,6 +427,10 @@ async fn completion_chunk_stream(
                     } else {
                         None
                     };
+                    next_text_offset = logprobs
+                        .as_ref()
+                        .and_then(text_end_offset)
+                        .unwrap_or_else(|| text_len(prompt));
                     let mut chunk = delta_chunk(&envelope, prompt.clone(), logprobs);
                     if return_token_ids && first_chunk {
                         if let Some(choice) = chunk.choices.first_mut() {
@@ -407,9 +482,10 @@ async fn completion_chunk_stream(
                             &envelope,
                             finished.finish_reason,
                             finished.kv_transfer_params.map(|value| *value),
+                            finished.weight_versions.filter(|_| return_weight_versions),
                         )?;
                         if let Some(output_log) = output_log.take() {
-                            log_output(
+                            log_outputs.log(
                                 LoggedOutput::StreamComplete,
                                 &output_log,
                                 None,
@@ -430,6 +506,7 @@ async fn completion_chunk_stream(
                                 Usage::from_token_usage(
                                     finished.usage,
                                     enable_prompt_tokens_details,
+                                    None,
                                 ),
                                 metrics,
                             )))
@@ -459,7 +536,7 @@ async fn completion_chunk_stream(
                 if let Some(output_log) = output_log.as_mut() {
                     output_log.push_str(&delta);
                     if log_outputs.logs_deltas() && !delta.is_empty() {
-                        log_output(
+                        log_outputs.log(
                             LoggedOutput::StreamDelta,
                             &delta,
                             Some(&token_ids),
@@ -496,9 +573,10 @@ async fn completion_chunk_stream(
                         &envelope,
                         finished.finish_reason,
                         finished.kv_transfer_params.map(|value| *value),
+                        finished.weight_versions.filter(|_| return_weight_versions),
                     )?;
                     if let Some(output_log) = output_log.take() {
-                        log_output(
+                        log_outputs.log(
                             LoggedOutput::StreamComplete,
                             &output_log,
                             None,
@@ -516,7 +594,11 @@ async fn completion_chunk_stream(
                         );
                         y.yield_ok(CompletionSseChunk::Usage(usage_chunk(
                             &envelope,
-                            Usage::from_token_usage(finished.usage, enable_prompt_tokens_details),
+                            Usage::from_token_usage(
+                                finished.usage,
+                                enable_prompt_tokens_details,
+                                None,
+                            ),
                             metrics,
                         )))
                         .await;
@@ -555,6 +637,7 @@ fn final_chunk(
     envelope: &Arc<StreamResponseEnvelope>,
     finish_reason: FinishReason,
     kv_transfer_params: Option<Value>,
+    weight_versions: Option<Vec<WeightVersionSpan>>,
 ) -> Result<CompletionStreamResponse, ApiError> {
     let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
     let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
@@ -563,6 +646,7 @@ fn final_chunk(
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
         stop_reason,
+        weight_versions,
         ..Default::default()
     });
     chunk.kv_transfer_params = kv_transfer_params;
@@ -585,7 +669,7 @@ fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
     serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
-fn prompt_only_logprobs_to_openai(
+fn echoed_prompt_logprobs_to_openai(
     prompt_logprobs: Option<&DecodedPromptLogprobs>,
     prompt: &str,
     prompt_token_ids: &[u32],
@@ -611,7 +695,7 @@ fn prompt_only_logprobs_to_openai(
     }
 
     Err(server_error!(
-        "prompt-only completion requested logprobs but generation returned none"
+        "echoed completion prompt requested logprobs but generation returned none"
     ))
 }
 
@@ -725,7 +809,7 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_stop_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::stop_eos(), None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         assert_eq!(chunk.choices[0].text, "");
@@ -733,21 +817,21 @@ mod tests {
 
     #[test]
     fn final_chunk_maps_length_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Length, None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("length"));
     }
 
     #[test]
     fn final_chunk_maps_abort_finish_reason() {
-        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None)
+        let chunk = final_chunk(&stream_envelope(), FinishReason::Abort, None, None)
             .expect("finish reason valid");
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
     }
 
     #[test]
     fn final_chunk_rejects_error_finish_reason() {
-        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None).is_err());
+        assert!(final_chunk(&stream_envelope(), FinishReason::Error(None), None, None).is_err());
     }
 
     #[tokio::test]
@@ -779,6 +863,7 @@ mod tests {
                             first_token_ts: 10.5,
                             last_token_ts: 10.5,
                         },
+                        weight_versions: None,
                     }),
                 )),
             ])
@@ -914,6 +999,7 @@ mod tests {
                         first_token_ts: 10.5,
                         last_token_ts: 11.0,
                     },
+                    weight_versions: None,
                 }),
             )),
         ]);
@@ -1068,6 +1154,7 @@ mod tests {
                         ec_transfer_params: None,
                         sampling_mask: None,
                         spec_decode_metrics: None,
+                        weight_versions: None,
                         timestamps: vllm_llm::RequestTimestamps::default(),
                     }),
                 ))
@@ -1123,6 +1210,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1185,6 +1273,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1251,6 +1340,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1306,6 +1396,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1366,6 +1457,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1445,6 +1537,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),
@@ -1522,6 +1615,7 @@ mod tests {
                     ec_transfer_params: None,
                     sampling_mask: None,
                     spec_decode_metrics: None,
+                    weight_versions: None,
                     timestamps: Default::default(),
                 }),
             )),

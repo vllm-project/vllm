@@ -32,8 +32,8 @@ use vllm_engine_core_client::test_utils::{
 };
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::{
-    Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo, GenerateRequest, Llm,
-    WeightVersionSpan,
+    EngineCoreLlm, Error, FinishReason, GenerateOutputStreamExt as _, GeneratePromptInfo,
+    GenerateRequest, WeightVersionSpan,
 };
 use vllm_metrics::METRICS;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -199,7 +199,7 @@ async fn connect_async_llm_with_ipc(
     client_index: u32,
     model_name: &str,
     ipc: &IpcNamespace,
-) -> Llm {
+) -> EngineCoreLlm {
     let client = EngineCoreClient::connect(
         EngineCoreClientConfig::new_single(handshake_address)
             .with_model_name(model_name)
@@ -211,7 +211,7 @@ async fn connect_async_llm_with_ipc(
     )
     .await
     .unwrap();
-    Llm::new(client)
+    EngineCoreLlm::new(client)
 }
 
 fn request_metrics_model_name(prefix: &str) -> String {
@@ -245,7 +245,7 @@ async fn generate_streams_outputs() {
                 assert!(request.request_id.starts_with("req-delta-"));
                 assert_ne!(request.request_id, "req-delta");
                 assert_eq!(request.client_index, 7);
-                assert_eq!(request.prompt_token_ids, Some(vec![11, 22]));
+                assert_eq!(request.prompt_token_ids, Some(vec![11, 22].into()));
 
                 send_outputs(
                     push,
@@ -438,8 +438,8 @@ async fn generate_merges_outputs_by_stream_interval() {
     assert_eq!(
         weight_versions,
         [
-            None,
-            None,
+            Some(vec![span("v7", 0, 1)]),
+            Some(vec![span("v7", 0, 2), span("v8", 2, 5)]),
             Some(vec![span("v7", 0, 2), span("v8", 2, 5), span("v7", 5, 7)])
         ]
     );
@@ -1280,7 +1280,7 @@ async fn generate_without_engine_stats_exports_only_frontend_observed_metrics() 
     )
     .await
     .unwrap();
-    let llm = Llm::new(client);
+    let llm = EngineCoreLlm::new(client);
     let mut request = sample_generate_request("req-no-log-stats", 8);
     request.arrival_time = None;
     request.lora_request = Some(LoraRequest {

@@ -24,7 +24,7 @@ from ...utils import multi_gpu_test
 ATTN_BACKEND = ["ROCM_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 MODELS = [
-    "hmellor/tiny-random-Gemma2ForCausalLM",
+    "vllm-project/tiny-random-Gemma2ForCausalLM",
     "meta-llama/Llama-3.2-1B-Instruct",
 ]
 
@@ -88,7 +88,7 @@ TARGET_TEST_SUITE = _resolve_target_test_suite()
 )
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted."""
-    llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
+    llm = LLM("vllm-project/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails

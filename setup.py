@@ -1118,7 +1118,6 @@ class precompiled_wheel_utils:
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
-                            "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_flashkda_C.abi3.so",
@@ -1596,7 +1595,6 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
-        ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
     # tml-fa4 is copied into an isolated vllm.third_party package.
@@ -1722,7 +1720,7 @@ setup(
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.3.3"],
         "instanttensor": ["instanttensor >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.17.1"],
         "audio": [
             "av",
             "scipy",
