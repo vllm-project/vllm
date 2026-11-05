@@ -33,6 +33,9 @@ class AsyncScheduler(Scheduler):
             # bonus token (num_sampled_tokens_per_step == 0) — only the canvas
             # (spec) tokens.
             cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
+            scheduler_output.has_structured_output_spec_decode |= (
+                request.use_structured_output and cur_num_spec_tokens > 0
+            )
             request.num_output_placeholders += (
                 self.num_sampled_tokens_per_step + cur_num_spec_tokens
             )
