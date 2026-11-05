@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--flashinfer-sampler",
         action="store_true",
-        help="Exercise FlashInfer sampling with deterministic top-k 1 (not argmax).",
+        help="Exercise FlashInfer top-k 1 sampling (ties may differ from greedy).",
     )
     return parser.parse_args()
 

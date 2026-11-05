@@ -105,8 +105,9 @@ To use FlashInfer sampling while keeping vLLM's default attention selection:
   --flashinfer-sampler
 ```
 
-This option uses deterministic top-k 1 with temperature 1 and no per-request
-seed. Ordinary greedy requests bypass FlashInfer's fused sampler even when
+This option uses top-k 1 with temperature 1 and no per-request seed. FlashInfer
+may select any exactly tied maximum, so its output can differ from greedy's
+fixed tie-break. Ordinary greedy requests bypass FlashInfer's fused sampler even when
 the environment flag is enabled. Without the option, the example uses greedy
 generation; `--seed` continues to configure the engine in both modes.
 
@@ -172,9 +173,16 @@ MRV2 and `VLLM_GPU_SYNC_CHECK=error` are required throughout. The main parity,
 batching, preemption and FlashInfer-sampler tests use
 `VLLM_BATCH_INVARIANT=1`. Only the mixed-attention candidate disables batch
 invariance, retaining the same exact-token and per-offset top-5 assertions.
-The sampler comparison uses temperature 1 and top-k 1 without a request seed,
-which remains deterministic while exercising MRV2's real FlashInfer sampling
-path. Backend inspection and GPU profiler traces must confirm FlashInfer
+Only the sampler comparison uses temperature 1 and top-k 1 without a request
+seed to exercise MRV2's real FlashInfer sampling path. A fresh FlashAttention 3
+greedy engine scores every exact token prefix of the FI trajectory. Unique
+maxima must match exactly; different tokens are accepted only if both are
+exactly tied maxima in both score maps, without an epsilon. The original
+top-5 checker still runs at every offset. This tests conditional choices, not
+whole-sequence equality after a tie. All other comparisons retain their exact
+token assertions. Sampler candidate/reference JSON retains the prefixes,
+tokens, raw scores and source/model hashes; a separate parity marker records
+successful checks. Backend inspection and GPU profiler traces must confirm FlashInfer
 kernels actually ran; selecting an environment flag alone is insufficient.
 
 The CI entry point rejects skipped tests, journals failures immediately, bounds

@@ -4,12 +4,23 @@
 import gzip
 import json
 import os
+import subprocess
+import uuid
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 
-from tests.models.ncp_olmo.hf_reference import generate_reference, write_json
+from tests.models.ncp_olmo.hf_reference import (
+    REPO,
+    file_hash,
+    generate_reference,
+    runtime_hashes,
+    write_json,
+)
+from tests.models.ncp_olmo.sampler_reference import check_top1
 from vllm import SamplingParams
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -277,6 +288,83 @@ class NCPBackendProbe:
         }
 
 
+def _check_sampler_same_prefix(vllm_runner, model, kwargs, input_ids, outputs, path):
+    prefixes = [
+        {"prompt_token_ids": ids + output[0][:offset]}
+        for ids, output in zip(input_ids, outputs, strict=True)
+        for offset in range(len(output[0]))
+    ]
+    with vllm_runner(model, **kwargs) as baseline:
+        assert [baseline.llm.get_tokenizer().encode(p) for p in PROMPTS] == input_ids
+        backends = baseline.llm.collective_rpc("ncp_backend_info")
+        assert len(backends) == 1 and not backends[0]["flashinfer_sampler"]
+        assert all(name == "FLASH_ATTN" for _, name in backends[0]["attention"])
+        reference = baseline.llm.generate(
+            prefixes, SamplingParams(temperature=0.0, max_tokens=1, logprobs=5)
+        )
+    steps = []
+    for index, (prompt_index, offset) in enumerate(
+        (p, t) for p, output in enumerate(outputs) for t in range(len(output[0]))
+    ):
+        actual = outputs[prompt_index]
+        result = reference[index]
+        assert result.prompt_token_ids == prefixes[index]["prompt_token_ids"]
+        assert len(result.outputs) == 1
+        expected = result.outputs[0]
+        assert len(expected.token_ids) == 1
+        assert expected.logprobs is not None and len(expected.logprobs) == 1
+        steps.append(
+            {
+                "prompt_index": prompt_index,
+                "offset": offset,
+                "input_ids": result.prompt_token_ids,
+                "reference_token": expected.token_ids[0],
+                "candidate_token": actual[0][offset],
+                "reference_top5": [
+                    [token, value.logprob]
+                    for token, value in expected.logprobs[0].items()
+                ],
+                "candidate_top5": list(actual[2][offset].items()),
+            }
+        )
+    assert len(reference) == len(steps) == 48
+    write_json(
+        path / "sampler-reference.json",
+        {
+            "candidate_sha256": file_hash(path / "sampler-candidate.json"),
+            "backends": backends[0],
+            "steps": steps,
+        },
+    )
+    alternate_ties = 0
+    for step in steps:
+        expected_token, actual_token = step["reference_token"], step["candidate_token"]
+        expected_scores, actual_scores = (
+            dict(step["reference_top5"]),
+            dict(step["candidate_top5"]),
+        )
+        alternate_ties += check_top1(
+            expected_token, actual_token, expected_scores, actual_scores
+        )
+        check_logprobs_close(
+            outputs_0_lst=[([expected_token], "", [expected_scores])],
+            outputs_1_lst=[([actual_token], "", [actual_scores])],
+            name_0="same_prefix_greedy",
+            name_1="flashinfer_sampler",
+            always_check_logprobs=True,
+        )
+    write_json(
+        path / "sampler-parity.json",
+        {
+            "status": "NCP_FLASHINFER_SAME_PREFIX_TOP1_OK",
+            "reference_sha256": file_hash(path / "sampler-reference.json"),
+            "checked_tokens": len(steps),
+            "alternate_exact_ties": alternate_ties,
+            "upstream_topk_checks_all_offsets": True,
+        },
+    )
+
+
 @pytest.mark.parametrize("mode", ["flashinfer-sampler", "mixed-attention"])
 def test_flashinfer_matches_flash_attention(
     vllm_runner, ncp_model_path, monkeypatch, tmp_path, mode
@@ -290,10 +378,14 @@ def test_flashinfer_matches_flash_attention(
         enable_chunked_prefill=True,
         attention_config={"backend": "FLASH_ATTN", "flash_attn_version": 3},
     )
-    with vllm_runner(ncp_model_path, **kwargs) as baseline:
-        reference = baseline.generate_greedy_logprobs(PROMPTS, 16, 5)
+    baseline_kwargs = {
+        **kwargs,
+        "worker_extension_cls": f"{__name__}.NCPBackendProbe",
+    }
 
     if mode == "mixed-attention":
+        with vllm_runner(ncp_model_path, **kwargs) as baseline:
+            reference = baseline.generate_greedy_logprobs(PROMPTS, 16, 5)
         # Native FlashInfer attention does not implement batch invariance.
         # This mixed-backend comparison still requires exact greedy tokens.
         monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
@@ -324,17 +416,79 @@ def test_flashinfer_matches_flash_attention(
             assert ["SlidingWindowSpec", "FLASH_ATTN"] in selected["attention"]
         else:
             assert selected["flashinfer_sampler"]
+            assert all(name == "FLASH_ATTN" for _, name in selected["attention"])
+        if mode == "flashinfer-sampler":
+            input_ids = [candidate.llm.get_tokenizer().encode(p) for p in PROMPTS]
+            write_json(
+                tmp_path / "sampler-request.json",
+                {
+                    "nonce": uuid.uuid4().hex,
+                    "commit": subprocess.check_output(
+                        ["git", "rev-parse", "HEAD"], cwd=REPO, text=True, timeout=10
+                    ).strip(),
+                    "test_sha256": file_hash(Path(__file__)),
+                    "checker_sha256": file_hash(
+                        REPO / "tests/models/ncp_olmo/sampler_reference.py"
+                    ),
+                    "runtime_hashes": runtime_hashes(Path(ncp_model_path)),
+                    "versions": {
+                        name: version(name)
+                        for name in ("torch", "transformers", "flashinfer-python")
+                    },
+                    "gpu": torch.cuda.get_device_name(),
+                    "protocol": {
+                        "temperature": 1.0,
+                        "top_k": 1,
+                        "max_tokens": 16,
+                        "logprobs": 5,
+                        "request_seed": None,
+                        "engine_seed": 0,
+                        "batch_invariant": os.environ["VLLM_BATCH_INVARIANT"],
+                        "gpu_sync_check": os.environ["VLLM_GPU_SYNC_CHECK"],
+                        "model_runner_v2": os.environ["VLLM_USE_V2_MODEL_RUNNER"],
+                    },
+                    "input_ids": input_ids,
+                },
+            )
         candidate.llm.start_profile()
         if mode == "flashinfer-sampler":
-            # top_k=1 is deterministic, but temperature>0 and no per-request
-            # seed make MRV2 execute its fused sampling path.
-            outputs = candidate.generate_w_logprobs(
-                PROMPTS,
+            # No request seed: MRV2 must use FI, which may choose any tied max.
+            results = candidate.llm.generate(
+                [{"prompt_token_ids": ids} for ids in input_ids],
                 SamplingParams(temperature=1.0, top_k=1, max_tokens=16, logprobs=5),
             )
+            assert [result.prompt_token_ids for result in results] == input_ids
+            outputs = []
+            for result in results:
+                assert len(result.outputs) == 1
+                output = result.outputs[0]
+                assert output.logprobs is not None
+                assert len(output.token_ids) == len(output.logprobs) == 16
+                outputs.append(
+                    (
+                        list(output.token_ids),
+                        output.text,
+                        [
+                            {token: value.logprob for token, value in step.items()}
+                            for step in output.logprobs
+                        ],
+                    )
+                )
         else:
             outputs = candidate.generate_greedy_logprobs(PROMPTS, 16, 5)
         candidate.llm.stop_profile()
+    if mode == "flashinfer-sampler":
+        write_json(
+            tmp_path / "sampler-candidate.json",
+            {
+                "request_sha256": file_hash(tmp_path / "sampler-request.json"),
+                "input_ids": input_ids,
+                "outputs": [
+                    (ids, text, [list(step.items()) for step in scores])
+                    for ids, text, scores in outputs
+                ],
+            },
+        )
     traces = list(tmp_path.rglob("*.pt.trace.json.gz"))
     assert traces, "The worker must emit its GPU trace"
     kernel_names = {
@@ -361,4 +515,10 @@ def test_flashinfer_matches_flash_attention(
             "flashinfer_kernels": flashinfer_kernels,
         },
     )
-    _check_all_token_logprobs(reference, outputs)
+    if mode == "flashinfer-sampler":
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+        _check_sampler_same_prefix(
+            vllm_runner, ncp_model_path, baseline_kwargs, input_ids, outputs, tmp_path
+        )
+    else:
+        _check_all_token_logprobs(reference, outputs)
