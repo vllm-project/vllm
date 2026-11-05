@@ -4,7 +4,8 @@
 
 `track_weights_loading` diffs parameter names, so `qkv_proj.weight` counts as
 loaded once any one shard is written. These tests pin the shard-level check
-that closes that gap for `QKVParallelLinear` and `MergedColumnParallelLinear`.
+that closes that gap for `QKVParallelLinear`, `MergedColumnParallelLinear` and
+`MinimaxM3QKVParallelLinearWithIndexer`.
 """
 
 import pytest
@@ -14,6 +15,7 @@ from torch import nn
 from vllm.config import LoadConfig
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    MinimaxM3QKVParallelLinearWithIndexer,
     QKVParallelLinear,
 )
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
@@ -41,6 +43,23 @@ def make_qkv(total_num_heads: int = 2) -> QKVParallelLinear:
 Q = ("weight", shard((2 * HEAD, HIDDEN), "q"))
 K = ("weight", shard((HEAD, HIDDEN), "k"))
 V = ("weight", shard((HEAD, HIDDEN), "v"))
+
+
+def test_minimax_m3_qkv_reports_shards_the_checkpoint_never_filled():
+    layer = MinimaxM3QKVParallelLinearWithIndexer(
+        HIDDEN,
+        HEAD,
+        total_num_heads=2,
+        total_num_kv_heads=1,
+        total_num_index_heads=1,
+        index_head_size=HEAD,
+    )
+    load(layer, Q, K)
+    assert layer.pop_missing_shards() == [
+        "weight.v",
+        "weight.index_q",
+        "weight.index_k",
+    ]
 
 
 def test_qkv_reports_shards_the_checkpoint_never_filled():
