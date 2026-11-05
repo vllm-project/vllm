@@ -783,6 +783,17 @@ def _accepts_parameters(function: Callable, required: set[str]) -> bool:
     )
 
 
+@functools.lru_cache
+def _aiter_paged_mqa_logits() -> Callable | None:
+    # AITER's shape-dispatched entry point (ROCm/aiter#6140): it picks the
+    # Gluon or FlyDSL kernel and its launch knobs from its tuned table.
+    try:
+        from aiter.paged_mqa_logits import paged_mqa_logits
+    except ImportError:
+        return None
+    return paged_mqa_logits
+
+
 def rocm_fp8_paged_mqa_logits(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -854,6 +865,22 @@ def rocm_fp8_paged_mqa_logits(
             (out_logits,) = current_workspace_manager().get_simultaneous(
                 ((batch_size * next_n, max_model_len), torch.float32),
             )
+            preshuffle = block_size > 1 and not _ON_RDNA
+            aiter_paged_mqa_logits = _aiter_paged_mqa_logits()
+            if aiter_paged_mqa_logits is not None:
+                aiter_paged_mqa_logits(
+                    q_fp8,
+                    kv_cache_fp8,
+                    weights,
+                    out_logits,
+                    # AITER versions with this op read the (B, next_n) table.
+                    context_lens,
+                    block_tables,
+                    max_model_len,
+                    Preshuffle=preshuffle,
+                    KVBlockSize=block_size,
+                )
+                return out_logits
             deepgemm_fp8_paged_mqa_logits(
                 q_fp8,
                 kv_cache_fp8,
@@ -863,7 +890,7 @@ def rocm_fp8_paged_mqa_logits(
                 block_tables,
                 max_model_len,
                 ChunkK=256,
-                Preshuffle=block_size > 1 and not _ON_RDNA,
+                Preshuffle=preshuffle,
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
