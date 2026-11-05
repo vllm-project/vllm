@@ -407,7 +407,7 @@ steps:
       # PLE and QSA import conflicting HC registrations in a shared process.
       - pytest -v -s models/qwen4_exp/test_ple.py
 
-- label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
+- label: ":nvidia: (B200) Qwen4 Exp HC and GDN Kernels"
   key: qwen4-exp-hc-kernels-b200
   timeout_in_minutes: 20
   device: b200-k8s
@@ -415,9 +415,20 @@ steps:
   - csrc/qwen4_exp/
   - vllm/models/qwen4_exp/nvidia/hyperconnection.py
   - vllm/models/qwen4_exp/nvidia/ops/hc.py
+  - vllm/models/qwen4_exp/nvidia/gdn_decode/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/fusion/quant_activation.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/utils/mxfp8_utils.py
+  - vllm/model_executor/kernels/linear/mxfp8/
   - tests/models/qwen4_exp/test_hc_ops.py
+  - tests/models/qwen4_exp/test_gdn_norm_quant.py
   commands:
-    - pytest -v -s models/qwen4_exp/test_hc_ops.py
+    - >-
+      pytest -v -s
+      models/qwen4_exp/test_hc_ops.py
+      models/qwen4_exp/test_gdn_norm_quant.py
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
@@ -448,7 +459,9 @@ steps:
   source_file_dependencies:
   - vllm/models/qwen4_exp/
   - vllm/config/compilation.py
+  - vllm/config/parallel.py
   - vllm/v1/attention/backends/short_conv_attn.py
+  - vllm/v1/attention/backends/gdn_attn.py
   - tests/models/qwen4_exp/
   commands:
     - >-
