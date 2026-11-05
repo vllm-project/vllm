@@ -798,6 +798,12 @@ class TestObjStoreConfig:
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
 
+    def test_accelerated_included_only_when_set(self):
+        default = ObjStoreConfig(bucket="b", endpoint_override="ep")
+        assert "accelerated" not in default.to_nixl_params()
+        cfg = ObjStoreConfig(bucket="b", endpoint_override="ep", accelerated="true")
+        assert cfg.to_nixl_params()["accelerated"] == "true"
+
 
 def test_obj_tier_replicated_layout_collapses_mapper_identity():
     """TP=2 and TP=4 replicated configs share the obj FileMapper namespace."""
