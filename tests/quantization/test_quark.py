@@ -1633,7 +1633,7 @@ def test_quark_int8_moe_scale_layout_flags(
     reason="Requires a GPU to launch the INT8 fused_experts kernel",
 )
 def test_quark_int8_static_per_channel_weight_scales() -> None:
-    """Per-channel W13 scales must be indexed by expert *and* output channel.
+    """Per-channel W13/W2 scales must be indexed by expert *and* output channel.
 
     Scaling the channels of an expert that receives tokens must change the
     output, while scaling those of an expert that receives none must not. When
@@ -1687,8 +1687,9 @@ def test_quark_int8_static_per_channel_weight_scales() -> None:
 
     with set_current_vllm_config(VllmConfig()):
 
-        def run(scales: torch.Tensor) -> torch.Tensor:
-            layer.w13_weight_scale = scales
+        def run(w13_scales: torch.Tensor, w2_scales: torch.Tensor) -> torch.Tensor:
+            layer.w13_weight_scale = w13_scales
+            layer.w2_weight_scale = w2_scales
             return fused_experts(
                 hidden_states,
                 w13,
@@ -1698,16 +1699,27 @@ def test_quark_int8_static_per_channel_weight_scales() -> None:
                 quant_config=method.get_fused_moe_quant_config(layer),
             )
 
-        baseline = run(w13_scale.clone())
-        scaled_routed = w13_scale.clone()
-        scaled_routed[routed_expert] *= 4
-        routed_out = run(scaled_routed)
-        scaled_unrouted = w13_scale.clone()
-        scaled_unrouted[unrouted_expert] *= 4
-        unrouted_out = run(scaled_unrouted)
+        baseline = run(w13_scale.clone(), w2_scale.clone())
 
-    assert not torch.equal(baseline, routed_out)
-    torch.testing.assert_close(baseline, unrouted_out, atol=0, rtol=0)
+        def scaled(scales: torch.Tensor, expert: int) -> torch.Tensor:
+            out = scales.clone()
+            out[expert] *= 4
+            return out
+
+        outputs = {
+            "w13": (
+                run(scaled(w13_scale, routed_expert), w2_scale.clone()),
+                run(scaled(w13_scale, unrouted_expert), w2_scale.clone()),
+            ),
+            "w2": (
+                run(w13_scale.clone(), scaled(w2_scale, routed_expert)),
+                run(w13_scale.clone(), scaled(w2_scale, unrouted_expert)),
+            ),
+        }
+
+    for name, (routed_out, unrouted_out) in outputs.items():
+        assert not torch.equal(baseline, routed_out), name
+        torch.testing.assert_close(baseline, unrouted_out, atol=0, rtol=0, msg=name)
 
 
 @pytest.mark.parametrize("tp", [1])
