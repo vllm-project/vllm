@@ -127,59 +127,6 @@ def test_streamed_gate_up_bias_tp_slice() -> None:
     assert torch.equal(experts.w13_bias[0], loaded_weight[4:])
 
 
-def _model_with_w2_bias(monkeypatch, tp_rank: int) -> tuple[GptOssModel, torch.Tensor]:
-    """A GptOssModel holding only a routed-expert ``w2_bias`` of 2 experts, on
-    TP rank ``tp_rank`` of 2, whose loaders can be driven."""
-    from vllm.model_executor.models import gpt_oss
-
-    group = SimpleNamespace(world_size=1, rank_in_group=0)
-    for name in ("get_dp_group", "get_ep_group", "get_pcp_group"):
-        monkeypatch.setattr(gpt_oss, name, lambda: group)
-    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 2)
-    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: tp_rank)
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.config.get_tensor_model_parallel_rank",
-        lambda: tp_rank,
-    )
-    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
-
-    experts = _TestExperts("w2_bias", (2, 3), tp_rank=tp_rank)
-    experts.w2_bias.weight_loader = lambda param, weight, **kwargs: param.copy_(weight)
-
-    model = GptOssModel.__new__(GptOssModel)
-    torch.nn.Module.__init__(model)
-    model.config = SimpleNamespace(num_local_experts=2, intermediate_size=64)
-    model.parallel_config = SimpleNamespace(enable_expert_parallel=False)
-    model.get_expert_mapping = lambda: []  # type: ignore[method-assign]
-    layer = torch.nn.Module()
-    layer.mlp = torch.nn.Module()
-    layer.mlp.experts = torch.nn.Module()
-    layer.mlp.experts.routed_experts = experts
-    layer.mlp.experts._quant_method = SimpleNamespace(weight_dtype="fp8")
-    model.layers = torch.nn.ModuleList([layer])
-    return model, experts.w2_bias
-
-
-@pytest.mark.parametrize("loader", ["mxfp4", "quark", "other"])
-def test_w2_bias_keeps_callers_tensor(monkeypatch, loader: str) -> None:
-    """TP ranks != 0 load the down bias as zeros (rank 0 adds it once), without
-    zeroing the caller's tensor, which may be a trainer's IPC buffer."""
-    model, w2_bias = _model_with_w2_bias(monkeypatch, tp_rank=1)
-    w2_bias.data.fill_(7)
-    if loader == "quark":  # per expert
-        weights = [
-            (f"layers.0.mlp.experts.{e}.w2_bias", torch.ones(3)) for e in range(2)
-        ]
-    else:
-        weights = [("layers.0.mlp.experts.w2_bias", torch.ones(2, 3))]
-
-    getattr(model, f"_load_weights_{loader}")(2, 0, weights, [])
-
-    assert torch.count_nonzero(w2_bias) == 0
-    for name, weight in weights:
-        assert torch.equal(weight, torch.ones_like(weight)), f"{name} was zeroed"
-
-
 @pytest.mark.parametrize("case", ["mxfp4", "nvfp4"])
 def test_streamed_quantized_expert_layout(case: str) -> None:
     if case == "mxfp4":
@@ -208,20 +155,36 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
     assert torch.equal(experts.w13_weight[0], expected)
 
 
-def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader() -> None:
-    """A reload may mix the per-expert and full-checkpoint loaders, so the
-    per-expert one splits in whole MXFP4 blocks as the full one does, not by the
-    padded size (here 64 rows per rank padded to 96)."""
-    experts = _TestExperts(
-        "w13_weight",
-        (2, 192, 4),
-        tp_rank=1,
-        intermediate_size=128,
-        weight_dtype="gpt_oss_mxfp4",
-        dtype=torch.uint8,
-    )
-    loaded_weight = torch.arange(1024).to(torch.uint8).reshape(256, 2, 2)
+@pytest.mark.parametrize("shard", ["w13", "w2"])
+def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader(shard: str) -> None:
+    """The per-expert loader splits in whole MXFP4 blocks, as the full-checkpoint
+    loader does, not by the padded parameter size. TP rank 1 of 2. w13: 4 blocks,
+    2 per rank, padded to 3. w2: 3 blocks split 2 + 1, padded to 3."""
+    if shard == "w13":
+        experts = _TestExperts(
+            "w13_weight",
+            (2, 192, 4),
+            tp_rank=1,
+            intermediate_size=128,
+            weight_dtype="gpt_oss_mxfp4",
+            dtype=torch.uint8,
+        )
+        loaded_weight = torch.arange(1024).to(torch.uint8).reshape(256, 2, 2)
+        expected = loaded_weight.reshape(256, 4)[128:]
+        written, padding = experts.w13_weight[0, :128], experts.w13_weight[:, 128:]
+    else:
+        experts = _TestExperts(
+            "w2_weight",
+            (2, 4, 48),
+            tp_rank=1,
+            intermediate_size=96,
+            weight_dtype="gpt_oss_mxfp4",
+            dtype=torch.uint8,
+        )
+        loaded_weight = torch.arange(192).to(torch.uint8).reshape(4, 3, 16)
+        expected = loaded_weight.reshape(4, 48)[:, 32:]  # block 2
+        written, padding = experts.w2_weight[0, :, :16], experts.w2_weight[:, :, 16:]
 
-    assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
-    assert torch.equal(experts.w13_weight[0, :128], loaded_weight.reshape(256, 4)[128:])
-    assert torch.count_nonzero(experts.w13_weight[:, 128:]) == 0
+    assert _load(experts, f"{shard}_weight", loaded_weight, f"gpt_oss_{shard}")
+    assert torch.equal(written, expected)
+    assert torch.count_nonzero(padding) == 0

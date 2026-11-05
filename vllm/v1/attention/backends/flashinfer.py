@@ -2075,6 +2075,7 @@ class FlashInferImpl(AttentionImpl):
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
+        self.kv_cache_quantized = is_quantized_kv_cache(self.kv_cache_dtype)
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -2253,7 +2254,7 @@ class FlashInferImpl(AttentionImpl):
         # a weight reload can change the q/k/v scales.
         bmm1_scale = self.scale
         bmm2_scale = 1.0
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if self.kv_cache_quantized:
             bmm1_scale *= layer._q_scale_float * layer._k_scale_float
             bmm2_scale *= layer._v_scale_float
 

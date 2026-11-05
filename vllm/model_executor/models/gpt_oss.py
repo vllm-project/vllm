@@ -82,6 +82,9 @@ _GPT_OSS_STREAMED_EXPERT_SUFFIX_TO_SHARD = {
 }
 
 
+_MXFP4_WEIGHT_DTYPES = ("gpt_oss_mxfp4", "mxfp4")
+
+
 def _get_weight_loader(param: torch.Tensor) -> Callable[..., object]:
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     if not callable(weight_loader):
@@ -201,16 +204,12 @@ class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
     def _narrow_for_rank(self, loaded_weight: torch.Tensor, dim: int) -> torch.Tensor:
-        """This rank's part of the intermediate dimension ``dim`` of one expert,
-        split as the full-checkpoint loaders split it (MXFP4: in whole blocks),
-        whatever padding the parameter has: a reload may mix both loaders."""
+        """This rank's slice of dim ``dim``, as the full-checkpoint loader splits it."""
         moe = self.moe_config
         tp_size = moe.moe_parallel_config.tp_size
         tp_rank = moe.moe_parallel_config.tp_rank
-        mx = getattr(self.quant_method, "weight_dtype", "") in (
-            "gpt_oss_mxfp4",
-            "mxfp4",
-        )
+        # biases of MXFP4 experts are split in whole blocks too
+        mx = getattr(self.quant_method, "weight_dtype", "") in _MXFP4_WEIGHT_DTYPES
         blocks = moe.intermediate_size // (OCP_MX_BLOCK_SIZE if mx else 1)
         per_rank = cdiv(blocks, tp_size)
         length = loaded_weight.shape[dim]
@@ -334,10 +333,7 @@ class GptOssRoutedExperts(RoutedExperts):
 
         if weight_name.endswith("_bias"):
             self._load_expert_bias(expert_data, loaded_weight, shard_id)
-        elif weight_dtype in (
-            "gpt_oss_mxfp4",
-            "mxfp4",
-        ) or quant_method_name in (
+        elif weight_dtype in _MXFP4_WEIGHT_DTYPES or quant_method_name in (
             "CompressedTensorsW4A4Nvfp4MoEMethod",
             "Nvfp4OnlineMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
