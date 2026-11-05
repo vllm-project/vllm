@@ -11,7 +11,6 @@ import zmq
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.utils import sched_yield
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_zmq_ipc_path, make_zmq_socket
 from vllm.v1.outputs import KVConnectorOutput
@@ -76,30 +75,27 @@ class EarlyKVRecvSender:
 
     def __init__(self, path: str) -> None:
         self._socket = make_zmq_socket(zmq.Context.instance(), path, zmq.PUSH)
-        self._last_step_rpc = time.perf_counter()
+        self._last_step_rpc = time.monotonic()
         self._next_poll = 0.0
 
     def step_rpc_done(self) -> None:
         """Worker thread: an ``execute_model`` or ``sample_tokens`` RPC finished."""
-        self._last_step_rpc = time.perf_counter()
+        self._last_step_rpc = time.monotonic()
 
     def wait_for_poll(self, rpc_mq: MessageQueue) -> bool:
-        """Spin until the next poll is due, yielding as dequeue() does.
+        """Spin until the next poll is due.
 
         Returns False once an RPC is queued, or at once when no step RPC
         arrived recently or no receive is pending.
         """
         if (
-            time.perf_counter() - self._last_step_rpc > _ACTIVE_WINDOW_S
+            time.monotonic() - self._last_step_rpc > _ACTIVE_WINDOW_S
             or not has_kv_transfer_group()
             or not get_kv_transfer_group().has_pending_recving()
         ):
             return False
-        while not (rpc_mq.shutting_down or rpc_mq.readable()):
-            if time.perf_counter() >= self._next_poll:
-                return True
-            sched_yield()
-        return False
+        rpc_mq.spin_until_readable((), self._next_poll)
+        return not (rpc_mq.shutting_down or rpc_mq.readable())
 
     def poll(self) -> None:
         """Send completed receives; let the worker monitor handle fatal errors."""
@@ -116,7 +112,7 @@ class EarlyKVRecvSender:
         finally:
             # Measured from the end of a poll, so long polls do not run back
             # to back.
-            self._next_poll = time.perf_counter() + _POLL_INTERVAL_S
+            self._next_poll = time.monotonic() + _POLL_INTERVAL_S
 
     def close(self) -> None:
         self._socket.close(linger=0)
