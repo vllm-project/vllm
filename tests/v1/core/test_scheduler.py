@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+import random
 from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -82,7 +83,13 @@ from vllm.v1.outputs import (
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
-from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
+from .utils import (
+    EOS_TOKEN_ID,
+    create_requests,
+    create_scheduler,
+    mock_kv,
+    new_sliding_window_spec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -8054,87 +8061,142 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
 
 
-@pytest.mark.parametrize("sliding_window", [None, 64])
-@pytest.mark.parametrize(
-    "outcome,promoted_blocks", [("received", 6), ("failed", 10), ("invalid", 6)]
-)
-def test_parked_reservation_tracks_load_outcome(
-    sliding_window, outcome, promoted_blocks
-):
-    """A stale cached reservation would silently change async load admission, and
-    the count only moves at promotion: a failed load gives up its blocks there."""
-
-    def assert_cache_fresh():
-        parked = scheduler._parked_reservations
-        assert parked == {r: scheduler._request_remaining_blocks(r) for r in parked}
-        assert scheduler._parked_reserved_blocks == sum(parked.values())
-
-    def report(sched_output, **connector_output):
-        scheduler.update_from_output(
-            sched_output,
-            dataclasses.replace(
-                EMPTY_MODEL_RUNNER_OUTPUT,
-                kv_connector_output=KVConnectorOutput(**connector_output),
-            ),
-        )
-        assert_cache_fresh()
+def test_failed_load_reservation_keeps_new_async_loads_out():
+    """Promotion frees a failed load's blocks, but it still needs its full sequence.
+    A stale reservation would admit a new load into them and overcommit the pool."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     scheduler = create_scheduler(
-        use_kv_connector=mock_kv(matched_tokens=64, is_async=True),
-        kv_cache_spec=sliding_window
-        and SlidingWindowSpec(
-            block_size=16,
-            num_kv_heads=1,
-            head_size=1,
-            dtype=torch.float32,
-            sliding_window=sliding_window,
-        ),
+        num_blocks=16, use_kv_connector=mock_kv(matched_tokens=96, is_async=True)
     )
     scheduler.recompute_kv_load_failures = True
-    [request] = create_requests(num_requests=1, num_tokens=160)
-    scheduler.add_request(request)
+    failed, new = create_requests(2, num_tokens=160, req_ids=["failed", "new"])
+    scheduler.add_request(failed)
     output = scheduler.schedule()
-    assert scheduler._parked_reservations == {request: 6}
-
-    ids = {request.request_id}
-    if outcome == "invalid":
-        (block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
-        report(output, invalid_block_ids={block_ids[1]})
-        assert request.num_computed_tokens == 16
-        output = scheduler.schedule()
-    report(
-        output,
-        finished_recving=ids,
-        failed_recving=ids if outcome == "failed" else set(),
+    ids = {failed.request_id}
+    scheduler.update_from_output(
+        output, create_model_runner_output([], finished_recving=ids, failed_recving=ids)
     )
 
-    # Promote without scheduling, so the refreshed reservation stays observable.
-    scheduler.connector.get_num_new_matched_tokens = Mock(return_value=(0, False))
-    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
-        scheduler.schedule()
-    assert request.status == RequestStatus.WAITING
-    assert_cache_fresh()
-    assert scheduler._parked_reservations[request] == promoted_blocks
-
+    # The retry waits on a deferred lookup, so the promoted load holds no blocks.
+    lookups = {"failed": (None, False), "new": (96, True)}
+    scheduler.connector.get_num_new_matched_tokens = lambda r, _: lookups[r.request_id]
     scheduler.schedule()
-    assert request.status == RequestStatus.RUNNING
-    assert not scheduler._parked_reservations
-    assert scheduler._parked_reserved_blocks == 0
+    assert failed.status == RequestStatus.WAITING
+    scheduler.add_request(new)
+    scheduler.schedule()
+    assert new.status == RequestStatus.WAITING
+
+    lookups["failed"] = (0, False)
+    scheduler.schedule()
+    assert failed.status == RequestStatus.RUNNING
 
 
-def test_aborting_parked_load_releases_its_reservation():
-    scheduler = create_scheduler(
-        use_kv_connector=mock_kv(matched_tokens=64, is_async=True)
+def _run_async_load_events(spec, num_spec_tokens, seed, on_demand):
+    """Random receives, failed loads, invalid blocks and aborts on a tight pool.
+    Returns every step's decisions and the events that occurred."""
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    rng = random.Random(seed)
+    s = create_scheduler(
+        num_blocks=64,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=True),
+        kv_cache_spec=spec,
+        num_speculative_tokens=num_spec_tokens,
     )
-    [request] = create_requests(num_requests=1, num_tokens=160)
-    scheduler.add_request(request)
-    scheduler.schedule()
-    assert scheduler._parked_reserved_blocks == 6
+    s.recompute_kv_load_failures = True
+    if on_demand:
+        s._reserve_parked = s._inflight_prefills.add
+        s._unreserve_parked = lambda _: None
 
-    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    def match(request, computed):
+        if rng.random() < 0.1:
+            return None, False
+        tokens = min(rng.randrange(12), (request.num_tokens - computed) // 16) * 16
+        return (tokens, True) if tokens else (0, False)
 
-    assert not scheduler._parked_reservations
-    assert scheduler._parked_reserved_blocks == 0
+    def check_reservations():
+        parked = s._parked_reservations
+        assert parked == {r: s._request_remaining_blocks(r) for r in parked}
+        assert s._parked_reserved_blocks == sum(parked.values())
+        if any(r.status != RequestStatus.WAITING_FOR_REMOTE_KVS for r in parked):
+            events.add("promoted_load_held")
+
+    s.connector.get_num_new_matched_tokens = match
+    group = s.kv_cache_manager.coordinator.single_type_managers[0]
+    decisions, events = [], set()
+    for step in range(60):
+        for i in range(rng.choice((0, 1, 2, 6))):
+            tokens, max_tokens = rng.randrange(16, 400), rng.randrange(1, 8)
+            ids = [f"{step}.{i}"]
+            s.add_request(
+                create_requests(
+                    1, tokens, max_tokens=max_tokens, req_ids=ids, ignore_eos=True
+                )[0]
+            )
+        output = s.schedule()
+        check_reservations()
+        requests = sorted(s.requests.items())
+        states = [(k, r.status, r.num_computed_tokens) for k, r in requests]
+        decisions.append((sorted(output.num_scheduled_tokens.items()), states))
+        finished: set[str] = set()
+        failed: set[str] = set()
+        invalid: set[int] = set()
+        for req_id, r in requests:
+            if (
+                r.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and req_id not in s.finished_recving_kv_req_ids
+            ):
+                x, blocks = rng.random(), group.req_to_blocks.get(req_id, ())
+                if x < 0.4:
+                    (failed if x < 0.15 else finished).add(req_id)
+                elif x < 0.5 and blocks and not blocks[0].is_null:
+                    invalid.add(blocks[0].block_id)
+        events |= {"received"} if finished else set()
+        events |= {"failed"} if failed else set()
+        events |= {"invalid_blocks"} if invalid else set()
+        s.update_from_output(
+            output,
+            create_model_runner_output(
+                [s.requests[i] for i in sorted(output.num_scheduled_tokens)],
+                finished_recving=finished | failed,
+                failed_recving=failed,
+                invalid_block_ids=invalid,
+            ),
+        )
+        check_reservations()
+        for req_id in sorted(s.requests):
+            if rng.random() < 0.02:
+                s.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
+                events.add("aborted")
+        check_reservations()
+    return decisions, events
+
+
+@pytest.mark.parametrize(
+    "spec,num_spec_tokens",
+    [
+        (None, None),
+        (None, 2),
+        (new_sliding_window_spec(sliding_window=64), None),
+    ],
+    ids=["full", "full_spec_decode", "sliding_window"],
+)
+def test_cached_reservations_admit_like_on_demand_sum(spec, num_spec_tokens):
+    """Caching must not change admission through any async load transition, including
+    a scheduled load's leftover draft blocks, which count until the step ends."""
+    seen = set()
+    for seed in range(8):
+        decisions, events = _run_async_load_events(spec, num_spec_tokens, seed, False)
+        assert decisions == _run_async_load_events(spec, num_spec_tokens, seed, True)[0]
+        seen |= events
+    assert seen == {
+        "received",
+        "failed",
+        "invalid_blocks",
+        "aborted",
+        "promoted_load_held",
+    }
 
 
 def _create_hybrid_mamba_connector_scheduler(
