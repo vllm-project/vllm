@@ -277,7 +277,9 @@ fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
         MessageContent::Parts(parts) => parts
             .iter()
             .filter_map(|p| match p {
-                ContentPart::Text { text } => Some(text.as_str()),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Some(text.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>()
@@ -345,6 +347,9 @@ fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
             .into_iter()
             .map(|part| match part {
                 ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::Refusal { .. } => bail_invalid_request!(
+                    "Only assistant messages can have a 'refusal' content type."
+                ),
                 ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
                     image_url: image_url.url,
                     detail: image_url.detail,
@@ -379,7 +384,9 @@ fn convert_assistant_text_blocks(
         MessageContent::Parts(parts) => parts
             .into_iter()
             .map(|part| match part {
-                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                ContentPart::Text { text } | ContentPart::Refusal { refusal: text } => {
+                    Ok(AssistantContentBlock::Text { text })
+                }
                 _ => bail_invalid_request!(
                     "Only text content parts are supported for assistant messages."
                 ),
@@ -1376,6 +1383,60 @@ mod tests {
         .unwrap_err();
 
         expect!["Only text content parts are supported for assistant messages."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_replays_assistant_refusal_parts_as_text() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": [
+                    {"type": "refusal", "refusal": "I can't help with that."},
+                ]},
+            ],
+            "echo": true,
+        }))
+        .expect("refusal parts parse in assistant messages");
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages[1],
+            VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::Text {
+                text: "I can't help with that.".to_string(),
+            }])
+        );
+        assert_eq!(
+            prepared.options.echo.as_deref(),
+            Some("I can't help with that.")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_refusal_parts_outside_assistant_messages() {
+        let request: ChatCompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": [
+                {"type": "refusal", "refusal": "no"},
+            ]}],
+        }))
+        .expect("refusal parts parse in any message");
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only assistant messages can have a 'refusal' content type."]
             .assert_eq(&error.to_error_response().error.message);
     }
 
