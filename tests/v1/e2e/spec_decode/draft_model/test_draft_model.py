@@ -192,11 +192,23 @@ def test_draft_model_tensor_parallelism(vllm_runner):
 
 
 @multi_gpu_only(num_gpus=2)
-@pytest.mark.parametrize("load_format", ["auto", "fastsafetensors"])
-def test_draft_model_pipeline_parallelism(vllm_runner, load_format: str):
+@pytest.mark.parametrize(
+    "load_kwargs",
+    [
+        {"load_format": "auto"},
+        {"load_format": "fastsafetensors"},
+        {
+            "load_format": "runai_streamer",
+            "model_loader_extra_config": {"distributed": True},
+        },
+    ],
+    ids=["auto", "fastsafetensors", "runai_distributed"],
+)
+def test_draft_model_pipeline_parallelism(vllm_runner, load_kwargs: dict):
     """Ensure the draft model runs whole on the last stage when PP > 1.
 
-    fastsafetensors syncs over every rank, so the draft must not use it.
+    fastsafetensors and distributed RunAI streaming sync over every rank, so
+    the draft must not use them.
     """
     sd_case = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
@@ -204,7 +216,7 @@ def test_draft_model_pipeline_parallelism(vllm_runner, load_format: str):
         pipeline_parallel_size=2,
         **some_high_acceptance_metrics(),
         enforce_eager=False,
-        engine_kwargs={"load_format": load_format},
+        engine_kwargs=load_kwargs,
     )
     assert_draft_model_correctness(sd_case, vllm_runner)
 

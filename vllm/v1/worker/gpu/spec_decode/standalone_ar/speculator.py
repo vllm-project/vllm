@@ -126,8 +126,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             self.vllm_config.parallel_config.data_parallel_index
         )
         self._draft_vllm_config = draft_vllm_config
-        # Checked outside single_stage_pp_group(): fastsafetensors syncs over
-        # every rank, not just the draft model's stage.
+        # Checked outside single_stage_pp_group(): fastsafetensors and
+        # distributed RunAI streaming sync over every rank, not just the draft
+        # model's stage.
         load_config = get_pp_safe_draft_load_config(
             get_draft_load_config(draft_vllm_config)
         )
