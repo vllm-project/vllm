@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import subprocess
+import sys
+import textwrap
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -98,3 +101,34 @@ def test_get_bundles_sorted_by_node(bundles_to_node_id, bundle_specs, expected):
         result = get_bundles_sorted_by_node(mock_pg)
 
     assert result == expected
+
+
+def test_ray_import_runtime_error_means_ray_unavailable():
+    """On AMD GPU nodes where Slurm sets only ROCR_VISIBLE_DEVICES, `import ray`
+    raises RuntimeError. Loading the serve CLI must treat Ray as unavailable
+    instead of crashing."""
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+
+        class RaisingRayFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "ray":
+                    raise RuntimeError(
+                        "Please use HIP_VISIBLE_DEVICES instead of "
+                        "ROCR_VISIBLE_DEVICES"
+                    )
+
+        sys.meta_path.insert(0, RaisingRayFinder())
+
+        import vllm.entrypoints.cli.serve  # noqa: F401
+        from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
+        from vllm.v1.executor.ray_utils import ray_is_available
+
+        assert not ray_is_available()
+        assert not is_ray_initialized()
+        assert not is_in_ray_actor()
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

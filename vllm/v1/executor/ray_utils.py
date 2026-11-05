@@ -31,7 +31,9 @@ try:
 
     ray_import_err = None
 
-except ImportError as e:
+except (ImportError, RuntimeError) as e:
+    # On AMD GPU nodes, importing Ray raises RuntimeError when only
+    # ROCR_VISIBLE_DEVICES is set (as Slurm does).
     ray = None  # type: ignore
     # only capture string to avoid variable references in the traceback that can
     # prevent garbage collection in some cases
