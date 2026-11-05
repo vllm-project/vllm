@@ -363,6 +363,27 @@ def test_try_backend(oracle_class, backend, monkeypatch):
     assert oracle.try_backend(backend, [TritonExperts]) == (TritonExperts, [])
 
 
+def test_activation_format_is_derived_from_config() -> None:
+    """`activation_format` predicts the prepare/finalize layout, so it is derived
+    from the MoE config rather than stored on the oracle."""
+    moe_config = make_dummy_moe_config()
+    assert (
+        UnquantizedMoEKernelOracle(moe_config).activation_format
+        == mk.FusedMoEActivationFormat.Standard
+    )
+
+    # An explicitly requested batched_triton backend runs a batched P/F even
+    # without a batched parallel config; this is what upgrades TRITON to
+    # BATCHED_TRITON in select_unquantized_moe_backend.
+    moe_config.moe_backend = "batched_triton"
+    assert (
+        UnquantizedMoEKernelOracle(moe_config).activation_format
+        == mk.FusedMoEActivationFormat.BatchedExperts
+    )
+    # The config-level prediction stays the plain rule; only this oracle widens it.
+    assert moe_config.activation_format == mk.FusedMoEActivationFormat.Standard
+
+
 @pytest.mark.parametrize("unknown", [False, True], ids=["explicit", "unknown"])
 @pytest.mark.parametrize("oracle", SELECT_CASES)
 def test_explicit_moe_backend(oracle, unknown, monkeypatch):
