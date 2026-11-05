@@ -537,6 +537,7 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
     handles = []
     mapped_handles = []
     ahead = threading.Event()
+    release_ahead = threading.Event()
     real_open = open
     real_safe_open_handle = wu._safe_open_handle
 
@@ -546,6 +547,9 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
         handles.append(handle)
         if len(opened) == 2:
             ahead.set()
+            # Hold the shard that is read ahead before any byte is read from
+            # it, so the mapping state below is deterministic.
+            assert release_ahead.wait(5), "Ahead shard was never released"
         return handle
 
     monkeypatch.setattr(wu, "open", track_open, raising=False)
@@ -560,10 +564,14 @@ def test_streaming_bounds_prefetch_and_closes_on_early_exit(tmp_path, monkeypatc
     )
     _, retained = next(iterator)
     assert ahead.wait(5)
-    # The first shard is held by the consumer, with only one shard ahead.
-    assert len(opened) == 2
-    assert mapped_handles == handles[:1]
-    assert all(not handle.closed for handle in handles)
+    try:
+        # The first shard is held by the consumer, with only one shard ahead.
+        assert len(opened) == 2
+        # The shard that is read ahead is not mapped before its reads finish.
+        assert mapped_handles == handles[:1]
+        assert all(not handle.closed for handle in handles)
+    finally:
+        release_ahead.set()
     iterator.close()
     assert len(opened) == 2
     assert all(handle.closed for handle in handles)
