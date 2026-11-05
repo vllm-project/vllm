@@ -19,6 +19,9 @@ from tests.evals.gsm8k.gsm8k_eval import (
 )
 
 
+CHAT_SUFFIX = "\nSolve step by step. End with the final answer as a number."
+
+
 async def evaluate(args: argparse.Namespace) -> tuple[dict, list[dict]]:
     prompts, labels = _build_gsm8k_prompts(args.num_questions, args.num_shots)
     records: list[dict] = [{} for _ in prompts]
@@ -37,19 +40,46 @@ async def evaluate(args: argparse.Namespace) -> tuple[dict, list[dict]]:
                 "seed": 42,
                 "stop": ["Question", "Assistant:", "<|separator|>"],
             }
+            endpoint = "completions"
+            if args.api == "chat":
+                question = prompts[index].rsplit("Question: ", 1)[-1]
+                question = question.removesuffix("\nAnswer:").strip()
+                payload = {
+                    "model": args.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": question + CHAT_SUFFIX,
+                        }
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": args.max_tokens,
+                    "seed": 42,
+                }
+                endpoint = "chat/completions"
             try:
                 async with (
                     semaphore,
                     session.post(
-                        f"{args.host}:{args.port}/v1/completions", json=payload
+                        f"{args.host}:{args.port}/v1/{endpoint}", json=payload
                     ) as response,
                 ):
                     body = await response.json()
                     response.raise_for_status()
                 choice = body["choices"][0]
-                content = choice.get("text") or ""
-                reasoning = ""
-                score_text = content
+                if args.api == "chat":
+                    message = choice.get("message") or {}
+                    content = message.get("content") or ""
+                    reasoning = (
+                        message.get("reasoning_content")
+                        or message.get("reasoning")
+                        or ""
+                    )
+                    score_text = content.rsplit("</think>", 1)[-1]
+                else:
+                    content = choice.get("text") or ""
+                    reasoning = ""
+                    score_text = content
                 records[index] = {
                     "index": index,
                     "response_id": body.get("id"),
@@ -98,7 +128,10 @@ async def evaluate(args: argparse.Namespace) -> tuple[dict, list[dict]]:
         "seed": 42,
         "concurrency": args.concurrency,
         "connection_limit": args.concurrency,
-        "scored_text": "completion text",
+        "scored_text": "completion text"
+        if args.api == "completions"
+        else "chat content after </think>",
+        "api": args.api,
     }
     return summary, records
 
@@ -114,6 +147,7 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, default=1319)
     parser.add_argument("--output", required=True)
     parser.add_argument("--details", required=True)
+    parser.add_argument("--api", choices=["completions", "chat"], default="completions")
     args = parser.parse_args()
     if args.concurrency < 1:
         parser.error("--concurrency must be at least 1")

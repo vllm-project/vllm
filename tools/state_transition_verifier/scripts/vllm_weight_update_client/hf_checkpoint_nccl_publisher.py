@@ -20,6 +20,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from functools import cached_property
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -183,6 +184,8 @@ class SafetensorsCheckpointSource(WeightSource):
         self.manifest = manifest
         self.device = device
 
+    # vLLM's WeightSource requires a cached_property: engines read it repeatedly
+    @cached_property
     def metadata(self) -> list[ParamMeta]:
         return [
             ParamMeta(
@@ -195,6 +198,9 @@ class SafetensorsCheckpointSource(WeightSource):
 
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
         return self.manifest.iter_cuda_tensors(self.device)
+
+    def iter_full(self) -> Iterator[tuple[str, torch.Tensor]]:
+        return iter(self)
 
 
 class _CheckpointTensorIterator(Iterator[tuple[str, torch.Tensor]]):
@@ -588,7 +594,7 @@ class NcclCheckpointPublisher:
         transfer_started = time.perf_counter()
 
         metadata_started = time.perf_counter()
-        source_metadata = source.metadata()
+        source_metadata = source.metadata
         metadata_seconds = time.perf_counter() - metadata_started
         expected_names = [item.name for item in source_metadata]
         duplicate_names = _duplicate_names(expected_names)
