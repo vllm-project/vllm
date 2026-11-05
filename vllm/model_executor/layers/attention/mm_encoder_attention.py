@@ -56,9 +56,7 @@ _FP8_AMAX_HISTORY_LEN = 16
 # lives across model init, not forward passes).
 _fp8_scale_save_path: str | None = None
 _fp8_scale_save_margin: float = MultiModalConfig.mm_encoder_fp8_scale_save_margin
-_fp8_scale_save_every_wrap: bool = (
-    MultiModalConfig.mm_encoder_fp8_scale_save_every_wrap
-)
+_fp8_scale_save_every_wrap: bool = MultiModalConfig.mm_encoder_fp8_scale_save_every_wrap
 _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
