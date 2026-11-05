@@ -537,9 +537,8 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         static_context[self.layer_name] = self
 
     def process_weights_after_loading(self) -> None:
-        if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            self._k_scale_float = self._k_scale.item()
-            self._v_scale_float = self._v_scale.item()
+        self._k_scale_float = self._k_scale.item()
+        self._v_scale_float = self._v_scale.item()
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
