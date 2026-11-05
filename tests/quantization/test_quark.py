@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.oracle.int8 import Int8MoeBackend
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
@@ -1592,39 +1593,61 @@ def test_quark_int8_w_per_tensor_a_per_tensor(monkeypatch, dist_init, workspace_
 
 
 @pytest.mark.parametrize(
-    "weight_key, act_key, per_out_ch_quant",
+    "weight_key, act_key, per_act_token_quant, per_out_ch_quant",
     [
-        (kInt8StaticChannelSym, kInt8StaticTensorSym, True),
-        (kInt8StaticTensorSym, kInt8StaticTensorSym, False),
+        (kInt8StaticChannelSym, kInt8StaticTensorSym, False, True),
+        (kInt8StaticTensorSym, kInt8StaticTensorSym, False, False),
+        # Dynamic activations: the two pairs supported by TritonExperts.
+        (kInt8StaticChannelSym, kInt8DynamicTokenSym, True, True),
+        (kInt8StaticTensorSym, kInt8DynamicTensorSym, False, False),
     ],
-    ids=["per_channel_weights", "per_tensor_weights"],
+    ids=[
+        "static_act_per_channel_weights",
+        "static_act_per_tensor_weights",
+        "dynamic_token_act_per_channel_weights",
+        "dynamic_tensor_act_per_tensor_weights",
+    ],
 )
 def test_quark_int8_moe_scale_layout_flags(
-    weight_key: QuantKey, act_key: QuantKey, per_out_ch_quant: bool
+    weight_key: QuantKey,
+    act_key: QuantKey,
+    per_act_token_quant: bool,
+    per_out_ch_quant: bool,
 ) -> None:
-    """Static per-tensor activations can carry per-channel weight scales.
+    """Activation and weight scale layouts are reported independently.
 
-    The activation and weight scale layouts are independent, so Quark static
-    INT8 must report them separately (the legacy fused_experts path indexes
+    Quark INT8 must derive the activation layout from the activation quant key
+    and the weight layout from the weight quant key (the Triton kernels index
     W13/W2 channel scales off the weight layout, not the activation layout).
     """
+    static_act = act_key.scale.static
     moe_config = _make_test_moe_config()
-    method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
-    assert method.int8_backend is None  # static activations stay on legacy path
+    # Pin the dynamic-activation backend so the test does not depend on the
+    # platform's backend priority.
+    with patch(
+        "vllm.model_executor.layers.quantization.quark.quark_moe."
+        "select_int8_moe_backend",
+        return_value=(Int8MoeBackend.TRITON, MagicMock()),
+    ):
+        method = QuarkW8A8Int8MoEMethod(moe_config, weight_key, act_key)
+    if static_act:
+        assert method.int8_backend is None  # static activations: legacy path
+    else:
+        assert method.int8_backend == Int8MoeBackend.TRITON
 
     intermediate = moe_config.intermediate_size
     layer = SimpleNamespace(
         w13_weight_scale=torch.ones(moe_config.num_experts, 2 * intermediate, 1),
         w2_weight_scale=torch.ones(moe_config.num_experts, intermediate, 1),
-        w13_input_scale=torch.tensor(0.5),
-        w2_input_scale=torch.tensor(0.25),
+        w13_input_scale=torch.tensor(0.5) if static_act else None,
+        w2_input_scale=torch.tensor(0.25) if static_act else None,
         w13_bias=None,
         w2_bias=None,
     )
     quant_config = method.get_fused_moe_quant_config(layer)
 
     assert quant_config is not None
-    assert quant_config.per_act_token_quant is False
+    assert quant_config.per_act_token_quant is per_act_token_quant
     assert quant_config.per_out_ch_quant is per_out_ch_quant
 
 
