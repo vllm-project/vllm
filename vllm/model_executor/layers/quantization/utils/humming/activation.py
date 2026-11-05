@@ -9,7 +9,10 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
 )
 
-_SILU_IMPL = "a / (1.f + expf(-a))"
+# Humming builds process_input without fast math, so request the fast SiLU
+# intrinsics explicitly; precise expf and IEEE division make the fused
+# activation + quantization kernel issue-bound at prefill sizes.
+_SILU_IMPL = "__fdividef(a, 1.f + __expf(-a))"
 _GELU_IMPL = "0.5f * a * (1.f + erff(a * 0.7071067811865476f))"
 _RELU2_IMPL = "fmaxf(a, 0.f) * fmaxf(a, 0.f)"
 _GELU_TANH_IMPL = """[](float a) {
@@ -20,7 +23,7 @@ _GELU_TANH_IMPL = """[](float a) {
 _CLAMPED_SILU_IMPL = """[](float a, float b) {{
     const float gate = fminf(a, {limit});
     const float up = fmaxf(fminf(b, {limit}), -{limit});
-    const float activated_gate = gate / (1.f + expf(-{alpha} * gate));
+    const float activated_gate = __fdividef(gate, 1.f + __expf(-{alpha} * gate));
     return activated_gate * (up + {beta});
 }}(a, b)"""
 
@@ -50,7 +53,7 @@ _HUMMING_ACTIVATIONS: dict[MoEActivation, dict[str, str]] = {
         "activation_type": "binary_split",
         "activation_impl": """[](float a, float b) {{
             const float gate = {situ_beta} * tanhf(a / {situ_beta});
-            const float activated_gate = gate / (1.f + expf(-a));
+            const float activated_gate = __fdividef(gate, 1.f + __expf(-a));
             const float up = {situ_up};
             return activated_gate * up;
         }}(a, b)""",
@@ -62,7 +65,7 @@ _HUMMING_ACTIVATIONS: dict[MoEActivation, dict[str, str]] = {
     MoEActivation.SWIGLUSTEP: {
         "activation_type": "binary_split",
         "activation_impl": """[](float a, float b) {
-            const float activated_gate = a / (1.f + expf(-a));
+            const float activated_gate = __fdividef(a, 1.f + __expf(-a));
             const float gate = fminf(activated_gate, 7.f);
             const float up = fmaxf(fminf(b, 7.f), -7.f);
             return gate * up;
