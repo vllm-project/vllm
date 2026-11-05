@@ -4991,8 +4991,7 @@ class GPUModelRunner(
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
-                        with self.jit_warmup_registry.activate():  # type: ignore[attr-defined]
-                            self.drafter.load_model(self.model)
+                        self.drafter.load_model(self.model)
                     drafter_moe_model = None
                     if self.parallel_config.enable_eplb and hasattr(
                         self.drafter, "model"
