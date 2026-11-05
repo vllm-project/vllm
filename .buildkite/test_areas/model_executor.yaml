@@ -28,7 +28,8 @@ steps:
 #     # init) fails fast with a traceback instead of running until the global
 #     # build timeout. The `thread` method also handles hangs inside C/CUDA
 #     # calls that the signal method cannot interrupt.
-#     - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread
+#     # test_reload_refit.py runs in the B200 Weight Reload Refit step
+#     - pytest -v -s model_executor -m '(not slow_test) and (not distributed)' --timeout=900 --timeout-method=thread --ignore=model_executor/model_loader/test_reload_refit.py
 #     - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
 #   mirror:
 #     amd:
@@ -98,7 +99,10 @@ steps:
   - vllm/model_executor/layers/linear.py
   - vllm/model_executor/layers/attention/
   - vllm/model_executor/layers/mamba/
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
+  - vllm/model_executor/parameter.py
   - vllm/model_executor/utils.py
+  - vllm/model_executor/models/utils.py
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/falcon_h1.py
   - vllm/model_executor/models/qwen2.py
