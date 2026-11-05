@@ -37,6 +37,11 @@ class EngramConfig:
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
+    disk_offload: bool = False
+    """Keep Qwen4Exp PLE tables in the checkpoint files and read each step's
+    rows on the host instead of allocating the table. Takes precedence over
+    cpu_offload."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -44,10 +49,11 @@ class EngramConfig:
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
-    memory without per-step Engram DP collectives. Requires sufficient
-    /dev/shm capacity and a shared IPC namespace. Defaults to enabled whenever
-    the other settings allow it, falling back to per-replica tables when DP
-    replicas are not co-located on one node or /dev/shm cannot hold them."""
+    memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
+    by FABRIC handle where supported, else /dev/shm (which then needs capacity
+    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    allow it, falling back to per-replica tables when DP replicas are not
+    co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
@@ -81,6 +87,11 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
+        if self.disk_offload:
+            from vllm.platforms import current_platform
+
+            if field != "ple_layer_ids" or not current_platform.is_cuda():
+                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -107,6 +118,8 @@ class EngramConfig:
             raise ValueError(
                 "Engram embedding_across_dp is not supported with elastic EP yet."
             )
+        if self.disk_offload and parallel_config.enable_elastic_ep:
+            raise ValueError("disk_offload is not supported with elastic EP.")
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
