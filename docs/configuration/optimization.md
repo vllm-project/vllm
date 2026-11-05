@@ -56,6 +56,8 @@ With `--scheduling-policy priority`, a lower `priority` value is handled first, 
 vllm serve <model> --scheduling-policy priority --max-priority-preemptions-per-step 2
 ```
 
+To also keep lower-priority prefill out of a higher-priority request's first tokens, see [Prefill Hold for Higher-Priority Requests](#prefill-hold-for-higher-priority-requests).
+
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
@@ -88,6 +90,19 @@ llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", max_num_batched_tokens=16384
 ```
 
 See related papers for more details (<https://arxiv.org/pdf/2401.08671> or <https://arxiv.org/pdf/2308.16369>).
+
+### Prefill Hold for Higher-Priority Requests
+
+With `--scheduling-policy priority`, a higher-priority request's first tokens share each step with chunks of lower-priority prefills, which lengthen those steps and so its time to first token (TTFT) and the tokens after it. `--priority-prefill-budget-cap` holds lower-priority prefills, running or waiting, back until the higher-priority request has its first `--priority-prefill-budget-cap-tokens` output tokens (16 by default). It is off by default and requires `--scheduling-policy priority`, and `--priority-prefill-budget-cap-tokens` has no effect without it. Set the token count to cover the first output your application acts on, such as a voice agent's first sentence, which can take a few dozen tokens.
+
+The hold starts in the step in which the request fits (a free running slot and KV cache room for its whole sequence) or, with a running slot free, its KV connector load is done. A request that is not admitted or is scheduled nothing, or a load still in flight, holds prefill back for at most `--priority-prefill-budget-cap-tokens` steps, so none can stall it. Decodes are never held, nor is a request with one token left to compute (a full prefix cache hit), nor a prefill midway through an encoder input while a request it is held for needs encoder cache space, since only that prefill's progress frees the space. A lower-priority request whose KV blocks are already allocated, such as one whose KV load is done, sits out only while a request of the same or a lower priority runs: preemption cannot reclaim a waiting request's blocks, so otherwise the higher-priority request could only preempt itself for them. While higher-priority requests' first tokens are due back to back, lower-priority prefill makes no progress. With the option on, vLLM exports the Prometheus counters `vllm:priority_prefill_held_steps` and `vllm:priority_prefill_held_tokens`: the steps it holds prefill back and the prefill tokens it holds back.
+
+```bash
+vllm serve <model> --scheduling-policy priority \
+    --priority-prefill-budget-cap --priority-prefill-budget-cap-tokens 48
+```
+
+When higher-priority requests also wait for KV cache space, combine it with `--max-priority-preemptions-per-step` (see [Preemption for Higher-Priority Requests](#preemption-for-higher-priority-requests)).
 
 ## Parallelism Strategies
 

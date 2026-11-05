@@ -91,6 +91,8 @@ def create_scheduler(
     watermark: float = 0.0,
     max_priority_preemptions_per_step: int = 0,
     max_num_inflight_kv_loads: int | None = None,
+    priority_prefill_budget_cap: bool = False,
+    priority_prefill_budget_cap_tokens: int = 16,
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
@@ -149,6 +151,8 @@ def create_scheduler(
         policy=scheduling_policy,
         max_priority_preemptions_per_step=max_priority_preemptions_per_step,
         max_num_inflight_kv_loads=max_num_inflight_kv_loads,
+        priority_prefill_budget_cap=priority_prefill_budget_cap,
+        priority_prefill_budget_cap_tokens=priority_prefill_budget_cap_tokens,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(

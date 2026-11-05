@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
@@ -470,6 +470,24 @@ class Scheduler(SchedulerInterface):
             )
         ):
             self._max_growth_blocks = len(managers)
+        self.priority_prefill_budget_cap = (
+            self.scheduler_config.priority_prefill_budget_cap
+        )
+        self.priority_prefill_budget_cap_tokens = (
+            self.scheduler_config.priority_prefill_budget_cap_tokens
+        )
+        # The step in which each KV load in flight was parked, in that order,
+        # and the steps each waiting request has held lower-priority prefill
+        # back: either holds for priority_prefill_budget_cap_tokens steps only.
+        self._load_hold_start: OrderedDict[Request, int] = OrderedDict()
+        self._hold_progress: dict[Request, tuple[int, int]] = {}
+        # Since the last stats, the steps in which the budget cap held prefill
+        # back and the prefill tokens it held; and the last such step, with the
+        # tokens held in it so far.
+        self._num_prefill_held_steps = 0
+        self._num_prefill_held_tokens = 0
+        self._prefill_held_step = -1
+        self._prefill_held_step_tokens = 0
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
@@ -843,12 +861,21 @@ class Scheduler(SchedulerInterface):
         # Priority policy: make room for the highest-priority waiting request
         # first, so that no request scheduled in this step is preempted.
         make_room_req = self._peek_make_room_request(defer_prefills)
+        make_room_hit = (
+            None if make_room_req is None else self._local_prefix_hit(make_room_req)
+        )
+        holders = self._first_tokens_holders()
+        hold_priority = min((req.priority for req in holders), default=None)
         make_room_preempted_reqs: set[Request] = set()
-        if make_room_req is not None and make_room_req not in self._make_room_untried:
+        if (
+            make_room_req is not None
+            and self.max_priority_preemptions_per_step
+            and make_room_req not in self._make_room_untried
+            # Nor while the budget cap holds it back.
+            and (hold_priority is None or make_room_req.priority <= hold_priority)
+        ):
             make_room_preempted_reqs = self._make_room(
-                make_room_req,
-                self._local_prefix_hit(make_room_req),
-                scheduled_timestamp,
+                make_room_req, make_room_hit, scheduled_timestamp
             )
         # The waiting loop drains the requests holding KV blocks first. In the
         # step room is made, a lower-priority one whose remaining blocks are not
@@ -857,6 +884,27 @@ class Scheduler(SchedulerInterface):
             make_room_req.priority
             if make_room_req is not None and make_room_preempted_reqs
             else None
+        )
+        # With the budget cap, lower-priority prefills sit out while a request
+        # awaits its first tokens. A request that a higher-priority holder keeps
+        # waiting holds nothing more, and its own window has not begun.
+        if (
+            make_room_req is not None
+            and (hold_priority is None or make_room_req.priority <= hold_priority)
+            and self._waiting_request_holds(make_room_req, make_room_hit)
+        ):
+            holders.append(make_room_req)
+        first_tokens_priority = min((req.priority for req in holders), default=None)
+        # A prefill midway through an encoder input keeps that input's encoder
+        # output cached, and only its progress frees the space: it goes on while
+        # a request it is held for has encoder inputs to schedule.
+        encoder_holder_priority = min(
+            (
+                req.priority
+                for req in holders
+                if self._has_unscheduled_encoder_input(req)
+            ),
+            default=None,
         )
 
         # First, schedule the RUNNING requests.
@@ -891,6 +939,33 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if (
+                first_tokens_priority is not None
+                and request.is_prefill_chunk
+                and request.priority > first_tokens_priority
+                # One with a single token left samples like a decode.
+                and request.num_computed_tokens < request.num_tokens - 1
+                and not (
+                    encoder_holder_priority is not None
+                    and encoder_holder_priority < request.priority
+                    and self._holds_unscheduled_encoder_output(request)
+                )
+            ):
+                # A higher-priority request awaits its first tokens: this step
+                # is for it and the decodes.
+                num_held_tokens = (
+                    request.num_tokens_with_spec
+                    + request.num_output_placeholders
+                    - request.num_computed_tokens
+                )
+                if 0 < long_prefill_token_threshold < num_held_tokens:
+                    num_held_tokens = long_prefill_token_threshold
+                self._count_prefill_hold(
+                    num_held_tokens, min(token_budget, input_budget - draft_slots)
+                )
                 req_index += 1
                 continue
 
@@ -1207,6 +1282,23 @@ class Scheduler(SchedulerInterface):
                     continue
 
                 if (
+                    first_tokens_priority is not None
+                    and request.priority > first_tokens_priority
+                    and request_queue is self.kv_holding_waiting
+                    and request.num_computed_tokens < request.num_tokens - 1
+                    # While it waits, preemption cannot reach its KV blocks: so
+                    # only while a request of its priority or a lower one runs,
+                    # which preemption takes first.
+                    and any(req.priority >= request.priority for req in self.running)
+                ):
+                    # Nor does a lower-priority prefill start meanwhile. This
+                    # queue is drained first, so the request awaiting its first
+                    # tokens may be in the other one: skip rather than wait.
+                    self._count_prefill_hold(0)
+                    skip_request(request_queue)
+                    continue
+
+                if (
                     request_queue is not self.kv_holding_waiting
                     and self.max_priority_preemptions_per_step
                     and any(
@@ -1425,6 +1517,16 @@ class Scheduler(SchedulerInterface):
                 elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
                     # DP prefill balancing: defer this step's local prefill
                     # compute to a cadence-aligned step.
+                    break
+                elif (
+                    first_tokens_priority is not None
+                    and request.priority > first_tokens_priority
+                    and request_queue is not self.kv_holding_waiting
+                    and num_computed_tokens < request.num_tokens - 1
+                ):
+                    # Nor does a lower-priority prefill start meanwhile; one with
+                    # a single token left samples like a decode.
+                    self._count_prefill_hold(0)
                     break
                 else:
                     request_token_budget = min(token_budget, input_budget - draft_slots)
@@ -1689,6 +1791,8 @@ class Scheduler(SchedulerInterface):
                             request, num_computed_tokens
                         )
                     self._reserve_parked(request)
+                    if self.priority_prefill_budget_cap:
+                        self._load_hold_start[request] = self.current_step
                     self._set_kv_fetch_stage(request, KV_FETCH_IN_PROGRESS)
                     skip_request(request_queue)
                     continue
@@ -3263,6 +3367,7 @@ class Scheduler(SchedulerInterface):
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
         self._unreserve_parked(request)
+        self._load_hold_start.pop(request, None)
         self._set_kv_fetch_stage(request, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
@@ -3508,13 +3613,19 @@ class Scheduler(SchedulerInterface):
         num_running, num_waiting = self.get_request_counts()
         num_deferred = len(self.deferred_waiting)
         num_priority_preemptions = self._num_priority_preemptions
+        num_prefill_held_steps = self._num_prefill_held_steps
+        num_prefill_held_tokens = self._num_prefill_held_tokens
         self._num_priority_preemptions = 0
+        self._num_prefill_held_steps = 0
+        self._num_prefill_held_tokens = 0
         return SchedulerStats(
             num_running_reqs=num_running,
             num_waiting_reqs=num_waiting - num_deferred,
             num_skipped_waiting_reqs=num_deferred,
             num_kv_fetch_reqs_by_stage=self._kv_fetch_counts.copy(),
             num_priority_preemptions=num_priority_preemptions,
+            num_prefill_held_steps=num_prefill_held_steps,
+            num_prefill_held_tokens=num_prefill_held_tokens,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3676,10 +3787,14 @@ class Scheduler(SchedulerInterface):
 
     def _peek_make_room_request(self, defer_prefills: bool) -> Request | None:
         """The highest-priority waiting request that the waiting loop can
-        schedule in this step, or None if no running request has a lower
-        priority, prefills are deferred or scheduling is paused."""
+        schedule in this step, or None if no request of a lower priority runs
+        (or, with the budget cap, waits), prefills are deferred or scheduling is
+        paused."""
         if (
-            not self.max_priority_preemptions_per_step
+            not (
+                self.max_priority_preemptions_per_step
+                or self.priority_prefill_budget_cap
+            )
             or defer_prefills
             or self._pause_state != PauseState.UNPAUSED
         ):
@@ -3703,10 +3818,22 @@ class Scheduler(SchedulerInterface):
             for queue in (self.kv_holding_waiting, self.waiting, self.async_kv_waiting)
         )
         request = min((req for req in heads if req is not None), default=None)
-        if request is None or not any(
-            req.priority > request.priority for req in self.running
+        if request is None or not (
+            any(req.priority > request.priority for req in self.running)
+            or (
+                self.priority_prefill_budget_cap
+                and any(
+                    queue.has_lower_priority_than(request.priority)
+                    for queue in (
+                        self.kv_holding_waiting,
+                        self.waiting,
+                        self.async_kv_waiting,
+                    )
+                )
+            )
         ):
-            # Nothing to preempt for it: spare its prefix cache lookup.
+            # Nothing to preempt or hold back for it: spare its prefix cache
+            # lookup.
             return None
         return request
 
@@ -3747,6 +3874,130 @@ class Scheduler(SchedulerInterface):
             and len(loras) >= self.lora_config.max_loras
             and request.lora_request.lora_int_id not in loras
         )
+
+    def _first_tokens_holders(self) -> list[Request]:
+        """With the budget cap, the requests whose first tokens are due.
+
+        These are the running requests with fewer than
+        `priority_prefill_budget_cap_tokens` output tokens, counting the one
+        that each step in flight adds even if its draft tokens are rejected,
+        and, while a running slot is free, the requests whose KV load is done
+        (the waiting loop promotes them on the budget the running loop leaves)
+        or in flight for fewer than that many steps (a stuck load stops
+        holding). What such a request waits for may be what it holds back, so
+        each of them but a load in flight also stops holding after that many
+        steps in which it is scheduled nothing: _holds_while_scheduled."""
+        if not self.priority_prefill_budget_cap:
+            return []
+        # A load parked in step k holds in steps k + 1 to k + T at most. The
+        # loads are in the order they were parked, so those past their steps
+        # leave from the front; promoted and freed loads have left already.
+        window = self.priority_prefill_budget_cap_tokens
+        load_hold_start = self._load_hold_start
+        while load_hold_start and (
+            self.current_step - next(iter(load_hold_start.values())) > window
+        ):
+            load_hold_start.popitem(last=False)
+        # Forget the requests that have gone.
+        self._hold_progress = {
+            req: progress
+            for req, progress in self._hold_progress.items()
+            if self.requests.get(req.request_id) is req
+        }
+        holders = [
+            req
+            for req in self.running
+            if req.num_output_tokens
+            + cdiv(req.num_output_placeholders, 1 + self.num_spec_tokens)
+            < self.priority_prefill_budget_cap_tokens
+            and self._holds_while_scheduled(req)
+        ]
+        if self._running_slot_free():
+            holders.extend(
+                self.requests[req_id]
+                for req_id in self.finished_recving_kv_req_ids
+                if req_id in self.requests
+                and self._holds_while_scheduled(self.requests[req_id])
+            )
+            holders.extend(
+                req
+                for req, start in load_hold_start.items()
+                if self.current_step - start <= window
+                and req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                and req.request_id not in self.finished_recving_kv_req_ids
+            )
+        return holders
+
+    def _waiting_request_holds(
+        self,
+        request: Request,
+        hit: tuple[tuple[list[KVCacheBlock], ...], int] | None,
+    ) -> bool:
+        """With the budget cap, whether the waiting `request` holds
+        lower-priority prefill back in this step: while a running slot is free
+        and it fits (net of its prefix cache hit `hit`, counting deferred
+        frees), for at most `priority_prefill_budget_cap_tokens` such steps."""
+        return (
+            self.priority_prefill_budget_cap
+            and self._running_slot_free()
+            and self._num_blocks_short(request, hit)
+            <= self._num_released_blocks([], hit)
+            and self._holds_while_scheduled(request)
+        )
+
+    def _holds_while_scheduled(self, request: Request) -> bool:
+        """Whether `request`, whose first tokens are due, holds prefill back in
+        this step, which counts: it does for at most
+        `priority_prefill_budget_cap_tokens` steps in a row in which it computes
+        nothing, so a request that the waiting loop does not reach or admit, or a
+        running one waiting for what is held back, stops holding."""
+        num_computed_tokens, num_steps = self._hold_progress.get(request, (-1, 0))
+        if num_computed_tokens != request.num_computed_tokens:
+            num_steps = 0
+        if num_steps >= self.priority_prefill_budget_cap_tokens:
+            return False
+        self._hold_progress[request] = (request.num_computed_tokens, num_steps + 1)
+        return True
+
+    @staticmethod
+    def _has_unscheduled_encoder_input(request: Request) -> bool:
+        """Whether part of an encoder input of `request` is still to be
+        scheduled."""
+        return any(
+            feature.mm_position.offset + feature.mm_position.length
+            > request.num_computed_tokens
+            for feature in request.mm_features or ()
+        )
+
+    def _holds_unscheduled_encoder_output(self, request: Request) -> bool:
+        """Whether `request` holds a cached encoder output of an input that it
+        has yet to schedule in full."""
+        return any(
+            request.mm_features[input_id].mm_position.offset
+            + request.mm_features[input_id].mm_position.length
+            > request.num_computed_tokens
+            for input_id in self.encoder_cache_manager.get_cached_input_ids(request)
+        )
+
+    def _count_prefill_hold(self, num_tokens: int, budget: int = 0) -> None:
+        """Count this step, once, as one in which the budget cap holds prefill
+        back, and a held chunk of `num_tokens` within the `budget` the step has
+        left less what it already counts as held, since held chunks take no
+        budget: a step's held tokens are at most its budget."""
+        if self._prefill_held_step != self.current_step:
+            self._prefill_held_step = self.current_step
+            self._prefill_held_step_tokens = 0
+            self._num_prefill_held_steps += 1
+        num_tokens = max(0, min(num_tokens, budget - self._prefill_held_step_tokens))
+        self._prefill_held_step_tokens += num_tokens
+        self._num_prefill_held_tokens += num_tokens
+
+    def _running_slot_free(self) -> bool:
+        """Whether a running slot is free. A waiting request needs one to be
+        promoted; with none free, holding prefill back would only stall the
+        running requests."""
+        num_running = len(self.running) + self.num_waiting_for_streaming_input
+        return num_running < self.max_num_active_reqs
 
     def _local_prefix_hit(
         self, request: Request
@@ -4066,6 +4317,7 @@ class Scheduler(SchedulerInterface):
             # Promote request to waiting or preempted.
             self._update_waiting_for_remote_kv(request)
             self._reserve_parked(request)
+            self._load_hold_start.pop(request, None)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:
