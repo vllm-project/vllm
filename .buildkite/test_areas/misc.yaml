@@ -1069,6 +1069,7 @@ steps:
     - VLLM_TEST_MODEL=ibm-granite/granite-3.0-1b-a400m-base VLLM_TEST_SERVER_ARGS="--data-parallel-size 4 --enable-expert-parallel --max-model-len 4096" pytest -v -s v1/determinism/test_online_batch_invariance.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI300) Batch Invariance (Distributed)"
       dind: false
       device: mi300_4

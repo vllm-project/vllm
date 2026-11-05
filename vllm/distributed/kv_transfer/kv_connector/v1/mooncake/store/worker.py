@@ -29,6 +29,7 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed import (
     get_dcp_group,
     get_pcp_group,
@@ -211,6 +212,42 @@ def _replicate_config_supports_group_ids(
     if hasattr(replicate_config_cls, "group_ids"):
         return True
     return hasattr(replicate_config, "group_ids")
+
+
+def _resolve_cache_prefix(vllm_config: VllmConfig) -> str:
+    """Return the configured cache_prefix, deriving one for "auto".
+
+    "auto" namespaces keys by build and model identity, so a new image or
+    model revision does not read KV written by a different deployment.
+    Ranks and Store payload format are already part of the key.
+    """
+    assert vllm_config.kv_transfer_config is not None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    prefix = str(extra_config.get("cache_prefix", ""))
+    if prefix != "auto":
+        return prefix
+    # Default dev identities do not change with the code, so reject them.
+    image_tag = envs.VLLM_IMAGE_TAG.strip()
+    build_commit = envs.VLLM_BUILD_COMMIT.strip()
+    build = (image_tag if image_tag != "local/vllm-openai:dev" else "") or (
+        build_commit if build_commit != "unknown" else ""
+    )
+    if not build:
+        raise ValueError(
+            "MooncakeStore cache_prefix='auto' requires VLLM_IMAGE_TAG or "
+            "VLLM_BUILD_COMMIT to identify the deployed code."
+        )
+    model_config = vllm_config.model_config
+    prefix = "auto-" + hash_factors(
+        {
+            "build": build,
+            "model": model_config.compute_hash(),
+            "hf_commit": getattr(model_config.hf_config, "_commit_hash", None),
+            "cache": vllm_config.cache_config.compute_hash(),
+        }
+    )
+    logger.info("MooncakeStore resolved cache_prefix: %s", prefix)
+    return prefix
 
 
 def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
@@ -1499,6 +1536,8 @@ class MooncakeStoreWorker:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
+        # Resolve before connecting so a missing build identity fails fast.
+        cache_prefix = _resolve_cache_prefix(vllm_config)
         try:
             from mooncake.store import (  # type: ignore
                 MooncakeDistributedStore,
@@ -1678,11 +1717,7 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
-            cache_prefix=str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix", ""
-                )
-            ),
+            cache_prefix=cache_prefix,
             store_namespace=store_namespace,
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
@@ -2739,6 +2774,32 @@ class LookupKeyServer:
 # ============================================================
 
 
+@dataclasses.dataclass
+class LookupState:
+    future: Future[MooncakeLookupResult]
+    signature: tuple[int, int, bytes]
+    # Freshness runs from when the RPC returned, not when it was queued.
+    completed_at: float | None = None
+    error_logged: bool = False
+
+    def __post_init__(self) -> None:
+        self.future.add_done_callback(self._mark_completed)
+
+    def _mark_completed(self, _: Future) -> None:
+        self.completed_at = time.monotonic()
+
+
+def _lookup_signature(
+    num_tokens: int, block_hashes: list[BlockHash]
+) -> tuple[int, int, bytes]:
+    # Block hashes form a cumulative chain; its last hash identifies it.
+    return (
+        num_tokens,
+        len(block_hashes),
+        bytes(block_hashes[-1]) if block_hashes else b"",
+    )
+
+
 class LookupKeyClient:
     """ZMQ client for the LookupKey admin channel.
 
@@ -2761,7 +2822,14 @@ class LookupKeyClient:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
-        self.futures: dict[str, Future[MooncakeLookupResult]] = {}
+        self._lookups: dict[str, LookupState] = {}
+        assert vllm_config.kv_transfer_config is not None
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        prefetch_limit = extra_config.get("lookup_prefetch_limit", 0)
+        self._prefetch_slots = (
+            threading.BoundedSemaphore(prefetch_limit) if prefetch_limit > 0 else None
+        )
+        self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
     def _lookup(
         self, num_tokens: int, block_hashes: list[BlockHash]
@@ -2785,26 +2853,67 @@ class LookupKeyClient:
         non_block: bool = False,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
-        so the caller retries on a later step."""
-        future = self.futures.get(req_id)
-        if future is None:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
-            self.futures[req_id] = future
-        if non_block and not future.done():
+        then cache it until expiry or discard()."""
+        now = time.monotonic()
+        signature = _lookup_signature(num_tokens, block_hashes)
+        state = self._lookups.get(req_id)
+        if state is not None and (
+            state.signature != signature
+            or (
+                state.completed_at is not None
+                and now - state.completed_at > self._lookup_ttl_s
+            )
+        ):
+            self.discard(req_id)
+            state = None
+        if state is None:
+            state = LookupState(
+                future=self.executor.submit(
+                    self._lookup, num_tokens, list(block_hashes)
+                ),
+                signature=signature,
+            )
+            self._lookups[req_id] = state
+        if non_block and not state.future.done():
             return None
         try:
-            return future.result()
+            result = state.future.result()
         except Exception as e:
-            logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
-            return MooncakeLookupResult(0)
-        finally:
-            del self.futures[req_id]
+            if not state.error_logged:
+                state.error_logged = True
+                logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+            result = MooncakeLookupResult(0)
+        if not non_block:
+            self.discard(req_id)
+        return result
+
+    def prefetch(
+        self, req_id: str, num_tokens: int, block_hashes: list[BlockHash]
+    ) -> bool:
+        """Start a lookup for a newly added request; a later lookup(req_id)
+        reuses it. At most ``lookup_prefetch_limit`` prefetches are in flight;
+        beyond that, returns False and the scheduler looks up as usual."""
+        assert req_id not in self._lookups
+        slots = self._prefetch_slots
+        if slots is None or not slots.acquire(blocking=False):
+            return False
+        try:
+            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
+        except RuntimeError:  # executor shut down
+            slots.release()
+            return False
+        future.add_done_callback(lambda _: slots.release())
+        self._lookups[req_id] = LookupState(
+            future=future,
+            signature=_lookup_signature(num_tokens, block_hashes),
+        )
+        return True
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
-        future = self.futures.pop(req_id, None)
-        if future is not None:
-            future.cancel()
+        state = self._lookups.pop(req_id, None)
+        if state is not None:
+            state.future.cancel()
 
     def _reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
@@ -2819,9 +2928,15 @@ class LookupKeyClient:
         return bytes(resp) == RESP_OK
 
     def reset(self) -> bool:
-        return self.executor.submit(self._reset).result()
+        success = self.executor.submit(self._reset).result()
+        if success:
+            for req_id in list(self._lookups):
+                self.discard(req_id)
+        return success
 
     def close(self):
+        for req_id in list(self._lookups):
+            self.discard(req_id)
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
 
