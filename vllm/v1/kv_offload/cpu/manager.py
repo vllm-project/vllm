@@ -199,6 +199,18 @@ class CPUOffloadingManager(OffloadingManager):
             key for key in reused_keys if key not in state.inserted_keys
         )
 
+    # --- CPUOffloadingManager interface ---
+
+    def get_num_available_chunks(self) -> int:
+        """Chunks allocatable now: free plus idle (evictable) cached chunks."""
+        return self._get_num_free_chunks() + self._num_evictable_cache_chunks
+
+    def is_evictable(self, key: OffloadKey) -> bool | None:
+        chunk = self._policy.get(key)
+        if chunk is None:
+            return None
+        return chunk.ref_cnt == 0
+
     # --- OffloadingManager interface ---
 
     @override

@@ -482,6 +482,55 @@ class TestTieringOffloadingManager:
             self.manager._process_finished_jobs()
         completed.assert_called_once_with(set(to_keys([1, 2])), _CTX, False)
 
+    def test_promotion_failure_flags_request_while_live(self, manager_setup):
+        """A promotion that fails while its request is still live marks the
+        request so later lookups do not re-initiate promotions for it."""
+        self._start_request()
+        job = TieringTransferJob(
+            job_id=self.manager._next_job_id(),
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            alloc_fn=lambda keys, ctx: None,
+            is_promotion=True,
+        )
+        self.manager._register_job(job, 0)
+        failed = JobResult(job_id=job.job_id, success=False)
+        with patch.object(
+            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+        ):
+            self.manager._process_finished_jobs()
+        assert _CTX.req_id in self.manager._promotion_failed_requests
+
+    def test_promotion_failure_after_finalize_does_not_leak(self, manager_setup):
+        """A promotion resolving after its request finalized must not re-add
+        the req_id to _promotion_failed_requests: the request state is gone,
+        nothing will discard it, and no future promotion can name it."""
+        self._start_request()
+        job = TieringTransferJob(
+            job_id=self.manager._next_job_id(),
+            req_context=_CTX,
+            keys=to_keys([1, 2]),
+            alloc_fn=lambda keys, ctx: None,
+            is_promotion=True,
+        )
+        self.manager._register_job(job, 0)
+
+        # No pending stores or cascades, so finalization runs immediately --
+        # the in-flight promotion is not part of the finalize gate.
+        self.manager.on_request_finished(_CTX)
+        assert _CTX.req_id not in self.manager._req_state
+        assert _CTX.req_id not in self.manager._promotion_failed_requests
+
+        # The promotion now resolves with allocation failed (e.g. the primary
+        # tier reports the request finalized).
+        failed = JobResult(job_id=job.job_id, success=False)
+        with patch.object(
+            self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+        ):
+            self.manager._process_finished_jobs()
+
+        assert _CTX.req_id not in self.manager._promotion_failed_requests
+
     def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
         from unittest.mock import patch
 
@@ -645,25 +694,31 @@ class TestTieringOffloadingManager:
         assert count_hits(self.manager, chunks) == 3
 
     def test_promotion_batch_larger_than_primary_capacity(self, manager_setup):
-        """A promotion batch larger than the primary capacity is denied
-        eventually.
+        """A promotion batch larger than the primary capacity shrinks to the
+        primary capacity: only a capacity-sized prefix is promoted, the rest
+        MISS.
         """
         keys = to_keys(range(15))
         for key in keys:
             self.secondary_tier1.chunks[key] = True
 
         self._start_request()
-        # Attempt promotion atmost 3 times to see if the mechanics
-        # abandons it eventually.
-        max_attempts = 3
-        success = False
-        for _ in range(max_attempts):
-            results = [self.manager.lookup(key, _CTX) for key in keys]
-            if success := all(r is LookupResult.MISS for r in results):
-                break
-            self._simulate_on_schedule_end()
+        results = [self.manager.lookup(key, _CTX) for key in keys]
+        assert all(r is LookupResult.HIT_PENDING for r in results[:5])
+        assert all(r is LookupResult.MISS for r in results[5:])
 
-        assert success, "Expected all keys to be missed"
+        self._simulate_on_schedule_end()
+        # After the promotion lands, the connector walk stops at the first
+        # MISS: a stable capacity-sized prefix hit, no retry loop back to
+        # HIT_PENDING on all 15.
+        walked: list[LookupResult] = []
+        for key in keys:
+            result = self.manager.lookup(key, _CTX)
+            if result is LookupResult.MISS:
+                break
+            walked.append(result)
+        assert len(walked) == 5
+        assert all(r is LookupResult.HIT for r in walked)
 
     @pytest.mark.parametrize(
         "source",
@@ -1764,10 +1819,9 @@ class TestTieringOffloadingManager:
         # the lookup that staged it).
         promo_chunk = to_keys([99])[0]
         self.secondary_tier1.chunks[promo_chunk] = True
-        assert (
-            self.manager.lookup(promo_chunk, ReqContext(req_id="pending"))
-            is LookupResult.HIT_PENDING
-        )
+        pending_ctx = ReqContext(req_id="pending")
+        self.manager.on_new_request(pending_ctx)
+        assert self.manager.lookup(promo_chunk, pending_ctx) is LookupResult.HIT_PENDING
         assert self.manager._pending_load_submissions
 
         # Request-level tier registration.
@@ -1795,7 +1849,11 @@ class TestTieringOffloadingManager:
         assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
         assert self.manager._request_load_sources == {}
-        assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
+        assert set(self.manager._req_state) == {
+            _CTX.req_id,
+            rl_ctx.req_id,
+            pending_ctx.req_id,
+        }
         assert self.manager._processed_jobs_this_step is False
 
         # Primary tier reset to a fresh state.
@@ -1881,6 +1939,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(self.secondary_tier1, "lookup", tier1_lookup)
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
+        self.manager.on_new_request(ctx)
         assert self.manager.lookup(chunks[0], ctx) is LookupResult.HIT_PENDING
         tier1_lookup.assert_called()
 

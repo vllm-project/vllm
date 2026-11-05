@@ -581,6 +581,7 @@ class TestBackpressure:
         bp.store_latency_ema = _BP_HIGH_WATER_S * 4
 
         # Lookups should still initiate promotion.
+        self.manager.on_new_request(_CTX)
         for b in blocks:
             result = self.manager.lookup(b, _CTX)
             assert result is LookupResult.HIT_PENDING

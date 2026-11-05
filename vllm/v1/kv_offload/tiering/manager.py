@@ -104,6 +104,28 @@ class RequestState:
     pending_cascade_keys: list[OffloadKey] = field(default_factory=list)
     promotion_job_ids: set[JobId] = field(default_factory=set)
 
+    # Remaining promotion demand budget for the current scheduler step;
+    # None until the request's first initiate_promotion of the step.
+    _promotion_budget: int | None = None
+    _evictable_primary_hits: set[OffloadKey] = field(default_factory=set)
+
+    def on_evictable_primary_hit(self, key: OffloadKey):
+        self._evictable_primary_hits.add(key)
+
+    def on_initiate_promotion(self, primary_tier: CPUOffloadingManager) -> bool:
+        """Return true if promotion initiation doesn't exceed budget."""
+        if self._promotion_budget is None:
+            self._promotion_budget = primary_tier.get_num_available_chunks()
+        self._promotion_budget -= 1
+        # primary_tier.get_num_available_chunks() also counts the number of
+        # evictable chunks. Factor this requests keys in the evictable list
+        # so we don't double count the budget.
+        return self._promotion_budget - len(self._evictable_primary_hits) >= 0
+
+    def reset_promotion_budget(self):
+        self._promotion_budget = None
+        self._evictable_primary_hits.clear()
+
 
 PrimaryAllocFn = Callable[
     [Collection[OffloadKey], ReqContext], tuple[list[OffloadKey], np.ndarray] | None
@@ -450,6 +472,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         # set of keys being promoted
         self._inflight_promotion_keys: set[OffloadKey] = set()
+        # Requests whose promotion failed to allocate primary slots
+        # atleast once. Request discarded in _maybe_finalize_request.
+        self._promotion_failed_requests: set[str] = set()
 
     @property
     @override
@@ -655,6 +680,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._inflight_promotion_keys.difference_update(transfer_job.requested_keys)
 
         if not transfer_job.is_materialized():
+            ## Promotion failed. lets not doom the request into a retry loop.
+            req_id = transfer_job.req_context.req_id
+            if req_id in self._req_state:
+                self._promotion_failed_requests.add(req_id)
             _maybe_update_load_sources(set(transfer_job.requested_keys))
             return
 
@@ -853,6 +882,8 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            if self.primary_tier.is_evictable(key):
+                self._req_state[req_context.req_id].on_evictable_primary_hit(key)
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -946,10 +977,22 @@ class TieringOffloadingManager(OffloadingManager):
 
         Returns:
             True if promotion was scheduled or already in flight.
+            False,
+             - if the request's promotion demand this step exceeds primary tier
+               availability. or,
+             - if the request failed promotion once already.
 
         """
         if key in self._inflight_promotion_keys:
             return True
+
+        if req_context.req_id in self._promotion_failed_requests:
+            return False
+
+        # Verify if the promotion would exceed budget.
+        state = self._req_state[req_context.req_id]
+        if not state.on_initiate_promotion(self.primary_tier):
+            return False
 
         # Record load_sources
         load_sources = self._request_load_sources.setdefault(req_context.req_id, {})
@@ -1315,6 +1358,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._metrics.on_request_finished(state.req_context)
         self._request_load_sources.pop(req_id, None)
         del self._req_state[req_id]
+        self._promotion_failed_requests.discard(req_id)
 
     @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
@@ -1337,6 +1381,11 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
+        # The demand budget is per step: a request's next lookup walk starts
+        # from the primary tier's availability at that time.
+        for req_state in self._req_state.values():
+            req_state.reset_promotion_budget()
+
         # Keys parked by this step's prepare_store cannot have completed yet, so
         # they are simply re-parked here and retried on the next step. That is
         # safe: _maybe_finalize_request() holds off while pending_cascade_keys is
@@ -1432,6 +1481,7 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._promotion_failed_requests.clear()
         self._metrics.assert_idle()
 
         finished_req_ids = []
