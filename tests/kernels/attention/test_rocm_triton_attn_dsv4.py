@@ -1905,6 +1905,10 @@ def test_hip_mega_paged_prefill_bf16_long_ramp() -> None:
     )
     mag = mag[:, None, None]
     torch.testing.assert_close(out.float() / mag, ref / mag, atol=3e-3, rtol=0.02)
+    # The max error is set by BF16/FP8 rounding. A row sum built from P values
+    # other than the rounded BF16 ones fed to PV shows up only in the RMS.
+    rms = ((out.float() - ref) / mag).pow(2).mean().sqrt().item()
+    assert rms < 2.5e-4, rms
 
 
 @requires_gfx950
