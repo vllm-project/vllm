@@ -18,6 +18,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, in_piecewise_cudagraph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.host_memory import host_registration_ranges
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -25,7 +26,6 @@ from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.simple_kv_offload.cuda_mem_ops import host_registration_ranges
 
 logger = init_logger(__name__)
 

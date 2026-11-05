@@ -9,13 +9,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import PIN_MEMORY
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
-from vllm.v1.simple_kv_offload.cuda_mem_ops import (
+from vllm.utils.host_memory import (
     host_registration_ranges,
     pin_tensor,
     unpin_tensor,
 )
+from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.host_buffer import HostBuffer
 from vllm.v1.simple_kv_offload.metadata import (

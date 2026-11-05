@@ -96,12 +96,12 @@ class CUDAHiSparseBackend(HiSparseBackend):
             )
 
     def pin_tensor(self, tensor: torch.Tensor) -> None:
-        from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+        from vllm.utils.host_memory import pin_tensor
 
         pin_tensor(tensor)
 
     def unpin_tensor(self, tensor: torch.Tensor) -> None:
-        from vllm.v1.simple_kv_offload.cuda_mem_ops import unpin_tensor
+        from vllm.utils.host_memory import unpin_tensor
 
         unpin_tensor(tensor)
 
