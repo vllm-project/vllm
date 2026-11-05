@@ -1588,6 +1588,18 @@ class NemotronH_Nano_VL_V2(
         return modalities
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        sizes = kwargs.get("video_frame_sizes")
+        if isinstance(sizes, torch.Tensor) and len(sizes.unique(dim=0)) > 1:
+            # device_resize videos of different frame sizes cannot share one
+            # frame tensor: embed them one at a time (all fields are per video).
+            return [
+                embedding
+                for i in range(len(sizes))
+                for embedding in self.embed_multimodal(
+                    **{k: cast(Sequence, v)[i : i + 1] for k, v in kwargs.items()}
+                )
+            ]
+
         # Validate the multimodal input keyword arguments
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if modalities is None:

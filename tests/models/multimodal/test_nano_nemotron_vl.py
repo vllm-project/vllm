@@ -391,6 +391,40 @@ def _uninitialized_model() -> NemotronH_Nano_VL_V2:
     return object.__new__(NemotronH_Nano_VL_V2)  # type: ignore[type-abstract]
 
 
+def test_nemotron_device_resize_embeds_videos_of_different_sizes_separately():
+    # Videos that keep their aspect ratio can get different frame sizes, and
+    # one encoder batch can hold several of them.
+    model = _uninitialized_model()
+    nn.Module.__init__(model)
+    seen: list[dict] = []
+
+    def record(**kwargs):
+        seen.append(kwargs)
+        return {}
+
+    model._parse_and_validate_multimodal_inputs = record  # type: ignore[method-assign]
+    frames = [
+        torch.zeros(2, 4, 8, 3, dtype=torch.uint8),
+        torch.zeros(2, 6, 6, 3, dtype=torch.uint8),
+    ]
+    kwargs = dict(
+        pixel_values_raw_video=frames,
+        video_frame_sizes=torch.tensor([[32, 64], [48, 48]]),
+        video_num_patches=torch.tensor([2, 2]),
+        frames_indices=torch.tensor([[0, 1], [0, 1]]),
+        frame_duration_ms=torch.tensor([500, 500]),
+    )
+    model.embed_multimodal(**kwargs)
+    assert [k["video_frame_sizes"].tolist() for k in seen] == [[[32, 64]], [[48, 48]]]
+    assert all(k["pixel_values_raw_video"][0] is f for k, f in zip(seen, frames))
+    assert [k["video_num_patches"].tolist() for k in seen] == [[2], [2]]
+
+    seen.clear()
+    same_size = torch.tensor([[32, 64], [32, 64]])
+    model.embed_multimodal(**{**kwargs, "video_frame_sizes": same_size})
+    assert len(seen) == 1
+
+
 @pytest.mark.parametrize("input_key", ["image_embeds", "video_embeds"])
 def test_precomputed_multimodal_embeddings(input_key: str):
     model = _uninitialized_model()
