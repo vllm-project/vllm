@@ -316,13 +316,8 @@ def select_wna16_moe_backend(
         A tuple of (``WNA16MoEBackend``, experts class or ``None``).
 
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
     # WNA16 MoE always runs BF16 activations.
-    oracle = WNA16MoEKernelOracle(config, weight_key, None, activation_format)
+    oracle = WNA16MoEKernelOracle(config, weight_key, None)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend

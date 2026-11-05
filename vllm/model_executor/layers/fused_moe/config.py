@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 import torch
 
@@ -23,6 +23,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import get_triton_kernels_version
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEActivationFormat,
+    )
 
 logger = init_logger(__name__)
 
@@ -1440,6 +1445,20 @@ class FusedMoEConfig:
     @property
     def is_act_and_mul(self) -> bool:
         return self.activation.is_gated
+
+    @property
+    def activation_format(self) -> "FusedMoEActivationFormat":
+        """Activation layout a modular prepare/finalize uses for this config."""
+        # `modular_kernel` imports this module, so the enum is imported lazily.
+        from vllm.model_executor.layers.fused_moe.modular_kernel import (
+            FusedMoEActivationFormat,
+        )
+
+        return (
+            FusedMoEActivationFormat.BatchedExperts
+            if self.moe_parallel_config.use_batched_activation_format
+            else FusedMoEActivationFormat.Standard
+        )
 
     @property
     def w13_num_shards(self) -> int:

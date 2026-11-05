@@ -121,12 +121,7 @@ def select_int8_moe_backend(
     """
     AVAILABLE_BACKENDS = _get_priority_backends(config)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    oracle = Int8MoEKernelOracle(config, weight_key, activation_key, activation_format)
+    oracle = Int8MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend

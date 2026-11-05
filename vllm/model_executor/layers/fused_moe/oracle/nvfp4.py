@@ -264,12 +264,7 @@ def select_nvfp4_moe_backend(
             b for b in AVAILABLE_BACKENDS if b in NVFP4_BACKENDS_WITH_CLAMP
         ]
 
-    use_batched = config.moe_parallel_config.use_batched_activation_format
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if use_batched
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     runner_backend = config.moe_backend
     requested_backend = (
@@ -278,7 +273,7 @@ def select_nvfp4_moe_backend(
     # B12X can run with BF16 activations when the env forces a16.
     if requested_backend is not None and _use_a16(requested_backend, False):
         activation_key = None
-    oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key, activation_format)
+    oracle = NvFp4MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     if requested_backend is not None:

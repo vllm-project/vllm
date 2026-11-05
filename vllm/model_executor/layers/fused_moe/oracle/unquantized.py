@@ -253,13 +253,7 @@ def select_unquantized_moe_backend(
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
     # if not ideal. Once we unify TP + DP/EP, we can select P/F first.
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if moe_config.moe_parallel_config.use_batched_activation_format
-        or moe_config.moe_backend == "batched_triton"
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    oracle = UnquantizedMoEKernelOracle(moe_config, None, None, activation_format)
+    oracle = UnquantizedMoEKernelOracle(moe_config, None, None)
 
     # MoonEP owns the expert layout (expert-grouped [NvS, H] + cu_seqlens),
     # so it is not interchangeable with the token-major experts backends.
@@ -273,7 +267,7 @@ def select_unquantized_moe_backend(
     if runner_backend not in ["auto", "humming", "marlin"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+            oracle.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
             and requested_backend == UnquantizedMoeBackend.TRITON
         ):
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
@@ -498,6 +492,13 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
     """
 
     name = "Unquantized"
+
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        # Unquantized also runs batched when a batched_triton backend is asked for.
+        if self.moe_config.moe_backend == "batched_triton":
+            return mk.FusedMoEActivationFormat.BatchedExperts
+        return super().activation_format
 
     def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
         return UnquantizedMoeBackend

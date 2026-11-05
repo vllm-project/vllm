@@ -92,13 +92,8 @@ def _select_kernel_cls(
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
     """Select the first supported expert class for the MXFP8 config."""
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
     _, experts_cls = Mxfp8MoEKernelOracle(
-        config, kMxfp8Static, kMxfp8Dynamic, activation_format
+        config, kMxfp8Static, kMxfp8Dynamic
     ).return_or_raise(backend)
     return experts_cls
 

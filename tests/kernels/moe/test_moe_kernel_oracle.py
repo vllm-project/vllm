@@ -290,12 +290,7 @@ def test_return_or_raise(
                 )
             ),
         )
-    oracle = Int8MoEKernelOracle(
-        make_dummy_moe_config(),
-        None,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
+    oracle = Int8MoEKernelOracle(make_dummy_moe_config(), None, None)
 
     if expected_error is not None:
         with pytest.raises(ValueError, match=expected_error):

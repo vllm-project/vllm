@@ -102,14 +102,7 @@ def select_w4a8_int8_moe_backend(
     if not AVAILABLE_BACKENDS:
         raise NotImplementedError("W4A8 Int8 MoE is only supported on CPU platforms")
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-    oracle = W4A8Int8MoEKernelOracle(
-        config, weight_key, activation_key, activation_format
-    )
+    oracle = W4A8Int8MoEKernelOracle(config, weight_key, activation_key)
 
     # Handle explicit moe_backend from user.
     runner_backend = config.moe_backend

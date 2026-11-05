@@ -50,15 +50,20 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         moe_config: FusedMoEConfig,
         weight_key: "QuantKey | None" = None,
         activation_key: "QuantKey | None" = None,
-        activation_format: mk.FusedMoEActivationFormat = (
-            mk.FusedMoEActivationFormat.Standard
-        ),
     ) -> None:
         # Deployment inputs shared by every backend probe of one selection.
         self.moe_config = moe_config
         self.weight_key = weight_key
         self.activation_key = activation_key
-        self.activation_format = activation_format
+
+    @property
+    def activation_format(self) -> mk.FusedMoEActivationFormat:
+        """Activation layout of the prepare/finalize this config will use.
+
+        Derived from `moe_config` rather than stored, so the instance does not
+        hold a second copy of it.
+        """
+        return self.moe_config.activation_format
 
     def backend_enum_cls(self) -> type[BackendT]:
         """Return the concrete `Enum` class enumerating this oracle's

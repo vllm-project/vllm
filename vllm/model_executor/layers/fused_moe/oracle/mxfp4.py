@@ -667,11 +667,7 @@ def select_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     if runner_backend != "auto":
         requested_backends = _get_requested_backends(
@@ -687,9 +683,7 @@ def select_mxfp4_moe_backend(
                 f"moe_backend={runner_backend!r} does not support "
                 f"activation={requested_activation_key}"
             )
-        oracle = Mxfp4MoEKernelOracle(
-            config, kMxfp4Static, requested_activation_key, activation_format
-        )
+        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
         last_error: Exception | None = None
         for requested_backend in requested_backends:
             act_key = (
@@ -717,9 +711,7 @@ def select_mxfp4_moe_backend(
     )
 
     unsupported_reasons: list[tuple[Mxfp4MoeBackend, str | None]] = []
-    oracle = Mxfp4MoEKernelOracle(
-        config, kMxfp4Static, requested_activation_key, activation_format
-    )
+    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, requested_activation_key)
     for backend in AVAILABLE_BACKENDS:
         # EMULATION takes the requested key, other backends use their own
         act_key = (
@@ -762,11 +754,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
+    activation_format = config.activation_format
 
     # Honor explicit moe_backend (e.g. "marlin", "triton_unfused") before
     # falling back to the auto priority list.
@@ -785,7 +773,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
                 for b in requested_backends
             ]
         last_error: Exception | None = None
-        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None, activation_format)
+        oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None)
         for requested_backend in requested_backends:
             try:
                 return oracle.return_or_raise(
@@ -812,7 +800,7 @@ def select_deepseek_v4_mxfp4_moe_backend(
         priority_backends = _get_priority_backends()
 
     # Iterate priority backends: TRTLLM MXFP8, then Triton.
-    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None, activation_format)
+    oracle = Mxfp4MoEKernelOracle(config, kMxfp4Static, None)
     for backend in priority_backends:
         kernel_cls, _ = oracle.try_backend(
             backend, activation_key=_backend_activation_key(backend)
@@ -2246,23 +2234,13 @@ def _mxfp4_quant_keys_for_experts(
     return kMxfp4Static, _backend_activation_key(mxfp4_backend)
 
 
-def _activation_format_for_config(
-    moe_config: FusedMoEConfig,
-) -> mk.FusedMoEActivationFormat:
-    return (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if moe_config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-
 def _validate_mxfp4_experts_config(
     experts_cls: type[mk.FusedMoEExperts],
     moe_config: FusedMoEConfig,
     mxfp4_backend: Mxfp4MoeBackend,
 ) -> None:
     """Fail closed when a caller bypasses the oracle and picks experts directly."""
-    activation_format = _activation_format_for_config(moe_config)
+    activation_format = moe_config.activation_format
     weight_key, activation_key = _mxfp4_quant_keys_for_experts(
         experts_cls, mxfp4_backend
     )
