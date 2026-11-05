@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.ep_weight_filter import (
     compute_eplb_local_expert_ids,
     compute_local_expert_ids,
+    moe_layer_partitions,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
@@ -467,6 +468,8 @@ class DefaultModelLoader(BaseModelLoader):
         pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
         ep_size = dp_size * pcp_size * tp_size
         ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        if ep_size <= 1:
+            return
 
         if parallel_config.enable_eplb:
             # Redundant slots replicate experts from other ranks' shards, so
@@ -502,12 +505,18 @@ class DefaultModelLoader(BaseModelLoader):
                 ep_rank,
             )
         else:
-            self.local_expert_ids = compute_local_expert_ids(
-                num_experts,
-                ep_size,
-                ep_rank,
-                placement=parallel_config.expert_placement_strategy,
-            )
+            # A layer's count can differ from the config's: DeepSeek V4.1's
+            # DSpark draft splits 128 experts beside the backbone's 384.
+            partitions = moe_layer_partitions(model) or {
+                (num_experts, parallel_config.expert_placement_strategy)
+            }
+            local_expert_ids: set[int] = set()
+            for count, placement in partitions:
+                local_expert_ids |= (
+                    compute_local_expert_ids(count, ep_size, ep_rank, placement)
+                    or set()
+                )
+            self.local_expert_ids = local_expert_ids
         if self.local_expert_ids is not None:
             logger.info_once(
                 "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
