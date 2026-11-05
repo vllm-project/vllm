@@ -748,6 +748,7 @@ class MoRIIOWrapper:
         self.notify_port: int | None = None
         self.lock = threading.Lock()
         self.done_req_ids: list[MoRIIOTransferAck] = []
+        self.renewed_lease_transfer_ids: set[TransferId] = set()
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.failed_write_cache_req_ids: list[str] = []
@@ -1066,6 +1067,8 @@ class MoRIIOWrapper:
             self._handle_write_failed_message(data)
         elif message_type == "release":
             self._handle_release_message(data)
+        elif message_type == "renew_lease":
+            self._handle_lease_renewal_message(data)
         else:
             raise MoRIIOError(f"Unhandled structured message type: {message_type}")
 
@@ -1131,6 +1134,16 @@ class MoRIIOWrapper:
             self.done_remote_allocate_req_dict.pop(transfer_id, None)
             self._mark_transfer_terminal_locked(transfer_id)
 
+    def _handle_lease_renewal_message(self, data: dict):
+        assert get_role() == ROLE.PRODUCER, "Only prefill can get READ lease renewals"
+        transfer_ids = data.get("transfer_ids")
+        if not isinstance(transfer_ids, list):
+            # A renewal is advisory; never let a bad one stop the listener.
+            logger.warning("Ignoring READ lease renewal without transfer_ids")
+            return
+        with self.lock:
+            self.renewed_lease_transfer_ids.update(transfer_ids)
+
     def fail_unallocated_write(self, transfer_id: TransferId) -> bool:
         """Mark a WRITE transfer terminal and release its source blocks if
         decode never sent its allocation.
@@ -1178,18 +1191,8 @@ class MoRIIOWrapper:
             logger.warning("Missing remote_ip or remote_port for notification")
             return
 
-        path = make_zmq_path("tcp", remote_ip, remote_port)
-
-        if path not in self.paths:
-            ctx = zmq.Context.instance()
-            sock = make_zmq_socket(
-                ctx=ctx, path=path, socket_type=zmq.DEALER, bind=False
-            )
-            self.paths[path] = sock
-
+        path, sock = self._notify_socket(remote_ip, remote_port)
         req_list = req_ids if isinstance(req_ids, list) else [req_ids]
-
-        sock = self.paths[path]
         try:
             for req_id in req_list:
                 if not isinstance(req_id, str):
@@ -1208,6 +1211,36 @@ class MoRIIOWrapper:
             logger.error("Failed to send notification to %s: %s", path, e)
             self.paths.pop(path, None)
             raise
+
+    def _notify_socket(self, remote_ip, remote_port) -> tuple[str, zmq.Socket]:
+        path = make_zmq_path("tcp", remote_ip, remote_port)
+        if path not in self.paths:
+            ctx = zmq.Context.instance()
+            self.paths[path] = make_zmq_socket(
+                ctx=ctx, path=path, socket_type=zmq.DEALER, bind=False
+            )
+        return path, self.paths[path]
+
+    def send_lease_renewal(
+        self, transfer_ids: list[TransferId], remote_ip: str, remote_port: int
+    ) -> None:
+        """Renew READ leases on one prefill rank. Best effort: a renewal that
+        cannot be queued is dropped, and the socket, which also carries this
+        rank's releases, is kept."""
+        path, sock = self._notify_socket(remote_ip, remote_port)
+        try:
+            sock.send(
+                msgpack.dumps({"type": "renew_lease", "transfer_ids": transfer_ids}),
+                flags=zmq.NOBLOCK,
+            )
+        except zmq.ZMQError as e:
+            logger.warning("Dropped a READ lease renewal to %s: %s", path, e)
+
+    def pop_renewed_lease_transfer_ids(self) -> set[TransferId]:
+        with self.lock:
+            renewed = self.renewed_lease_transfer_ids
+            self.renewed_lease_transfer_ids = set()
+        return renewed
 
     def pop_finished_req_ids(self):
         # Producer invocation: return every completion message since the last

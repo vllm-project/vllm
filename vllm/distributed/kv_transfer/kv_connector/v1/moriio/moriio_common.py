@@ -327,8 +327,9 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
-        #                     READ release notification (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation, and the
+        #                     READ block lease that decode renews while the
+        #                     request waits for its read (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
 
@@ -429,15 +430,21 @@ class MoRIIOConstants:
     DEFAULT_HANDSHAKE_PORT = "6301"
     DEFAULT_NOTIFY_PORT = "61005"
 
+    # Upper bound (seconds) on how long decode lease renewals can keep a READ
+    # request's prefill blocks.
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
 
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
-    # Timeout (seconds) for deferred WRITE allocation or a missing READ release
-    # notification.
+    # Timeout (seconds) for deferred WRITE allocation, and the READ block lease:
+    # prefill frees a request's blocks once it expires, and decode renews it every
+    # lease / READ_LEASE_RENEWALS_PER_LEASE while the request waits for its read.
+    # A renewal extends the lease to READ_LEASE_EXTENSION_FRACTION of its length.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    READ_LEASE_RENEWALS_PER_LEASE = 6
+    READ_LEASE_EXTENSION_FRACTION = 2 / 3
     # Timeout (seconds) before an in-flight recv whose RDMA completion was lost
     # is aborted, so the decode worker does not hang on it forever.
     # Overridable via kv_connector_extra_config["recv_abort_timeout"].
@@ -532,11 +539,29 @@ class ReqMeta:
     remote_dp_size_local: int = 0
 
 
+@dataclass(frozen=True)
+class ReadLeaseTarget:
+    """A prefill DP rank holding READ blocks that decode keeps leased."""
+
+    host: str
+    notify_port: int
+    dp_rank: int
+    # Prefill TP size; 0 means the same as decode's.
+    tp_size: int
+    lease_duration: float
+
+
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
+        # READ lease expiry per request, in the scheduler's perf_counter domain.
         self.reqs_to_send: dict[ReqId, float] = {}
+        # The scheduler's perf_counter when it built this metadata, so a worker
+        # (possibly on another node) can rebase reqs_to_send onto its own clock.
+        self.scheduler_clock: float = 0.0
+        # Decode: READ leases to renew on each prefill rank this step.
+        self.read_lease_renewals: dict[ReadLeaseTarget, list[TransferId]] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
 
     def __repr__(self):
@@ -544,6 +569,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_send={self.reqs_to_send}, "
+            f"read_lease_renewals={self.read_lease_renewals}, "
             f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
         )
 
