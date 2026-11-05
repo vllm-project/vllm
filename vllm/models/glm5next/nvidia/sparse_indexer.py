@@ -46,6 +46,7 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
     LayerNameType,
     _resolve_layer_name,
 )
@@ -146,6 +147,7 @@ def sparse_attn_indexer_kpool(
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -191,9 +193,19 @@ def sparse_attn_indexer_kpool(
                 sched.max_num_seqs * (num_spec + 1),
                 sched.max_num_batched_tokens,
             )
-        # float32 logits -> 4 bytes/element; uint8 sentinel so elems == bytes.
-        decode_logits_elems = worst_decode_tokens * max_pool_len * 4
-        prefill_cap_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        # FP32 logits, plus DeepGEMM's output when it emits BF16; uint8
+        # sentinel so elems == bytes.
+        bytes_per_elem = torch.float32.itemsize
+        if logits_dtype != torch.float32:
+            bytes_per_elem += logits_dtype.itemsize
+        decode_logits_elems = worst_decode_tokens * max_pool_len * bytes_per_elem
+        prefill_cap_elems = (
+            envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB
+            * 1024
+            * 1024
+            // torch.float32.itemsize
+            * bytes_per_elem
+        )
         max_logits_elems = max(decode_logits_elems, prefill_cap_elems)
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
@@ -416,6 +428,7 @@ def sparse_attn_indexer_kpool(
                         q_slice_cast[rows],
                         q_scale_slice[rows] if q_scale_slice is not None else None,
                         weights[row_start + rows.start : row_start + rows.stop],
+                        logits_dtype,
                     )
                     # Compressed: row i starts at K position cu_seqlen_ks[i].
                     row_ends = cu_seqlen_ke[rows] - cu_seqlen_ks[rows]
@@ -427,6 +440,7 @@ def sparse_attn_indexer_kpool(
                             cu_seqlen_ks[rows],
                             cu_seqlen_ke[rows],
                             chunk.max_seqlen_k,
+                            logits_dtype=logits_dtype,
                         ),
                         row_ends,
                     )
@@ -452,6 +466,8 @@ def sparse_attn_indexer_kpool(
                 dcp_world_size,
                 pool_cp_interleave,
                 row_starts=None,
+                logits_dtype=logits_dtype,
+                num_positions=max_pool_len,
             )
 
             if index_kpool > 1:
@@ -654,7 +670,10 @@ def sparse_attn_indexer_kpool(
             else padded_q_quant_decode_tokens
         )
         padded_q_scale, decode_weights = mqa_logits_mx_inputs(
-            padded_q_quant_cast, padded_q_scale, padded_weights[:num_padded_tokens]
+            padded_q_quant_cast,
+            padded_q_scale,
+            padded_weights[:num_padded_tokens],
+            logits_dtype,
         )
         # SM100 decode is varlen: one row and context length per token.
         logits = as_fp32_logits(
@@ -666,6 +685,7 @@ def sparse_attn_indexer_kpool(
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
                 max_model_len=max_pool_len,
+                logits_dtype=logits_dtype,
                 indices=decode_metadata.indices,
             ),
             seq_lens.view(-1),
@@ -701,6 +721,8 @@ def sparse_attn_indexer_kpool(
             dcp_rank,
             dcp_world_size,
             pool_cp_interleave,
+            logits_dtype=logits_dtype,
+            num_positions=max_pool_len,
         )
 
         # Resolve to token-level indices in the output buffer.
@@ -785,6 +807,13 @@ class SparseAttnIndexerKpool(CustomOp):
             _cfg.kernel_config.sparse_indexer_topk_backend
             if _cfg is not None
             else "auto"
+        )
+        self.logits_dtype = (
+            STR_DTYPE_TO_TORCH_DTYPE[
+                _cfg.attention_config.resolve_indexer_logits_dtype("float32")
+            ]
+            if _cfg is not None
+            else torch.float32
         )
         _parallel = _cfg.parallel_config if _cfg is not None else None
         self._parallel_config = _parallel
@@ -881,4 +910,5 @@ class SparseAttnIndexerKpool(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            self.logits_dtype,
         )

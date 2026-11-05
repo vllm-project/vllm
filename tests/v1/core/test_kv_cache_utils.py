@@ -6,8 +6,9 @@ import importlib
 from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
+import numpy as np
 import pytest
 import torch
 
@@ -22,7 +23,9 @@ from tests.v1.core.utils import (
 )
 from vllm.config import (
     CacheConfig,
+    KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -1074,7 +1077,7 @@ def test_frontend_block_hashes_count_check():
     def frontend_hashes(config, num_hashes):
         request = EngineCoreRequest(
             request_id="0",
-            prompt_token_ids=list(range(10)),
+            prompt_token_ids=np.arange(10, dtype=np.int32),
             mm_features=None,
             sampling_params=SamplingParams(),
             pooling_params=None,
@@ -1194,31 +1197,46 @@ def test_lookahead_block_hash_keeps_mm_inputs_for_next_block(
             {"disable_lookahead_block_hashes": True}, 0, id="disabled-by-config"
         ),
         pytest.param({"kv_connector": True}, 0, id="kv-connector"),
+        pytest.param({"method": None}, 0, id="no-speculation"),
     ],
 )
-def test_num_hash_lookahead_tokens(overrides: dict[str, Any], expected: int):
-    speculative_config = object.__new__(SpeculativeConfig)
-    object.__setattr__(speculative_config, "method", overrides.get("method", "mtp"))
-    object.__setattr__(
-        speculative_config,
-        "disable_lookahead_block_hashes",
-        overrides.get("disable_lookahead_block_hashes", False),
-    )
-    vllm_config = cast(
-        VllmConfig,
-        SimpleNamespace(
-            cache_config=SimpleNamespace(
-                enable_prefix_caching=overrides.get("enable_prefix_caching", True)
+def test_num_hash_lookahead_tokens(
+    overrides: dict[str, Any], expected: int, monkeypatch
+):
+    """Resolve hash lookahead during config construction, without loading weights."""
+    num_lookahead = overrides.get("num_prefill_lookahead_tokens", 1)
+    method = overrides.get("method", "mtp")
+    if method == "dspark":
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    speculative_config = None
+    if method is not None:
+        speculative_config = SpeculativeConfig(
+            model="ngram",
+            num_speculative_tokens=num_lookahead,
+            disable_lookahead_block_hashes=overrides.get(
+                "disable_lookahead_block_hashes", False
             ),
-            speculative_config=speculative_config,
-            num_prefill_lookahead_tokens=overrides.get(
-                "num_prefill_lookahead_tokens", 1
-            ),
-            kv_transfer_config=object() if overrides.get("kv_connector") else None,
+        )
+        speculative_config.method = method
+        if num_lookahead > 1 or method == "dspark":
+            speculative_config.draft_model_config = ModelConfig(
+                model="facebook/opt-125m",
+                hf_overrides={"n_predict": num_lookahead},
+            )
+            speculative_config.draft_parallel_config = ParallelConfig()
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(
+            enable_prefix_caching=overrides.get("enable_prefix_caching", True)
+        ),
+        speculative_config=speculative_config,
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="ExampleConnector", kv_role="kv_both")
+            if overrides.get("kv_connector")
+            else None
         ),
     )
 
-    assert VllmConfig.num_hash_lookahead_tokens.fget(vllm_config) == expected
+    assert vllm_config.num_hash_lookahead_tokens == expected
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1492,6 +1510,21 @@ def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
     draft = replace(target, is_draft=True)
     assert draft == target and hash(draft) == hash(target)
     assert type(target).merge([target, draft]) == target
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        new_kv_cache_spec(),
+        SinkFullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
+        ),
+    ],
+)
+def test_attention_merge_preserves_kv_head_major_slots(spec):
+    # NIXL re-shards NVFP4 pages by KV head only if the group spec keeps the flag.
+    spec = replace(spec, num_head_slots=2 * spec.num_kv_heads, kv_head_major_slots=True)
+    assert type(spec).merge([spec, spec]).kv_head_major_slots
 
 
 @pytest.mark.parametrize(
