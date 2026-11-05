@@ -148,6 +148,20 @@ class ExtendedEngineCoreOutput(EngineCoreOutput):
     new_prompt_len_snapshot: int | None = None
 
 
+class LoRALoadTiming(msgspec.Struct, omit_defaults=True):
+    adapter_name: str
+    transition: str
+    seconds: float
+
+
+class LoRALoadEvent(msgspec.Struct, omit_defaults=True):
+    gpu_adapters: list[str] = []
+    cpu_adapters: list[str] = []
+    pinned_adapters: list[str] = []
+    ranks: dict[str, int] = {}
+    loads: list[LoRALoadTiming] = []
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,
@@ -162,6 +176,7 @@ class EngineCoreOutputs(
     wave_complete: int | None = None
     start_wave: int | None = None
     weight_version: str | None = None
+    lora_load_event: LoRALoadEvent | None = None
 
 
 def token_ids(ids: list[int]) -> list:
@@ -305,6 +320,12 @@ outputs = EngineCoreOutputs(
     ],
     finished_requests={"req-1"},
     weight_version="v7",
+    lora_load_event=LoRALoadEvent(
+        gpu_adapters=["alpha"],
+        cpu_adapters=["alpha", "beta"],
+        ranks={"alpha": 64},
+        loads=[LoRALoadTiming("alpha", "load", 0.25)],
+    ),
 )
 
 extended_outputs = EngineCoreOutputs(
@@ -318,6 +339,7 @@ extended_outputs = EngineCoreOutputs(
     ],
     finished_requests=outputs.finished_requests,
     weight_version=outputs.weight_version,
+    lora_load_event=outputs.lora_load_event,
 )
 extended_outputs_bytes = msgspec.msgpack.encode(extended_outputs)
 # The ordinary frontend's schema ignores even non-default extension values.

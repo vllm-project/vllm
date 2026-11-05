@@ -14,6 +14,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.lora.load_event import LoRALoadEvent
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
@@ -39,6 +40,9 @@ class LoRAModelRunnerMixin:
         for module in self.get_model().modules():
             if isinstance(module, LogitsProcessorWithLoRA):
                 module.reset_sharded_to_full_mapping()
+
+    def take_lora_load_event(self) -> LoRALoadEvent | None:
+        return self.lora_manager.take_load_event() if self.lora_config else None
 
     def load_lora_model(
         self,
@@ -146,6 +150,7 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
+            self.lora_manager.drain_load_timings()
             if remove_lora:
                 self.lora_manager.remove_all_adapters()
 
