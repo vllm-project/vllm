@@ -556,7 +556,10 @@ class Attention(nn.Module, AttentionLayerBase):
             # 3D [num_tokens, heads, head_dim] query
             num_tokens = query.shape[0]
             output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
-        output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+        # Zero-init output buffer to prevent uninitialized memory in CUDA-graph
+        # padding rows from contaminating downstream dynamic per-tensor FP8
+        # activation scale reductions (abs().max()).
+        output = torch.zeros(output_shape, dtype=output_dtype, device=query.device)
         hidden_size = output_shape[-1]
         # Reshape the query, key, and value tensors.
         # NOTE(woosuk): We do this outside the custom op to minimize the
