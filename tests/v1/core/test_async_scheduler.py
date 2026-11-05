@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -233,6 +234,76 @@ def test_pp_priority_waits_for_kv_without_reserving_decode_quota(kv_ready):
     assert set(output.num_scheduled_tokens) == expected
     assert set(output.num_scheduled_tokens.values()) == {1}
     assert not output.preempted_req_ids
+
+
+@pytest.mark.parametrize("local_running", [False, True])
+def test_pp_priority_starts_kv_load_after_prefill_exhausts_budget(local_running):
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=4,
+        max_num_batched_tokens=16,
+        pipeline_parallel_size=2,
+        scheduling_policy="priority",
+        max_num_inflight_kv_loads=1,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+    )
+    (local,) = create_requests(
+        num_requests=1,
+        num_tokens=32 if local_running else 16,
+        req_ids=["local"],
+        sampling_params=SamplingParams(max_tokens=16, skip_reading_prefix_cache=True),
+    )
+    local.priority = -1
+    scheduler.add_request(local)
+    if local_running:
+        first_chunk = scheduler.schedule()
+        scheduler.update_from_output(
+            first_chunk, _make_model_runner_output(first_chunk)
+        )
+
+    (remote,) = create_requests(num_requests=1, num_tokens=32, req_ids=["remote"])
+    remote.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(remote)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"local": 16}
+    assert remote.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert not scheduler.async_kv_waiting
+    assert list(scheduler.kv_holding_waiting) == [remote]
+
+
+def test_pp_priority_running_decode_allocates_before_load_only_request():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        use_v2_model_runner=True,
+        max_num_seqs=1,
+        pipeline_parallel_size=2,
+        scheduling_policy="priority",
+        num_blocks=3,
+        max_num_inflight_kv_loads=1,
+        use_kv_connector=mock_kv(matched_tokens=16, is_async=True),
+    )
+    (local,) = create_requests(
+        num_requests=1,
+        num_tokens=16,
+        req_ids=["local"],
+        sampling_params=SamplingParams(max_tokens=16, skip_reading_prefix_cache=True),
+    )
+    local.priority = -1
+    scheduler.add_request(local)
+    prefill = scheduler.schedule()
+    scheduler.update_from_output(prefill, _make_model_runner_output(prefill))
+    assert not scheduler.schedule().num_scheduled_tokens
+
+    (remote,) = create_requests(num_requests=1, num_tokens=32, req_ids=["remote"])
+    remote.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(remote)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {"local": 1}
+    assert not output.preempted_req_ids
+    assert remote.status == RequestStatus.WAITING
 
 
 def test_pp_priority_preemption_releases_decode_slot(monkeypatch):
@@ -877,7 +948,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 

@@ -77,7 +77,9 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    get_flashinfer_kv_cache_layouts,
     get_flashinfer_layout_string,
+    get_kv_cache_dtype_from_layers,
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -726,13 +728,15 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             # The trtllm-gen kernels consume head-major block interiors; the L/B
             # nesting outside the block is immaterial to them.
             return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
-        return super().supported_kv_cache_layouts()
+        # FlashInfer addresses a layer's cache as NHD or HND pages, so it cannot
+        # consume LHBNC, which puts the head dim outside the block dim.
+        return get_flashinfer_kv_cache_layouts()
 
     forward_includes_kv_cache_update: bool = False
 
@@ -945,7 +949,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.page_size = self.kv_cache_spec.block_size
 
         if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
-            self.cache_dtype = self.cache_config.cache_dtype
+            self.cache_dtype = self._resolve_cache_dtype()
             # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype.startswith("nvfp4")
@@ -1121,6 +1125,29 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len = CpuGpuBuffer(
             max_num_reqs, dtype=torch.int32, device=self.device, pin_memory=False
+        )
+        # Rebased query offsets for TRTLLM prefill. Persistent because a FULL
+        # CUDA graph can capture this path (e.g. a draft-model prefill whose
+        # uniform query length exceeds reorder_batch_threshold) and keeps the
+        # address it saw at capture time.
+        self.qo_indptr_prefill = torch.zeros(
+            max_num_reqs + 1, dtype=torch.int32, device=self.device
+        )
+
+    def _resolve_cache_dtype(self) -> str:
+        cache_dtype = self.cache_config.cache_dtype
+        if cache_dtype != "auto":
+            return cache_dtype
+
+        layer_cache_dtype = get_kv_cache_dtype_from_layers(
+            self.vllm_config, self.layer_names
+        )
+        if layer_cache_dtype is not None and layer_cache_dtype != "auto":
+            return layer_cache_dtype
+
+        raise ValueError(
+            "FlashInfer requires a resolved KV cache dtype for quantized "
+            f"attention layers {self.layer_names}."
         )
 
     @property
@@ -1748,8 +1775,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # use_trtllm_attention never selects it when DCP is enabled.
                 assert not self.use_dcp
                 # Create GPU versions
-                qo_indptr_prefill_gpu = (
-                    qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                qo_indptr_prefill_gpu = self.qo_indptr_prefill[
+                    : num_reqs + 1 - prefill_start
+                ]
+                torch.sub(
+                    qo_indptr[prefill_start : num_reqs + 1],
+                    qo_indptr[prefill_start],
+                    out=qo_indptr_prefill_gpu,
                 )
                 # Compute cum_seq_lens_kv on GPU to avoid CPU sync.
                 # This is the cumulative sum of the number of KV cache
@@ -2043,7 +2075,6 @@ class FlashInferImpl(AttentionImpl):
         self.nvfp4_fa2 = self.is_kvcache_nvfp4 and _nvfp4_kv_on_fa2()
         self.nvfp4_trtllm = self.is_kvcache_nvfp4 and not self.nvfp4_fa2
         self.kv_cache_dtype = "nvfp4" if self.is_kvcache_nvfp4 else kv_cache_dtype
-        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 

@@ -1,28 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-
-logger = init_logger(__name__)
 
 
 class AsyncScheduler(Scheduler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # reusable read-only placeholder list for speculative decoding.
-        self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
-        self.pp_size = self.parallel_config.pipeline_parallel_size
-        self.decode_stagger = self.pp_size if self.pp_microbatch_enabled else 1
+        self.decode_stagger = (
+            self.parallel_config.pipeline_parallel_size
+            if self.pp_microbatch_enabled
+            else 1
+        )
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         # Use the latest num of scheduled draft tokens in next step as placeholder.
-        self._spec_token_placeholders = [
-            -1
-        ] * scheduler_output.num_spec_tokens_to_schedule
+        spec_token_placeholders = [-1] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
@@ -41,7 +37,7 @@ class AsyncScheduler(Scheduler):
             )
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = self._spec_token_placeholders
+            request.spec_token_ids = spec_token_placeholders
 
             if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be
