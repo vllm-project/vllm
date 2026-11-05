@@ -59,15 +59,35 @@ def test_top_level_overrides_are_rejected(checkpoint, hf_overrides, expected_err
         ModelConfig(checkpoint, hf_overrides=hf_overrides)
 
 
-def test_text_config_overrides_take_effect(checkpoint):
+@pytest.mark.parametrize(
+    ("overrides", "expected_skip"),
+    [
+        # Sparse layers 3..59; every 4th one recomputes the top-k.
+        (
+            {"use_index_cache": True, "index_topk_freq": 4},
+            set(range(3, 60)) - set(range(3, 60, 4)),
+        ),
+        # The offset counts sparse-layer ordinals (the AMD-path convention,
+        # not raw layer ids), so the first three sparse layers all compute
+        # before the every-4th cadence starts.
+        (
+            {
+                "use_index_cache": True,
+                "index_topk_freq": 4,
+                "index_skip_topk_offset": 2,
+            },
+            set(range(3, 60)) - {3, 4, 5} - set(range(9, 60, 4)),
+        ),
+    ],
+    ids=["default_offset", "offset_2"],
+)
+def test_text_config_overrides_take_effect(checkpoint, overrides, expected_skip):
     text_config = ModelConfig(
-        checkpoint,
-        hf_overrides={"text_config": {"use_index_cache": True, "index_topk_freq": 4}},
+        checkpoint, hf_overrides={"text_config": overrides}
     ).hf_text_config
 
-    # Sparse layers 3..59; every 4th one recomputes the top-k. The AMD and
-    # NVIDIA models must pick the same compute layers.
-    expected = sorted(set(range(3, 60)) - set(range(3, 60, 4)))
+    # The AMD and NVIDIA models must pick the same compute layers.
+    expected = sorted(expected_skip)
     assert [i for i in range(60) if _should_skip_index_topk(text_config, i)] == expected
     assert [
         i for i in range(60) if _should_skip_index_topk_nv(text_config, i)

@@ -216,7 +216,9 @@ def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
     preceding compute layer wrote into the shared ``topk_indices_buffer`` this
     same forward pass. Cuts the indexer score + top-k cost ~``freq`` x but
     approximates the per-layer selection, so validate accuracy on long-context
-    inputs. Gated by ``use_index_cache`` in the text config; enable via
+    inputs. ``index_skip_topk_offset`` shifts the cadence start in sparse-layer
+    ordinals, matching the AMD path. Gated by ``use_index_cache`` in the text
+    config; enable via
     ``--hf-overrides '{"text_config": {"use_index_cache": true,
     "index_topk_freq": 4}}'``.
     """
