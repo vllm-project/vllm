@@ -90,7 +90,9 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     the plan's trace time (with `HTTPVLLMWeightSyncClient`, raise its
     `timeout` for a very large model). Every update must send a subset of that
     metadata with the same dtypes and shapes; `send_weights` checks this on
-    every trainer rank before contacting the workers. The inference server
+    every trainer rank before contacting the workers. The check stays until
+    re-init, even if planning failed and the workers fell back to
+    `load_weights`. The inference server
     must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
     refuse otherwise at init."""
 
@@ -231,14 +233,19 @@ class NCCLWeightTransferEngine(
             init_info, self.parallel_config
         )
         # After the group forms, so these errors reach the trainer; before any
-        # `start_reload`, so a refusal leaves the model untouched.
+        # `start_reload`, so a refusal leaves the model untouched. A refusal
+        # destroys the group, so a retry starts clean.
         if init_info.use_load_plan:
-            if not init_info.metadata:
-                raise ValueError(
-                    "NCCL weight transfer: use_load_plan needs the trainer's "
-                    "metadata in the init info"
-                )
-            check_plannable(self._default_model)
+            try:
+                if not init_info.metadata:
+                    raise ValueError(
+                        "NCCL weight transfer: use_load_plan needs the trainer's "
+                        "metadata in the init info"
+                    )
+                check_plannable(self._default_model)
+            except Exception:
+                self.shutdown()
+                raise
             self._plan_metadata = [
                 ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
                 for name, dtype_name, shape in init_info.metadata
@@ -516,6 +523,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
             engine._open_trainer_endpoint(init_info)
             return engine
 
+        # without the plan, keep calling overrides that take no `metadata`
         if plan_meta is None:
             payload = cls._build_worker_init_payload(init_info)
         else:

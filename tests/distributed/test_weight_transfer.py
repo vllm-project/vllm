@@ -363,7 +363,8 @@ class TestNCCLEngineParsing:
     @pytest.mark.parametrize("refusal", ["layerwise", "eplb"])
     def test_use_load_plan_refusal_at_init_leaves_the_model(self, monkeypatch, refusal):
         """A configuration no plan supports is refused at init, after the
-        group forms and before any `start_reload` changes the model."""
+        group forms (then destroyed) and before any `start_reload` changes the
+        model."""
         import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
         from vllm.model_executor.model_loader.reload.direct import (
             record_checkpoint_layout,
@@ -400,7 +401,8 @@ class TestNCCLEngineParsing:
                     metadata=[("w", "float32", [2, 3])],
                 )
             )
-        assert engine.model_update_group is group
+        group.destroy.assert_called_once()
+        assert engine.model_update_group is None
         assert model.w.device.type == "cpu"  # not moved to meta (layerwise)
         assert model.w.shape == (3, 2)  # not viewed back (direct)
         assert not hasattr(model, "_direct_reload_begun")
@@ -441,7 +443,8 @@ class TestNCCLEngineParsing:
 @pytest.mark.parametrize("backend", ["nccl", "sparse_nccl"])
 def test_use_load_plan_refused_after_the_group_forms(monkeypatch, backend):
     """The dense backend without metadata, and the sparse backend, refuse
-    `use_load_plan` after the group forms, so the error reaches the trainer."""
+    `use_load_plan` after the group forms, so the error reaches the trainer,
+    and destroy the group."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
     import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
 
@@ -469,7 +472,8 @@ def test_use_load_plan_refused_after_the_group_forms(monkeypatch, backend):
     match = "dense NCCL backend" if sparse else "metadata"
     with pytest.raises(ValueError, match=match):
         engine.init_transfer_engine(init_info)
-    assert engine.model_update_group is group
+    group.destroy.assert_called_once()
+    assert engine.model_update_group is None
 
 
 def test_nccl_update_must_match_the_load_plan_manifest():

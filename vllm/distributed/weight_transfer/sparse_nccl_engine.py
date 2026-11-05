@@ -139,8 +139,10 @@ class SparseNCCLWeightTransferEngine(
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
-        # after the group forms, so the error reaches the trainer
+        # after the group forms, so the error reaches the trainer; destroy the
+        # group, so a retry starts clean
         if init_info.use_load_plan:
+            self.shutdown()
             raise ValueError("use_load_plan is supported by the dense NCCL backend")
 
     def start_weight_update(self) -> None:
