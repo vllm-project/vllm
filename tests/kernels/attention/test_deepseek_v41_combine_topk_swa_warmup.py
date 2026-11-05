@@ -97,6 +97,6 @@ def test_warmup_covers_chunked_prefill_pointer_alignments():
                 4096,
                 4096,
             )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     assert not compiled, f"JIT compiled after warmup: {compiled}"
