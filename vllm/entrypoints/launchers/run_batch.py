@@ -9,7 +9,7 @@ import stat
 import sys
 import tempfile
 from argparse import Namespace
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Awaitable, Callable
 from http import HTTPStatus
 from io import BytesIO, StringIO
 from pathlib import Path
@@ -227,10 +227,6 @@ AllResponse: TypeAlias = (
     | TranscriptionResponseVariant
     | TranslationResponse
     | TranslationResponseVerbose
-)
-
-_ALL_RESPONSE_ADAPTER: TypeAdapter[AllResponse | ErrorResponse] = TypeAdapter(
-    AllResponse | ErrorResponse
 )
 
 
@@ -647,37 +643,13 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
-    raw_body: bytes | None = None
-    if (
-        isinstance(response, Response)
-        and not isinstance(response, StreamingResponse)
-        and response.media_type == "application/json"
-    ):
-        if request.url == "/v1/embeddings" and response.status_code == HTTPStatus.OK:
-            raw_body = bytes(response.body)
-        else:
-            with contextlib.suppress(pydantic.ValidationError):
-                response = _ALL_RESPONSE_ADAPTER.validate_json(response.body)
+    if isinstance(response, (StreamingResponse, AsyncIterable)):
+        return make_error_request_output(
+            request, error_msg="Request must not be sent in stream mode"
+        )
 
-    if raw_body is not None:
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(request_id=f"vllm-batch-{random_uuid()}"),
-            error=None,
-        )
-        batch_output._raw_body = raw_body
-    elif isinstance(response, AllResponse):
-        batch_output = BatchRequestOutput(
-            id=f"vllm-{random_uuid()}",
-            custom_id=request.custom_id,
-            response=BatchResponseData(
-                body=response, request_id=f"vllm-batch-{random_uuid()}"
-            ),
-            error=None,
-        )
-    elif isinstance(response, ErrorResponse):
-        batch_output = BatchRequestOutput(
+    if isinstance(response, ErrorResponse):
+        return BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
             response=BatchResponseData(
@@ -686,12 +658,39 @@ async def run_request(
             ),
             error=response,
         )
-    else:
-        batch_output = make_error_request_output(
-            request, error_msg="Request must not be sent in stream mode"
+
+    if isinstance(response, AllResponse):
+        return BatchRequestOutput(
+            id=f"vllm-{random_uuid()}",
+            custom_id=request.custom_id,
+            response=BatchResponseData(
+                body=response, request_id=f"vllm-batch-{random_uuid()}"
+            ),
+            error=None,
         )
 
-    return batch_output
+    if isinstance(response, Response):
+        if response.status_code != HTTPStatus.OK:
+            return make_error_request_output(
+                request,
+                error_msg=f"Unexpected response status code: {response.status_code}",
+            )
+        if response.media_type != "application/json":
+            return make_error_request_output(
+                request,
+                error_msg=f"Unsupported response media type: {response.media_type}",
+            )
+
+        output = BatchRequestOutput(
+            id=f"vllm-{random_uuid()}",
+            custom_id=request.custom_id,
+            response=BatchResponseData(request_id=f"vllm-batch-{random_uuid()}"),
+            error=None,
+        )
+        output._raw_body = bytes(response.body)
+        return output
+
+    return make_error_request_output(request, error_msg="Unsupported response type")
 
 
 WrapperFn: TypeAlias = Callable[[Callable], Callable]
