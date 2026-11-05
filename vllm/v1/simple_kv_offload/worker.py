@@ -9,10 +9,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
-from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+from vllm.v1.simple_kv_offload.cuda_mem_ops import (
+    host_registration_ranges,
+    pin_tensor,
+    unpin_tensor,
+)
 from vllm.v1.simple_kv_offload.disk_backend import DiskBackend
 from vllm.v1.simple_kv_offload.host_buffer import HostBuffer
 from vllm.v1.simple_kv_offload.metadata import (
@@ -268,18 +271,8 @@ class SimpleCPUOffloadWorker:
             self.num_cpu_blocks * t[0].nbytes for t in unique_gpu_caches.values()
         ]
 
-        numa_node = None
-        get_numa_nodes = getattr(current_platform, "get_all_device_numa_nodes", None)
-        numa_nodes = get_numa_nodes() if get_numa_nodes is not None else None
-        if numa_nodes is not None and device.index is not None:
-            numa_node = numa_nodes[device.index]
-
         start = time.perf_counter()
-        buf = HostBuffer(
-            max(self.cpu_capacity_bytes, sum(layer_bytes)),
-            self.cpu_hugepage_size,
-            numa_node,
-        )
+        buf = HostBuffer(sum(layer_bytes), self.cpu_hugepage_size)
         populated = time.perf_counter()
         self._host_buffer = buf
 
@@ -291,15 +284,27 @@ class SimpleCPUOffloadWorker:
             cpu_kv_caches[name] = view.view(cpu_shape)
             offset += size
         if pin_memory:
-            pin_tensor(buf.tensor)
+            registered = []
+            try:
+                for offset, end in host_registration_ranges(
+                    layer_bytes, self.num_cpu_blocks, buf.nbytes
+                ):
+                    if offset:
+                        time.sleep(0)
+                    tensor = buf.tensor[offset:end]
+                    pin_tensor(tensor)
+                    registered.append(tensor)
+            except Exception:
+                for tensor in reversed(registered):
+                    unpin_tensor(tensor)
+                raise
         pinned = time.perf_counter()
         logger.info(
             "SimpleCPUOffloadWorker [CPU]: %.2f GiB on %d KiB pages for %s, "
-            "NUMA node %s; populate %.2fs, pin %.2fs",
+            "populate %.2fs, pin %.2fs",
             buf.nbytes / (1024**3),
             buf.page_size >> 10,
             device,
-            buf.numa_node,
             populated - start,
             pinned - populated,
         )

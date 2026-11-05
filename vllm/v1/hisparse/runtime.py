@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-import math
-import mmap
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -27,6 +25,7 @@ from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.simple_kv_offload.cuda_mem_ops import host_registration_ranges
 
 logger = init_logger(__name__)
 
@@ -302,79 +301,6 @@ def get_hisparse_host_block_stride(
     return page_size_bytes
 
 
-def _hisparse_registration_ranges(
-    tensor_sizes: list[int],
-    num_blocks: int,
-    host_block_stride: int,
-    max_chunk_bytes: int = HOST_REGISTER_CHUNK_BYTES,
-) -> tuple[tuple[int, int], ...]:
-    """Split a shared pool without bisecting any tensor's host block.
-
-    CUDA batch copies reject descriptors spanning adjacent registrations.
-    """
-    total_size = num_blocks * host_block_stride
-    if total_size % mmap.PAGESIZE:
-        raise ValueError("HiSparse host pool must be OS-page aligned.")
-    if max_chunk_bytes < mmap.PAGESIZE:
-        raise ValueError("HiSparse registration chunks must span at least one page.")
-
-    tensors: list[tuple[int, int, int]] = []
-    tensor_start = 0
-    for tensor_size in tensor_sizes:
-        if tensor_size % num_blocks:
-            raise ValueError(
-                f"HiSparse host tensor size {tensor_size} is not divisible by "
-                f"{num_blocks} blocks."
-            )
-        tensor_end = tensor_start + tensor_size
-        tensors.append((tensor_start, tensor_end, tensor_size // num_blocks))
-        tensor_start = tensor_end
-    if tensor_start > total_size:
-        raise ValueError("HiSparse host tensors exceed the shared host pool.")
-
-    def last_safe_boundary(lower: int, upper: int) -> int | None:
-        best = None
-        for start, end, block_bytes in tensors:
-            first_block = max(0, (lower - start) // block_bytes + 1)
-            last_block = min(num_blocks, (min(upper, end) - start) // block_bytes)
-            if first_block > last_block:
-                continue
-            divisor = math.gcd(block_bytes, mmap.PAGESIZE)
-            if start % divisor:
-                continue
-            period = mmap.PAGESIZE // divisor
-            if period == 1:
-                residue = 0
-            else:
-                # Find block boundaries that are also OS-page boundaries.
-                residue = (
-                    (-start // divisor) * pow(block_bytes // divisor, -1, period)
-                ) % period
-            block = last_block - (last_block - residue) % period
-            if block >= first_block:
-                candidate = start + block * block_bytes
-                best = candidate if best is None else max(best, candidate)
-
-        if upper >= tensor_start:
-            candidate = upper // mmap.PAGESIZE * mmap.PAGESIZE
-            if candidate >= tensor_start and candidate > lower:
-                best = candidate if best is None else max(best, candidate)
-        return best
-
-    ranges: list[tuple[int, int]] = []
-    start = 0
-    while total_size - start > max_chunk_bytes:
-        end = last_safe_boundary(start, start + max_chunk_bytes)
-        if end is None:
-            raise ValueError(
-                "A HiSparse host block is too large for the registration chunk limit."
-            )
-        ranges.append((start, end))
-        start = end
-    ranges.append((start, total_size))
-    return tuple(ranges)
-
-
 def allocate_hisparse_host_pools(
     vllm_config: VllmConfig,
     tensor_sizes: list[int],
@@ -409,8 +335,11 @@ def allocate_hisparse_host_pools(
     )
     pinned: list[torch.Tensor] = []
     try:
-        for start, end in _hisparse_registration_ranges(
-            tensor_sizes, num_blocks, host_block_stride
+        for start, end in host_registration_ranges(
+            tensor_sizes,
+            num_blocks,
+            num_blocks * host_block_stride,
+            HOST_REGISTER_CHUNK_BYTES,
         ):
             tensor = region.base_tensor[start:end]
             pin_tensor(tensor)

@@ -299,7 +299,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     registration_ranges = MagicMock(return_value=((0, page), (page, 4 * page)))
     monkeypatch.setattr(
         hisparse_runtime_module,
-        "_hisparse_registration_ranges",
+        "host_registration_ranges",
         registration_ranges,
     )
     pinned: list[torch.Tensor] = []
@@ -337,7 +337,9 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
-    registration_ranges.assert_called_once_with([24, 40], 4, page)
+    registration_ranges.assert_called_once_with(
+        [24, 40], 4, 4 * page, hisparse_runtime_module.HOST_REGISTER_CHUNK_BYTES
+    )
     assert [
         (tensor.data_ptr() - region.base_tensor.data_ptr(), tensor.nbytes)
         for tensor in pinned
@@ -364,7 +366,7 @@ def test_shared_host_pool_tracks_successful_registrations(
     )
     monkeypatch.setattr(
         hisparse_runtime_module,
-        "_hisparse_registration_ranges",
+        "host_registration_ranges",
         lambda *args: ((0, page), (page, 3 * page)),
     )
     cudart = MagicMock()
@@ -448,10 +450,10 @@ def test_shared_host_pool_registers_layer_spans_in_one_backing(monkeypatch):
 def test_hisparse_registration_chunks_end_between_host_blocks():
     """Registration seams must not bisect a DMA-addressable host block."""
     page = mmap.PAGESIZE
-    ranges = hisparse_runtime_module._hisparse_registration_ranges(
+    ranges = hisparse_runtime_module.host_registration_ranges(
         tensor_sizes=[4 * 3 * page, 4 * 5 * page],
         num_blocks=4,
-        host_block_stride=8 * page,
+        total_size=32 * page,
         max_chunk_bytes=10 * page,
     )
 

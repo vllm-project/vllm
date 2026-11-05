@@ -9,6 +9,7 @@ read partially written / stale blocks and silently corrupt the CPU cache.
 
 from __future__ import annotations
 
+import mmap
 import time
 from contextlib import nullcontext
 from unittest.mock import MagicMock
@@ -402,6 +403,12 @@ def test_explicit_cpu_blocks_bound_live_worker_allocation(monkeypatch, num_layer
         assert worker.cpu_kv_caches is not None
         assert all(t.shape[0] == 4 for t in worker.cpu_kv_caches.values())
         assert sum(t.nbytes for t in worker.cpu_kv_caches.values()) <= 8 * BLOCK_BYTES
+        # The byte budget must not reserve storage outside the selected blocks.
+        allocated_bytes = (
+            next(iter(worker.cpu_kv_caches.values())).untyped_storage().nbytes()
+        )
+        cache_bytes = num_layers * 4 * BLOCK_BYTES
+        assert cache_bytes <= allocated_bytes < cache_bytes + mmap.PAGESIZE
     finally:
         if worker._backend is not None:
             worker._backend.shutdown()

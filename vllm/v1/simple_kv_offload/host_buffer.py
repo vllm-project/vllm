@@ -7,10 +7,8 @@ never fall back to ordinary memory: a short pool or hugetlb cgroup limit
 fails at startup.
 """
 
-import ctypes
 import mmap
 import os
-import platform
 
 import torch
 
@@ -25,8 +23,6 @@ _MAP_HUGE_SHIFT = 26
 _MADV_HUGEPAGE = getattr(mmap, "MADV_HUGEPAGE", 14)
 _MADV_DONTFORK = getattr(mmap, "MADV_DONTFORK", 10)
 _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
-_MPOL_PREFERRED = 1
-_SYS_MBIND = {"x86_64": 237, "aarch64": 235}  # glibc does not export mbind
 
 
 def parse_hugepage_size(value: object) -> int | None:
@@ -53,7 +49,6 @@ class HostBuffer:
         self,
         nbytes: int,
         hugepage_size: int | None = None,
-        numa_node: int | None = None,
     ):
         self.page_size = hugepage_size or mmap.PAGESIZE
         self.nbytes = max(1, -(-nbytes // self.page_size)) * self.page_size
@@ -78,9 +73,6 @@ class HostBuffer:
             except OSError as e:
                 logger.warning("MADV_HUGEPAGE failed: %s", e)
         self.tensor = torch.frombuffer(memoryview(self._mmap), dtype=torch.int8)
-        self.numa_node: int | None = None
-        if numa_node is not None and self._prefer_node(numa_node):
-            self.numa_node = numa_node
         try:
             # Fault every page now: a cgroup or pool shortfall becomes an
             # error here instead of SIGBUS or an OOM kill while serving.
@@ -93,26 +85,3 @@ class HostBuffer:
                 f"Cannot populate {self.nbytes / 2**30:.2f} GiB of {kind} pages: "
                 f"{e}. The container's memory or hugetlb limit is too small."
             ) from e
-
-    def _prefer_node(self, node: int) -> bool:
-        nr = _SYS_MBIND.get(platform.machine())
-        if nr is None:
-            return False
-        mask = (ctypes.c_ulong * (node // 64 + 1))()
-        mask[node // 64] = 1 << (node % 64)
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.syscall.restype = ctypes.c_long
-        ret = libc.syscall(
-            ctypes.c_long(nr),
-            ctypes.c_void_p(self.tensor.data_ptr()),
-            ctypes.c_ulong(self.nbytes),
-            ctypes.c_int(_MPOL_PREFERRED),
-            mask,
-            ctypes.c_ulong(len(mask) * 64 + 1),
-            ctypes.c_uint(0),
-        )
-        if ret != 0:
-            err = ctypes.get_errno()
-            logger.warning("mbind to NUMA node %d failed: %s", node, os.strerror(err))
-            return False
-        return True

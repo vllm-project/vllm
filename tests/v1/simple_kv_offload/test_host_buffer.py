@@ -29,8 +29,8 @@ def hugepage_with_free(n: int) -> int:
     raise AssertionError("unreachable")
 
 
-def mapping_info(addr: int) -> tuple[set[str], str | None]:
-    """(smaps VmFlags, numa_maps policy) of the mapping starting at ``addr``."""
+def mapping_flags(addr: int) -> set[str]:
+    """Smaps VmFlags of the mapping starting at ``addr``."""
     flags: set[str] = set()
     with open("/proc/self/smaps") as f:
         inside = False
@@ -41,14 +41,7 @@ def mapping_info(addr: int) -> tuple[set[str], str | None]:
             elif inside and line.startswith("VmFlags:"):
                 flags = set(line.split()[1:])
                 break
-    try:
-        with open("/proc/self/numa_maps") as f:
-            policy = next(
-                (ln.split()[1] for ln in f if int(ln.split()[0], 16) == addr), None
-            )
-    except (FileNotFoundError, PermissionError):
-        policy = None
-    return flags, policy
+    return flags
 
 
 @pytest.mark.parametrize(
@@ -81,20 +74,10 @@ def test_buffer_rounds_up_populates_and_skips_fork(
     assert buf.nbytes == 2 * page
     assert buf.tensor.data_ptr() % page == 0
     assert int(buf.tensor[::4096].abs().sum()) == 0  # kernel-zeroed
-    flags, _ = mapping_info(buf.tensor.data_ptr())
+    flags = mapping_flags(buf.tensor.data_ptr())
     assert "dc" in flags  # MADV_DONTFORK sets VM_DONTCOPY
     assert ("ht" in flags) == hugepages
     assert ("hg" in flags) == (thp_enabled and not hugepages)
-
-
-def test_buffer_prefers_numa_node():
-    buf = HostBuffer(mmap.PAGESIZE, numa_node=0)
-    if buf.numa_node is None:
-        pytest.skip("NUMA placement is unsupported or blocked")
-    _, policy = mapping_info(buf.tensor.data_ptr())
-    if policy is None:
-        pytest.skip("NUMA policy is not visible in /proc/self/numa_maps")
-    assert policy == "prefer:0"
 
 
 def test_hugepage_buffer_fails_closed_when_pool_is_short():

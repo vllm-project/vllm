@@ -16,9 +16,7 @@ import torch
 
 from vllm.v1.simple_kv_offload import cuda_mem_ops
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
-    _HIP_MEMCPY_FLAG_EXT_PREFER_CE,
     BatchMemcpyParams,
-    _copy_flags_for_hip_version,
     _CUmemcpyAttributes,
     _load_hip_runtime,
     _num_attrs_for_hip_version,
@@ -46,22 +44,6 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 )
 def test_num_attrs_for_hip_version(version: int, expected: int):
     assert _num_attrs_for_hip_version(version) == expected
-
-
-# From HIP 7.16, a batch copy without hipMemcpyFlagExtPreferCE runs as a blit
-# kernel on the CUs instead of on the SDMA engines.
-@pytest.mark.parametrize(
-    ("version", "expected"),
-    [
-        (0, 0),  # unknown (hipRuntimeGetVersion failed)
-        (70_253_211, 0),  # ROCm 7.2.2
-        (71_500_000, 0),  # ROCm 7.15 -- just below the 7.16 cutoff
-        (71_600_000, _HIP_MEMCPY_FLAG_EXT_PREFER_CE),  # ROCm 7.16
-        (80_000_000, _HIP_MEMCPY_FLAG_EXT_PREFER_CE),  # ROCm 8.0
-    ],
-)
-def test_copy_flags_for_hip_version(version: int, expected: int):
-    assert _copy_flags_for_hip_version(version) == expected
 
 
 @pytest.mark.parametrize(
@@ -164,19 +146,16 @@ def test_copy_blocks_noop_on_empty(monkeypatch):
     assert counts == []
 
 
-@pytest.mark.parametrize("fail_chunk", [None, 1])
-def test_pin_tensor_chunks_and_rolls_back(monkeypatch, fail_chunk):
-    """Registration is bounded and a failed chunk leaves no pinned ranges."""
-    chunk_size = 4096
-    tensor = torch.empty(2 * chunk_size + 128, dtype=torch.int8)
+@pytest.mark.parametrize("nbytes", [4096, (1 << 30) + 4096])
+def test_pin_tensor_pairs_with_hisparse_teardown(monkeypatch, nbytes):
+    """HiSparse relies on one unregister releasing each registered range."""
+    from vllm.v1.hisparse.backend import CUDAHiSparseBackend
+
+    tensor = torch.empty(nbytes, dtype=torch.int8)
     registered = {}
-    calls = []
 
     class Runtime:
         def cudaHostRegister(self, ptr, size, flags):
-            calls.append((ptr, size))
-            if size > chunk_size or len(calls) - 1 == fail_chunk:
-                return ctypes.c_int(1)
             registered[ptr] = size
             return ctypes.c_int(0)
 
@@ -185,18 +164,7 @@ def test_pin_tensor_chunks_and_rolls_back(monkeypatch, fail_chunk):
             return ctypes.c_int(0)
 
     monkeypatch.setattr(torch.cuda, "cudart", Runtime)
-    monkeypatch.setattr(
-        cuda_mem_ops, "_HOST_REGISTER_CHUNK_BYTES", chunk_size, raising=False
-    )
-    if fail_chunk is not None:
-        with pytest.raises(RuntimeError, match="cudaHostRegister failed"):
-            cuda_mem_ops.pin_tensor(tensor)
-        assert registered == {}
-        assert len(calls) == fail_chunk + 1
-    else:
-        cuda_mem_ops.pin_tensor(tensor)
-        assert registered == {
-            tensor.data_ptr(): chunk_size,
-            tensor.data_ptr() + chunk_size: chunk_size,
-            tensor.data_ptr() + 2 * chunk_size: 128,
-        }
+    backend = CUDAHiSparseBackend()
+    backend.pin_tensor(tensor)
+    backend.unpin_tensor(tensor)
+    assert registered == {}
