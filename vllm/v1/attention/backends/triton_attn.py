@@ -42,6 +42,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     MAX_3D_QUERY_LEN,
+    is_gfx1201,
     unified_attention,
 )
 from vllm.v1.kv_cache_interface import (
@@ -56,6 +57,8 @@ logger = init_logger(__name__)
 
 # constants
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
+# gfx1201 pure-decode batches with a 16-bit KV cache switch to 2D from this grid.
+GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D = 64
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
 
@@ -97,6 +100,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     # Step-dependent fields reference persistent input buffers directly.
     supports_draft_decode_metadata_update = True
+    gfx1201_decode_threshold: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -133,19 +137,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # must be at least equal to the threshold below.
         # If this threshold is not reached (i.e., the batch size is not large enough),
         # the 3D kernel will be selected instead.
-        self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
-
-        # Modify the threshold if needed.
-        if self.decode_cudagraph_enabled:
-            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
-            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
-
-            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-            # as threshold. This ensures that each captured graph covers the
-            # correct execution path.
-            self.seq_threshold_3D = min(
-                capture_sizes,
-                key=lambda x: abs(x - self.seq_threshold_3D),
+        self.seq_threshold_3D = self._snap_to_capture_size(
+            MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        )
+        self.seq_threshold_3D_decode = self.seq_threshold_3D
+        if (
+            self.gfx1201_decode_threshold
+            and is_gfx1201
+            and get_dtype_size(kv_cache_spec.dtype) == 2
+        ):
+            self.seq_threshold_3D_decode = self._snap_to_capture_size(
+                max(1, GFX1201_DECODE_MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv)
             )
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
@@ -175,7 +177,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             max_query_len_3d = min(query_len, MAX_3D_QUERY_LEN)
         # Scratch is indexed by query token, including verification tokens.
         max_num_seqs_3d = min(
-            self.seq_threshold_3D, vllm_config.scheduler_config.max_num_seqs
+            self.seq_threshold_3D_decode
+            if max_query_len_3d == 1
+            else self.seq_threshold_3D,
+            vllm_config.scheduler_config.max_num_seqs,
         )
         max_num_tokens_3d = max_num_seqs_3d * max_query_len_3d
         if self.max_seqs_64_segments > 0:
@@ -220,6 +225,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 device=device,
             )
 
+    def _snap_to_capture_size(self, threshold: int) -> int:
+        # Each captured decode graph must take a single 2D/3D path.
+        if not self.decode_cudagraph_enabled:
+            return threshold
+        capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+        assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
+        return min(capture_sizes, key=lambda x: abs(x - threshold))
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
@@ -255,7 +268,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             causal=common_attn_metadata.causal,
-            seq_threshold_3D=self.seq_threshold_3D,
+            seq_threshold_3D=(
+                self.seq_threshold_3D_decode
+                if max_query_len == 1
+                else self.seq_threshold_3D
+            ),
             num_par_softmax_segments=self.num_par_softmax_segments,
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,

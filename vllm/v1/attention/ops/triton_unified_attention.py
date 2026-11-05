@@ -1198,18 +1198,6 @@ def unified_attention(
             f"(out.stride(1) = {out.stride(1)} != head_size = {head_size})."
         )
 
-    # gfx1201 decode: switch to the 2D kernel at half the threshold
-    # (64 // num_kv_heads sequences instead of 128 // num_kv_heads). Multi-token
-    # queries and fp8 KV caches keep the full threshold.
-    if (
-        is_gfx1201
-        and max_seqlen_q == 1
-        and k.element_size() == 2
-        and seq_threshold_3D is not None
-        and not is_batch_invariant
-    ):
-        seq_threshold_3D = max(1, seq_threshold_3D // 2)
-
     # Launch the 2D kernel if
     # 1. No split-K threshold or scratch buffers, or the scratch has fewer
     #    rows than query tokens, or
