@@ -1033,6 +1033,7 @@ def test_admission_lookup_waits_to_create_load_until_local_hit_is_known():
 
     scheduler.start_lookup_prefetch(request)
 
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.prefetched == [(request.request_id, 48)]
     assert scheduler.load_specs == {}
     assert scheduler._unfinished_requests == {}
@@ -1061,6 +1062,7 @@ def test_admission_lookup_skips_ineligible_requests(option):
         request.block_hashes = []
 
     scheduler.start_lookup_prefetch(request)
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.prefetched == []
 
 
@@ -1074,6 +1076,7 @@ def test_admission_lookup_is_discarded_on_preemption():
 
     scheduler.build_connector_meta(_make_preemption_scheduler_output())
 
+    assert isinstance(scheduler.client, _StubLookupClient)
     assert scheduler.client.discarded == [request.request_id]
 
 

@@ -914,7 +914,9 @@ def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
         assert finished == (False, None)
 
         gate.set()
-        assert client.lookup("busy", 48, []).hit_length == 32
+        result = client.lookup("busy", 48, [])
+        assert result is not None
+        assert result.hit_length == 32
         client.executor.submit(lambda: None).result(timeout=5)
         assert sock.send_multipart.call_count == 1
         assert request.request_id not in client._lookups
