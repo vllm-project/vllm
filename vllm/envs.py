@@ -1511,14 +1511,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # FP8 ViT attention on ROCm with the AITER backend
     # (--mm-encoder-attn-dtype fp8). 128 zero-pads Q/K/V head_dims below 128
     # to 128 and runs AITER's asm FP8 head_dim-128 kernel instead of its CK-tile
-    # kernel (validated on MI355X with head_dim 80). 16 (default; 0 also means
-    # 16) pads only to a multiple of 16. Any other value is rejected.
+    # kernel (validated on MI355X with head_dim 80). 16 (default; empty or 0
+    # also mean 16) pads only to a multiple of 16. Other values are rejected.
     "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM": lambda: (
         int(
             env_with_choices(
-                "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16", ["0", "16", "128"]
+                "VLLM_ROCM_VIT_FP8_PAD_HEAD_DIM", "16", ["", "0", "16", "128"]
             )()
-            or "16"
+            or 16
         )
         or 16
     ),
