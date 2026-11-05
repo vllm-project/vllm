@@ -112,7 +112,7 @@ def test_sentencepiece_leading_space_matches_engine():
     strings match the engine's per-token detokenization (leading space
     restored), so `/v1/completions/derender` top_logprobs keys do not collide.
     Regression test for #59241."""
-    tokenizer = get_tokenizer("hmellor/tiny-random-LlamaForCausalLM")
+    tokenizer = get_tokenizer("vllm-project/tiny-random-LlamaForCausalLM")
     spaced = tokenizer.convert_tokens_to_ids("▁true")
     bare = tokenizer.convert_tokens_to_ids("true")
     assert spaced != bare
