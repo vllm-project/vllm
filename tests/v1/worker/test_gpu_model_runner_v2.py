@@ -481,13 +481,15 @@ def test_capture_model_excludes_adaptive_verification_profiling_cache(
     assert curves == ([] if profile_only else [[]])
 
 
-def test_capture_model_bounds_adaptive_verification_profiling_cache(monkeypatch):
-    """Adaptive verification profiles shapes in ascending size after the KV
-    cache is allocated. A larger shape cannot reuse the blocks a smaller one
-    left cached, so without a release between shapes the cache grows to the
-    sum of every shape's activations instead of the largest one's."""
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_capture_model_bounds_adaptive_verification_profiling_memory(monkeypatch):
+    """Adaptive verification profiles every shape after the KV cache is
+    allocated, so the memory it reserves must stay within what the largest
+    shape needs instead of growing with the number of shapes."""
     runner = _make_capture_runner(monkeypatch, captured=True)
-    sizes = [1, 2, 4]
+    # Each shape's activations in MiB. Multiples of 20 MiB are reserved
+    # exactly, with or without expandable segments.
+    sizes = [20, 40, 80]
     monkeypatch.setattr(
         runner.cudagraph_manager, "captured_token_counts", lambda: sizes, raising=False
     )
@@ -498,31 +500,25 @@ def test_capture_model_bounds_adaptive_verification_profiling_cache(monkeypatch)
         ],
         set_initial_cost_curves=lambda timings: None,
     )
-    # Cached bytes per shape: a shape reuses only its own blocks.
-    cached: dict[int, int] = {}
     profiled: list[int] = []
-    peak_cached = 0
 
     def _dummy_run(num_tokens):
-        nonlocal peak_cached
-        cached[num_tokens] = num_tokens << 30
+        torch.empty(num_tokens << 20, dtype=torch.uint8, device="cuda")
         profiled.append(num_tokens)
-        peak_cached = max(peak_cached, sum(cached.values()))
 
     monkeypatch.setattr(runner, "_dummy_run", _dummy_run)
     monkeypatch.setattr(
         model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
     )
-    monkeypatch.setattr(torch.accelerator, "empty_cache", cached.clear)
-    monkeypatch.setattr(
-        torch.accelerator, "get_memory_info", lambda: (16 << 30, 16 << 30)
-    )
     monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+    torch.accelerator.empty_cache()
+    base = torch.accelerator.memory_reserved()
+    torch.accelerator.reset_peak_memory_stats()
 
     runner.capture_model()
 
-    assert profiled == [1, 1, 2, 2, 4, 4]
-    assert peak_cached == max(sizes) << 30
+    assert sorted(profiled) == [20, 20, 40, 40, 80, 80]
+    assert torch.accelerator.max_memory_reserved() - base <= max(sizes) << 20
 
 
 @pytest.mark.parametrize("target_buffer", ["absent", "none", "tensor"])
