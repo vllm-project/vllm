@@ -338,6 +338,27 @@ def _roots(model_runner) -> dict[str, nn.Module]:
     return roots
 
 
+def _plausible_dummy_weights():
+    """Fill dummy floats and packed bytes with 0x3C: finite and positive in fp32,
+    bf16, fp16 and fp8, so quantization checks on the dummy build pass."""
+    try:
+        from vllm.model_executor.model_loader import dummy_loader
+    except ImportError:
+        return None
+    orig = dummy_loader.initialize_single_dummy_weight
+
+    def fill(param, *args, **kwargs):
+        plausible = param.is_floating_point() or param.dtype == torch.uint8
+        if plausible and param.is_contiguous():
+            with torch.no_grad():
+                param.view(torch.uint8).fill_(0x3C)
+        else:
+            orig(param, *args, **kwargs)
+
+    dummy_loader.initialize_single_dummy_weight = fill
+    return lambda: setattr(dummy_loader, "initialize_single_dummy_weight", orig)
+
+
 def install(worker_cls) -> None:
     """Wrap worker_cls.load_model for vLLM builds without the built-in hook."""
     import inspect
@@ -357,10 +378,13 @@ def install(worker_cls) -> None:
             self.vllm_config.load_config.load_format = "dummy"
         # Lets model-specific checkpoint validation skip the dummy load.
         os.environ["VLLM_WEIGHT_SNAPSHOT_RESTORING"] = "1" if restore else ""
+        undo = _plausible_dummy_weights() if restore else None
         try:
             out = orig(self, *args, **kwargs)
         finally:
             os.environ.pop("VLLM_WEIGHT_SNAPSHOT_RESTORING", None)
+            if undo is not None:
+                undo()
         roots = _roots(self.model_runner)
         (restore_fn if restore else save)(roots, path)
         return out
