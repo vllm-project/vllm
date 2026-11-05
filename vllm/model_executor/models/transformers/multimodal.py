@@ -220,11 +220,13 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return num_samples / int(_count_embed_tokens([seq])[0])
 
     @cached_property
+    def _has_transcription_request(self) -> bool:
+        return hasattr(self.get_hf_processor(), "apply_transcription_request")
+
+    @cached_property
     def _is_long_form_audio_model(self) -> bool:
         """Whether a whole recording goes through in a single pass."""
-        return self._get_max_audio_length() is None and hasattr(
-            self.get_hf_processor(), "apply_transcription_request"
-        )
+        return self._has_transcription_request and not self._get_max_audio_length()
 
     def _get_max_long_form_audio_length(self, seq_len: int) -> int:
         """Samples of the longest audio, set with `--limit-mm-per-prompt`."""
@@ -234,8 +236,10 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         return min(length, int(seq_len * self._audio_samples_per_token))
 
     def get_max_audio_tokens(self, seq_len: int) -> int:
-        if self._is_long_form_audio_model:
-            length = self._get_max_long_form_audio_length(seq_len)
+        # Measured, as config limits can be per encoder window (e.g. Qwen3-ASR)
+        if self._has_transcription_request:
+            if not (length := self._get_max_audio_length()):
+                length = self._get_max_long_form_audio_length(seq_len)
             return math.ceil(length / self._audio_samples_per_token)
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")

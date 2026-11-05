@@ -181,6 +181,7 @@ def test_unclaimed_fields_warn_rather_than_raise():
     [
         ("zai-org/GLM-ASR-Nano-2512", False),
         ("ibm-granite/granite-speech-3.3-2b", False),
+        ("Qwen/Qwen3-ASR-1.7B-hf", False),
         ("microsoft/VibeVoice-ASR-HF", True),
     ],
 )
@@ -236,6 +237,7 @@ def test_long_form_audio_limit(limit, expected_tokens):
     [
         ("microsoft/VibeVoice-ASR-HF", True),
         ("zai-org/GLM-ASR-Nano-2512", True),
+        ("Qwen/Qwen3-ASR-1.7B-hf", True),
         ("ibm-granite/granite-speech-3.3-2b", False),
     ],
 )
@@ -243,6 +245,15 @@ def test_transcription_needs_a_transcription_request(model_id, transcribes):
     model_config = ModelConfig(model=model_id, model_impl="transformers")
 
     assert supports_transcription(get_model_cls(model_config)) == transcribes
+
+
+def test_qwen3_asr_config_follows_the_checkpoint_format():
+    """VLLM's own config would drop the `audio_config` of a Transformers checkpoint."""
+    hf_config = ModelConfig(model="Qwen/Qwen3-ASR-1.7B-hf").hf_config
+    native_config = ModelConfig(model="Qwen/Qwen3-ASR-1.7B").hf_config
+
+    assert hf_config.audio_config is not None
+    assert not hasattr(native_config, "audio_config")
 
 
 VIBEVOICE_OUTPUT = (

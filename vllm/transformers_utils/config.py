@@ -218,7 +218,9 @@ def _maybe_register_hf_config(config: PreTrainedConfig | None) -> None:
 
     model_type = getattr(config, "model_type", None)
     if isinstance(model_type, str) and model_type in _CONFIG_REGISTRY:
-        _register_config_class(model_type, _CONFIG_REGISTRY[model_type])
+        config_class = _CONFIG_REGISTRY[model_type]
+        if isinstance(config, config_class):
+            _register_config_class(model_type, config_class)
 
 
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
@@ -425,7 +427,9 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
-            if model_type in _CONFIG_REGISTRY:
+            # Transformers-format Qwen3-ASR checkpoints use the Transformers config
+            hf_qwen3_asr = model_type == "qwen3_asr" and "audio_config" in config_dict
+            if model_type in _CONFIG_REGISTRY and not hf_qwen3_asr:
                 # Register the config class to AutoConfig to ensure it's used
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
