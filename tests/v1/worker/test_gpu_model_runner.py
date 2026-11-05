@@ -482,8 +482,8 @@ def _mock_backend(
         ([[32, 64]], 32),
         # Neither divides the other, so only the LCM satisfies both.
         ([[32], [48]], 96),
-        # Both accept the default 16 and prefer 64, so the largest shared
-        # preference wins over 16.
+        # Both accept the default 16 and prefer 64, so the shared preference
+        # wins over 16.
         ([([MultipleOf(16)], 64), ([MultipleOf(16)], 64)], 64),
         # A backend that rejects 16 stays on the LCM path. Preferring 256
         # must not replace lcm(64, 32).
@@ -509,6 +509,26 @@ def test_preferred_block_size_keeps_default_when_largest_preference_is_rejected(
         _mock_backend([MultipleOf(16)], preferred=16),
     ]
     assert Platform._preferred_block_size_for_backends(classes, 16, None) == 16
+
+
+@pytest.mark.parametrize(
+    "backends,expected",
+    [
+        # ROCm: both backends prefer 16 while the default is 64.
+        ([([MultipleOf(16)], 16), ([MultipleOf(16)], 16)], 16),
+        # HPU: full attention and its chunked-local subclass both prefer 128.
+        ([([16, 128], 128), ([16, 128], 128)], 128),
+        # DeepSeek-V4.1 on SM90: SWA prefers 256, the indexer stays at 64.
+        # 256 is legal for both, and must not replace the default.
+        ([([64], 64), ([MultipleOf(32)], 256)], 64),
+    ],
+)
+def test_preferred_block_size_requires_a_unanimous_preference(backends, expected):
+    classes = [
+        _mock_backend(supported, preferred=preferred)
+        for supported, preferred in backends
+    ]
+    assert Platform._preferred_block_size_for_backends(classes, 64, None) == expected
 
 
 def test_preferred_block_size_searches_past_an_exact_size_backend():
