@@ -10,7 +10,13 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
+from vllm.config import (
+    ModelConfig,
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.models.muse_spark.common.dspark import MuseSparkDSparkForCausalLM
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.muse_spark import (
@@ -88,7 +94,7 @@ def test_dspark_config_loads(tmp_path, mode):
     assert config.draft_vocab_size == config.vocab_size
 
 
-def test_dspark_speculative_config_preserves_architecture(tmp_path):
+def _dspark_speculative_config(tmp_path, **draft) -> SpeculativeConfig:
     target_path, draft_path = tmp_path / "target", tmp_path / "draft"
     target_path.mkdir()
     draft_path.mkdir()
@@ -104,18 +110,49 @@ def test_dspark_speculative_config_preserves_architecture(tmp_path):
         "vocab_size": 128,
     }
     (target_path / "config.json").write_text(json.dumps(target))
-    (draft_path / "config.json").write_text(json.dumps(_dspark_config()))
-
-    config = SpeculativeConfig(
+    (draft_path / "config.json").write_text(json.dumps(_dspark_config() | draft))
+    return SpeculativeConfig(
         model=str(draft_path),
         method="dspark",
         num_speculative_tokens=7,
         target_model_config=ModelConfig(model=str(target_path), tokenizer_mode="skip"),
         target_parallel_config=ParallelConfig(),
     )
+
+
+def test_dspark_speculative_config_preserves_architecture(tmp_path):
+    config = _dspark_speculative_config(tmp_path)
     assert config.parallel_drafting
     assert config.draft_model_config.architectures == ["MuseSparkDSparkModel"]
     assert isinstance(config.draft_model_config.hf_config, MuseSparkDSparkConfig)
+
+
+def test_dspark_draft_loads_weights(tmp_path, dist_init):
+    spec = _dspark_speculative_config(
+        tmp_path,
+        hidden_size=64,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=64,
+        vocab_size=128,
+        mask_token_id=127,
+        target_hidden_size=64,
+        enable_confidence_head=False,
+    )
+    vllm_config = VllmConfig(
+        model_config=spec.target_model_config, speculative_config=spec
+    )
+    with set_current_vllm_config(vllm_config):
+        model = MuseSparkDSparkForCausalLM(vllm_config=vllm_config)
+    checkpoint = {
+        "fc.weight": torch.zeros_like(model.model.fc.weight),
+        "lm_head.weight": torch.zeros_like(model.lm_head.weight),
+        "d2t": torch.zeros(128, dtype=torch.long),
+    }
+
+    loaded = model.load_weights(checkpoint.items())
+
+    assert loaded == {"model.fc.weight", "lm_head.weight", "draft_id_to_target_id"}
 
 
 def test_dspark_output_logit_transform():

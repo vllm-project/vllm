@@ -30,7 +30,7 @@ nav:
       - models/extensions
       - Hardware Supported Models:
         - models/hardware_supported_models/*
-        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/
+        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/
     - Features: features
   - Developer Guide:
     - contributing/README.md

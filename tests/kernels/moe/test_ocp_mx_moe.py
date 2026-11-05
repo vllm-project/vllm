@@ -90,11 +90,11 @@ def enable_pickle(monkeypatch):
 @pytest.mark.parametrize(
     "model_case",
     [
-        ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
-        ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
-        ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
+        ModelCase("vllm-project/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
+        ModelCase("vllm-project/deepseek_r1_3_layers_mxfp4", tp=8),
+        ModelCase("vllm-project/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
+        ModelCase("vllm-project/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
 @pytest.mark.skipif(
@@ -134,7 +134,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         #     assert isinstance(layer.mlp.experts.quant_method,
         #                       QuarkOCP_MX_MoEMethod)
 
-        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        # if model_case.model_id == "vllm-project/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
@@ -2218,10 +2218,11 @@ def test_select_mxfp4_moe_backend_respects_checkpoint_activation(
 
 @pytest.mark.parametrize("backend_name", ["AITER_TRITON_MXFP4_BF16", "AITER_MXFP4_FP8"])
 @pytest.mark.parametrize("use_ep", [False, True])
-def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
+def test_aiter_mxfp4_monolithic_expert_parallel_support(
     monkeypatch: pytest.MonkeyPatch, backend_name: str, use_ep: bool
 ):
-    """Global routing cannot index local expert weights, even without all-to-all."""
+    """Naive EP (no all-to-all) is supported by W4A16, which takes an expert_map;
+    W4A8's global routing cannot index local expert weights."""
     from tests.kernels.moe.utils import make_dummy_moe_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
@@ -2266,8 +2267,9 @@ def test_aiter_mxfp4_monolithic_rejects_expert_parallel(
         FusedMoEActivationFormat.Standard,
     )
 
-    assert supported is not use_ep
-    if use_ep:
+    expect_supported = not use_ep or backend_name == "AITER_TRITON_MXFP4_BF16"
+    assert supported is expect_supported
+    if not expect_supported:
         assert reason is not None
         assert "parallel config" in reason
 
