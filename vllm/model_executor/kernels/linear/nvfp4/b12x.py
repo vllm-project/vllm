@@ -229,9 +229,8 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             getattr(layer, "b12x_nvfp4_packed_weight", None), packed
         )
         # Declare every serving shape now. An undeclared token count is
-        # prepared on first use, and that preparation evicts kernels other
-        # layers compiled earlier in the same forward, which then fails CUDA
-        # graph capture.
+        # prepared on first use, and that preparation evicts kernels compiled
+        # earlier, including ones already captured in CUDA graphs.
         config = get_current_vllm_config()
         capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
         capacity = max(
