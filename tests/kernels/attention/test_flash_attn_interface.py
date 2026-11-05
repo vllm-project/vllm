@@ -85,3 +85,74 @@ def test_fa4_descale_layout(
             torch.testing.assert_close(actual, original, rtol=0, atol=0)
             if original.stride(1) == 1:
                 assert actual is original
+
+
+def test_fa_utils_import_and_backend_validation_without_fa_extensions(monkeypatch):
+    """CUDA builds without _vllm_fa2_C/_vllm_fa3_C must import fa_utils cleanly
+    and reject FlashAttentionBackend during backend validation."""
+    import vllm._custom_ops as custom_ops
+    from vllm.platforms.interface import DeviceCapability, Platform
+
+    class _FakeCudaPlatform(Platform):
+        device_type = "cuda"
+
+        def is_cuda(self) -> bool:
+            return True
+
+        def is_xpu(self) -> bool:
+            return False
+
+        def is_rocm(self) -> bool:
+            return False
+
+        @classmethod
+        def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+            return DeviceCapability(11, 0)
+
+    fake_platform = _FakeCudaPlatform()
+    monkeypatch.setattr("vllm.platforms.current_platform", fake_platform)
+    monkeypatch.setattr(custom_ops, "reshape_and_cache_flash", Mock(), raising=False)
+    monkeypatch.delitem(sys.modules, "vllm.vllm_flash_attn", raising=False)
+    monkeypatch.delitem(
+        sys.modules, "vllm.vllm_flash_attn.flash_attn_interface", raising=False
+    )
+
+    root = Path(__file__).resolve().parents[3]
+    fa_utils_path = root / "vllm/v1/attention/backends/fa_utils.py"
+    spec = importlib.util.spec_from_file_location("_test_fa_utils_no_fa", fa_utils_path)
+    assert spec is not None and spec.loader is not None
+    fa_utils_mod = importlib.util.module_from_spec(spec)
+    # Must not raise ImportError at module import time when FA extensions are absent.
+    spec.loader.exec_module(fa_utils_mod)
+
+    assert not fa_utils_mod.is_flash_attn_varlen_func_available()
+    assert fa_utils_mod.get_flash_attn_version(head_size=128) is None
+    with pytest.raises(ImportError, match="requires the CUDA flash attention"):
+        fa_utils_mod.flash_attn_varlen_func()
+
+    from vllm.v1.attention.backends import flash_attn as flash_attn_mod
+
+    monkeypatch.setattr(flash_attn_mod, "current_platform", fake_platform)
+    monkeypatch.setattr(
+        flash_attn_mod,
+        "is_flash_attn_varlen_func_available",
+        fa_utils_mod.is_flash_attn_varlen_func_available,
+    )
+    monkeypatch.setattr(
+        flash_attn_mod,
+        "get_flash_attn_version",
+        fa_utils_mod.get_flash_attn_version,
+    )
+
+    reason = flash_attn_mod.FlashAttentionBackend.supports_combination(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=None,
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        device_capability=DeviceCapability(11, 0),
+    )
+    assert reason is not None and "FlashAttention" in reason
