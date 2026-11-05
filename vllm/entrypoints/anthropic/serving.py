@@ -737,8 +737,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.reasoning_effort = disabled_thinking_effort
         elif thinking.type == "enabled":
             req.thinking_token_budget = thinking.budget_tokens
-        # "adaptive" pins nothing: the model chooses depth beneath the ceiling
-        # already set from output_config.effort.
+        # "adaptive" and "between_tools" pin nothing: the model chooses depth
+        # beneath the ceiling already set from output_config.effort. vLLM
+        # cannot scope thinking to between-tool steps, so "between_tools" is
+        # mapped to the same no-op as "adaptive".
 
     @classmethod
     def _handle_output_config(

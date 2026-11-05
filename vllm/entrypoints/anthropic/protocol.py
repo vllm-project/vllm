@@ -246,10 +246,23 @@ class AnthropicThinkingConfigAdaptive(BaseModel):
     display: AnthropicThinkingDisplay | None = None
 
 
+class AnthropicThinkingConfigBetweenTools(BaseModel):
+    """Thinking that is off up front but may resume between tool calls.
+
+    vLLM cannot scope reasoning to between-tool steps and has no request-level
+    control over when a model thinks, so it is treated like ``adaptive``: no
+    budget is pinned and the model decides beneath the ``output_config.effort``
+    ceiling.
+    """
+
+    type: Literal["between_tools"]
+
+
 AnthropicThinkingConfig = Annotated[
     AnthropicThinkingConfigEnabled
     | AnthropicThinkingConfigDisabled
-    | AnthropicThinkingConfigAdaptive,
+    | AnthropicThinkingConfigAdaptive
+    | AnthropicThinkingConfigBetweenTools,
     Field(discriminator="type"),
 ]
 

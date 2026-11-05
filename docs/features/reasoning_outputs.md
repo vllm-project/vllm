@@ -434,6 +434,29 @@ types = [item.type for item in response.output]
 assert "reasoning" not in types
 ```
 
+## Anthropic Messages Thinking Types
+
+The Anthropic Messages API (`/v1/messages`) accepts a `thinking` configuration
+whose `type` selects how much the model reasons. vLLM maps the Anthropic types
+onto its own controls:
+
+| `thinking.type` | Effect |
+| --- | --- |
+| `"disabled"` | Sets `reasoning_effort` to `"none"`, which clears `enable_thinking` for templates that honor it. Models that cannot turn thinking off are served with a low effort instead. |
+| `"enabled"` | Sets `thinking_token_budget` to `budget_tokens` (must be at least 1024 and less than `max_tokens`). |
+| `"adaptive"` | Pins nothing: the model chooses depth beneath the `output_config.effort` ceiling. |
+| `"between_tools"` | Same as `"adaptive"`. |
+
+### `thinking.type=between_tools`
+
+vLLM has no request-level control over *when* a model thinks, only whether
+thinking is on and its budget, so it cannot restrict reasoning to between-tool
+steps. The type is accepted and mapped to the same behavior as `"adaptive"`: no
+budget is pinned and the model decides depth beneath the `output_config.effort`
+ceiling. On a model served with a reasoning parser this means thinking may also
+run before the first response. Whether thinking happens at all depends on the
+model and its chat template; on a non-reasoning model the setting has no effect.
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`), Anthropic Messages API (`/v1/messages`) and the Responses API (`/v1/responses`).
