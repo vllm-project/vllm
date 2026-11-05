@@ -389,8 +389,8 @@ class KimiK3ReasoningParser(ReasoningParser):
     ) -> DeltaMessage | None:
         """Strip XTML content wrappers from streaming deltas after reasoning.
 
-        Called by KimiK3Parser when no tool parser is configured, so the
-        reasoning parser handles ``<|open|>response<|sep|>`` /
+        Called by KimiK3Parser when no tool parser is configured or the request
+        has no tools, so the reasoning parser handles ``<|open|>response<|sep|>`` /
         ``<|close|>response<|sep|>`` / ``<|close|>message<|sep|>`` stripping itself.
 
         Works from accumulated text (``previous_text`` / ``current_text``

@@ -66,6 +66,18 @@ class KimiK3Parser(DelegatingParser):
         tool_call_id_type: str = "random",
         function_name_returned: bool = False,
     ) -> tuple[DeltaMessage | None, bool]:
+        if not request.tools and isinstance(
+            self._reasoning_parser, KimiK3ReasoningParser
+        ):
+            # No tools means no tools channel to parse: strip the XTML content
+            # markers as the reasoning-only path does, instead of gating content
+            # on tool framing that would hold back all text after the first
+            # <|close|>response<|sep|> or <|open|>tools<|sep|>.
+            return self._reasoning_parser.strip_content_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+            ), False
+
         if request.tool_choice != "none":
             return super()._extract_tool_calls_streaming(
                 previous_text,

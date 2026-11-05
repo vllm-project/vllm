@@ -548,6 +548,60 @@ def test_delegating_parser_tool_choice_none_strips_xtml_and_suppresses_calls():
     assert all(not message.tool_calls for message in messages)
 
 
+class KimiK3ReasoningOnlyParser(KimiK3Parser):
+    reasoning_parser_cls = KimiK3ReasoningParser
+
+
+@pytest.mark.parametrize(
+    ("chunks", "tail"),
+    [
+        # Empty response and message end, then text generated past EOS.
+        (
+            [OPEN, "response", SEP, CLOSE, "response", SEP, CLOSE, "message", SEP]
+            + ["<|end_of_msg|>", "Hello", " world"],
+            "Hello world",
+        ),
+        # Prose in a tools channel opened right after the response.
+        ([OPEN, "response", SEP, OPEN, "tools", SEP, "## CI", "\n\nprose"], "prose"),
+        # A malformed call that never closes.
+        (
+            [OPEN, "response", SEP, OPEN, "tools", SEP, OPEN]
+            + ['call tool="bash" tool_name="command">', "ls -la"],
+            "ls -la",
+        ),
+    ],
+)
+def test_delegating_parser_without_tools_streams_text_after_tool_framing(
+    chunks: list[str], tail: str
+):
+    request = ChatCompletionRequest(model="test-model", messages=[])
+    # The prompt ends inside the think channel; the first tokens close it.
+    stream = [(CLOSE, [4]), ("think", [2]), (SEP, [3])] + [
+        (chunk, [100 + i]) for i, chunk in enumerate(chunks)
+    ]
+
+    def stream_content(parser: KimiK3Parser) -> str:
+        content = ""
+        for index, (text, token_ids) in enumerate(stream, start=1):
+            delta = parser.parse_delta(
+                delta_text=text,
+                delta_token_ids=token_ids,
+                request=request,
+                prompt_token_ids=[1, 2, 3],
+                finished=index == len(stream),
+            )
+            if delta is not None:
+                assert not delta.tool_calls
+                content += delta.content or ""
+        return content
+
+    content = stream_content(KimiK3DelegatingParser(_dummy_tokenizer()))
+
+    assert content.endswith(tail)
+    assert RESPONSE_CLOSE not in content
+    assert content == stream_content(KimiK3ReasoningOnlyParser(_dummy_tokenizer()))
+
+
 @pytest.mark.parametrize(
     "req",
     [
