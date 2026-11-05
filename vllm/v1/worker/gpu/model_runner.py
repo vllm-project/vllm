@@ -550,6 +550,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
+                tree_accept = None
+                if self.speculator is not None and (
+                    "tree_accept" in self.speculator.overridden_hooks()
+                ):
+                    tree_accept = self.speculator.tree_accept
                 self.rejection_sampler = RejectionSampler(
                     self.sampler,
                     self.speculative_config,
@@ -557,6 +562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     watermark_key=speculative_target_watermark_key(
                         self.vllm_config.watermark_config
                     ),
+                    tree_accept=tree_accept,
                 )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,

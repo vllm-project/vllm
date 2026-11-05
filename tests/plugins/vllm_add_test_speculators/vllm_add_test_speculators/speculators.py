@@ -6,9 +6,15 @@ import numpy as np
 import torch
 
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
-from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanInputs,
+    TargetTokens,
+    VerifyPlan,
+)
 
 from . import OFF_CHAIN
+from .reference import walk_tree
 
 
 class NgramTreeSpeculator(NgramGPUSpeculator):
@@ -18,6 +24,11 @@ class NgramTreeSpeculator(NgramGPUSpeculator):
     (the path skips the sibling's row)."""
 
     _printed = False
+
+    def tree_accept(
+        self, plan: VerifyPlan, target: TargetTokens, width: int
+    ) -> AcceptResult:
+        return walk_tree(plan, target, width)
 
     def plan(self, inputs: PlanInputs) -> VerifyPlan | None:
         if inputs.chain_only:

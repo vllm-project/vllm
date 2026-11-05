@@ -38,9 +38,13 @@ from vllm.v1.worker.gpu.spec_decode.plan_kernels import (
     PlanLayout,
     arange_table,
 )
-from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    TargetTokens,
+    VerifyPlan,
+    check_accept_result,
+)
 from vllm.v1.worker.gpu.spec_decode.round_runner import SpecRound, spec_kernel_layers
-from vllm.v1.worker.gpu.spec_decode.tree_accept import VerifyOutput, walk_tree
 from vllm.v1.worker.utils import AttentionGroup
 
 HAS_GPU = current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -329,12 +333,6 @@ def test_mrope_tree_positions(last_parent):
             assert torch.equal(tree[:, along], chain[:, start : start + len(path)])
 
 
-def _verify_output(drafted, row_start, target):
-    return VerifyOutput(
-        logits=None, target=target, row_start=row_start, drafted=drafted
-    )
-
-
 def _reference_walk(parent, count, drafted, target):
     """From the root: the lowest child whose drafted token is the current row's
     target, until there is none."""
@@ -351,10 +349,9 @@ def _reference_walk(parent, count, drafted, target):
         path.append(children[0])
 
 
-@requires_kernels
 @pytest.mark.parametrize("seed", range(3))
 def test_walk_tree_matches_reference(seed):
-    """The walk follows the child holding the target token; rows past a
+    """The test plugin's walk follows the child holding the target token; rows past a
     request's count and masked drafts (-1) are never accepted."""
     gen = np.random.default_rng(seed)
     num_reqs, num_cols, vocab = 7, 6, 3
@@ -371,11 +368,16 @@ def test_walk_tree_matches_reference(seed):
         for r in range(1, count):
             if drafted[row_start[b] + r] != -1 and gen.random() < 0.5:
                 target[row_start[b] + parent[b, r]] = drafted[row_start[b] + r]
-    output = _verify_output(
-        _t(drafted, torch.int64), _t(row_start), _t(target, torch.int64)
+    output = TargetTokens(
+        tokens=_t(target, torch.int64),
+        drafted=_t(drafted, torch.int64),
+        row_start=_t(row_start),
     )
+    reference = pytest.importorskip("vllm_add_test_speculators.reference")
 
-    result = walk_tree(_plan(parent, counts), output, 8)
+    plan = _plan(parent, counts)
+    result = reference.walk_tree(plan, output, 8)
+    check_accept_result(plan, output, result)
 
     assert result.sampled.shape == (num_reqs, 8)
     for b, count in enumerate(counts):
@@ -384,6 +386,49 @@ def test_walk_tree_matches_reference(seed):
         n = int(result.path_len[b])
         assert result.path[b, :n].tolist() == path
         assert result.sampled[b, :n].tolist() == sampled
+
+
+def _check(parent, counts, path, path_len):
+    """``check_accept_result`` on CPU: a failed device assert would end a GPU
+    process."""
+    cpu = torch.device("cpu")
+    row_start = torch.tensor(np.concatenate([[0], np.cumsum(counts)]), device=cpu)
+    tokens = torch.zeros(int(row_start[-1]), dtype=torch.int64)
+    parent = torch.tensor(parent, dtype=torch.int32)
+    check_accept_result(
+        VerifyPlan(parent=parent, tokens=torch.zeros_like(parent)),
+        TargetTokens(tokens=tokens, drafted=tokens, row_start=row_start.int()),
+        AcceptResult(
+            torch.tensor(path, dtype=torch.int32),
+            torch.tensor(path_len, dtype=torch.int32),
+            torch.zeros(len(counts), 4, dtype=torch.int64),
+        ),
+    )
+
+
+_TREE = [[-1, 0, 0, 1], [-1, 0, 1, 2]]
+
+
+def test_check_accept_result_takes_plan_paths():
+    """Every root-to-row path of the plan passes, padding past path_len ignored."""
+    _check(_TREE, [4, 3], [[0, 1, 3, 9], [0, 1, 2, 9]], [3, 3])
+    _check(_TREE, [4, 3], [[0, 2, 0, 0], [0, 0, 0, 0]], [2, 1])
+
+
+@pytest.mark.parametrize(
+    "path, path_len",
+    [
+        pytest.param([[1, 3, 0, 0], [0, 1, 0, 0]], [2, 2], id="not-at-root"),
+        pytest.param([[0, 2, 3, 0], [0, 1, 0, 0]], [3, 2], id="not-a-child"),
+        pytest.param([[0, 1, 0, 0], [0, 1, 2, 3]], [2, 4], id="past-rows"),
+        pytest.param([[0, 1, 0, 0], [0, 1, 0, 0]], [0, 2], id="empty"),
+        pytest.param([[0, 1, 1, 0], [0, 1, 0, 0]], [3, 2], id="repeat"),
+    ],
+)
+def test_check_accept_result_rejects(path, path_len):
+    """A speculator's path that is not in the plan fails vLLM's check."""
+    with pytest.raises(RuntimeError, match="not in the plan"):
+        _check(_TREE, [4, 3], path, path_len)
 
 
 def _random_paths(gen, parent, counts, to_last=False):

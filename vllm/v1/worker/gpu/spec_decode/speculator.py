@@ -43,7 +43,12 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.gpu.spec_decode.round import PlanInputs, VerifyPlan
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    PlanInputs,
+    TargetTokens,
+    VerifyPlan,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -157,12 +162,22 @@ class BaseSpeculator(ABC):
         """
         return None
 
+    def tree_accept(
+        self, plan: VerifyPlan, target: TargetTokens, width: int
+    ) -> AcceptResult:
+        """The accepted path of each request of a plan that is not a chain
+        (``round_contract.md``, step 4), from the target's token at every row.
+        ``sampled`` is ``[R, width]``. Not overriding it runs every plan as a
+        chain: the model runner lowers the speculator at startup.
+        """
+        raise NotImplementedError
+
     def overridden_hooks(self) -> frozenset[str]:
         """The optional per-step hooks this speculator overrides. The model
         runner reads them once and skips the no-op defaults on every step."""
         return frozenset(
             name
-            for name in ("plan",)
+            for name in ("plan", "tree_accept")
             if getattr(type(self), name) is not getattr(BaseSpeculator, name)
         )
 

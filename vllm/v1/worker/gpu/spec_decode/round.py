@@ -82,3 +82,40 @@ class AcceptResult:
     sampled nothing, e.g. a prefill chunk that does not end its prompt)."""
     sampled: torch.Tensor
     """``[R, C]`` token ids."""
+
+
+@dataclass(frozen=True)
+class TargetTokens:
+    """What the target chose at the verify rows of a range of requests, flat in
+    plan order (every tensor indexed from the range's first row)."""
+
+    tokens: torch.Tensor
+    """``[num_rows]`` int64: the target's token at each row, the argmax or a
+    draw from the row's processed logits at its plan position."""
+    drafted: torch.Tensor
+    """``[num_rows]`` int64: the token each row holds (row 0: the last committed
+    token); -1 for a row that must not be accepted (a placeholder, or a draft
+    the grammar rejected)."""
+    row_start: torch.Tensor
+    """``[num_reqs + 1]`` int32: where each request's rows start."""
+
+
+def check_accept_result(
+    plan: VerifyPlan, target: TargetTokens, result: AcceptResult
+) -> None:
+    """Assert on device, without a host sync, that ``result`` is a path of
+    ``plan``: it starts at the root, each row's parent is the row before it,
+    and ``path_len`` is in ``[1, rows]``."""
+    num_cols = plan.parent.shape[1]
+    path, path_len = result.path.long(), result.path_len.long()
+    rows = (target.row_start[1:] - target.row_start[:-1]).long()
+    cols = torch.arange(num_cols, device=path.device)
+    on_path = cols[1:] < path_len[:, None]
+    in_rows = (path >= 0) & (path < rows[:, None])
+    parent = plan.parent.long().gather(1, torch.where(in_rows, path, 0))
+    ok = (
+        (path[:, 0] == 0).all()
+        & ((path_len >= 1) & (path_len <= rows)).all()
+        & (~on_path | (in_rows[:, 1:] & (parent[:, 1:] == path[:, :-1]))).all()
+    )
+    torch._assert_async(ok, "tree_accept returned a path that is not in the plan")

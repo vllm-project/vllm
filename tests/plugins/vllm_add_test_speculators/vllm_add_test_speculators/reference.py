@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Reference versions of the tree parts vLLM leaves to a speculator's plugin,
-in PyTorch, for correctness only: the KV compaction (``layout:paged_token``
-commit)."""
+in PyTorch, for correctness only: the tree walk (``tree_accept``) and the KV
+compaction (``layout:paged_token`` commit)."""
 
 from collections.abc import Mapping, Sequence
 
@@ -18,6 +18,43 @@ from vllm.v1.worker.gpu.spec_decode.kernels import (
     SpecKernel,
     SpecLayerSpec,
 )
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    TargetTokens,
+    VerifyPlan,
+)
+
+
+def walk_tree(plan: VerifyPlan, target: TargetTokens, width: int) -> AcceptResult:
+    """From the root, step to the child whose token is the target's token at
+    the current row; stop when no child matches. Rows past a request's rows and
+    rows drafted -1 are never accepted."""
+    num_reqs, num_cols = plan.parent.shape
+    device = target.tokens.device
+    cols = torch.arange(num_cols, device=device)
+    rows = (target.row_start[1:] - target.row_start[:-1]).long()[:, None]
+    flat = (target.row_start[:-1].long()[:, None] + cols).clamp(
+        max=max(target.tokens.numel() - 1, 0)
+    )
+    live = (cols > 0) & (cols < rows)
+    tokens, drafted = target.tokens[flat], target.drafted[flat]
+    parent = plan.parent.long()
+    sampled = torch.zeros(num_reqs, width, dtype=torch.int64, device=device)
+    path = cols.int().repeat(num_reqs, 1)
+    path_len = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+    node = torch.zeros(num_reqs, dtype=torch.int64, device=device)
+    alive = rows[:, 0] > 0
+    for step in range(num_cols):
+        token = tokens.gather(1, node[:, None])[:, 0]
+        sampled[:, step] = torch.where(alive, token, sampled[:, step])
+        path[:, step] = torch.where(alive, node.int(), path[:, step])
+        path_len += alive.int()
+        match = live & (parent == node[:, None]) & (drafted == token[:, None])
+        child = torch.where(match, cols, num_cols).min(dim=1).values
+        alive &= child < num_cols
+        node = torch.where(alive, child, node)
+    return AcceptResult(path=path, path_len=path_len, sampled=sampled)
+
 
 # Caches copy as integers of their element size (fp8 has no index_put on CPU).
 _AS_INT = {1: torch.int8, 2: torch.int16, 4: torch.int32, 8: torch.int64}

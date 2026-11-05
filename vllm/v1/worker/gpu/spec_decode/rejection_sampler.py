@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import fields, replace
 from typing import Any
 
@@ -27,8 +27,15 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
-from vllm.v1.worker.gpu.spec_decode.round import VerifyPlan
-from vllm.v1.worker.gpu.spec_decode.tree_accept import VerifyOutput, walk_tree
+from vllm.v1.worker.gpu.spec_decode.round import (
+    AcceptResult,
+    TargetTokens,
+    VerifyPlan,
+    check_accept_result,
+)
+
+# The speculator's tree_accept: (plan, target tokens, width) -> accepted paths.
+TreeAccept = Callable[[VerifyPlan, TargetTokens, int], AcceptResult]
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -187,9 +194,13 @@ class RejectionSampler:
         device: torch.device,
         *,
         watermark_key: int | None = None,
+        tree_accept: TreeAccept | None = None,
     ):
         self.sampler = sampler
         self.watermark_key = watermark_key
+        # Chooses the accepted path of a plan that is not a chain; a speculator
+        # without one runs chains (lowered at startup).
+        self.tree_accept = tree_accept
         if watermark_key is not None:
             assert isinstance(sampler, GPUWatermarkSampler)
         self.num_speculative_steps = spec_config.num_speculative_tokens
@@ -282,7 +293,7 @@ class RejectionSampler:
             "watermark_key": self.watermark_key,
         }
 
-    def _verify_output(
+    def _target_tokens(
         self,
         input_batch: InputBatch,
         logits: torch.Tensor,
@@ -290,7 +301,7 @@ class RejectionSampler:
         draft_sampled: torch.Tensor,
         start: int,
         end: int,
-    ) -> VerifyOutput:
+    ) -> tuple[torch.Tensor, TargetTokens]:
         """The sampling parameters applied to the rows of requests
         ``[start, end)`` and the target's token for each row, at the rows' plan
         positions."""
@@ -324,11 +335,10 @@ class RejectionSampler:
                 is_drafting=False,
                 use_fp64=self.sampler.use_fp64_gumbel,
             )
-        return VerifyOutput(
-            logits=processed,
-            target=target,
-            row_start=input_batch.cu_num_logits[start : end + 1] - lo,
+        return processed, TargetTokens(
+            tokens=target,
             drafted=draft_sampled[lo:hi],
+            row_start=input_batch.cu_num_logits[start : end + 1] - lo,
         )
 
     def _verify(
@@ -438,11 +448,13 @@ class RejectionSampler:
             result = None
             plan = input_batch.verify_plan
             if plan is not None and not plan.is_chain:
+                assert self.tree_accept is not None
                 plan = slice_plan(plan, start, end)
-                output = self._verify_output(
+                tree_logits, target = self._target_tokens(
                     input_batch, logits, plan_pos, draft_sampled, start, end
                 )
-                result = walk_tree(plan, output, self.num_speculative_steps + 1)
+                result = self.tree_accept(plan, target, self.num_speculative_steps + 1)
+                check_accept_result(plan, target, result)
             chunk_logits = logits[lo:hi]
             if result is None:
                 # draft_logits uses persistent request-state indices, not batch
@@ -462,7 +474,7 @@ class RejectionSampler:
             else:
                 sampled, num_sampled = result.sampled, result.path_len
                 path_chunks.append(result.path)
-                processed_logits = output.logits
+                processed_logits = tree_logits
                 if max_num_logprobs != NO_LOGPROBS or max_num_kept is not None:
                     # Lay the rows out as a chain: committed token k's logits
                     # first. Only paid for when logprobs or masks are returned.

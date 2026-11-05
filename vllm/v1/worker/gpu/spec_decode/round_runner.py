@@ -114,6 +114,9 @@ class SpecRound:
             kernels=self.registry(),
         )
         settings = {
+            "a speculator without tree_accept": runner.speculator is not None
+            and self.resources.max_branching > 1
+            and "tree_accept" not in runner.speculator.overridden_hooks(),
             "pipeline parallelism (no tree path broadcast)": runner.use_pp,
             "prefill context parallelism": runner.pcp_manager is not None,
             "decode context parallelism": runner.dcp_size > 1,

@@ -62,6 +62,7 @@ def _make_rejection_sampler(
     rejection_sampler.fly_entropy_threshold = 0.3
     rejection_sampler.fly_entropy_top_k = 3
     rejection_sampler.watermark_key = None
+    rejection_sampler.tree_accept = None
     return rejection_sampler
 
 
@@ -339,7 +340,7 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
     seen: list[VerifyPlan] = []
     drawn: list[torch.Tensor] = []
 
-    def walk_tree(plan, output, width):
+    def tree_accept(plan, target, width):
         seen.append(plan)
         num = plan.parent.shape[0]
         return AcceptResult(
@@ -352,7 +353,6 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
         drawn.append(logits)
         return logits.argmax(dim=-1)
 
-    monkeypatch.setattr(rs, "walk_tree", walk_tree)
     monkeypatch.setattr(rs, "gumbel_sample", gumbel_sample)
     temperature = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     states = SimpleNamespace(
@@ -369,6 +369,7 @@ def test_chunked_tree_walk_sees_every_plan_field(monkeypatch):
         ),
         num_speculative_steps=rows - 1,
     )
+    rejection_sampler.tree_accept = tree_accept
     logits = torch.zeros(num_reqs * rows, 8)
     pos = torch.arange(num_reqs * rows)
     for max_chunk_logits in (num_reqs * rows, rows):

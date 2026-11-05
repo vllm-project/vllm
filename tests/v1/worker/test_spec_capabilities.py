@@ -262,6 +262,14 @@ def test_no_kv_commit_verifies_chains():
 _LOWERED = ": keeps verify rows in chain order"
 
 
+class _Speculator:
+    def __init__(self, hooks):
+        self.hooks = frozenset(hooks)
+
+    def overridden_hooks(self):
+        return self.hooks
+
+
 def _resolve(**settings):
     """Resolve the capabilities of a runner over a hybrid whose layers all
     verify trees, with ``settings`` on the runner."""
@@ -273,10 +281,12 @@ def _resolve(**settings):
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder, runner.adaptive_verification = None, None
     runner.speculator_plans = True
+    runner.speculator = _Speculator({"plan", "tree_accept"})
     for setting, value in settings.items():
         setattr(runner, setting, value)
     spec_round = object.__new__(SpecRound)
     spec_round.kernels = _provided()
+    spec_round.resources = SpecResources(capture_rows=(1, 4), max_branching=2)
     return spec_round.resolve_capabilities(runner)
 
 
@@ -291,6 +301,12 @@ def _resolve(**settings):
             "micro-batching" + _LOWERED,
         ),
         ("cache_config", CacheConfig(use_replayssm=True), _gdn_reason("replay")),
+        # vLLM has no tree walk: a speculator chooses its accepted paths.
+        (
+            "speculator",
+            _Speculator({"plan"}),
+            "a speculator without tree_accept" + _LOWERED,
+        ),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
