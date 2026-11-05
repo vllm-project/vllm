@@ -617,7 +617,6 @@ steps:
   - csrc/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/checkpoint.py
-  - vllm/model_executor/layers/mamba/mamba_mixer2.py
   - vllm/model_executor/layers/mamba/gdn
   - vllm/models/qwen3_5/
   - vllm/model_executor/layers/mamba/ops
