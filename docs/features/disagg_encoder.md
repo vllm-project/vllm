@@ -104,8 +104,10 @@ with `vllm-rs serve ... --grpc-port PORT`, using the same model and processing
 configuration as the proxy. E is an EC producer; P is an EC consumer and KV
 producer; D is a KV consumer. E+PD is also supported.
 
-Run the proxy from a vLLM source checkout matching the workers, so its Python
-gRPC bindings can be generated from `rust/proto/`:
+Run the proxy from a vLLM source checkout matching the workers and install the
+Python gRPC dependencies. At startup, the proxy generates bindings
+from `rust/proto/` in a subprocess and imports only the generated Python modules,
+keeping the native proto compiler isolated from model extensions:
 
 ```bash
 uv pip install --python .venv/bin/python grpcio-tools grpcio-health-checking

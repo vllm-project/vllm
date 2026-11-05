@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import subprocess
 import sys
 import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 from functools import lru_cache
+from importlib import import_module
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 import grpc
@@ -40,18 +43,45 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 @lru_cache(maxsize=1)
 def load_protocol():
-    """Generate Python bindings from this checkout, without duplicating protos."""
-    root = str(Path(__file__).resolve().parents[3])
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    try:
-        pb, inference = grpc.protos_and_services("rust/proto/inference.proto")
-        control_pb, control = grpc.protos_and_services("rust/proto/control.proto")
-    except NotImplementedError as error:
-        raise RuntimeError(
-            "gRPC proxy requires grpcio-tools; install it in the proxy environment"
-        ) from error
-    return pb, inference, control_pb, control
+    """Isolate protoc's native protobuf library from model extensions."""
+    root = Path(__file__).resolve().parents[3]
+    with TemporaryDirectory(prefix="vllm-epd-grpc-") as generated:
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "grpc_tools.protoc",
+                    "-I.",
+                    f"--python_out={generated}",
+                    f"--grpc_python_out={generated}",
+                    "rust/proto/inference.proto",
+                    "rust/proto/control.proto",
+                ],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise RuntimeError(
+                "Failed to generate gRPC bindings; ensure grpcio-tools is installed. "
+                f"{error.stderr or ''}"
+            ) from error
+        sys.path.insert(0, generated)
+        try:
+            return tuple(
+                import_module(f"rust.proto.{name}")
+                for name in (
+                    "inference_pb2",
+                    "inference_pb2_grpc",
+                    "control_pb2",
+                    "control_pb2_grpc",
+                )
+            )
+        finally:
+            sys.path.remove(generated)
 
 
 def transfer_params(value):
