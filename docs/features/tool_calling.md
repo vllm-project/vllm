@@ -109,6 +109,32 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
+## Tool Result Validation
+
+A tool result must reference a tool call that the model actually made. vLLM
+rejects a request with HTTP 400 `invalid_request_error` when a tool result has
+no ID, an empty ID, or an ID that does not match any prior tool call. The error
+names the offending field:
+
+| API | Field |
+| --- | --- |
+| Chat Completions | `tool_call_id` |
+| Responses | `call_id` |
+| Anthropic Messages | `tool_use_id` |
+
+IDs are matched against the effective conversation history, not only the
+current request body. For the Responses API this includes calls from a stored
+response referenced by `previous_response_id`, so a continuation that answers
+an earlier call with a `function_call_output` is accepted. Parallel tool calls
+may be answered in any order, and results may answer calls from any earlier
+turn.
+
+!!! note
+    GPT-OSS (Harmony) Responses keep their existing behavior: a
+    `function_call_output` whose `call_id` matches no prior call is still
+    rejected, but with `param="input"` and the message
+    `No call message found for <id>`.
+
 ## Constrained Decoding Behavior
 
 Structural-tag parsers resolve call obligation, grammar activation, and argument-schema enforcement separately. With structural-tag enforcement enabled:
