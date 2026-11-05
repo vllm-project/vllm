@@ -38,6 +38,7 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.utils import extract_json_member_object
+from vllm.renderers.inkling_encoding import CONTENT_XML, SPECIAL_TOKEN_SPELLINGS
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -227,6 +228,17 @@ class InklingParser(ParserEngine):
     ) -> None:
         kwargs.setdefault("parser_engine_config", inkling_config())
         super().__init__(tokenizer, tools, **kwargs)
+        # At these efforts Inkling answers in bare text with no content marker.
+        effort = (kwargs.get("chat_template_kwargs") or {}).get("reasoning_effort")
+        self._bare_text_effort = effort in ("none", "minimal")
+
+    def _prompt_declares_no_tools(self, prompt_token_ids: Sequence[int]) -> bool:
+        # The renderer declares every tool source (request, template kwargs,
+        # developer messages) in a single CONTENT_XML block. If that marker
+        # cannot be resolved, absence is unprovable.
+        vocab = self.vocab
+        xml_ids = {vocab[s] for s in SPECIAL_TOKEN_SPELLINGS[CONTENT_XML] if s in vocab}
+        return bool(xml_ids) and xml_ids.isdisjoint(prompt_token_ids)
 
     def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
         """Seed the initial parsing state from the prompt tail.
@@ -251,7 +263,16 @@ class InklingParser(ParserEngine):
                 self._streaming_initialized = True
                 return
             if token_id == model_id:
-                self._engine.reset(initial_state=ParserState.MESSAGE_HEADER)
+                # The header only hides an optional function name; with no
+                # tools declared there is none, so stream bare text directly.
+                plain_text = self._bare_text_effort and self._prompt_declares_no_tools(
+                    prompt_token_ids
+                )
+                self._engine.reset(
+                    initial_state=ParserState.CONTENT
+                    if plain_text
+                    else ParserState.MESSAGE_HEADER
+                )
                 self._streaming_initialized = True
                 return
             if token_id in special_ids:
