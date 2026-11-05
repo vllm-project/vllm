@@ -680,6 +680,7 @@ class FullAttentionSpec(AttentionSpec):
         merged_spec = cls(
             block_size=specs[0].block_size,
             block_stride_alignment=specs[0].block_stride_alignment,
+            kernel_block_alignment=specs[0].kernel_block_alignment,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -842,6 +843,7 @@ class RSWASpec(FullAttentionSpec):
         return cls(
             block_size=base.block_size,
             block_stride_alignment=base.block_stride_alignment,
+            kernel_block_alignment=base.kernel_block_alignment,
             num_kv_heads=base.num_kv_heads,
             head_size=base.head_size,
             head_size_v=base.head_size_v,
@@ -1049,6 +1051,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         bounded_replay_set = set(spec.bounded_replay for spec in specs)
         block_stride_alignment_set = {spec.block_stride_alignment for spec in specs}
+        kernel_block_alignment_set = {spec.kernel_block_alignment for spec in specs}
         assert len({spec.dcp_sharded for spec in specs}) == 1
         assert len({spec.max_tp_shards for spec in specs}) == 1
         assert (
@@ -1059,14 +1062,17 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(extra_retained_set) == 1
             and len(bounded_replay_set) == 1
             and len(block_stride_alignment_set) == 1
+            and len(kernel_block_alignment_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, tokens per state, model version, sliding "
-            "window size, retained token count, and replay policy."
+            "window size, retained token count, replay policy, and block and "
+            "kernel block alignments."
         )
         return cls(
             block_size=specs[0].block_size,
             block_stride_alignment=block_stride_alignment_set.pop(),
+            kernel_block_alignment=kernel_block_alignment_set.pop(),
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
@@ -1265,6 +1271,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             head_size_v=specs[0].head_size_v,
             sink_len=specs[0].sink_len,
             block_stride_alignment=specs[0].block_stride_alignment,
+            kernel_block_alignment=specs[0].kernel_block_alignment,
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             dcp_sharded=specs[0].dcp_sharded,
