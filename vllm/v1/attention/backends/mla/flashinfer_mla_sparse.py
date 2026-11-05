@@ -943,11 +943,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         steps = [(max_tokens, heads)]
         if self.use_shardq:
-            from vllm.v1.attention.ops.shardq import max_rank_tokens
-
+            # A rank owns at most two chunks of ceil(n / (2 * world)) per
+            # request (allocate_shardq_buffers).
             max_reqs = vllm_config.scheduler_config.max_num_seqs
             world = get_tensor_model_parallel_world_size()
-            steps.append((max_rank_tokens(max_tokens, max_reqs, world), shardq_heads))
+            rank_tokens = min(max_tokens, -(-max_tokens // world) + 2 * max_reqs)
+            steps.append((rank_tokens, shardq_heads))
         peak = max(self._prims_ts_peak_bytes(*step) for step in steps)
         _ = torch.empty(peak, dtype=torch.uint8, device=current_platform.device_type)
 
@@ -967,10 +968,12 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         valid_counts: torch.Tensor,
         layer: AttentionLayer,
         block_size: int,
+        return_lse: bool | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sparse MLA of every row of ``q`` [T, H, 576] (E4M3, quantized by the
         layer with ``q_scale``) over its ``valid_counts`` leading physical rows
-        of ``topk_indices`` (-1 entries are masked)."""
+        of ``topk_indices`` (-1 entries are masked). ``return_lse`` None means
+        ``need_to_return_lse_for_decode``."""
         assert q.dtype == torch.float8_e4m3fn, q.dtype
         num_tokens, heads, _ = q.shape
         padded = self._prims_ts_query_heads(heads)
@@ -981,7 +984,8 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
         )
         kv_descale = layer._k_scale_float if is_fp8 else 1.0
         softmax_scale = self.scale * layer._q_scale_float * kv_descale
-        return_lse = self.need_to_return_lse_for_decode
+        if return_lse is None:
+            return_lse = self.need_to_return_lse_for_decode
         buckets = self.prims_ts_buckets
         # A call of one chunk (every decode step) returns views of the kernel's
         # head-padded output and LSE: the DCP combine reads them in place.
@@ -1086,11 +1090,6 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
             is_decode=True,
         )
 
-    def shardq_query_heads(self, num_heads: int) -> int:
-        if self.use_prims_ts:
-            return num_heads
-        return trtllm_gen_query_heads(num_heads)
-
     def _forward_mqa_kernel(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -1114,7 +1113,7 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
 
         if self.use_prims_ts:
             return self._forward_prims_ts(
-                q, kv_cache, topk_indices, seq_lens, layer, block_size
+                q, kv_cache, topk_indices, seq_lens, layer, block_size, return_lse
             )
 
         self._prepare_mqa_kernel(layer, q.device)

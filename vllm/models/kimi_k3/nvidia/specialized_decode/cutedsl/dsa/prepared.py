@@ -265,7 +265,10 @@ class PreparedDsa:
         assert dcp is None or max(pitches) <= dcp.cap, (max(pitches), dcp.cap)
         self.dcp = dcp.size if dcp is not None else 1
         if dcp is None and not self.fp8:
-            assert self.impl.fp8_decode_padded_heads == QUERY_HEADS
+            assert (
+                self.impl._compute_fp8_decode_padded_heads(self.impl.num_heads)
+                == QUERY_HEADS
+            )
         self.heads = layer.W_UK_T.shape[0]
         self.device, self.pitches = layer.W_UK_T.device, pitches
         *shared, fi_buffers = scratch

@@ -39,6 +39,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
+from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
+    AiterFlyDSLFP8PrefillBackend,
+)
 from vllm.v1.attention.backends.mla.triton_mla import _compute_num_kv_splits
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
@@ -186,6 +189,15 @@ def _fp8_mla_prefill_supported() -> bool:
     except Exception:  # noqa: BLE001
         return False
     return True
+
+
+def _asm_fp8_prefill_superseded(prefill_backend: object) -> bool:
+    """Whether the selected MLA prefill backend supersedes the ASM FP8 prefill.
+
+    ``AiterFlyDSLFP8PrefillBackend`` runs FP8 attention itself and also serves
+    context-free prefills, so the assembly prefill kernel must not claim them.
+    """
+    return isinstance(prefill_backend, AiterFlyDSLFP8PrefillBackend)
 
 
 @functools.lru_cache(maxsize=1)
@@ -1096,12 +1108,18 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                     f"{_NATIVE_CPRR_HEADS}, and this AITER build lacks segmented "
                     "MLA decode."
                 )
+        # The group's cache dtype can differ from cache_config.cache_dtype
+        # (a speculative kv_cache_dtype override, kv_cache_dtype_skip_layers).
+        # Use the group's original format: decode normalizes E5M2 to "fp8".
+        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
+        if kv_cache_dtype is None:
+            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_segmented_dcp_verify = (
             supports_segmented_dcp_verify
             and _segmented_mla_fits_lds(
                 self.num_heads * self.dcp_world_size,
                 kv_cache_spec.block_size,
-                is_quantized_kv_cache(vllm_config.cache_config.cache_dtype),
+                is_quantized_kv_cache(kv_cache_dtype),
             )
         )
         self._use_triton_dcp_verify = (
@@ -1115,10 +1133,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 device
             ).multi_processor_count
 
-        # Use the group's original format: decode normalizes E5M2 to "fp8".
-        kv_cache_dtype = getattr(kv_cache_spec, "cache_dtype_str", None)
-        if kv_cache_dtype is None:
-            kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self._supports_fused_dcp_prefill = _supports_fused_dcp_prefill_config(
             kv_cache_dtype,
             self.q_data_type,
@@ -1231,7 +1245,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # pad has to be applied here explicitly.
         if self._asm_dcp_verify:
             self._num_attention_heads = self._asm_dcp_verify_heads
-        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        kv_cache_dtype_str = kv_cache_dtype
         if kv_cache_dtype_str in DS_MLA_STATE_CONTENT_BYTES:
             # A dense MLA draft of a DSA target keeps its own fp8 cache.
             layer = self.compilation_config.static_forward_context[layer_names[0]]
@@ -1322,10 +1336,13 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # heads. It writes bf16 through a raw output pointer, so fp16 must use
         # the standard prefill path. Head counts that are not a multiple of 16
         # are replicate-padded up to one in _mla_fp8_prefill_attn.
+        # A FlyDSL FP8 prefill backend supersedes the assembly kernel, so the
+        # PS workspace buffers below are not allocated either.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             kv_cache_dtype_str == "fp8"
             and vllm_config.model_config.dtype == torch.bfloat16
             and AiterMLAHelper.is_valid_fp8_prefill_num_heads(self.num_heads)
+            and not _asm_fp8_prefill_superseded(self._prefill_backend)
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -3192,17 +3209,21 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         """Dispatch prefill to the FP8 ASM kernel when available.
 
         Falls back to the parent (``flash_attn_varlen_func``) when FP8
-        MLA prefill is disabled, PS metadata is missing, or chunked
-        context requires two-pass merge.
+        MLA prefill is disabled, the selected prefill backend supersedes
+        it, PS metadata is missing, or chunked context requires two-pass
+        merge.
 
         The annotation uses the base ``MLACommonMetadata`` to honour LSP
         with ``MLACommonImpl.forward_mha``; the AITER builder always
         produces ``AiterMLAMetadata`` instances at runtime, so we narrow
         with ``isinstance`` before reading the AITER-specific FP8 fields.
         """
+        prefill_metadata = attn_metadata.prefill
         if (
             not self._fp8_prefill_enabled
             or not isinstance(attn_metadata, AiterMLAMetadata)
+            or prefill_metadata is None
+            or _asm_fp8_prefill_superseded(prefill_metadata.prefill_backend)
             or attn_metadata.fp8_prefill_qo_indptr is None
         ):
             return super().forward_mha(
@@ -3216,8 +3237,6 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 output_scale,
             )
 
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
         has_context = prefill_metadata.chunked_context is not None
 
         if has_context:

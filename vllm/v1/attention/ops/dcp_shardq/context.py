@@ -7,8 +7,8 @@ with all heads against each rank's 1/W of the keys, merges the indexer's
 per-rank top-k across ranks, and combines the attention partials by LSE: per
 layer it moves gigabytes and repeats the attention work W times over.
 
-When the TP group is the DCP group, a pure prefill step can instead run as a
-TP ShardQ step (vllm.v1.attention.ops.shardq): each rank gathers its requests'
+When the TP group is the DCP group, a prefill step can instead run as a TP
+ShardQ step (vllm.v1.attention.ops.shardq): each rank gathers its requests'
 whole context into a symmetric-memory workspace, in token order and in the
 paged formats of the MLA and indexer caches, then scores and attends its slice
 of the query tokens with all heads over the workspace, exactly as TP ShardQ
@@ -19,7 +19,8 @@ into all workspaces (prior-context MLA and indexer rows, plus the indexer rows
 of the new tokens); the MLA layer then writes the new tokens' MLA rows, which
 every rank computes for all tokens, into its own workspace.
 
-A step runs this way when its prefill rows fit the workspace. Its leading
+A step runs this way when ShardQ splits its tokens (build_shardq_split) and
+its prefill rows fit the workspace. Its leading
 decode rows (rows of at most ``1 + num_speculative_tokens`` tokens, which the
 indexer scores on its decode path) keep the DCP path within the step; its
 other rows are sharded, including the short prefill pieces that the sparse
@@ -53,14 +54,11 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     ConvertReqIndexToGlobalIndexKernel,
 )
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.cp_common import symm_mem
 from vllm.v1.attention.ops.dcp import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.dcp_shardq import PAGE_TOKENS
-from vllm.v1.attention.ops.shardq import (
-    ShardQSplit,
-    _symm_buffer,
-    _SymmBuffer,
-    make_shardq_split,
-)
+from vllm.v1.attention.ops.shardq import ShardQSplit
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
@@ -192,12 +190,42 @@ def dcp_fallback_max_tokens(vllm_config: "VllmConfig", decode_query_len: int) ->
     )
 
 
-def _workspace(layout: ContextLayout, pages: int, device) -> _SymmBuffer:
-    # Sizes come from the configuration, so every rank rendezvouses together.
+@dataclass
+class _Workspace:
+    storage: torch.Tensor
+    handle: Any
+    # Every rank's workspace address, [world].
+    peer_ptrs: torch.Tensor
+
+
+# Shared by every layer; outgrown workspaces stay alive for queued kernels.
+_workspace_buffer: _Workspace | None = None
+_retired: list[_Workspace] = []
+
+
+def _workspace(layout: ContextLayout, pages: int, device) -> _Workspace:
+    """The symmetric-memory workspace, grown to ``pages`` pages if needed.
+    Sizes come from the configuration, so every rank rendezvouses together."""
+    global _workspace_buffer
     nbytes = pages * (layout.mla_page_bytes + layout.index_page_bytes)
-    return _symm_buffer(
-        get_tp_group().device_group, "dcp_shardq_context", nbytes, torch.uint8, device
+    buf = _workspace_buffer
+    if buf is not None and buf.storage.numel() >= nbytes:
+        return buf
+    if buf is not None:
+        _retired.append(buf)
+    group = get_tp_group().device_group
+    storage = symm_mem.empty(nbytes, dtype=torch.uint8, device=device)
+    handle = symm_mem.rendezvous(storage, group.group_name)
+    peer_ptrs = torch.tensor(
+        [
+            handle.get_buffer(peer, [nbytes], torch.uint8, 0).data_ptr()
+            for peer in range(group.size())
+        ],
+        dtype=torch.int64,
+        device=storage.device,
     )
+    _workspace_buffer = _Workspace(storage, handle, peer_ptrs)
+    return _workspace_buffer
 
 
 def reserve_workspace(
@@ -324,8 +352,12 @@ class DcpShardQContext:
     block_table: torch.Tensor
     # int64 [num_prefill_tokens]: workspace slot of each new prefill token.
     slot_mapping: torch.Tensor
-    # Indexer prefill chunks over the workspace, in the non-DCP form.
+    # Indexer prefill chunks over the workspace, in the non-DCP form, over
+    # the indexer rows of gather_indices.
     indexer_chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
+    # The tokens the indexer scores, in the order their top-k is written:
+    # every decode row in place, then this rank's ShardQ tokens.
+    gather_indices: torch.Tensor
 
     # The workspace's pages of 64 tokens address its views and block table.
     block_size = PAGE_TOKENS
@@ -411,6 +443,7 @@ class DcpShardQContext:
 
 def build_dcp_shardq_context(
     common_attn_metadata: CommonAttentionMetadata,
+    split: ShardQSplit,
     layout: ContextLayout,
     max_pages: int,
     max_indexer_keys: int,
@@ -418,23 +451,26 @@ def build_dcp_shardq_context(
     world: int,
     rank: int,
     device: torch.device,
-    num_decodes: int = 0,
 ) -> DcpShardQContext | None:
-    """The context plan of a step's prefill rows (its requests from
-    ``num_decodes`` on) on DCP rank ``rank`` of ``world``, or None when they
-    do not fit the ``max_pages`` workspace pages.
+    """The context plan of ``split``'s step on DCP rank ``rank`` of ``world``,
+    or None when its prefill rows (the requests after ``split``'s decode
+    tokens) do not fit the ``max_pages`` workspace pages.
 
     Every rank derives the same plan; the push kernel finds each rank's rows
     from the step's device sequence lengths.
     """
     num_reqs = common_attn_metadata.num_reqs
     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+    all_qsl = query_start_loc_cpu.numpy().astype(np.int64)
+    num_decode_tokens = split.num_decode_tokens
+    num_decodes = int(np.searchsorted(all_qsl, num_decode_tokens))
+    if all_qsl[num_decodes] != num_decode_tokens:
+        return None
     seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
     assert seq_lens_cpu is not None
     # Exact for prefill rows.
     seq_lens_cpu = seq_lens_cpu[:num_reqs]
-    qsl = query_start_loc_cpu.numpy().astype(np.int64)[num_decodes:]
-    num_decode_tokens = int(qsl[0])
+    qsl = all_qsl[num_decodes:]
     query_lens = np.diff(qsl)
     seq_lens = seq_lens_cpu.numpy().astype(np.int64)[num_decodes:]
     pages = -(-seq_lens // PAGE_TOKENS)
@@ -453,6 +489,21 @@ def build_dcp_shardq_context(
         page_start * PAGE_TOKENS + context_lens - (qsl[:-1] - qsl[0]), query_lens
     ) + np.arange(int(qsl[-1] - qsl[0]))
 
+    # The indexer scores every decode row in place, then this rank's tokens
+    # compactly, each at its position; the requests' query ranges are
+    # renumbered over those rows (the decodes' stay put).
+    local_start = int(split.num_tokens_per_rank[:rank].sum())
+    local_token_ids = split.token_ids[
+        local_start : local_start + int(split.num_tokens_per_rank[rank])
+    ]
+    gather_indices = np.concatenate(
+        (np.arange(num_decode_tokens), local_token_ids + num_decode_tokens)
+    )
+    all_seq_lens = seq_lens_cpu.numpy().astype(np.int64)
+    token_to_req = np.searchsorted(all_qsl[1:], gather_indices, side="right")
+    positions = gather_indices + all_seq_lens[token_to_req] - all_qsl[token_to_req + 1]
+    compact_qsl = np.searchsorted(gather_indices, all_qsl)
+
     def to_device(array: np.ndarray, dtype: torch.dtype) -> torch.Tensor:
         host = torch.from_numpy(np.ascontiguousarray(array)).to(dtype)
         if device.type == "cuda":
@@ -460,19 +511,23 @@ def build_dcp_shardq_context(
         return host.to(device, non_blocking=True)
 
     block_table_gpu = to_device(block_table, torch.int32)
+    compact_qsl_cpu = torch.from_numpy(compact_qsl).to(torch.int32)
+    compact_qsl_gpu = to_device(compact_qsl, torch.int32)
+    positions_gpu = to_device(positions, torch.int32)
     seq_lens_gpu = common_attn_metadata.seq_lens[:num_reqs]
     chunk_specs = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
         seq_lens_cpu[num_decodes:],
-        torch.from_numpy(query_lens),
+        torch.diff(compact_qsl_cpu[num_decodes:]),
         max_indexer_keys,
         max_logits_bytes,
+        request_offset=num_decodes,
     )
     indexer_chunks = [
         build_prefill_chunk_metadata(
-            num_decodes + req_slice.start,
-            num_decodes + req_slice.stop,
-            common_attn_metadata.query_start_loc,
-            query_start_loc_cpu,
+            req_slice.start,
+            req_slice.stop,
+            compact_qsl_gpu,
+            compact_qsl_cpu,
             seq_lens_gpu,
             seq_lens_gpu,
             seq_lens_cpu,
@@ -480,6 +535,7 @@ def build_dcp_shardq_context(
             1,
             query_slice=query_slice,
             skip_kv_gather=query_slice.start > 0,
+            positions=positions_gpu,
         )
         for req_slice, query_slice in chunk_specs
     ]
@@ -498,12 +554,14 @@ def build_dcp_shardq_context(
         block_table=block_table_gpu,
         slot_mapping=to_device(slot_mapping, torch.int64),
         indexer_chunks=[chunk for chunk in indexer_chunks if chunk is not None],
+        gather_indices=to_device(gather_indices, torch.int64),
     )
 
 
 class _GatheredContextIndexRemap(ConvertReqIndexToGlobalIndexKernel):
     """The sparse-MLA top-k remap as a DCP ShardQ step runs it
-    (SparseMLACommonImpl.forward_mqa_shardq): onto the workspace's 64-token
+    (SparseMLACommonImpl.forward_mqa over kv_gathered metadata): onto the
+    workspace's 64-token
     pages, without DCP, with valid counts, through a block table padded to
     TABLE_PAGES_ALIGN pages. Its Triton kernel is the one every
     ConvertReqIndexToGlobalIndexKernel launches, so warming these keys here
@@ -552,10 +610,9 @@ def register_warmup(layout: ContextLayout, world: int, num_topk_tokens: int) -> 
 
 
 SHARDQ = "ShardQ"
-# Why a step keeps the DCP path.
-DENSE_MHA = "dense MHA"
-FEW_TOKENS = "few tokens"
-PADDED = "padded"
+# Why a step keeps the DCP path: no token split (too few tokens, requests no
+# longer than the top-k, a padded batch), or the workspace cannot hold it.
+NO_SPLIT = "no split"
 WORKSPACE = "workspace full"
 
 
@@ -623,7 +680,6 @@ class DcpShardQPlanner:
         max_pages: int,
         max_indexer_keys: int,
         max_logits_bytes: int,
-        min_tokens: int,
         max_decode_query_len: int,
         world: int,
         rank: int,
@@ -639,7 +695,6 @@ class DcpShardQPlanner:
         self.max_pages = max_pages
         self.max_indexer_keys = max_indexer_keys
         self.max_logits_bytes = max_logits_bytes
-        self.min_tokens = min_tokens
         self.max_decode_query_len = max_decode_query_len
         self.world = world
         self.rank = rank
@@ -647,63 +702,52 @@ class DcpShardQPlanner:
         self.stats = DcpShardQStats(log=rank == 0, label=label)
 
     def plan(
-        self, common_attn_metadata: CommonAttentionMetadata, use_dense_mha: bool
-    ) -> tuple[ShardQSplit, DcpShardQContext] | None:
-        """The prefill rows' token split and context plan of a step that runs
-        as a DCP ShardQ step, or None for the DCP path.
+        self, common_attn_metadata: CommonAttentionMetadata, split: ShardQSplit | None
+    ) -> DcpShardQContext | None:
+        """The context plan of a step that runs as a DCP ShardQ step with the
+        token split ``split`` (vllm.v1.attention.ops.shardq.build_shardq_split),
+        or None for the DCP path. A step without prefill rows is not counted.
 
-        The step's leading decode rows (the requests of at most
-        ``max_decode_query_len`` tokens before its first longer one, which the
-        indexer scores on its decode path) keep the DCP path; the split and
-        the plan cover the rest. A step without prefill rows is not counted.
-
-        ``use_dense_mha``: the step's prefill rows take dense MHA.
+        The split's decode tokens (requests of at most ``max_decode_query_len``
+        tokens, which the indexer scores on its decode path) keep the DCP path;
+        the plan covers the rest.
         """
-        num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
-        if num_reqs == 0 or num_tokens == 0:
+        if common_attn_metadata.num_reqs == 0 or num_tokens == 0:
             return None
-        qsl = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1].numpy()
-        qsl = qsl.astype(np.int64)
-        query_lens = np.diff(qsl)
-        is_prefill = query_lens > self.max_decode_query_len
-        if not is_prefill.any():
-            return None
-        num_decodes = int(is_prefill.argmax())
-        num_prefill_tokens = num_tokens - int(qsl[num_decodes])
-        context = None
-        if qsl[-1] != num_tokens or query_lens.min() == 0:
-            path = PADDED
-        elif use_dense_mha:
-            path = DENSE_MHA
-        elif num_prefill_tokens < self.min_tokens:
-            path = FEW_TOKENS
-        else:
-            context = build_dcp_shardq_context(
-                common_attn_metadata,
-                self.layout,
-                self.max_pages,
-                self.max_indexer_keys,
-                self.max_logits_bytes,
-                self.world,
-                self.rank,
-                self.device,
-                num_decodes,
+        if split is None:
+            _, num_prefills, _, num_prefill_tokens = split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=self.max_decode_query_len
             )
-            path = SHARDQ if context is not None else WORKSPACE
-        self.stats.record(path, num_prefill_tokens)
-        if context is None:
-            # Dense MHA rows take no MQA combine; the others are bounded.
-            if path != DENSE_MHA and num_tokens > self.max_fallback_tokens:
-                logger.warning_once(
-                    "A %d-token step keeps the DCP path (%s), more than the %d "
-                    "tokens the memory profile reserved for it.",
-                    num_tokens,
-                    path,
-                    self.max_fallback_tokens,
-                )
+            if num_prefills:
+                self.stats.record(NO_SPLIT, num_prefill_tokens)
+                self._check_fallback(num_tokens, NO_SPLIT)
             return None
-        split = make_shardq_split(
-            qsl[num_decodes:] - qsl[num_decodes], self.world, self.rank, self.device
+        context = build_dcp_shardq_context(
+            common_attn_metadata,
+            split,
+            self.layout,
+            self.max_pages,
+            self.max_indexer_keys,
+            self.max_logits_bytes,
+            self.world,
+            self.rank,
+            self.device,
         )
-        return split, context
+        num_prefill_tokens = int(split.num_tokens_per_rank.sum())
+        self.stats.record(
+            SHARDQ if context is not None else WORKSPACE, num_prefill_tokens
+        )
+        if context is None:
+            self._check_fallback(num_tokens, WORKSPACE)
+        return context
+
+    def _check_fallback(self, num_tokens: int, path: str) -> None:
+        if num_tokens > self.max_fallback_tokens:
+            logger.warning_once(
+                "A %d-token step keeps the DCP path (%s), more than the %d "
+                "tokens the memory profile reserved for it.",
+                num_tokens,
+                path,
+                self.max_fallback_tokens,
+            )

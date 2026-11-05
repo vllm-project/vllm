@@ -85,7 +85,10 @@ class AttentionConfig:
 
     mla_prefill_backend: MLAPrefillBackendEnum | None = None
     """MLA prefill backend to use. If None, will be selected automatically.
-    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED."""
+    Valid options: FLASH_ATTN (FA3/FA4), FLASHINFER, TRTLLM_RAGGED; on ROCm,
+    ROCM_AITER_FA and ROCM_AITER_FLYDSL_FP8. ROCM_AITER_FLYDSL_FP8 is opt-in
+    (gfx950, bf16 models): it quantizes Q/K/V to FP8 per tensor at runtime and
+    falls back to ROCM_AITER_FA for inputs the FlyDSL kernel cannot take."""
 
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
@@ -151,12 +154,15 @@ class AttentionConfig:
     the query and the attention output between the layouts. Applies to steps
     with at least `sparse_mla_shard_q_min_tokens` prefill tokens on the
     FlashInfer sparse MLA backend, or on FlashMLA sparse with an FP8 DeepSeek
-    KV cache, without PCP or HiSparse; under DCP, on FlashInfer only. A mixed
-    step's decode tokens stay sharded by head."""
+    KV cache, without PCP or HiSparse. Under DCP (on FlashInfer and SM100, with
+    the DCP group equal to the TP group), each rank attends a gathered copy of
+    its tokens' context instead of the DCP-local cache. A mixed step's decode
+    tokens stay sharded by head (on the DCP path under DCP)."""
 
     sparse_mla_shard_q_min_tokens: int = Field(default=1024, ge=1)
-    """Minimum number of prefill tokens in a step for `sparse_mla_shard_q` to
-    apply."""
+    """Minimum number of tokens after a step's decodes (requests of at most
+    1 + num_speculative_tokens tokens) for `sparse_mla_shard_q` to apply. Below
+    it the all-to-all exchanges can cost more than they save."""
 
     minimax_m3_indexer_cp: bool = False
     """MiniMax M3 on ROCm with tensor_parallel_size > 1: score the sparse

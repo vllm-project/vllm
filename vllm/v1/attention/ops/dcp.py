@@ -636,7 +636,7 @@ def _dcp_a2a_send_recv_buffers(
 # The batch size and the LSE layout (the attention backend's, e.g. a
 # transposed [H, B] buffer) change from step to step; only scalar loads use
 # them, so the kernel compiles once per NUM_SEQS_POW2 bucket instead of once
-# per their alignments (see dcp_shardq.context.warm_up_dcp_fallback).
+# per their alignments.
 @triton.jit(do_not_specialize=["num_seqs", "lse_stride_B", "lse_stride_H"])
 def _dcp_a2a_pack_send_kernel(
     out_ptr,

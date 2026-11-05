@@ -36,6 +36,7 @@ from vllm.model_executor.layers.mla import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import dcp_shardq_context
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.models.kimi_k3.common.dsa_cache import (
     KimiK3IndexerCache,
@@ -212,9 +213,6 @@ class KimiK3DSAIndexer(nn.Module):
         self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
         # Set by KimiK3DSAAttention to skip scoring dense-MHA prefills.
         self.dense_mha_metadata_layer_name = ""
-        # Set by KimiK3DSAAttention when its MLA layer takes ShardQ steps: the
-        # op then follows that layer's token split.
-        self.shardq_layer_name = ""
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         # PCP gathers the unquantized key inside the op.
         self.use_fused_k_insert = (
@@ -276,10 +274,10 @@ class KimiK3DSAIndexer(nn.Module):
 
     def _shardq_indexer_rows(self) -> torch.Tensor | None:
         """The rows a ShardQ step scores on this rank (decode rows, then this
-        rank's prefill tokens), or None outside ShardQ steps and in cudagraph
-        capture or replay: a graph would bake in the capture batch's row count
-        and the address of its rows tensor."""
-        if not self.shardq_layer_name:
+        rank's prefill tokens; see shardq_gather_indices), or None outside
+        ShardQ steps and in cudagraph capture or replay: a graph would bake in
+        the capture batch's row count and the address of its rows tensor."""
+        if not getattr(self.k_cache, "use_shardq", False):
             return None
         forward_context = get_forward_context()
         if (
@@ -290,8 +288,14 @@ class KimiK3DSAIndexer(nn.Module):
         attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return None
-        shardq = getattr(attn_metadata.get(self.shardq_layer_name), "shardq", None)
-        return None if shardq is None else shardq.indexer_rows
+        prefill = getattr(attn_metadata.get(self.k_cache.prefix), "prefill", None)
+        if prefill is None:
+            return None
+        if prefill.shardq_gather_indices is not None:
+            return prefill.shardq_gather_indices
+        # Under DCP the MLA layer's gathered context plans the rows.
+        dcp_shardq = dcp_shardq_context(forward_context, self.k_cache.prefix)
+        return None if dcp_shardq is None else dcp_shardq[1].gather_indices
 
     def _fused_k_insert(self, index_k: torch.Tensor, num_tokens: int) -> None:
         attn_metadata = get_forward_context().attn_metadata
@@ -407,7 +411,6 @@ class KimiK3DSAIndexer(nn.Module):
             self.cp_kv_cache_interleave_size,
             skip_topk_buffer_clear=self.use_fused_k_insert,
             topk_backend=self.topk_backend,
-            shardq_layer_name=self.shardq_layer_name,
             dcp_local_topk=self.dcp_local_topk,
         )
 
@@ -666,6 +669,7 @@ class KimiK3DSAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            shardq_eligible=True,
         )
 
         # Dense-MHA prefills never read the top-k indices (PCP excluded, as
@@ -673,12 +677,11 @@ class KimiK3DSAAttention(nn.Module):
         indexer = self.dsa_indexer
         if not indexer.use_pcp:
             indexer.dense_mha_metadata_layer_name = self.mla_attn.mla_attn.layer_name
-        # ShardQ (sparse_mla_shard_q): the indexer is not an indexer_op, so the
-        # layer opts in itself, as DeepseekV32Attention does.
-        mla_layer = cast(Any, self.mla_attn.mla_attn)
-        if getattr(mla_layer.impl, "use_shardq", False):
-            mla_layer.use_shardq = True
-            indexer.shardq_layer_name = mla_layer.layer_name
+        # ShardQ (sparse_mla_shard_q): the indexer is not an indexer_op, so
+        # its cache follows the MLA layer's split here.
+        if self.mla_attn.mla_attn.use_shardq:
+            indexer.k_cache.use_shardq = True
+            indexer.k_cache.shardq_layer_name = self.mla_attn.mla_attn.layer_name
 
         offload = vllm_config.offload_config
         self.weights_offloaded = (

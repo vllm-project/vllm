@@ -144,6 +144,7 @@ def _make_builder():
     # SparseMLACommonMetadataBuilder state consumed by its build() method.
     builder.cp_kv_cache_interleave_size = 1
     builder.use_pcp = False
+    builder.use_shardq = False
     builder._prefill_backend = None
 
     def cpu_token_to_req(metadata):

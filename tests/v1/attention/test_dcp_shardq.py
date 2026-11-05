@@ -190,7 +190,18 @@ def _metadata(lens):
     )
 
 
-def _build_context(lens, layout, world, rank, max_pages=None):
+def _split(lens, world, num_decodes=0):
+    """ShardQ's token split over ``world`` ranks of the requests after the
+    first ``num_decodes``."""
+    from vllm.v1.attention.ops.shardq import ShardQSplit, zigzag_split
+
+    new = np.array([n for _, n in lens])
+    return ShardQSplit(
+        int(new[:num_decodes].sum()), *zigzag_split(new[num_decodes:], world)
+    )
+
+
+def _build_context(lens, layout, world, rank, max_pages=None, split=None):
     from vllm.v1.attention.ops.dcp_shardq.context import (
         build_dcp_shardq_context,
     )
@@ -198,6 +209,7 @@ def _build_context(lens, layout, world, rank, max_pages=None):
     total_pages = sum(-(-(c + n) // PAGE) for c, n in lens)
     return build_dcp_shardq_context(
         _metadata(lens),
+        _split(lens, world) if split is None else split,
         layout,
         total_pages if max_pages is None else max_pages,
         max_indexer_keys=1 << 20,
@@ -341,6 +353,12 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
     workspaces, plans = _push_all(rep, world, num_dst=1)
     _, _, ws_index = workspaces[0]
     seq_lens = [c + n for c, n in lens]
+    # This rank's tokens, each at its position in its request.
+    qsl = np.r_[0, np.cumsum([n for _, n in lens])]
+    rows = plans[0].gather_indices.cpu().numpy()
+    row_req = np.searchsorted(qsl[1:], rows, side="right")
+    row_pos = rows - qsl[row_req] + np.array([c for c, _ in lens])[row_req]
+    assert len(plans[0].indexer_chunks) == 1
     for chunk in plans[0].indexer_chunks:
         # Every key of the chunk's requests, as the TP path gathers them.
         keys = torch.empty(
@@ -363,18 +381,13 @@ def test_indexer_chunks_read_the_workspace_like_a_replicated_cache(
             rep.index, ref_keys, ref_scales, chunk.block_table, chunk.cu_seq_lens
         )
         assert torch.equal(keys, ref_keys) and torch.equal(scales, ref_scales)
-        # Causal bounds over the request's whole sequence (no DCP-local form).
-        ks, ke = chunk.cu_seqlen_ks.cpu(), chunk.cu_seqlen_ke.cpu()
-        row = 0
-        for q, (context, new) in enumerate(lens):
-            start = int(chunk.cu_seq_lens[q])
-            assert torch.equal(ks[row : row + new], torch.full((new,), start))
-            assert torch.equal(
-                ke[row : row + new],
-                start + torch.arange(context + 1, context + new + 1),
-            )
-            row += new
-        assert row == ks.numel() and chunk.total_seq_lens == sum(seq_lens)
+        # Causal bounds of this rank's tokens over the request's whole
+        # sequence (no DCP-local form).
+        ks, ke = chunk.cu_seqlen_ks.cpu().numpy(), chunk.cu_seqlen_ke.cpu().numpy()
+        starts = chunk.cu_seq_lens.cpu().numpy()[row_req]
+        np.testing.assert_array_equal(ks, starts)
+        np.testing.assert_array_equal(ke, starts + row_pos + 1)
+        assert chunk.total_seq_lens == sum(seq_lens)
 
 
 def test_workspace_holds_a_max_model_len_request():
@@ -393,33 +406,33 @@ def test_stats_report_paths_since_last_report():
     stats = dcp.DcpShardQStats(log=False)
     stats.record(dcp.SHARDQ, 16384)
     stats.record(dcp.SHARDQ, 8000)
-    stats.record(dcp.DENSE_MHA, 600)
+    stats.record(dcp.NO_SPLIT, 600)
     stats.record(dcp.WORKSPACE, 15000)
     assert stats.total == {
         dcp.SHARDQ: [2, 24384],
-        dcp.DENSE_MHA: [1, 600],
+        dcp.NO_SPLIT: [1, 600],
         dcp.WORKSPACE: [1, 15000],
     }
     assert stats.report() == (
         "DCP ShardQ prefill: 2/4 steps, 24384/39984 tokens (61.0%; 61.0% since "
-        "start) on ShardQ; DCP path: dense MHA 1 steps / 600 tokens, "
+        "start) on ShardQ; DCP path: no split 1 steps / 600 tokens, "
         "workspace full 1 steps / 15000 tokens"
     )
     stats.recent.clear()
-    stats.record(dcp.FEW_TOKENS, 900)
+    stats.record(dcp.NO_SPLIT, 900)
     assert stats.report() == (
         "DCP ShardQ prefill: 0/1 steps, 0/900 tokens (0.0%; 59.6% since start) "
-        "on ShardQ; DCP path: few tokens 1 steps / 900 tokens"
+        "on ShardQ; DCP path: no split 1 steps / 900 tokens"
     )
 
 
 @pytest.mark.parametrize("num_spec", [0, 3])
-def test_planner_follows_the_indexer_decode_threshold(num_spec):
-    """A step's leading decode rows (at most 1 + num_speculative_tokens tokens,
-    which the indexer scores on its decode path) keep the DCP path; the rest
-    of the step is sharded, a later short row included. Steps without prefill
-    rows are not counted; padded steps, zero-length rows included, are
-    reported as such."""
+def test_planner_follows_the_split_decode_rows(num_spec):
+    """The split's decode rows (at most 1 + num_speculative_tokens tokens,
+    which the indexer scores on its decode path) keep the DCP path; the plan
+    covers the rest of the step, a later short row included. Steps that
+    ShardQ does not split keep the DCP path too, counted when they have
+    prefill rows."""
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerMetadataBuilder,
     )
@@ -438,7 +451,6 @@ def test_planner_follows_the_indexer_decode_threshold(num_spec):
         1 << 12,
         1 << 20,
         1 << 30,
-        64,
         threshold,
         world,
         rank,
@@ -447,37 +459,34 @@ def test_planner_follows_the_indexer_decode_threshold(num_spec):
     )
     long = [(1000, 300), (0, 200)]
 
-    def plan(lens, extra_tokens=0):
+    def plan(lens, num_decodes=None):
         table = torch.zeros(len(lens), 1, dtype=torch.int32, device="cuda")
         metadata = _common_metadata(lens, table)
-        if extra_tokens:
-            metadata = dataclasses.replace(
-                metadata, num_actual_tokens=metadata.num_actual_tokens + extra_tokens
-            )
-        return planner.plan(metadata, use_dense_mha=False)
+        split = None if num_decodes is None else _split(lens, world, num_decodes)
+        return planner.plan(metadata, split)
 
     decodes = [(500, threshold), (70, 1)]
-    planned = plan([*decodes, *long])
-    assert planned is not None
-    split, context = planned
+    context = plan([*decodes, *long], num_decodes=2)
+    assert context is not None
     assert context.num_decodes == 2
     assert context.num_decode_tokens == threshold + 1
-    assert sum(split.counts) == 500
     assert context.world == world and context.rank == rank
+    # This rank's tokens follow the decode rows in place.
+    rows = context.gather_indices.cpu().numpy()
+    np.testing.assert_array_equal(rows[: threshold + 1], np.arange(threshold + 1))
+    assert len(rows) - threshold - 1 == _split(long, world).num_tokens_per_rank[rank]
     # A short row after the first prefill row is a prefill row.
-    planned = plan([*long, (500, threshold)])
-    assert planned is not None
-    assert planned[1].num_decodes == 0
-    assert sum(planned[0].counts) == 500 + threshold
+    context = plan([*long, (500, threshold)], num_decodes=0)
+    assert context is not None and context.num_decodes == 0
+    # Not split: decode rows alone are not counted, prefill rows are.
     assert plan(decodes) is None
-    assert plan([(500, 0), *long]) is None
-    assert plan(long, extra_tokens=8) is None
+    assert plan([*decodes, *long]) is None
     assert {path: c[0] for path, c in planner.stats.total.items()} == {
         dcp.SHARDQ: 2,
-        dcp.PADDED: 2,
+        dcp.NO_SPLIT: 1,
     }
     assert planner.stats.report().startswith(
-        "DCP ShardQ prefill [layers.0, 1 layers]: 2/4 steps"
+        "DCP ShardQ prefill [layers.0, 1 layers]: 2/3 steps"
     )
 
 
@@ -673,9 +682,6 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
         initialize_model_parallel,
     )
     from vllm.forward_context import create_forward_context, override_forward_context
-    from vllm.model_executor.layers.attention.sparse_mla_attention import (
-        SparseMLAShardQ,
-    )
     from vllm.model_executor.layers.sparse_attn_indexer import sparse_attn_indexer
     from vllm.models.kimi_k3.nvidia.ops.dsa_indexer import (
         indexer_q_quant_fold_weights,
@@ -685,7 +691,7 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
         DeepseekV32IndexerPrefillMetadata,
         build_prefill_chunk_metadata,
     )
-    from vllm.v1.attention.ops.shardq import indexer_rows, make_shardq_split
+    from vllm.v1.attention.ops.shardq import ShardQMetadata, shard_q, unshard_out
     from vllm.v1.worker.workspace import init_workspace_manager
 
     torch.accelerator.set_device_index(rank)
@@ -712,8 +718,11 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
         num_tokens = sum(n for _, n in lens)
         rep = Replicated(lens, layout, fill_random=False)
         kv_c, k_pe, scale = _real_rows(rep, cache_dtype)
-        plan = _build_context(lens, layout, world, rank)
-        tp_plan = _build_context(lens, layout, 1, 0)
+        split = _split(lens, world)
+        plan = _build_context(lens, layout, world, rank, split=split)
+        # The TP ShardQ step's chunks over the replicated caches: the same
+        # rows of this rank's tokens.
+        tp_plan = _build_context(lens, layout, 1, rank, split=split)
 
         torch.manual_seed(4)
         q_fp8, weights = indexer_q_quant_fold_weights(
@@ -725,8 +734,15 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
         hidden = torch.randn(num_tokens, 256, device="cuda").bfloat16()
         q = _fp8_query(num_tokens, NUM_HEADS // world)
         qsl = np.r_[0, np.cumsum([n for _, n in lens])]
-        split = make_shardq_split(qsl, world, rank, device)
-        rows_cpu, rows = indexer_rows(split, 0)
+        shardq = ShardQMetadata(
+            num_decode_tokens=0,
+            num_tokens_per_rank=split.num_tokens_per_rank.tolist(),
+            token_ids=torch.from_numpy(split.token_ids).to(device),
+            rank_offsets=torch.from_numpy(
+                np.r_[0, np.cumsum(split.num_tokens_per_rank)]
+            ).to(device),
+        )
+        num_local = int(split.num_tokens_per_rank[rank])
         req_id = torch.from_numpy(
             np.repeat(np.arange(len(lens)), np.diff(qsl)).astype(np.int32)
         ).cuda()
@@ -753,9 +769,7 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
             ]
 
         def run(gathered_context, mla, mla_table, index, index_table, chunks, dcp_size):
-            shardq = SparseMLAShardQ(
-                split, req_id[split.local_idx], 0, rows_cpu, rows, gathered_context
-            )
+            shardq.gathered_context = gathered_context
             mla_metadata = SimpleNamespace(
                 block_size=mla.shape[1],
                 block_table=mla_table,
@@ -773,12 +787,19 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
                 num_decode_tokens=0,
                 num_prefills=len(lens),
                 num_prefill_tokens=num_tokens,
-                prefill=DeepseekV32IndexerPrefillMetadata(chunks),
+                prefill=DeepseekV32IndexerPrefillMetadata(
+                    chunks,
+                    # The TP ShardQ step's rows; the DCP one's come with its
+                    # gathered context.
+                    shardq_gather_indices=(
+                        tp_plan.gather_indices if gathered_context is None else None
+                    ),
+                ),
                 block_table=index_table,
             )
-            config.compilation_config.static_forward_context["mla"] = SimpleNamespace(
-                kv_cache=mla
-            )
+            layers = config.compilation_config.static_forward_context
+            layers["mla"] = SimpleNamespace(kv_cache=mla)
+            layers["idx"] = SimpleNamespace(shardq_layer_name="mla")
             context = create_forward_context(
                 {"idx": index_metadata, "mla": mla_metadata}, config
             )
@@ -806,25 +827,34 @@ def _distributed_worker(rank, world, init_file, cache_dtype, kernel):
                     rank,
                     dcp_size,
                     1,
-                    shardq_layer_name="mla",
                 )
             # A canonical order, so that both attentions read the same rows.
-            local_topk = torch.sort(topk[: split.num_local], dim=1).values
-            topk[: split.num_local] = local_topk
+            local_topk = torch.sort(topk[:num_local], dim=1).values
+            topk[:num_local] = local_topk
             impl = _flashinfer_impl(cache_dtype, kernel, dcp_size)
             impl.topk_indices_buffer = topk
+            cache, table = rep.mla, tp_plan.block_table
             if gathered_context is not None:
                 # forward_impl's write of the new tokens' MLA rows.
+                cache = gathered_context.mla_view(mla)
+                table = gathered_context.block_table
                 ops.concat_and_cache_mla(
-                    kv_c,
-                    k_pe,
-                    gathered_context.mla_view(mla),
-                    gathered_context.slot_mapping,
-                    cache_dtype,
-                    scale,
+                    kv_c, k_pe, cache, gathered_context.slot_mapping, cache_dtype, scale
                 )
-            out = impl.forward_mqa_shardq(q, mla, mla_metadata, SCALES)
-            return local_topk, out.clone()
+            # MLAAttention.forward_impl's ShardQ exchanges around forward_mqa.
+            _, local_q = shard_q(q, shardq)
+            attn_metadata = SimpleNamespace(
+                topk_start=0,
+                num_decode_tokens=0,
+                block_size=PAGE,
+                block_table=table,
+                req_id_per_token=req_id[shardq.local_token_ids],
+                kv_gathered=True,
+                cp_kv_cache_interleave_size=1,
+            )
+            out, lse = impl.forward_mqa(local_q, cache, attn_metadata, SCALES)
+            assert lse is None
+            return local_topk, unshard_out(out, shardq, None).clone()
 
         try:
             tp_topk, tp_out = run(
@@ -944,7 +974,7 @@ def _dsa_layer(config, topk_buffer, layer_index=0):
         LAYER_HEADS * 256, 512, device="cuda", dtype=torch.bfloat16
     ).chunk(layer.impl.dcp_world_size)[layer.impl.dcp_rank]
     layer.kv_b_proj.weight.data.copy_(weight * 0.05)
-    layer.process_weights_after_loading(torch.bfloat16)
+    layer.process_weights_after_loading()
     return attn
 
 
@@ -1092,7 +1122,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 attn = _dsa_layer(config, topk_buffer)
                 layer, indexer = attn.mla_attn.mla_attn, attn.dsa_indexer
                 assert layer.use_shardq
-                assert indexer.shardq_layer_name == layer.layer_name
+                assert indexer.k_cache.shardq_layer_name == layer.layer_name
                 spec = layer.get_kv_cache_spec(config)
                 assert spec.block_size == LAYER_BLOCK
                 builder = FlashInferMLASparseTRTLLMBackend.get_builder_cls()(
@@ -1192,19 +1222,24 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
                 assert shardq is not None and shardq.gathered_context is not None, name
                 assert shardq.gathered_context.num_decodes == num_decodes
                 assert shardq.num_decode_tokens == num_decode_tokens
-                assert sum(shardq.split.counts) == num_tokens - num_decode_tokens
+                assert sum(shardq.num_tokens_per_rank) == num_tokens - num_decode_tokens
 
                 # DCP ShardQ: the indexer gathers the prefill rows' context
                 # and writes the top-k rows of this rank's prefill tokens after
                 # the decode rows, which it scores on the DCP path in place.
                 score(metadata, index_metadata)
-                local = num_decode_tokens + shardq.split.local_idx
-                num_rows = num_decode_tokens + shardq.split.num_local
+                local = num_decode_tokens + shardq.local_token_ids
+                num_rows = num_decode_tokens + len(shardq.local_token_ids)
                 decode_topk = topk_buffer[:num_decode_tokens].clone()
                 local_topk = topk_buffer[num_decode_tokens:num_rows].clone()
                 out = forward(metadata).clone()
                 torch.accelerator.synchronize()
                 monitoring[0] = False
+                # ShardQ's exchange kernels (vllm.v1.attention.ops.shardq) are
+                # not warmup-registered, under DCP as under TP.
+                compiled[:] = [
+                    c for c in compiled if "shard_q" not in c and "unshard_out" not in c
+                ]
                 assert not compiled, (name, compiled)
                 # The keys of the DCP path's cross-rank top-k merge, up to the
                 # order of near-tied (bf16) scores at the top-k boundary.
@@ -1271,9 +1306,10 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
 
             # Steps that keep the DCP path (each fits the workspace): fewer
             # than sparse_mla_shard_q_min_tokens prefill tokens (after a
-            # decode row), and decode rows alone, which are not counted.
+            # decode row), which ShardQ does not split, and decode rows alone,
+            # which are not counted.
             for lens, path in (
-                ([(100, 1), (3000, 600), (2900, 300)], dcp.FEW_TOKENS),
+                ([(100, 1), (3000, 600), (2900, 300)], dcp.NO_SPLIT),
                 ([(100, 1), (3000, 1)], None),
             ):
                 rep = Replicated(lens, _layout(cache_dtype), fill_random=False)
@@ -1293,7 +1329,7 @@ def _layer_worker(rank, world, init_file, cache_dtype, kernel):
             stats = builder.dcp_shardq.stats
             assert stats.total[dcp.SHARDQ][0] == len(LAYER_STEPS)
             assert small.dcp_shardq.stats.total[dcp.WORKSPACE][0] == len(LAYER_STEPS)
-            assert set(stats.total) == {dcp.SHARDQ, dcp.FEW_TOKENS}
+            assert set(stats.total) == {dcp.SHARDQ, dcp.NO_SPLIT}
 
             # The gathered context holds DCP interleave-1 shards only.
             config.parallel_config.cp_kv_cache_interleave_size = 64
@@ -1371,6 +1407,8 @@ def _profile_worker(rank, world, init_file, cache_dtype, kernel):
     config.attention_config.backend = AttentionBackendEnum.FLASHINFER_MLA_SPARSE
     config.kernel_config.flashinfer_sparse_mla_kernel = kernel
     config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    # No graphs, so the DCP workspace is sized by max_num_seqs alone.
+    config.compilation_config.max_cudagraph_capture_size = 0
     attention_config = config.attention_config
     attention_config.sparse_mla_shard_q = True
     # Too small for the step below, which keeps the DCP path.

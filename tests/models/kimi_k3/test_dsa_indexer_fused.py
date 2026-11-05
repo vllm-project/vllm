@@ -585,7 +585,7 @@ def test_mxfp4_cache_feeds_deepgemm_logits(packed: bool):
     # Row i sees the first ctx[i] keys.
     ctx = torch.linspace(1, num_tokens, num_rows, device="cuda").to(torch.int32)
 
-    q_scale_mx, w_mx = mqa_logits_mx_inputs(q_packed, q_scale, weights)
+    q_scale_mx, w_mx = mqa_logits_mx_inputs(q_packed, q_scale, weights, torch.float32)
     # Decode: varlen paged logits as the indexer metadata builds them (one
     # row per query token, per-token block table, request index per row).
     req = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
@@ -682,7 +682,6 @@ def test_indexer_score_reads_its_cache_format(
         dcp_world_size=1,
         cp_kv_cache_interleave_size=1,
         topk_backend="auto",
-        shardq_layer_name="",
         dcp_local_topk=0,
     )
     context_lens = seq_lens.view(-1, 1).contiguous()

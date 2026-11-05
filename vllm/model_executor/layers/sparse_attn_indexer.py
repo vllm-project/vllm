@@ -3,8 +3,8 @@
 """Custom Sparse Attention Indexer layers."""
 
 import math
+from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -80,6 +80,9 @@ from vllm.v1.attention.ops.dcp_topk_merge import (
 )
 from vllm.v1.attention.ops.pcp import maybe_gather_indexer_k
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if TYPE_CHECKING:
+    from vllm.v1.attention.ops.dcp_shardq.context import DcpShardQContext
 
 logger = init_logger(__name__)
 
@@ -578,6 +581,22 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def dcp_shardq_context(
+    forward_context, k_cache_prefix: str
+) -> "tuple[str, DcpShardQContext] | None":
+    """The MLA layer and gathered context of a DCP ShardQ step whose MLA
+    layer this indexer cache follows (``shardq_layer_name``), or None."""
+    k_cache = forward_context.no_compile_layers.get(k_cache_prefix)
+    mla_layer_name = getattr(k_cache, "shardq_layer_name", "")
+    if not mla_layer_name:
+        return None
+    shardq = getattr(forward_context.attn_metadata.get(mla_layer_name), "shardq", None)
+    gathered_context = getattr(shardq, "gathered_context", None)
+    if gathered_context is None:
+        return None
+    return mla_layer_name, gathered_context
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -607,7 +626,6 @@ def sparse_attn_indexer(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    shardq_layer_name: str = "",
     dcp_local_topk: int = 0,
     logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -824,42 +842,6 @@ def sparse_attn_indexer(
                 # unnecessary work.
                 return topk_indices_buffer
 
-    # The main MLA layer owns the ShardQ decision; follow its split so both
-    # sides agree on which top-k rows exist.
-    shardq = None
-    prefill_chunks = None
-    prefill_kv_cache = kv_cache
-    prefill_dcp_world_size = dcp_world_size
-    if shardq_layer_name:
-        mla_shardq = getattr(attn_metadata.get(shardq_layer_name), "shardq", None)
-        if mla_shardq is not None:
-            shardq = mla_shardq
-            # The MLA decode threshold is at least the indexer's, so rows the
-            # indexer treats as prefill may be MLA decodes; those stay in place.
-            assert num_decode_tokens <= shardq.num_decode_tokens
-        if shardq is not None and shardq.gathered_context is not None:
-            # A DCP ShardQ step scores its prefill rows over a gathered copy
-            # of their keys, as a non-DCP step does: no top-k merge across
-            # ranks. Its decode rows keep the DCP decode path.
-            assert num_decode_tokens == shardq.num_decode_tokens
-            mla_layer = forward_context.no_compile_layers[shardq_layer_name]
-            prefill_kv_cache = shardq.gathered_context.gather(
-                mla_layer.kv_cache,
-                attn_metadata[shardq_layer_name].block_table,
-                kv_cache,
-                attn_metadata_narrowed.block_table,
-            )
-            prefill_chunks = shardq.gathered_context.indexer_chunks
-            prefill_dcp_world_size = 1
-
-    # The caller may have computed the query (and weights) of the indexer rows
-    # only (ShardQ.indexer_rows): decode rows first, so those keep their index.
-    q_compact = (
-        shardq is not None
-        and q_quant.shape[0] == shardq.indexer_rows_cpu.shape[0]
-        and q_quant.shape[0] < hidden_states.shape[0]
-    )
-
     # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
     # top-k kernels scatter valid indices into it. On the fused deepseek_v32
     # nvidia path, _fused_norm_rope_kernel already cleared the same
@@ -876,8 +858,34 @@ def sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
-        if prefill_chunks is None:
-            prefill_chunks = prefill_metadata.chunks
+        prefill_chunks = prefill_metadata.chunks
+        prefill_kv_cache = kv_cache
+        prefill_dcp_world_size = dcp_world_size
+        indices = prefill_metadata.shardq_gather_indices
+        if dcp_world_size > 1 and (
+            dcp_shardq := dcp_shardq_context(forward_context, k_cache_prefix)
+        ):
+            # A DCP ShardQ step scores its prefill rows over a gathered copy
+            # of their keys, as a non-DCP ShardQ step does: no top-k merge
+            # across ranks. Its decode rows keep the DCP decode path.
+            mla_layer_name, gathered_context = dcp_shardq
+            assert num_decode_tokens == gathered_context.num_decode_tokens
+            prefill_kv_cache = gathered_context.gather(
+                forward_context.no_compile_layers[mla_layer_name].kv_cache,
+                attn_metadata[mla_layer_name].block_table,
+                kv_cache,
+                attn_metadata_narrowed.block_table,
+            )
+            prefill_chunks = gathered_context.indexer_chunks
+            prefill_dcp_world_size = 1
+            indices = gathered_context.gather_indices
+        # Under ShardQ the chunks index the gather indices' tokens. The caller
+        # may have computed the query and weights of just those.
+        prefill_q, prefill_q_scale, prefill_weights = q_quant, q_scale, weights
+        if indices is not None and q_quant.shape[0] != indices.shape[0]:
+            prefill_q, prefill_weights = q_quant[indices], weights[indices]
+            if q_scale is not None:
+                prefill_q_scale = q_scale[indices]
 
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
@@ -914,7 +922,7 @@ def sparse_attn_indexer(
             scales_spec,
             *gather_specs,
         )
-        assert shardq is None or candidate_blocks is None
+        assert indices is None or candidate_blocks is None
         for chunk in prefill_chunks:
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
@@ -947,26 +955,13 @@ def sparse_attn_indexer(
                     out_scales,
                 )
 
-            q_rows: slice | torch.Tensor = slice(chunk.token_start, chunk.token_end)
-            topk_rows = q_rows
-            if shardq is not None:
-                # Score MLA decode rows and this rank's prefill tokens. KV
-                # gathers above stay unconditional for continuation chunks
-                # that reuse the workspace. The top-k is written compactly, in
-                # token order, for the token-sharded attention.
-                lo, hi = np.searchsorted(
-                    shardq.indexer_rows_cpu, (chunk.token_start, chunk.token_end)
-                )
-                topk_rows = slice(int(lo), int(hi))
-                chunk_rows = shardq.indexer_rows[lo:hi] - chunk.token_start
-                cu_seqlen_ks = cu_seqlen_ks[chunk_rows]
-                cu_seqlen_ke = cu_seqlen_ke[chunk_rows]
-                # A compact query holds only the indexer rows, in their order.
-                q_rows = topk_rows if q_compact else shardq.indexer_rows[lo:hi]
-            q_slice = q_quant[q_rows]
-            q_scale_slice = q_scale[q_rows] if q_scale is not None else None
-            chunk_weights = weights[q_rows]
-            topk_indices = topk_indices_buffer[topk_rows, :topk_tokens]
+            chunk_rows = slice(chunk.token_start, chunk.token_end)
+            q_slice = prefill_q[chunk_rows]
+            q_scale_slice = (
+                prefill_q_scale[chunk_rows] if prefill_q_scale is not None else None
+            )
+            chunk_weights = prefill_weights[chunk_rows]
+            topk_indices = topk_indices_buffer[chunk_rows, :topk_tokens]
 
             # DeepGEMM returns compressed logits: row i starts at K position
             # cu_seqlen_ks[i]. None means every row starts at column zero.
@@ -1393,7 +1388,6 @@ def sparse_attn_indexer_fake(
     candidate_block_size: int = 0,
     candidate_write: bool = False,
     topk_backend: str = "auto",
-    shardq_layer_name: str = "",
     dcp_local_topk: int = 0,
     logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
