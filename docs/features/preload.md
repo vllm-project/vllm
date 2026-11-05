@@ -141,6 +141,12 @@ Tied weights (e.g. `lm_head.weight` sharing storage with
 `embed_tokens.weight`) are exported once and re-established as aliases in the
 engine, preserving parameter identity.
 
+Shared weights count toward the engine's `gpu_memory_utilization` budget.
+If IPC loading falls back to disk, the engine removes the corresponding external
+weight charge before profiling its locally loaded weights for KV cache sizing.
+The updated budget must still fit the available GPU memory; fallback does not
+stop the daemon or release its cached weights in zero-copy mode.
+
 ## Multi-node and data parallelism
 
 CUDA IPC handles are node-local, so each node serves only its local GPUs'
@@ -260,6 +266,12 @@ Socket paths are derived from the GPU UUID, so they are stable regardless of
   The engine reuses the quantized weights and scales without running online
   quantization again. This does not enable online MoE quantization or
   conversion from an already quantized checkpoint.
+  Serialized ModelOpt `FP8` (per-tensor) and `FP8_PER_CHANNEL_PER_TOKEN`
+  linear layers also support CUDA IPC with the CUTLASS linear backend.
+  Set the same `--kernel-config '{"linear_backend": "cutlass"}'` on the daemon
+  and engine. Engines reuse the processed weights and scales, including
+  fused-projection scales and output padding. This does not enable ModelOpt
+  block FP8, FP8 MoE, or other FP8 linear backends.
   ModelOpt NVFP4 MoE supports the TRT-LLM and vLLM CUTLASS backends. With
   CUTLASS, the daemon fuses activation scales once; engines reuse the fused
   scales without modifying the daemon's shared tensors.
