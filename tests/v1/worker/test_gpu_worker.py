@@ -37,6 +37,36 @@ def test_v2_gpu_worker_requires_triton(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    "fallback,free_memory,requested",
+    [(False, 100, 72), (True, 100, 92), (True, 80, 92)],
+)
+def test_disabling_extensible_cache_keeps_fallback_budget(
+    fallback, free_memory, requested
+):
+    """Re-sizing after a disk fallback must not re-charge the daemon's weights."""
+    from vllm.config import VllmConfig
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        record_external_weight_charge,
+        record_external_weight_fallback,
+    )
+    from vllm.utils.mem_utils import MemorySnapshot
+
+    worker = gpu_worker.Worker(
+        VllmConfig(), local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    worker.cache_config.enable_extensible_kv_cache = True
+    worker.init_snapshot = MemorySnapshot(
+        total_memory=100, free_memory=free_memory, device="cpu", auto_measure=False
+    )
+    with worker._external_weight_charges.track():
+        record_external_weight_charge("weights.sock", False, 20)
+        if fallback:
+            record_external_weight_fallback("weights.sock", False)
+    worker.disable_extensible_kv_cache()
+    assert worker.requested_memory == requested
+
+
 def test_sleep_preservation_restores_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
@@ -83,6 +113,10 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
     """Profiling must use serving's thread count to keep Dynamo guards valid."""
     from torch._dynamo.testing import CompileCounter
 
+    from vllm.model_executor.model_loader.weight_cache.utils import (
+        ExternalWeightCharges,
+    )
+
     monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     monkeypatch.setattr(gpu_worker, "has_ec_transfer", lambda: False)
     monkeypatch.setattr(
@@ -96,6 +130,7 @@ def test_load_model_preserves_compiled_graphs_at_runtime(monkeypatch):
         ),
         _maybe_get_memory_pool_context=lambda **kwargs: nullcontext(),
         _scoped_allocator_max_split=lambda **kwargs: nullcontext(),
+        _external_weight_charges=ExternalWeightCharges(),
     )
     original_threads = torch.get_num_threads()
     try:
