@@ -15,6 +15,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalFieldConfig
+from vllm.utils.torch_utils import token_ids_to_tensor
 
 from .minicpmv import MiniCPMVDummyInputsBuilder
 from .minicpmv4_6 import (
@@ -199,7 +200,7 @@ class MiniCPMV4_7ForConditionalGeneration(MiniCPMV4_6ForConditionalGeneration):
         ):
             return _sequential_positions(seq_len), 0
 
-        input_ids = torch.tensor(input_tokens, dtype=torch.long)
+        input_ids = token_ids_to_tensor(input_tokens)
         image_bounds = build_image_bounds(input_ids, self._canvas_special_ids)
 
         target_sizes_list: list[torch.Tensor] = []
