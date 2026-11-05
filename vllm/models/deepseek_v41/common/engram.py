@@ -227,6 +227,22 @@ class EngramLayout:
         self.pad_token_id: int = config.engram_pad_token_id
         assert len(self.layer_ids) == len(self.num_embeddings)
 
+        quant = getattr(config, "quantization_config", None) or {}
+        embed_quant = quant.get("engram_embed_quant", "fp8")
+        if embed_quant not in ("fp8", "mxfp4"):
+            raise ValueError(f"Unsupported engram_embed_quant {embed_quant!r}")
+        for key, expected in (
+            ("engram_embed_block_size", 32),
+            ("engram_embed_scale_dtype", "ue8m0"),
+        ):
+            if quant.get(key, expected) != expected:
+                raise ValueError(f"{key} must be {expected!r}")
+        embed_layers = quant.get("engram_embed_layers", self.layer_ids)
+        if set(embed_layers) != set(self.layer_ids):
+            raise ValueError("engram_embed_layers must match engram_layer_ids")
+        self.packed_fp4 = embed_quant == "mxfp4"
+        self.row_bytes = self.head_dim // 2 if self.packed_fp4 else self.head_dim
+
         primes = []
         seen: set[int] = set()
         for _ in self.layer_ids:
@@ -663,7 +679,7 @@ def _engram_lookup_kernel(
     PEER_ROWS: tl.constexpr = 0,
     PACKED_FP4: tl.constexpr = False,
 ):
-    """Gather FP8 rows as packed values/scales or dequantized BF16.
+    """Gather FP8 or MXFP4 rows; packed output supports FP8 tables only.
 
     Only this rank's heads are read; padded heads write zeros for all-gather.
     `weight`/`scales` may address pinned host memory through UVA. If SORTED,
@@ -993,7 +1009,7 @@ def can_share_engram_tables(layout: EngramLayout, block_size: int = 32) -> bool:
         )
         return False
     num_bytes = sum(layout.num_embeddings) * (
-        layout.head_dim + layout.head_dim // block_size
+        layout.row_bytes + layout.head_dim // block_size
     )
     group = get_engram_dp_group()
     assert group is not None
@@ -1215,7 +1231,9 @@ class ParallelEngramEmbedding(nn.Module):
             self._symm_handle = handle
             rows = self.part_num_embeddings
             return (
-                buffer[: rows * self.row_bytes].view(weight_dtype).view(rows, self.row_bytes),
+                buffer[: rows * self.row_bytes]
+                .view(weight_dtype)
+                .view(rows, self.row_bytes),
                 buffer[values : values + rows * scale_dim].view(rows, scale_dim),
             )
         if self.dp_shared_memory:
@@ -1302,6 +1320,8 @@ class ParallelEngramEmbedding(nn.Module):
 
         `background` limits the grid to leave SMs for concurrent work.
         """
+        if self.packed_fp4 and out.dtype == torch.uint8:
+            raise ValueError("MXFP4 Engram tables do not support packed FP8 output")
         rows = indices.shape[0] * self.part_n_hash_cols
         if not rows:
             return
@@ -1636,7 +1656,7 @@ class EngramBatch(nn.Module):
         table = layers[0].embed_tokens
         if (
             table.dp_size == 1
-            or table.packed_fp4
+            or any(layer.embed_tokens.packed_fp4 for layer in layers)
             or table.tp_size > 1
             or table.dim % 128
             or get_current_vllm_config().lora_config is not None
@@ -1777,19 +1797,8 @@ class Engram(nn.Module):
     def _create_embedding(
         self, layout: EngramLayout, layer_hash_index: int
     ) -> ParallelEngramEmbedding:
-        vllm_config = get_current_vllm_config()
-        engram_config = vllm_config.engram_config
+        engram_config = get_current_vllm_config().engram_config
         assert engram_config is not None
-        # Checkpoints that quantize the table declare it in quantization_config;
-        # absent means the shipping FP8 layout.
-        hf_config = vllm_config.model_config.hf_config
-        hf_quant = getattr(hf_config, "quantization_config", None) or {}
-        embed_quant = hf_quant.get("engram_embed_quant", "fp8")
-        if embed_quant not in ("fp8", "mxfp4"):
-            raise ValueError(
-                f"Unsupported engram_embed_quant {embed_quant!r}; "
-                "expected 'fp8' or 'mxfp4'"
-            )
         return ParallelEngramEmbedding(
             layout.num_embeddings[layer_hash_index],
             layout.head_dim,
@@ -1797,7 +1806,7 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
-            packed_fp4=embed_quant == "mxfp4",
+            packed_fp4=layout.packed_fp4,
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:
