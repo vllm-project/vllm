@@ -303,13 +303,6 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             if let Some(tool_calls) = tool_calls {
                 blocks.extend(convert_assistant_tool_calls(tool_calls)?);
             }
-            if blocks.iter().all(|block| {
-                matches!(block, AssistantContentBlock::Reasoning { text } if text.is_empty())
-            }) {
-                bail_invalid_request!(
-                    "Assistant messages must contain text, reasoning content, or tool_calls."
-                );
-            }
 
             Ok(VllmChatMessage::assistant_blocks(blocks))
         }
@@ -423,13 +416,9 @@ pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, A
             if tool.tool_type != "function" {
                 bail_invalid_request!("Only function tools are supported.");
             }
-            Ok(ChatTool {
-                name: tool.function.name,
-                description: tool.function.description,
-                parameters: tool.function.parameters,
-                strict: tool.function.strict,
-                defer_loading: tool.function.defer_loading.or(tool.defer_loading),
-            })
+            let mut function = tool.function;
+            function.defer_loading = function.defer_loading.or(tool.defer_loading);
+            Ok(ChatTool::from(function))
         })
         .collect()
 }

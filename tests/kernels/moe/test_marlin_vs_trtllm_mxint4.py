@@ -249,11 +249,8 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
         expert_map=None,
         global_scale1=None,
         global_scale2=None,
-        input_global_scale1=None,
-        input_global_scale2=None,
         w1_zeros=None,
         w2_zeros=None,
-        input_dtype=dtype,
     )
 
     # Sanity check: manually compute BF16 reference for comparison
