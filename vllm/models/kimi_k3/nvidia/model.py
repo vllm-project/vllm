@@ -1387,7 +1387,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                         and not self.config.is_linear_attn
                     ):  # noqa: E501
                         continue
-                    # Remapping the name of FP8 kv-scale.
+                    # Remapping the name of FP8 kv-scale. The quant config's
+                    # cache-scale mapper names them `self_attn.attn.*`, but
+                    # the MLA layer is the attention module and owns them.
+                    own_name = name.replace(".self_attn.attn.", ".self_attn.")
+                    if own_name in params_dict:
+                        name = own_name
                     remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                     if remapped_name is None:
                         continue

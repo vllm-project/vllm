@@ -24,7 +24,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
 )
-from vllm.model_executor.layers.attention import Attention, MLAAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -236,7 +236,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
-        if isinstance(layer, (Attention, MLAAttention)):
+        # (any attention layer that owns a KV cache, including model-specific
+        # ones that are neither `Attention` nor `MLAAttention`)
+        if isinstance(layer, AttentionLayerBase):
             return self.KVCacheMethodCls(self)
 
         # handle exclusion
@@ -1960,7 +1962,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     ) -> "QuantizeMethodBase | None":
         """Return quantize-method based on layer."""
         # KV-cache quantization
-        if isinstance(layer, Attention):
+        if isinstance(layer, AttentionLayerBase):
             if self.kv_cache_quant_method:
                 return ModelOptKVCacheMethod(self)
             return None
