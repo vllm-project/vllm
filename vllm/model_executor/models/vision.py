@@ -402,16 +402,10 @@ def run_dp_sharded_mrope_vision_model(
     This function is used to run the vision model with mrope.
 
     Args:
-        vision_model (torch.nn.Module): Vision model. A rank that receives no
-            images sends an empty output typed with ``vision_model.dtype`` if
-            the model defines it, else with the dtype of its first parameter
-            (by convention the patch embedding). ``dtype``, when defined, must
-            be the dtype of the returned embeddings; a model whose output dtype
-            differs from its first parameter (e.g. an fp32 patch embedding in
-            a bf16 tower) must define it. With TP > 1, a rank whose output
-            dtype does not match raises before its all-gather. An empty peer
-            may still have entered the all-gather; terminating it is left to
-            the caller's worker supervision.
+        vision_model (torch.nn.Module): Vision model. ``dtype``, if defined,
+            must be the dtype of its returned embeddings; it is required when
+            that differs from the first parameter's dtype. It types the output
+            of ranks without images.
         pixel_values (torch.Tensor): Image/Video input tensor.
         grid_thw_list: List of grid dimensions for each image
         rope_type: Type of rope used in the vision model.
