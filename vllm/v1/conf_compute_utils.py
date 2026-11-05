@@ -288,9 +288,7 @@ def _record_target(stream):
     """Where an event recorded on ``stream`` (None: the current stream) goes:
     the producer stream of a registered D2H stream, otherwise ``stream``."""
     s = stream if stream is not None else torch.cuda.current_stream()
-    if s.cuda_stream in _d2h_streams:
-        return _producer_of.get(s.cuda_stream, stream)
-    return stream
+    return _producer_of.get(s.native_handle, stream)
 
 
 def _stream_synchronize(self):
