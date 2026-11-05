@@ -159,6 +159,10 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_MINIMAX_M3_FUSE_NORM_FP8: bool = False
+    VLLM_MINIMAX_M3_MSA_DENSE_PREFILL: int = 0
+    VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK: int = 0
+    VLLM_ROCM_GEMM_JIT_WARMUP: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1442,6 +1446,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 on ROCm: when qkv_proj takes a per-token FP8 activation (FP8
+    # attention checkpoints), quantize it in the fused add + input RMSNorm kernel
+    # instead of a separate per-token quant of the BF16 norm output.
+    "VLLM_MINIMAX_M3_FUSE_NORM_FP8": lambda: (
+        os.getenv("VLLM_MINIMAX_M3_FUSE_NORM_FP8", "False").lower() in ("true", "1")
+    ),
+    # MiniMax-M3 on ROCm (AITER sparse PA): run a step's MSA prefill as dense causal
+    # attention when every prefill request of the step is at most this many tokens
+    # (queries at positions >= top-k x block size are recomputed sparse). 0 = off.
+    "VLLM_MINIMAX_M3_MSA_DENSE_PREFILL": lambda: int(
+        os.getenv("VLLM_MINIMAX_M3_MSA_DENSE_PREFILL", "0") or 0
+    ),
+    # Validation only: compare the dense MSA prefill with the sparse kernel on the
+    # first N calls per process and step kind (synchronizes). 0 = off.
+    "VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK": lambda: int(
+        os.getenv("VLLM_MINIMAX_M3_MSA_DENSE_PREFILL_CHECK", "0") or 0
+    ),
+    # Compile, before serving, the Triton variants that ROCm's unquantized GEMM
+    # dispatch and the bf16x3 MoE router would otherwise JIT-compile inside the
+    # first requests (token counts on both sides of each specialization boundary).
+    "VLLM_ROCM_GEMM_JIT_WARMUP": lambda: (
+        os.getenv("VLLM_ROCM_GEMM_JIT_WARMUP", "False").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (

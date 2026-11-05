@@ -35,6 +35,9 @@ from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
 from vllm.model_executor.warmup.mamba_triton_warmup import mamba_triton_warmup
+from vllm.model_executor.warmup.minimax_m3_rocm_sparse_pa_warmup import (
+    minimax_m3_rocm_sparse_pa_warmup,
+)
 from vllm.model_executor.warmup.qwen4_exp_qsa_warmup import (
     qwen4_exp_qsa_triton_warmup,
 )
@@ -309,6 +312,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         kimi_k3_triton_warmup(worker)
         watermark_sample_warmup(worker)
         qwen4_exp_qsa_triton_warmup(worker)
+        minimax_m3_rocm_sparse_pa_warmup(worker)
 
     if enable_jit_warmup and current_platform.is_device_capability_family(100):
         _warmup_bf16x3_router_gemm(
@@ -361,6 +365,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         minimax_m3_msa_warmup(worker)
+
+    from vllm.model_executor.warmup.rocm_gemm_jit_warmup import rocm_gemm_jit_warmup
+
+    try:
+        rocm_gemm_jit_warmup(worker)
+    except Exception:
+        logger.exception("ROCm GEMM JIT warmup failed; serving without it.")
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
