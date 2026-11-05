@@ -1634,13 +1634,14 @@ class RunCiCommandTest(unittest.TestCase):
 
 
 STACK_PR_FILES = ["docker/Dockerfile.rocm_base"]
-STACK_IMAGES = {"rocm-rocm-stack": "s@d1", "rocm-rocm-stack-wheels": "w@d2"}
+STACK_BUILT = {"rocm-rocm-stack-built": "s@d1 w@d2"}
 
 
 def ci_build(**overrides: Any) -> dict[str, Any]:
     return {
+        "commit": "fedcba9876543210",
         "created_at": "1",
-        "meta_data": STACK_IMAGES,
+        "meta_data": STACK_BUILT,
         "pull_request": {"id": 42},
         "web_url": "https://buildkite.example/ci/builds/2",
         **overrides,
@@ -1656,8 +1657,8 @@ class RocmCacheTest(unittest.TestCase):
         actor: str = "reviewer",
     ) -> FakeBuildkite:
         amd = FakeBuildkite([[]])
-        ci = FakeBuildkite([ci_builds or []])
-        run(make_event(command, actor), github, amd, ci_buildkite=ci)
+        self.ci = FakeBuildkite([ci_builds or []])
+        run(make_event(command, actor), github, amd, ci_buildkite=self.ci)
         return amd
 
     def test_commands_are_rocm_ci_commands_on_amd_ci(self) -> None:
@@ -1665,13 +1666,22 @@ class RocmCacheTest(unittest.TestCase):
             self.assertEqual(parse_command(command), command)
             self.assertEqual(pipeline_for_command(command), "amd-ci")
 
-    def test_cache_copies_the_images_this_prs_ci_recorded(self) -> None:
+    def test_cache_copies_the_images_this_prs_ci_pushed(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
         builds = [
-            ci_build(meta_data={key: "old" for key in STACK_IMAGES}, created_at="0"),
+            ci_build(meta_data={"rocm-rocm-stack-built": "old"}, created_at="0"),
+            # Built at an earlier commit: later ones (e.g. merging main) reuse it.
             ci_build(),
             ci_build(created_at="2", pull_request={"id": 7}),  # another PR
-            ci_build(created_at="3", meta_data={"rocm-rocm-stack": "s"}),  # partial
+            # Metadata any job can write does not tie a build to this PR.
+            ci_build(
+                commit="0" * 16,
+                created_at="3",
+                pull_request=None,
+                meta_data={"rocm-rocm-stack-built": "x@d9", "github-pr-number": "42"},
+            ),
+            # Reused a stack instead of pushing it: another PR's CI may have.
+            ci_build(created_at="4", meta_data={"rocm-rocm-stack": "s@d3"}),
         ]
 
         amd = self.comment(github, ci_builds=builds)
@@ -1682,12 +1692,14 @@ class RocmCacheTest(unittest.TestCase):
             build["env"],
             {
                 "ROCM_PROMOTE_PR": "42",
-                "ROCM_PROMOTE_SHA": "0123456789abcdef",
-                "ROCM_PROMOTE_IMAGES": "w@d2 s@d1",
+                "ROCM_PROMOTE_SHA": "fedcba9876543210",
+                "ROCM_PROMOTE_IMAGES": "s@d1 w@d2",
             },
         )
         self.assertIn(ROCM_CACHE_MARKER, github.comments[0])
         self.assertIn("ci/builds/2", github.comments[0])
+        self.assertIn("`fedcba987654`", github.comments[0])
+        self.assertEqual(self.ci.list_requests[0]["branch"], "contributor:feature")
 
     def test_nocache_records_the_decision_without_a_build(self) -> None:
         github = FakeGitHub(files=STACK_PR_FILES)
@@ -1701,6 +1713,7 @@ class RocmCacheTest(unittest.TestCase):
     def test_refusals_leave_the_gate_failing(self) -> None:
         other_recipe = FakeGitHub(files=STACK_PR_FILES)
         other_recipe.file_shas = {("docker/docker-bake-rocm.hcl", "main"): "newer"}
+        reused = [ci_build(meta_data={"rocm-rocm-stack": "s@d1"})]
         # The author, with CI delegated to them by an approval.
         author = FakeGitHub(
             files=STACK_PR_FILES,
@@ -1710,7 +1723,8 @@ class RocmCacheTest(unittest.TestCase):
         )
         cases = [
             (other_recipe, [ci_build()], "reviewer", "differs from main's"),
-            (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "hasn't built"),
+            (FakeGitHub(files=STACK_PR_FILES), [], "reviewer", "built the ROCm"),
+            (FakeGitHub(files=STACK_PR_FILES), reused, "reviewer", "built the ROCm"),
             (author, [ci_build()], "author", "Only maintainers with write access"),
         ]
         for github, builds, actor, text in cases:

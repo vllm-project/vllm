@@ -396,6 +396,32 @@ def test_a_pr_that_changes_the_stack_builds_it_without_waiting(tmp_path):
     assert len(built_tags(calls, stderr)) == 3
 
 
+def test_only_a_stack_the_build_pushed_can_be_cached(tmp_path):
+    # /ci rocm cache copies rocm-rocm-stack-built: never a stack this PR's CI reused,
+    # since other PRs' CI can push to its tags first.
+    for name, existing in (("built", ()), ("reused", ("rocm/vllm-dev:pr7-",))):
+        (tmp_path / name).mkdir()
+        status, stderr, calls = run_build(
+            tmp_path / name,
+            "base",
+            existing,
+            ROCM_CI_REPO="rocm/vllm-dev",
+            BUILDKITE_PULL_REQUEST="7",
+            CHANGED="docker/Dockerfile.rocm_base",
+        )
+        assert status == 0, stderr
+        built = [c for c in calls if c.startswith("meta rocm-rocm-stack-built ")]
+        if name == "reused":
+            assert "Reusing rocm/vllm-dev:pr7-stack-rocm-" in stderr
+            assert not built
+            continue
+        stack = r"rocm/vllm-dev:pr7-stack-rocm-\w+"
+        assert re.fullmatch(
+            rf"meta rocm-rocm-stack-built {stack}@sha256:\w+ {stack}-wheels@sha256:\w+",
+            built[0],
+        ), built
+
+
 def test_a_pr_that_changes_requirements_waits_only_for_the_stack(tmp_path):
     status, stderr, calls = untrusted_base(
         tmp_path,
