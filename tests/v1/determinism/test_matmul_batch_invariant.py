@@ -13,13 +13,13 @@ from utils import skip_unsupported
 import vllm.model_executor.determinism.batch_invariant as bi
 from vllm.model_executor.determinism.batch_invariant import (
     enable_batch_invariant_mode,
-    linear_batch_invariant,
     matmul_batch_invariant,
 )
 from vllm.model_executor.determinism.batch_invariant_configs import (
     _BATCH_INVARIANT_MATMUL_TUNED_CONFIGS,
     _get_tuned_matmul_arch_family,
 )
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
@@ -111,18 +111,19 @@ def test_matmul_batch_invariance(dtype):
 
 @skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("batch_size", [2, 29, 32, 33, 64])
+@pytest.mark.parametrize("batch_size", [2, 23, 29, 32, 37, 64])
 @pytest.mark.parametrize("has_bias", [False, True])
+@torch.inference_mode()
 def test_small_router_linear_batch_invariance(dtype, batch_size, has_bias):
     """Keep gpt-oss-20b router logits exact across decode batch sizes."""
     torch.manual_seed(42)
     x = torch.randn(batch_size, 2880, dtype=dtype, device=DEVICE_TYPE)
-    weight = torch.randn(32, 2880, dtype=dtype, device=DEVICE_TYPE)
-    bias = torch.randn(32, dtype=dtype, device=DEVICE_TYPE) if has_bias else None
+    layer = torch.nn.Linear(2880, 32, bias=has_bias, dtype=dtype, device=DEVICE_TYPE)
+    method = UnquantizedLinearMethod()
 
-    batch_output = linear_batch_invariant(x, weight, bias)
+    batch_output = method.apply(layer, x, layer.bias)
     for row in (0, batch_size - 1):
-        single_output = linear_batch_invariant(x[row : row + 1], weight, bias)
+        single_output = method.apply(layer, x[row : row + 1], layer.bias)
         torch.testing.assert_close(single_output[0], batch_output[row], rtol=0, atol=0)
 
 
