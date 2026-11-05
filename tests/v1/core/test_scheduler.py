@@ -8054,6 +8054,67 @@ def test_async_load_admission_reads_parked_reservations_from_cache(monkeypatch):
     assert scheduler._parked_reserved_blocks == sum(map(remaining, parked)) > 0
 
 
+@pytest.mark.parametrize("outcome,promoted_blocks", [("received", 6), ("failed", 10)])
+def test_parked_reservation_tracks_load_outcome(outcome, promoted_blocks):
+    """A stale cached reservation would silently change async load admission, and
+    the count only moves at promotion: a failed load gives up its blocks there."""
+
+    def assert_cache_fresh():
+        parked = scheduler._parked_reservations
+        assert parked == {r: scheduler._request_remaining_blocks(r) for r in parked}
+        assert scheduler._parked_reserved_blocks == sum(parked.values())
+
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=64, is_async=True)
+    )
+    scheduler.recompute_kv_load_failures = True
+    [request] = create_requests(num_requests=1, num_tokens=160)
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+    assert scheduler._parked_reservations == {request: 6}
+
+    ids = {request.request_id}
+    scheduler.update_from_output(
+        output,
+        dataclasses.replace(
+            EMPTY_MODEL_RUNNER_OUTPUT,
+            kv_connector_output=KVConnectorOutput(
+                finished_recving=ids,
+                failed_recving=ids if outcome == "failed" else set(),
+            ),
+        ),
+    )
+    assert_cache_fresh()
+
+    # Promote without scheduling, so the refreshed reservation stays observable.
+    scheduler.connector.get_num_new_matched_tokens = Mock(return_value=(0, False))
+    with patch.object(scheduler.kv_cache_manager, "allocate_slots", return_value=None):
+        scheduler.schedule()
+    assert request.status == RequestStatus.WAITING
+    assert_cache_fresh()
+    assert scheduler._parked_reservations[request] == promoted_blocks
+
+    scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert not scheduler._parked_reservations
+    assert scheduler._parked_reserved_blocks == 0
+
+
+def test_aborting_parked_load_releases_its_reservation():
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=64, is_async=True)
+    )
+    [request] = create_requests(num_requests=1, num_tokens=160)
+    scheduler.add_request(request)
+    scheduler.schedule()
+    assert scheduler._parked_reserved_blocks == 6
+
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+
+    assert not scheduler._parked_reservations
+    assert scheduler._parked_reserved_blocks == 0
+
+
 def _create_hybrid_mamba_connector_scheduler(
     matched_tokens: int,
     block_size: int = 16,

@@ -1590,10 +1590,14 @@ class Scheduler(SchedulerInterface):
                 # and every remote-KV resume, since those set
                 # num_computed_tokens = num_tokens - 1.
                 prefill_admitted |= num_computed_tokens < request.num_tokens - 1
-                self._unreserve_parked(request)
-                # Only track requests that will still be prefilling after this chunk.
-                if num_computed_tokens + num_new_tokens < request.num_tokens:
+                # Track requests still prefilling after this chunk. A promoted load
+                # also stays tracked until _update_after_schedule drops it.
+                if (
+                    num_computed_tokens + num_new_tokens < request.num_tokens
+                    or request in self._parked_reservations
+                ):
                     self._inflight_prefills.add(request)
+                self._unreserve_parked(request)
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -3442,7 +3446,8 @@ class Scheduler(SchedulerInterface):
         )
 
     def _reserve_parked(self, request: Request) -> None:
-        """Record or refresh the reservation of a parked async KV load."""
+        """Cache a parked async KV load's reservation. Set when parked and refreshed
+        at promotion, the only points where the load's held blocks change."""
         if self.kv_cache_config.hisparse_host_num_blocks is not None:
             # HiSparse's depends on free host blocks, so it is summed on demand.
             self._inflight_prefills.add(request)
@@ -3594,7 +3599,6 @@ class Scheduler(SchedulerInterface):
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
-                self._reserve_parked(req)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._free_blocks(self.requests[req_id])
@@ -3758,8 +3762,6 @@ class Scheduler(SchedulerInterface):
                 evict_blocks=False,
             )
         )
-        for req_id in async_failed_req_ids:
-            self._reserve_parked(self.requests[req_id])
 
         total_failed_requests = len(async_failed_req_ids)
         total_failed_tokens = num_failed_tokens
