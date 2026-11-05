@@ -156,7 +156,7 @@ A `VerifyPlan` holds device tensors per scheduled request, with `R` requests and
 | Field | Shape and meaning |
 | --- | --- |
 | `parent` | `[R, C]` int32. `parent[r, 0] == -1`. `parent[r, i]` is the row candidate `i` continues, in `[0, i)`. Rows are ordered parent first. A chain has `parent[r, i] == i - 1`. |
-| `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. |
+| `tokens` | `[R, C]` int32 candidate tokens. `tokens[r, 0]` is ignored. None exactly for a chain, which verifies the drafted tokens. |
 | `rows` | Host `[R]` int32, or `None`. `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`; the drafts past it leave the batch and count as rejected. `None` verifies every scheduled row. Entries past a request's rows are ignored. |
 | `is_chain` | A host flag. Set it when every `parent[r, i] == i - 1` by construction. The runner then skips ancestor sets and KV compaction. It never derives this flag from the tensors. |
 

@@ -26,7 +26,7 @@ class VerifyPlan:
     """``[R, C]`` int32, ``parent[r, 0] == -1``."""
     tokens: torch.Tensor | None = None
     """``[R, C]`` int32 candidate tokens (``tokens[r, 0]`` is ignored: the root token is
-    known). None only for the runner's chain plan, whose tokens are in its draft
+    known). None exactly for a chain, whose tokens are in the runner's draft
     buffer."""
     is_chain: bool = False
     """Host flag: every ``parent[r, i] == i - 1`` by construction. The runner
@@ -40,6 +40,8 @@ class VerifyPlan:
     def __post_init__(self) -> None:
         if not self.is_chain and self.tokens is None:
             raise ValueError("a plan that is not a chain must carry tokens")
+        if self.is_chain and self.tokens is not None:
+            raise ValueError("a chain plan must not carry tokens: they are drafted")
 
 
 @dataclass(frozen=True)

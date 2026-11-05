@@ -149,7 +149,7 @@ class PlanLayout:
             self.tree_ancestors[num_tokens:num_tokens_padded].zero_()
             self.pos_delta[num_tokens:num_tokens_padded].zero_()
         width = plan.parent.shape[1]
-        tokens = plan.tokens if plan.tokens is not None and not plan.is_chain else None
+        tokens = plan.tokens
         assert tokens is None or input_ids is not None
         _plan_layout_kernel[(num_reqs,)](
             plan.parent,

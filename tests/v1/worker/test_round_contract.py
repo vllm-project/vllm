@@ -99,11 +99,18 @@ _PARENT = [[-1, 0, 0, 1]]
     "make, match",
     [
         (lambda: VerifyPlan(parent=_t(_PARENT)), "tokens"),
+        # The layout ignores a chain's tokens: the runner's draft buffer holds them.
+        (
+            lambda: VerifyPlan(
+                parent=_t([[-1, 0, 1, 2]]), tokens=_t([[0, 7, 8, 9]]), is_chain=True
+            ),
+            "chain",
+        ),
         (lambda: SpecResources(capture_rows=()), "capture_rows"),
         (lambda: SpecResources(capture_rows=(0,)), "capture_rows"),
         (lambda: SpecResources(capture_rows=(2,), max_branching=0), "max_branching"),
     ],
-    ids=["plan-no-tokens", "no-rows", "zero-rows", "branching"],
+    ids=["plan-no-tokens", "chain-tokens", "no-rows", "zero-rows", "branching"],
 )
 def test_plan_and_resources_are_validated(make, match):
     with pytest.raises(ValueError, match=match):
