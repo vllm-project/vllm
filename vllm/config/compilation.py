@@ -924,6 +924,7 @@ class CompilationConfig:
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",
+        "vllm::zaya_cca",
         # Qwen4Exp's AMD backend still uses these splitting ops.
         "vllm::qwen4_exp_ple_short_conv",
         "vllm::qwen4_exp_qsa_with_output",
