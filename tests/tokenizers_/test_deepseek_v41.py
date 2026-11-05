@@ -153,8 +153,7 @@ def test_invalid_effort_is_a_request_error(effort):
     [
         {"thinking": False},
         {"enable_thinking": False},
-        {"thinking": True, "reasoning_effort": "none"},
-        {"enable_thinking": True, "reasoning_effort": "none"},
+        {"reasoning_effort": "none"},
     ],
 )
 def test_chat_mode_has_closed_thinking_prefix(controls):
@@ -511,3 +510,49 @@ def test_open_final_message_gets_no_generation_prompt(thinking_mode, final):
 def test_continue_final_message_requires_assistant(messages):
     with pytest.raises(ValueError, match="final assistant"):
         render(messages, continue_final_message=True)
+
+
+@pytest.fixture
+def real_v41_tokenizer():
+    from tokenizers import Tokenizer, models
+    from transformers import TokenizersBackend
+
+    backend = TokenizersBackend(
+        tokenizer_object=Tokenizer(models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    )
+    return get_deepseek_v41_tokenizer(backend)
+
+
+@pytest.mark.parametrize(
+    ("controls", "thinking"),
+    [
+        ({"thinking": False, "enable_thinking": True}, False),
+        ({"thinking": True, "enable_thinking": False}, True),
+        ({"thinking": False, "reasoning_effort": "high"}, False),
+        ({"thinking": False, "reasoning_effort": "medium"}, False),
+        ({"thinking": False, "reasoning_effort": []}, False),
+        ({"thinking": True, "reasoning_effort": "none"}, True),
+        ({"enable_thinking": True, "reasoning_effort": "none"}, True),
+    ],
+)
+def test_explicit_toggle_decides_reasoning_mode(real_v41_tokenizer, controls, thinking):
+    """Match the Rust renderer when aliases or effort conflict (#65114)."""
+    messages = [{"role": "user", "content": "question"}]
+    prompt = real_v41_tokenizer.apply_chat_template(
+        messages, tokenize=False, **controls
+    )
+    expected = real_v41_tokenizer.apply_chat_template(
+        messages, tokenize=False, thinking=thinking, reasoning_effort="high"
+    )
+    assert prompt == expected
+
+
+@pytest.mark.parametrize("key", ["thinking", "enable_thinking"])
+@pytest.mark.parametrize("value", [None, "false", 1])
+def test_selected_toggle_requires_boolean(real_v41_tokenizer, key, value):
+    with pytest.raises(ValueError, match=key):
+        real_v41_tokenizer.apply_chat_template(
+            [{"role": "user", "content": "question"}],
+            tokenize=False,
+            **{key: value},
+        )

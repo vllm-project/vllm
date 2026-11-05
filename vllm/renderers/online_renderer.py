@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -71,6 +71,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.renderers.metrics import observe_request_render_duration
+from vllm.tokenizers.deepseek_v41_reasoning import resolve_reasoning_kwargs
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
@@ -219,18 +220,47 @@ class OnlineRenderer:
             )
         )
 
+    def _normalize_chat_params(
+        self,
+        request: Any,
+        params: ChatParams,
+        defaults: dict[str, Any] | None,
+    ) -> ChatParams:
+        mode = self.model_config.tokenizer_mode
+        if not isinstance(request, ChatCompletionRequest) or not (
+            mode == "deepseek_v41"
+            or (
+                mode == "auto"
+                and self.model_config.hf_config.model_type == "deepseek_v41"
+            )
+        ):
+            return params
+        # Use raw request controls before generic merging/injected aliases erase
+        # source priority. Retain the configured top-level effort mapping.
+        effort = (
+            params.chat_template_kwargs.get("reasoning_effort")
+            if request.reasoning_effort is not None
+            else None
+        )
+        controls = resolve_reasoning_kwargs(
+            request.chat_template_kwargs or {}, defaults, effort=effort
+        )
+        return replace(
+            params, chat_template_kwargs=params.chat_template_kwargs | controls
+        )
+
     def effective_chat_template_kwargs(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> dict[str, Any]:
-        return (
-            request.build_chat_params(
-                self.chat_template,
-                self.chat_template_content_format,
-                self.reasoning_effort_map,
-            )
-            .with_defaults(self.default_chat_template_kwargs)
-            .chat_template_kwargs
-        )
+        params = request.build_chat_params(
+            self.chat_template,
+            self.chat_template_content_format,
+            self.reasoning_effort_map,
+        ).with_defaults(self.default_chat_template_kwargs)
+
+        return self._normalize_chat_params(
+            request, params, self.default_chat_template_kwargs
+        ).chat_template_kwargs
 
     async def render_chat(
         self,
@@ -818,6 +848,10 @@ class OnlineRenderer:
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+        )
+
+        chat_params = self._normalize_chat_params(
+            request, chat_params, default_template_kwargs
         )
 
         reuse_ids = _reused_prompt_token_ids(request, renderer, messages)

@@ -241,6 +241,23 @@ vllm serve ibm-granite/granite-3.2-2b-instruct \
     --default-chat-template-kwargs '{"thinking": true}'
 ```
 
+### DeepSeek V4.1 Parameter Precedence
+
+For DeepSeek V4.1 Chat Completions, Python and Rust resolve reasoning controls
+from the request, then server defaults, then the model default. Within each
+source, an explicit `thinking` toggle (or `enable_thinking` when `thinking` is
+absent) determines whether reasoning is enabled:
+
+- `thinking=false` disables reasoning and ignores any effort in that source.
+- `thinking=true` keeps reasoning enabled, including with `reasoning_effort="none"`.
+  Missing effort inherits from enabled server defaults, or defaults to `high` (75).
+- Without a toggle, `reasoning_effort="none"` disables reasoning; a concrete effort
+  enables it. With neither control, the next source supplies the decision.
+
+The top-level `reasoning_effort` overrides the effort in `chat_template_kwargs`.
+The selected toggle must be a boolean. The same resolved controls are used for
+prompt rendering and response parsing. Other models retain their existing rules.
+
 ### Mapping Reasoning Efforts
 
 Chat templates differ in which `reasoning_effort` values they recognize, and some silently fall back to another effort (e.g. maximum reasoning) for values they do not know. Use `--reasoning-effort-map` to rewrite the efforts clients send into ones the template supports. For a template that only recognizes `low`, `high` and `max`:
