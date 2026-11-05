@@ -505,7 +505,6 @@ steps:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
-  - pytest -v -s distributed/test_pp_transport.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
   - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'

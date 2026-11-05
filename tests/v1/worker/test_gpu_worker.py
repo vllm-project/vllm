@@ -542,11 +542,10 @@ class _OrderedHandle:
 def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The previous send's device handles are waited before the forward pass;
-    the metadata handle is left to the GroupCoordinator's reaper."""
+    """Previous device handles are waited before the forward pass; the
+    metadata handle is left to the GroupCoordinator's reaper."""
     import torch
 
-    from vllm.distributed.pp_transport.nccl import NcclTransport
     from vllm.sequence import IntermediateTensors
 
     log: list[str] = []
@@ -559,7 +558,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         return [metadata_handle, tensor_handle]
 
     pp_group = SimpleNamespace(
-        world_size=2,
         is_first_rank=True,
         is_last_rank=False,
         isend_tensor_dict=isend_tensor_dict,
@@ -579,9 +577,8 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         ),
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
-        _pp_transport=NcclTransport(SimpleNamespace()),
+        _pp_send_work=[previous_tensor_send],
     )
-    worker._pp_transport._send_work = [previous_tensor_send]
     scheduler_output = SimpleNamespace(
         total_num_scheduled_tokens=4, num_scheduled_tokens={"r0": 4}
     )
@@ -589,7 +586,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
     assert gpu_worker.Worker.execute_model(worker, scheduler_output) is None
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
-    assert worker._pp_transport._send_work == [tensor_handle]
+    assert worker._pp_send_work == [tensor_handle]
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(

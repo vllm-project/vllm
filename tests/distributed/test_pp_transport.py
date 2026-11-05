@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""PP transports carry every step's tensors intact through a PP chain, with
-varying sizes and stages that take turns lagging behind."""
+"""The copy-engine PP transport carries every step's tensors intact through a
+PP chain, with varying sizes and stages that take turns lagging behind."""
 
-from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 import ray
 import torch
 
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.distributed.pp_transport import PPTransport
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.distributed.pp_transport.copy_engine import CopyEngineTransport
-from vllm.distributed.pp_transport.nccl import NcclTransport
 from vllm.platforms import current_platform
 
 from ..utils import (
@@ -31,30 +27,29 @@ def _rows(step: int) -> int:
     return [MAX_ROWS, 1, 1337, 512][step % 4]
 
 
-def _run_chain(
-    make: Callable[[Any, dict | None, dict | None], PPTransport],
-    pp_size: int,
-    rank: int,
-    distributed_init_port: str,
-) -> None:
+@ray.remote(num_gpus=1, max_calls=1)
+def chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
     torch.accelerator.set_device_index(rank)
     init_test_distributed_environment(1, pp_size, rank, distributed_init_port)
     pp_group = get_pp_group()
     first, last = pp_group.is_first_rank, pp_group.is_last_rank
 
-    def buffers() -> dict[str, torch.Tensor]:
-        return {
+    persistent = None
+    if not first:
+        persistent = {
             k: torch.zeros(MAX_ROWS, WIDTH, dtype=torch.bfloat16, device="cuda")
             for k in KEYS
         }
-
-    persistent = None if first else buffers()
-    profile_send = None if last else buffers()
-    transport = make(pp_group, persistent, profile_send)
+    config = SimpleNamespace(
+        use_v2_model_runner=True,
+        parallel_config=SimpleNamespace(
+            tensor_parallel_size=1, prefill_context_parallel_size=1
+        ),
+    )
+    transport = CopyEngineTransport(config, pp_group, persistent)
 
     lag = torch.randn(4096, 4096, device="cuda")
     for step in range(STEPS):
-        transport.before_forward()
         # Senders often lag (a receiver reading too early sees stale values),
         # the last stage sometimes (a sender overwriting too early corrupts
         # values it has not read yet).
@@ -81,56 +76,21 @@ def _run_chain(
     torch.distributed.barrier(group=pp_group.cpu_group)
 
 
-def _copy_engine(pp_group, persistent, profile_send) -> PPTransport:
-    config = SimpleNamespace(
-        use_v2_model_runner=True,
-        parallel_config=SimpleNamespace(
-            pipeline_parallel_size=pp_group.world_size,
-            tensor_parallel_size=1,
-            prefill_context_parallel_size=1,
-        ),
-    )
-    transport, reason = CopyEngineTransport.create(
-        config, pp_group, persistent, profile_send
-    )
-    assert transport is not None, reason
-    return transport
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def nccl_chain_worker(monkeypatch, tp_size, pp_size, rank, distributed_init_port):
-    _run_chain(
-        lambda pp_group, persistent, profile_send: NcclTransport(get_tp_group()),
-        pp_size,
-        rank,
-        distributed_init_port,
-    )
-
-
-@ray.remote(num_gpus=1, max_calls=1)
-def copy_engine_chain_worker(
-    monkeypatch, tp_size, pp_size, rank, distributed_init_port
-):
-    _run_chain(_copy_engine, pp_size, rank, distributed_init_port)
-
-
-def _run(monkeypatch: pytest.MonkeyPatch, pp_size: int, test_target) -> None:
+def _run(monkeypatch: pytest.MonkeyPatch, pp_size: int) -> None:
     # NVML, not CUDA: the test process must not initialize CUDA.
-    if test_target is copy_engine_chain_worker and not (
+    if not (
         current_platform.is_cuda()
         and current_platform.is_fully_connected(list(range(pp_size)))
     ):
         pytest.skip("copy engines need NVLink-connected CUDA GPUs")
-    multi_process_parallel(monkeypatch, 1, pp_size, test_target)
+    multi_process_parallel(monkeypatch, 1, pp_size, chain_worker)
 
 
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize("test_target", [nccl_chain_worker, copy_engine_chain_worker])
-def test_pp_transport_pp2(monkeypatch: pytest.MonkeyPatch, test_target):
-    _run(monkeypatch, 2, test_target)
+def test_copy_engine_pp2(monkeypatch: pytest.MonkeyPatch):
+    _run(monkeypatch, 2)
 
 
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("test_target", [nccl_chain_worker, copy_engine_chain_worker])
-def test_pp_transport_pp4(monkeypatch: pytest.MonkeyPatch, test_target):
-    _run(monkeypatch, 4, test_target)
+def test_copy_engine_pp4(monkeypatch: pytest.MonkeyPatch):
+    _run(monkeypatch, 4)
