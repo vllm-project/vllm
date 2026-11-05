@@ -2142,6 +2142,53 @@ def test_sliding_window_backend_correctness(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    "batch_spec",
+    [
+        pytest.param(
+            BatchSpec(seq_lens=[24, 96], query_lens=[24, 40]),
+            id="prefill_before_extend",
+        ),
+        pytest.param(
+            BatchSpec(seq_lens=[32, 24, 96, 40, 80], query_lens=[1, 24, 16, 40, 8]),
+            id="interleaved",
+        ),
+    ],
+)
+def test_rocm_aiter_fa_unordered_batch(
+    default_vllm_config,
+    monkeypatch: pytest.MonkeyPatch,
+    batch_spec: BatchSpec,
+):
+    """A request with context may follow one without it and must still read it."""
+    from vllm._aiter_ops import is_aiter_found_and_supported
+    from vllm.v1.attention.backends import rocm_aiter_fa
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+
+    # Chunk the context so shorter contexts run out before the last chunk.
+    monkeypatch.setattr(rocm_aiter_fa, "_CP_TOKENS_PER_ITER_ROCM", 64)
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        batch_spec,
+        "Qwen/Qwen3-0.6B",
+        [AttentionBackendEnum.ROCM_AITER_FA],
+        causal_mask_mod,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
 def test_rocm_aiter_fa_unquantized_cache_ignores_kv_scales(
     default_vllm_config,
 ):
