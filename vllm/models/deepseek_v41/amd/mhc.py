@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.model_executor.kernels.mhc.triton import mhc_post_collapse_rms_norm_triton
 from vllm.model_executor.layers.mhc import (
@@ -39,6 +40,22 @@ class MHCOverlapStream:
         self.stream = stream
         self._fork_event = torch.cuda.Event()
         self._join_event = torch.cuda.Event()
+        self._mega_mhc_ready = False
+
+    def prepare_mega_mhc(self, hidden_size: int, device: torch.device) -> None:
+        """Allocate AITER Mega-MHC's per-stream scratch on the side stream.
+
+        The gates run there only inside FULL graph capture, which cannot
+        allocate it; sizing it for ``MHC_OVERLAP_MAX_TOKENS`` covers every
+        batch the overlap captures.
+        """
+        if self._mega_mhc_ready:
+            return
+        with torch.cuda.stream(self.stream):
+            rocm_aiter_ops.mega_mhc_prepare_stream(
+                MHC_OVERLAP_MAX_TOKENS, hidden_size, device
+            )
+        self._mega_mhc_ready = True
 
     def fork(self) -> None:
         self._fork_event.record()
@@ -67,6 +84,7 @@ def mhc_pre_delayed_overlap(
     sublayer_out: torch.Tensor | None = None,
     post_layer_mix: torch.Tensor | None = None,
     comb_res_mix: torch.Tensor | None = None,
+    fn_packed: torch.Tensor | None = None,
     *,
     overlap: MHCOverlapStream,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -106,6 +124,7 @@ def mhc_pre_delayed_overlap(
             sublayer_out=sublayer_out,
             post_layer_mix=post_layer_mix,
             comb_res_mix=comb_res_mix,
+            fn_packed=fn_packed,
         )
     residual, layer_input = mhc_post_collapse_rms_norm_triton(
         residual,
@@ -132,6 +151,7 @@ def mhc_pre_delayed_overlap(
             pre_mix=pre_mix,
             norm_weight=norm_weight,
             norm_eps=norm_eps,
+            fn_packed=fn_packed,
         )
     for tensor in (residual, pre_mix):
         tensor.record_stream(stream)
