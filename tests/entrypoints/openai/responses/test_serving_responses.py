@@ -416,6 +416,146 @@ async def test_online_renderer_renders_non_harmony_responses_with_explicit_histo
     assert preprocess_kwargs["default_template_kwargs"]["request_default"] == "kept"
 
 
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_stored_tool_call_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    preprocess_chat = AsyncMock(return_value=([], [tokens_input([1])]))
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_stored",
+                    "output": "done",
+                }
+            ],
+            tools=[],
+        ),
+        previous_messages=[
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "call_stored"}],
+            }
+        ],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    preprocess_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_stored_response_output_continuation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    preprocess_chat = AsyncMock(return_value=([], [tokens_input([1])]))
+    monkeypatch.setattr(renderer, "preprocess_chat", preprocess_chat)
+
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_stored",
+                    "output": "done",
+                }
+            ],
+            tools=[],
+        ),
+        previous_response_outputs=[
+            ResponseFunctionToolCall(
+                arguments="{}",
+                call_id="call_stored",
+                name="lookup",
+                type="function_call",
+            )
+        ],
+    )
+
+    assert not isinstance(result, ErrorResponse)
+    preprocess_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_rejects_empty_responses_call_id():
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "",
+                    "output": "orphaned",
+                }
+            ],
+            tools=[],
+        )
+    )
+
+    assert isinstance(result, ErrorResponse)
+    assert result.error.param == "call_id"
+
+
+@pytest.mark.asyncio
+async def test_online_renderer_accepts_parallel_responses_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    renderer = _new_online_renderer()
+    renderer.use_harmony = False
+    renderer.chat_template = "server-template"
+    renderer.chat_template_content_format = "string"
+    renderer.default_chat_template_kwargs = {}
+    monkeypatch.setattr(
+        renderer,
+        "preprocess_chat",
+        AsyncMock(return_value=([], [tokens_input([1])])),
+    )
+    result = await renderer.render_responses(
+        ResponsesRequest(
+            input=[
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "one",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_2",
+                    "name": "two",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_2",
+                    "output": "two",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "one",
+                },
+            ],
+            tools=[],
+        )
+    )
+
+    assert not isinstance(result, ErrorResponse)
+
+
 _REUSED_IDS = [10, 20, 30]
 _IMAGE_PART = {
     "type": "input_image",

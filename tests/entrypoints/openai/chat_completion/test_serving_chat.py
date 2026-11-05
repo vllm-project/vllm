@@ -337,7 +337,11 @@ class TestGPTOSSChat:
                     }
                 ],
             },
-            {"role": "tool", "content": "The weather in Paris, TX is sunny, 22°C"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "The weather in Paris, TX is sunny, 22°C",
+            },
         ]
 
         response_string = await gptoss_client.chat.completions.create(
@@ -368,6 +372,7 @@ class TestGPTOSSChat:
             },
             {
                 "role": "tool",
+                "tool_call_id": "call_456",
                 "content": [
                     {"type": "text", "text": "f2e897a7-2705-4337-8193-2a8f57b81618"}
                 ],
@@ -402,6 +407,7 @@ class TestGPTOSSChat:
             },
             {
                 "role": "tool",
+                "tool_call_id": "call_789",
                 "content": [
                     {"type": "text", "text": "Weather data: "},
                     {"type": "text", "text": "Austin, TX - Partly cloudy, 25°C"},

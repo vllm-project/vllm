@@ -74,4 +74,3 @@ def validate_responses_tool_call_ids(
 
     visit(previous_outputs)
     visit(input_items)
-
