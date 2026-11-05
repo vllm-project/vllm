@@ -147,6 +147,12 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
+def is_last_ubatch_empty(
+    orig_num_tokens: int, padded_num_tokens: int, num_ubatches: int
+) -> bool:
+    return (padded_num_tokens // num_ubatches) * (num_ubatches - 1) >= orig_num_tokens
+
+
 def compute_ubatch_slices(
     num_scheduled_tokens: np.ndarray,
     num_reqs: int,
