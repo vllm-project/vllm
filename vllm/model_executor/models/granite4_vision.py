@@ -665,7 +665,7 @@ class Granite4VisionForConditionalGeneration(
 
     def _get_all_layer_features(
         self,
-        pixel_values: torch.Tensor,
+        pixel_values: torch.Tensor | list[torch.Tensor],
         image_sizes: torch.Tensor,
     ) -> tuple[list[int], list[torch.Tensor]]:
         """Extract deepstack + spatial features for all levels.
@@ -691,7 +691,8 @@ class Granite4VisionForConditionalGeneration(
             for imsize in image_sizes
         ]
 
-        if pixel_values.dim() == 5:
+        # Strip per-image padding tiles for both batched and list layouts.
+        if isinstance(pixel_values, list) or pixel_values.dim() == 5:
             pixel_values = torch.cat(
                 [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
                 dim=0,
@@ -780,9 +781,6 @@ class Granite4VisionForConditionalGeneration(
         pixel_values = image_input["pixel_values"]
         image_sizes = image_input.get("image_sizes")
 
-        if isinstance(pixel_values, list):
-            pixel_values = torch.cat(pixel_values, dim=0)
-
         llm_layer_indices, per_image_packed = self._get_all_layer_features(
             pixel_values, image_sizes
         )
@@ -827,8 +825,11 @@ class Granite4VisionForConditionalGeneration(
         # 1. Text embeddings
         text_embeds = lm_inner.embed_input_ids(input_ids)
 
-        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0))
-        text_embeds[is_multimodal] = 0.0
+        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0)).
+        #    masked_fill_ with the mask on device avoids a GPU<->CPU sync.
+        assert is_multimodal is not None
+        mm_mask = is_multimodal.to(text_embeds.device, non_blocking=True)
+        text_embeds.masked_fill_(mm_mask.unsqueeze(-1), 0.0)
 
         # 3. Apply embedding_multiplier
         inputs_embeds = text_embeds * lm_inner.config.embedding_multiplier
