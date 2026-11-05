@@ -609,3 +609,5 @@ def compile_score_push():
 
 
 assert CNT_SC < CNT_WORDS and SC_DONE + SC_MAX_WG <= FLAG_BYTES // 4
+# Rows that fit the receive buffers also fit the request limits.
+assert MAX_ROWS == MAX_REQS * QL and MAX_REQS <= SC_MAX_REQS
