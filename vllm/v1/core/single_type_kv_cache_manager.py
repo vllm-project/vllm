@@ -1374,8 +1374,32 @@ class DFlashSlidingWindowManager(SlidingWindowManager):
         dcp_world_size: int = 1,
         final_segment_end_block: int | None = None,
     ) -> list[bool] | None:
-        # Only tails are ever backed, and any of them can serve a later hit.
-        return None
+        if retention_interval is None or alignment_tokens is None:
+            # Dense: only tails are ever backed, so this caches all of them.
+            return None
+        assert isinstance(kv_cache_spec, DFlashSlidingWindowSpec)
+        # A hit at a boundary ``b`` for a request ending at ``b + 1`` reads the
+        # blocks in ``[b + 2 - sliding_window, b)``; a longer request reads
+        # fewer. Any other position, segment boundaries included, needs drafter
+        # KV only for a request ending within the window past it, so sparse
+        # retention keeps just the boundary tails.
+        block_size = kv_cache_spec.block_size
+        mask = [False] * (end_block - start_block)
+        for boundary_tokens in reachable_boundaries:
+            hit_tokens = boundary_tokens // alignment_tokens * alignment_tokens
+            first_read = max(
+                boundary_tokens
+                + 2
+                - kv_cache_spec.sliding_window
+                - kv_cache_spec.extra_retained_tokens,
+                0,
+            )
+            for j in range(
+                max(start_block, first_read // block_size),
+                min(end_block, hit_tokens // block_size),
+            ):
+                mask[j - start_block] = True
+        return mask
 
 
 class CircularBufferManager(FullAttentionManager):

@@ -537,6 +537,52 @@ def test_dflash_window_hit_needs_only_the_window_before_request_end(
     ]
 
 
+@pytest.mark.parametrize(
+    ("retention_interval", "cached"), [(None, [2, 3, 4, 7, 8, 9]), (0, [8])]
+)
+def test_dflash_window_sparse_retention_caches_only_what_a_replay_reads(
+    retention_interval, cached
+):
+    """Sparse retention caches only the blocks a replay of the prompt reads,
+    not every chunk's tail, and the replay still hits."""
+    block_pool = BlockPool(num_gpu_blocks=32, enable_caching=True, hash_block_size=4)
+    spec = new_dflash_window_spec()
+    manager = get_sliding_window_manager(
+        spec, block_pool, manager_cls=DFlashSlidingWindowManager
+    )
+    init_none_hash(sha256)
+    request = Request(
+        request_id="r",
+        prompt_token_ids=list(range(40)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
+    for start, end in [(0, 20), (20, 40)]:
+        manager.remove_skipped_blocks("r", start)
+        manager.allocate_new_blocks("r", end, end)
+        manager.cache_blocks(
+            request, end, retention_interval=retention_interval, replay_boundaries=[39]
+        )
+
+    assert [
+        i
+        for i, block_hash in enumerate(request.block_hashes)
+        if block_pool.get_cached_block(block_hash, [0])
+    ] == cached
+    _, hit_length = DFlashSlidingWindowManager.find_longest_cache_hit(
+        block_hashes=request.block_hashes,
+        max_length=39,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=spec,
+        drop_eagle_block=False,
+        alignment_tokens=4,
+        num_request_tokens=40,
+    )
+    assert hit_length == 36
+
+
 @pytest.mark.parametrize("num_external_tokens", [40, 41, 43])
 def test_dflash_window_load_holds_only_the_window(num_external_tokens):
     """A KV-connector load has no drafts in flight, so it holds the same blocks
