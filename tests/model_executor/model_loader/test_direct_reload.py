@@ -292,6 +292,7 @@ class TestUnsent:
         with _DEVICE:
             model = _ToyModel()
         model.engram.weight.dummy_weight_value = 1.0  # e.g. a norm: may stay
+        model.attn.kv_b.weight.optional_in_update = True  # e.g. Engram: may stay
         track_loaded_params(model)  # a dummy cold start loads nothing
         process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
         partial = {n: t for n, t in _checkpoint().items() if n != "proj.weight"}
@@ -307,11 +308,14 @@ class TestUnsent:
         assert model._required_params is None  # recorded only once PWAL succeeds
         monkeypatch.undo()
         monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
-        _reload(model, {n: t for n, t in _checkpoint().items() if n != "engram.weight"})
+        kept = ("engram.weight", "attn.kv_b.weight")
+        _reload(model, {n: t for n, t in _checkpoint().items() if n not in kept})
         _reload(model, _checkpoint())
         begin_direct_reload(model)  # later updates: what the first one loaded
-        model.load_weights(list(_checkpoint().items())[1:])
-        with pytest.raises(RuntimeError, match="attn.kv_b.weight"):
+        model.load_weights(
+            (n, t) for n, t in _checkpoint().items() if n != "pad.weight"
+        )
+        with pytest.raises(RuntimeError, match="pad.weight"):
             finish_direct_reload(model, _MODEL_CONFIG, _DEVICE)
 
     def test_tensor_without_post_processing_keeps_its_bytes(self):

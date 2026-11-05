@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.model_loader.reload.direct import (
     begin_direct_reload,
     finish_direct_reload,
+    mark_loaded,
 )
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
@@ -50,10 +51,12 @@ SIZE = 512
 
 
 def _load(layer: torch.nn.Module, names: list[str] | None = None) -> None:
-    """Stand in for the weight loader: materialize and fill with finite values."""
+    """Stand in for the weight loader: materialize and fill with finite values,
+    and report the load as ``load_weights`` would to a direct reload."""
     for name, param in list(layer.named_parameters(recurse=False)):
         if names is not None and name not in names:
             continue
+        mark_loaded(layer, name)
         if param.is_meta:
             param = materialize_meta_tensor(param)
             setattr(layer, name, param)
