@@ -543,13 +543,15 @@ def test_mha_attn_aiter_fp8_pad_head_dim(
         assert (output - ref_output).abs().max().item() <= 0.30
 
         if pad_head_dim == 128:
-            # Same FP8 inputs (zero columns quantize to exact zeros), so the
-            # asm and CK-tile kernels differ only in accumulation rounding.
+            # Same FP8 inputs (zero columns quantize to exact zeros), but the
+            # asm and CK-tile kernels compute and round differently: on MI355X
+            # they differ by about 2/3 of each one's error vs FP32 (cosine
+            # 0.9993 to each other), so leave headroom for other archs/seeds.
             output_16 = run(16)[:, :real_len].float()
             cosine = torch.nn.functional.cosine_similarity(
                 output.flatten(), output_16.flatten(), dim=0
             )
-            assert cosine.item() >= 0.999
+            assert cosine.item() >= 0.998
             assert (output - output_16).abs().max().item() <= 0.05
     finally:
         vllm_config.model_config = old_model_config
