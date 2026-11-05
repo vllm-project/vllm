@@ -85,6 +85,8 @@ def _mm_executor_workers(config: "VllmConfig") -> int:
     preprocessed in parallel instead of one request at a time.
     """
     model_config = config.model_config
+    if not model_config.supports_multimodal_inputs:
+        return 1
     mm_config = model_config.multimodal_config
     if mm_config is None or mm_config.mm_processor_cache_gb > 0:
         return 1

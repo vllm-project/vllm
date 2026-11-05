@@ -5,6 +5,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.renderers import base
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.hf import HfRenderer
 
@@ -20,16 +22,22 @@ from vllm.renderers.hf import HfRenderer
 class _ModelConfig:
     multimodal_config: Any
     renderer_num_workers: int
-    supports_multimodal_inputs: bool = False
     hf_config: Any = field(default_factory=SimpleNamespace)
+
+    @property
+    def supports_multimodal_inputs(self) -> bool:
+        return self.multimodal_config is not None
 
 
 @dataclass
 class _VllmConfig:
     model_config: _ModelConfig
     parallel_config: Any = field(
-        default_factory=lambda: SimpleNamespace(_api_process_rank=0)
+        default_factory=lambda: SimpleNamespace(
+            _api_process_rank=0, _api_process_count=1
+        )
     )
+    observability_config: Any = None
 
 
 def _peak_concurrent_mm_requests(
@@ -40,7 +48,9 @@ def _peak_concurrent_mm_requests(
     multimodal_config = (
         None
         if mm_processor_cache_gb is None
-        else SimpleNamespace(mm_processor_cache_gb=mm_processor_cache_gb)
+        else SimpleNamespace(
+            mm_processor_cache_gb=mm_processor_cache_gb, mm_ipc_gpu_memory_gb=0
+        )
     )
     lock = threading.Lock()
     both_running = threading.Event()
@@ -57,7 +67,15 @@ def _peak_concurrent_mm_requests(
         with lock:
             in_flight -= 1
 
-    with patch.object(BaseRenderer, "_process_multimodal", fake_process_multimodal):
+    with ExitStack() as stack:
+        # Stub the MM processor and caches; only the executor is under test.
+        stack.enter_context(
+            patch.object(BaseRenderer, "_process_multimodal", fake_process_multimodal)
+        )
+        stack.enter_context(patch.object(base, "maybe_init_mm_gpu_ipc_pool"))
+        stack.enter_context(patch.object(base.mm_registry, "create_processor"))
+        for name in ("processor_cache_from_config", "processor_only_cache_from_config"):
+            stack.enter_context(patch.object(base, name, return_value=None))
         config = _VllmConfig(_ModelConfig(multimodal_config, renderer_num_workers))
         renderer = HfRenderer(config, None)
 
@@ -77,7 +95,7 @@ def _peak_concurrent_mm_requests(
 @pytest.mark.parametrize(
     ("renderer_num_workers", "mm_processor_cache_gb", "expected_peak"),
     [
-        # Text-only model: no processor cache config, keep one worker.
+        # Text-only model: no multimodal inputs, keep one worker.
         (2, None, 1),
         # Processor cache on: requests stay ordered with the cache (#38418).
         (2, 4, 1),
