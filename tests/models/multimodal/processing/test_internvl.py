@@ -4,6 +4,7 @@
 
 from collections.abc import Mapping
 
+import numpy as np
 import pytest
 from PIL import Image
 from transformers import PreTrainedConfig
@@ -133,3 +134,57 @@ def test_processor_override(
         max_num,
         hf_processor_mm_kwargs,
     )
+
+
+@pytest.mark.parametrize("model_id", ["OpenGVLab/InternVL3-1B"])
+def test_video_placeholder_adjacent_to_text(model_id: str):
+    """A video placeholder that directly follows text must survive processing.
+
+    InternVL's chat template emits "<video>" right after the user text. Since
+    "<video>" is not a vocabulary token, BPE merges it with the surrounding
+    text (".<" and ">\\n"), so the token-level target match fails and the
+    text-based fallback is used. The video replacement starts with ordinary
+    text ("Frame1: ..."), so the fallback must encode the prompt segments
+    separately; otherwise BPE merges across the new boundary (".Frame") and
+    the placeholder can no longer be located, which used to fail requests
+    with "found 0 prompt placeholders".
+    """
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    tokenizer = processor.info.get_tokenizer()
+
+    # Shaped like the actual chat-template output for a text+video message.
+    prompt = (
+        "<|im_start|>user\nWhat color is the moving shape? Answer briefly."
+        "<video>\n<|im_end|>\n<|im_start|>assistant\n"
+    )
+    prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+    # Sanity check: this prompt really exercises the text-based fallback,
+    # i.e. the bare target is not a token subsequence of the prompt.
+    target = tokenizer.encode("<video>", add_special_tokens=False)
+    assert not any(
+        prompt_ids[i : i + len(target)] == target
+        for i in range(len(prompt_ids) - len(target) + 1)
+    )
+
+    video = np.zeros((2, 224, 224, 3), dtype=np.uint8)
+    mm_items = processor.info.parse_mm_data({"video": video})
+
+    processed_inputs = processor(
+        prompt_ids,
+        mm_items=mm_items,
+        hf_processor_mm_kwargs={},
+    )
+
+    # The video placeholder must be found exactly once, and the video context
+    # tokens must all be present in the final prompt.
+    video_placeholders = processed_inputs["mm_placeholders"].get("video")
+    assert video_placeholders is not None
+    assert len(video_placeholders) == 1
+
+    video_token_id = tokenizer.convert_tokens_to_ids("<|video_pad|>")
+    num_frames = len(video)
+    image_seq_length = processor.info.get_hf_processor().image_seq_length
+    video_tok_count = processed_inputs["prompt_token_ids"].count(video_token_id)
+    assert video_tok_count == num_frames * image_seq_length

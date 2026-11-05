@@ -1620,7 +1620,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
         *,
-        encode_segments_separately: bool = False,
+        encode_segments_separately: bool = True,
     ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
         """Apply multi-modal prompt updates in text space, then encode the
         result.
@@ -1722,10 +1722,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         # A non-special-token target may be tokenized differently inside
         # the prompt, so fall back to performing the updates on the
-        # decoded text, then encoding the result back.
+        # decoded text, then encoding the result back. The segments are
+        # encoded separately so that BPE cannot merge tokens across a
+        # segment boundary, which would otherwise break the placeholder
+        # search (e.g. InternVL/Nemotron video replacements start with
+        # ordinary text like "Frame1: " and merge with preceding text).
         new_token_ids, match_result = self._apply_prompt_updates_via_text(
             token_ids,
             mm_prompt_updates,
+            encode_segments_separately=True,
         )
 
         placeholders = self._find_mm_placeholders(
