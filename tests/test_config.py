@@ -4466,7 +4466,7 @@ def test_unwatermarked_beam_does_not_bypass_engine_incompatibilities():
         num_speculative_tokens=1,
     )
 
-    with pytest.raises(ValueError, match="Speculative decoding with watermarking"):
+    with pytest.raises(ValueError, match="Watermarking supports only"):
         config._check_supports_watermarking(
             BeamSearchParams(beam_width=2, max_tokens=1, watermarking=False)
         )

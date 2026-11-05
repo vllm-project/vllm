@@ -1258,8 +1258,12 @@ def test_greedy_drafts_are_verified_against_the_watermarked_sample(monkeypatch):
     draft_sampled = torch.zeros(num_logits, dtype=torch.int64, device=device)
 
     all_token_ids = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
-    all_token_ids[:, :4] = torch.tensor([100, 101, 10, 11], dtype=torch.int32)
-    all_token_ids[:, :4] += torch.arange(num_reqs, dtype=torch.int32)[:, None]
+    all_token_ids[:, :4] = torch.tensor(
+        [100, 101, 10, 11], dtype=torch.int32, device=device
+    )
+    all_token_ids[:, :4] += torch.arange(
+        num_reqs, dtype=torch.int32, device=device
+    )[:, None]
     sampler = object.__new__(GPUWatermarkSampler)
     sampler.watermarker = watermarker
     sampler.deduplicate_contexts = "none"
@@ -1268,7 +1272,8 @@ def test_greedy_drafts_are_verified_against_the_watermarked_sample(monkeypatch):
     sampler.may_mask_logits = np.zeros(num_reqs, dtype=bool)
     monkeypatch.setattr(sampler, "apply_sampling_params", lambda logits, *args: logits)
     sampler.watermarking = SimpleNamespace(
-        np=np.ones(num_reqs, dtype=bool), gpu=torch.ones(num_reqs, dtype=torch.bool)
+        np=np.ones(num_reqs, dtype=bool),
+        gpu=torch.ones(num_reqs, dtype=torch.bool, device=device),
     )
     sampler.sampling_states = SimpleNamespace(
         temperature=SimpleNamespace(
