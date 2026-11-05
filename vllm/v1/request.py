@@ -8,12 +8,14 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gc_utils import gc_untrack
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -24,6 +26,7 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeMetrics
 from vllm.v1.mrope import MRoPEPositionState
 from vllm.v1.structured_output.request import StructuredOutputRequest
+from vllm.v1.token_buffer import TokenBuffer
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -62,7 +65,7 @@ class Request:
     def __init__(
         self,
         request_id: str,
-        prompt_token_ids: list[int] | None,
+        prompt_token_ids: list[int] | np.ndarray | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
         client_index: int = 0,
@@ -133,7 +136,10 @@ class Request:
         else:
             raise ValueError("sampling_params and pooling_params can't both be unset")
 
-        self.prompt_token_ids = prompt_token_ids
+        # An int32 ndarray from the frontends is copied, not read per token.
+        self.prompt_token_ids: list[int] | None = (
+            TokenBuffer(prompt_token_ids) if prompt_token_ids is not None else None
+        )
         self.prompt_embeds = prompt_embeds
         # Per-position mask used in mixed-mode (chat completion with
         # prompt_embeds). `None` except when both `prompt_token_ids` and
@@ -143,25 +149,25 @@ class Request:
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            prompt_token_ids, prompt_embeds
+            self.prompt_token_ids, prompt_embeds
         )
         self.mrope_position_state = MRoPEPositionState.from_kv_transfer_params(
             self.kv_transfer_params, self.num_prompt_tokens
         )
         self._output_token_ids: list[int] = []
         if self.prompt_token_ids is None:
-            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+            self._all_token_ids: list[int] = TokenBuffer([0] * self.num_prompt_tokens)
         elif self.prompt_is_token_ids is None:
-            self._all_token_ids = self.prompt_token_ids.copy()
+            self._all_token_ids = TokenBuffer(self.prompt_token_ids)
         else:
             # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
             # special token id that may lie outside the embedding. Zero them, matching
             # the no-token-ids case above, so embedding gathers over these placeholder
             # ids stay in bounds; the actual inputs come from prompt_embeds.
-            self._all_token_ids = [
+            self._all_token_ids = TokenBuffer(
                 t if is_tok else 0
                 for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
-            ]
+            )
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
@@ -197,6 +203,9 @@ class Request:
         # they should also be updated simultaneously.
         self.output_token_ids = ConstantList(self._output_token_ids)
         self.all_token_ids = ConstantList(self._all_token_ids)
+        # Holds only ints and grows with the context: hide it from the cyclic GC.
+        # It is only ever mutated in place.
+        gc_untrack(self._output_token_ids)
         # trace_headers
         self.trace_headers = trace_headers
         self.session_id = session_id
@@ -228,8 +237,9 @@ class Request:
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
 
         # Prompt block hashes precomputed by the frontend; the hasher continues
-        # from the first block they don't cover.
-        self.block_hashes: list[BlockHash] = block_hashes or []
+        # from the first block they don't cover. Hidden from the cyclic GC: it
+        # only holds bytes, one per block.
+        self.block_hashes: list[BlockHash] = gc_untrack(block_hashes or [])
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -296,9 +306,32 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
+    def truncate_block_hashes(
+        self, hash_block_size: int, num_hash_lookahead_tokens: int = 0
+    ) -> None:
+        """Discard hashes invalidated by truncating the request's tokens."""
+        num_valid_hashes = (
+            max(0, self.num_tokens - num_hash_lookahead_tokens) // hash_block_size
+        )
+        del self.block_hashes[num_valid_hashes:]
+        self._prompt_embeds_per_block_hashes.clear()
+
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None
+
+    @property
+    def prefill_token_ids(self) -> list[int]:
+        """All token ids, as the prompt_token_ids object itself while they hold
+        the same tokens, so that pickling both sends them once."""
+        prompt = self.prompt_token_ids
+        if (
+            prompt is not None
+            and self.prompt_is_token_ids is None
+            and len(prompt) == len(self._all_token_ids)
+        ):
+            return prompt
+        return self._all_token_ids
 
     @property
     def num_tokens(self) -> int:

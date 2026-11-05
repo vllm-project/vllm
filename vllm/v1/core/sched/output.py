@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.utils.gc_utils import untrack_long_lists
 from vllm.v1.mrope import MRoPEPositionState
 
 if TYPE_CHECKING:
@@ -84,6 +85,11 @@ class NewRequestData:
             replay_start=request.replay_start,
             mrope_position_state=request.mrope_position_state,
         )
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
+        # Workers receive these by pickle and keep them only for this step.
+        untrack_long_lists((self.prompt_is_token_ids, *self.block_ids))
 
     @property
     def prompt_len(self) -> int:
