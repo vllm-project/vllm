@@ -306,16 +306,22 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             RequestStatus.FINISHED_LENGTH_CAPPED,
             RequestStatus.FINISHED_STOPPED,
         ):
-            self._chunk_trackers.pop(request.request_id, None)
-            if request.request_id in self._pinned_chunk_blocks:
-                self._chunk_cancellations.add(request.request_id)
+            if self._chunked_push:
+                self._chunk_trackers.pop(request.request_id, None)
+                if request.request_id in self._pinned_chunk_blocks:
+                    self._chunk_cancellations.add(request.request_id)
             self._reqs_not_processed.add(request.request_id)
             self._reqs_need_save.pop(request.request_id, None)
-            return request.request_id in self._pinned_chunk_blocks, None
+            delay_free_blocks = bool(
+                self._chunked_push and request.request_id in self._pinned_chunk_blocks
+            )
+            return delay_free_blocks, None
 
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
-        tracker = self._chunk_trackers.get(request.request_id)
+        tracker = (
+            self._chunk_trackers.get(request.request_id) if self._chunked_push else None
+        )
         chunk_handoff = bool(tracker and tracker.final_job_enqueued)
         if delay_free_blocks:
             block_ids = self.get_exchange_clipped_blocks(block_ids)
@@ -342,7 +348,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # finished_sending; the explicit pins also protect blocks across
             # preemption before the request reaches this terminal path.
             delay_free_blocks = request.request_id in self._pinned_chunk_blocks
-        self._chunk_trackers.pop(request.request_id, None)
+        if self._chunked_push:
+            self._chunk_trackers.pop(request.request_id, None)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -492,7 +499,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 else block_table[start_block:end_block]
             )
             pinned = self._pinned_chunk_blocks.setdefault(req_id, set())
-            new_blocks = {block_id for block_id in referenced if block_id} - pinned
+            new_blocks = set(referenced) - pinned
             if new_blocks:
                 pool.touch([pool.blocks[block_id] for block_id in new_blocks])
                 pinned.update(new_blocks)
@@ -509,14 +516,19 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         return bool(
             self._finished_request_blocks
             or self._push_pending_registrations
-            or self._pinned_chunk_blocks
+            or (self._chunked_push and self._pinned_chunk_blocks)
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         """Clean up finished request blocks after push completes."""
         super().update_connector_output(connector_output)
         for req_id in connector_output.finished_sending or ():
-            if block_ids := self._pinned_chunk_blocks.pop(req_id, None):
+            block_ids = (
+                self._pinned_chunk_blocks.pop(req_id, None)
+                if self._chunked_push
+                else None
+            )
+            if block_ids:
                 pool = self._gpu_block_pool
                 assert pool is not None
                 pool.free_blocks(

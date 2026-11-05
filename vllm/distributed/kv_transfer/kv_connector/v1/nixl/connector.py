@@ -214,11 +214,6 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
-    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
-        assert self.connector_scheduler is not None
-        if isinstance(self.connector_scheduler, NixlPushConnectorScheduler):
-            self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
-
     def on_new_request(self, request: "Request") -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.on_new_request(request)
@@ -447,6 +442,11 @@ class NixlPushConnector(NixlBaseConnector):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        assert self.connector_scheduler is not None
+        assert isinstance(self.connector_scheduler, NixlPushConnectorScheduler)
+        self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
 
     def wait_for_save(self) -> None:
         """Publish chunk jobs after this step's model execution is enqueued."""

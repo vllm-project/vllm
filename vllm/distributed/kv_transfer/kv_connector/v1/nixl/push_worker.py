@@ -344,7 +344,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         while not self._push_writer_stop.is_set():
             try:
-                self._drain_chunk_job_inbox()
+                if self._chunked_push:
+                    self._drain_chunk_job_inbox()
 
                 # 1. D registrations to send.
                 while True:
@@ -394,8 +395,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         else:
                             self._pending_completion_notifs.put(notif)
 
-                self._process_chunk_jobs()
-                self._poll_chunk_transfers()
+                if self._chunked_push:
+                    self._process_chunk_jobs()
+                    self._poll_chunk_transfers()
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
 
@@ -404,8 +406,8 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # progress is event-driven (see module docstring).
             if (
                 self._push_finished_blocks
-                or self._chunk_deferred
-                or self._chunk_transfers
+                or (self._chunked_push and self._chunk_deferred)
+                or (self._chunked_push and self._chunk_transfers)
             ):
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
@@ -1144,9 +1146,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_wake.set()
 
         results = super().get_transfer_results()
-        with self._chunk_lock:
-            completed_chunk_requests = self._completed_chunk_requests
-            self._completed_chunk_requests = set()
+        completed_chunk_requests: set[ReqId] = set()
+        if self._chunked_push:
+            with self._chunk_lock:
+                completed_chunk_requests = self._completed_chunk_requests
+                self._completed_chunk_requests = set()
         for req_id in completed_chunk_requests:
             self._reqs_to_process.discard(req_id)
         results.finished_sending.update(completed_chunk_requests)
