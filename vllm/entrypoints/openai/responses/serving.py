@@ -65,9 +65,6 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
-    construct_builtin_and_mcp_tool_dicts,
-    construct_input_messages,
-    construct_tool_dicts,
     extract_function_tool_names,
     extract_tool_types,
     response_item_status,
@@ -203,24 +200,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
-
-    def _build_prompt_tool_dicts(
-        self, request: ResponsesRequest
-    ) -> list[dict[str, Any]] | None:
-        """Function tools plus builtin/MCP tools rendered for prompting."""
-        tool_dicts = construct_tool_dicts(
-            request.tools,
-            request.tool_choice,
-            exclude_tools_when_tool_choice_none=(
-                self.online_renderer.exclude_tools_when_tool_choice_none
-            ),
-        )
-        builtin_dicts = construct_builtin_and_mcp_tool_dicts(
-            request.tools, self.tool_server
-        )
-        if builtin_dicts:
-            tool_dicts = (tool_dicts or []) + builtin_dicts
-        return tool_dicts
 
     def _effective_chat_template_kwargs(
         self, request: ResponsesRequest
@@ -505,7 +484,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
-                        tool_server=self.tool_server,
                     )
                 else:
                     context = SimpleContext(
@@ -638,32 +616,6 @@ class OpenAIServingResponses(GenerateBaseServing):
             tokenizer,
             request_metadata,
         )
-
-    async def _make_request(
-        self,
-        request: ResponsesRequest,
-        prev_response: ResponsesResponse | None,
-    ):
-        tool_dicts = self._build_prompt_tool_dicts(request)
-        # Construct the input messages.
-        messages = construct_input_messages(
-            request_instructions=request.instructions,
-            request_input=request.input,
-            prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
-            prev_response_output=prev_response.output if prev_response else None,
-        )
-        chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        _, engine_inputs = await self.online_renderer.preprocess_chat(
-            request,
-            messages,
-            default_template=self.chat_template,
-            default_template_content_format=self.chat_template_content_format,
-            default_template_kwargs=chat_template_kwargs,
-            tool_dicts=tool_dicts,
-            parser=self.parser,
-        )
-        return messages, engine_inputs
-
 
     async def _render_next_turn(
         self,

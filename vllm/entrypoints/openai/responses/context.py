@@ -31,7 +31,6 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.utils import (
     build_response_output_items,
-    construct_builtin_and_mcp_tool_dicts,
     construct_tool_dicts,
     response_item_status,
 )
@@ -380,7 +379,6 @@ class ParsableContext(ConversationContext):
         chat_template_content_format: ChatTemplateContentFormatOption,
         response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
-        tool_server: ToolServer | None = None,
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -404,7 +402,7 @@ class ParsableContext(ConversationContext):
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.tool_dicts = self._build_prompt_tool_dicts(tool_server)
+        self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
@@ -417,18 +415,6 @@ class ParsableContext(ConversationContext):
     @property
     def all_turn_metrics(self) -> list[TurnMetrics]:
         return self.turn_usage.all_turn_metrics
-
-    def _build_prompt_tool_dicts(
-        self, tool_server: ToolServer | None
-    ) -> list[dict[str, Any]] | None:
-        """Function tools plus builtin/MCP tools rendered for prompting."""
-        tool_dicts = construct_tool_dicts(self.request.tools, self.request.tool_choice)
-        builtin_dicts = construct_builtin_and_mcp_tool_dicts(
-            self.request.tools, tool_server
-        )
-        if builtin_dicts:
-            tool_dicts = (tool_dicts or []) + builtin_dicts
-        return tool_dicts
 
     def append_output(self, output: RequestOutput) -> None:
         completion = output.outputs[0]

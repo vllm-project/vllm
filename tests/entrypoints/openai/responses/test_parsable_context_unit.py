@@ -212,8 +212,6 @@ def _make_context(parser_cls, **overrides):
         chat_template=None,
         chat_template_content_format="auto",
     )
-    if "tool_server" in overrides:
-        defaults["tool_server"] = overrides.pop("tool_server")
     defaults.update(overrides)
     return ParsableContext(**defaults)
 
@@ -490,25 +488,6 @@ def test_length_truncation_marks_last_item_incomplete():
 # ---------------------------------------------------------------------------
 # Tests: per-turn usage accounting
 # ---------------------------------------------------------------------------
-
-
-def test_tool_dicts_include_builtin_tools():
-    """Builtin tools requested by the client are rendered into tool_dicts
-    (merged with function tools) when a tool server provides them."""
-    request = _make_request(
-        tools=[
-            {"type": "code_interpreter", "container": {"type": "auto"}},
-        ],
-    )
-
-    class _FakeServer:
-        def has_tool(self, name):
-            return name == "python"
-
-    ctx = _make_context(None, request=request, tool_server=_FakeServer())
-
-    names = {d["function"]["name"] for d in ctx.tool_dicts}
-    assert "code_interpreter" in names
 
 
 def test_usage_metrics_single_turn():
