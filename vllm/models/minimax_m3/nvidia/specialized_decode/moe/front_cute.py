@@ -15,19 +15,19 @@ threads), built for calls of up to 8, 16 or 32 rows (the record's levels):
 * CTA ``1 + r``: row ``r`` of the BF16 input to per-token NVFP4, eight values
   per thread.
 
-:class:`Fc2InputQuant` quantizes the BF16 ``h`` rows FC1 wrote, one CTA per
-8-row token tile of the record, eight values per thread.
+The record also gets one zeroed word per token tile after its own words: the
+tiles' FC1 item counts (``gemm_cute.py``).
 
-Both quantize per token as the stock activation quantization does (its fast
-path): ``pt = amax(|row|) * (1 / 2688)``, ``encode = rcp(pt)``; per 16-value
-block ``sf = e4m3(encode * (amax(block) * rcp(6)))``, ``out = rcp(f32(sf) *
-rcp(encode))``, ``code = e2m1(value * out)`` (``rcp`` is ``rcp.approx.ftz``,
-conversions round to nearest and saturate). The GEMMs dequantize with
-``pt``. The input's scales are stored linearly ([rows, 384]); ``h``'s in the
-128x4 atom layout FC2 loads with TMA (one 128-row atom per 8-row tile, rows
-0-7 used).
+The quantization is per token, as the stock activation quantization does it
+(its fast path): ``pt = amax(|row|) * (1 / 2688)``, ``encode = rcp(pt)``; per
+16-value block ``sf = e4m3(encode * (amax(block) * rcp(6)))``, ``out =
+rcp(f32(sf) * rcp(encode))``, ``code = e2m1(value * out)`` (``rcp`` is
+``rcp.approx.ftz``, conversions round to nearest and saturate). The GEMMs
+dequantize with ``pt``. The input's scales are stored linearly ([rows,
+384]). FC1 quantizes its ``h`` rows for FC2 with the same helpers, the
+scales in the 128x4 atom layout (``H_TILE_BYTES`` per 8-row tile).
 
-PDL: both trigger their dependents on entry; every read of a previous
+PDL: the front triggers its dependents on entry; every read of a previous
 kernel's output follows the grid-dependency wait (the routing bias, a weight,
 is read before it).
 """
@@ -52,13 +52,14 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_route_cute import (  # noqa: E501
     MAX_EXPERTS,
-    TILE,
     build_record,
     clear_scratch,
     levels_for,
     mask_words_for,
+    max_tiles,
     present_words,
     record_words,
+    tile_words,
     zero_record,
 )
 
@@ -70,10 +71,9 @@ SF_VEC = 16
 THREADS = 768
 PER_LANE = EXPERTS // 32
 X_THREADS = HIDDEN // 8  # threads per input row
-H_THREADS = INTERMEDIATE // 8  # threads per h row
 H_TILE_BYTES = 128 * INTERMEDIATE // SF_VEC  # one tile's h scales
 
-assert X_THREADS == THREADS and TILE * H_THREADS == THREADS
+assert X_THREADS == THREADS
 assert EXPERTS <= MAX_EXPERTS and MAX_ROWS * TOP_K <= THREADS
 
 
@@ -344,7 +344,11 @@ class LowBatchFront:
             cute.make_tensor(x_pt_ptr, cute.make_layout(rows)),
             cute.make_tensor(permuted_ptr, slots),
             cute.make_tensor(
-                record_ptr, cute.make_layout(record_words(rows, TOP_K, EXPERTS))
+                record_ptr,
+                cute.make_layout(
+                    record_words(rows, TOP_K, EXPERTS)
+                    + tile_words(max_tiles(rows, TOP_K, EXPERTS))
+                ),
             ),
             rows,
         ).launch(
@@ -399,6 +403,12 @@ class LowBatchFront:
                     row_bias[j] = bias[thread % 32 + 32 * j]
             cute.arch.griddepcontrol_wait()
             zero_record(record, rows, TOP_K, EXPERTS, thread, THREADS)
+            # The tiles' FC1 item counts, after the record.
+            counts = record_words(rows, TOP_K, EXPERTS)
+            for word in cutlass.range(
+                thread, tile_words(max_tiles(rows, TOP_K, EXPERTS)), THREADS, unroll=1
+            ):
+                record[counts + word] = Int32(0)
             for row in cutlass.range(thread // 32, rows, THREADS // 32, unroll=1):
                 route_row(logits, row_bias, scale, weights, ids, row, thread % 32)
             cute.arch.sync_threads()
@@ -478,114 +488,3 @@ def quantize_row(
         scales_out[row * (width // SF_VEC) + thread // 2] = Uint8(sf)
     if thread == 0:
         pt_out[row] = pt
-
-
-class Fc2InputQuant:
-    """Per-token NVFP4 of FC1's BF16 ``h`` rows, one CTA per token tile of
-    the record (module docstring)."""
-
-    @cute.jit
-    def __call__(
-        self,
-        h_ptr: cute.Pointer,
-        record_ptr: cute.Pointer,
-        h_quant_ptr: cute.Pointer,
-        h_scale_ptr: cute.Pointer,
-        h_pt_ptr: cute.Pointer,
-        tiles: Int32,
-        cta_words: Int32,
-        stream: cuda.CUstream,
-    ):
-        """``h``: BF16 [8 tiles, 768] as words; outputs ``h_quant`` [8 tiles,
-        384] packed E2M1 as words, ``h_scale`` (one 6144-byte atom block per
-        tile) and ``h_pt`` FP32 [8 tiles]; ``tiles``: the record's capacity."""
-        h_rows = tiles * TILE
-        self.kernel(
-            cute.make_tensor(h_ptr, cute.make_layout(h_rows * INTERMEDIATE // 2)),
-            cute.make_tensor(record_ptr, cute.make_layout(4 + 2 * cta_words)),
-            cute.make_tensor(h_quant_ptr, cute.make_layout(h_rows * INTERMEDIATE // 8)),
-            cute.make_tensor(h_scale_ptr, cute.make_layout(tiles * H_TILE_BYTES)),
-            cute.make_tensor(h_pt_ptr, cute.make_layout(h_rows)),
-            cta_words,
-        ).launch(grid=(tiles, 1, 1), block=[THREADS, 1, 1], stream=stream, use_pdl=True)
-
-    @cute.kernel
-    def kernel(
-        self,
-        h: cute.Tensor,
-        record: cute.Tensor,
-        h_quant: cute.Tensor,
-        h_scale: cute.Tensor,
-        h_pt: cute.Tensor,
-        cta_words: Int32,
-    ):
-        """Thread ``t`` of a tile: row ``t / 96`` of the tile, values
-        ``8 (t % 96) ..`` of it."""
-        cute.arch.griddepcontrol_launch_dependents()
-
-        @cute.struct
-        class Shared:
-            warp_amax: cute.struct.MemRange[Float32, THREADS // 32]
-
-        shared = cutlass.utils.SmemAllocator().allocate(Shared)
-        warp_amax = _view(shared.warp_amax, THREADS // 32)
-        thread, _, _ = cute.arch.thread_idx()
-        tile, _, _ = cute.arch.block_idx()
-        cute.arch.griddepcontrol_wait()
-        if tile < record[1]:
-            quantize_tile(
-                h,
-                tile,
-                thread,
-                record[4 + cta_words + tile],
-                h_quant,
-                h_scale,
-                h_pt,
-                warp_amax,
-            )
-
-
-@cute.jit
-def quantize_tile(
-    h: cute.Tensor,
-    tile: Int32,
-    thread: Int32,
-    limit: Int32,
-    h_quant: cute.Tensor,
-    h_scale: cute.Tensor,
-    h_pt: cute.Tensor,
-    warp_amax: cute.Tensor,
-):
-    """Per-token NVFP4 of the rows of ``tile`` below ``limit``: thread ``t``
-    takes row ``t / 96`` of the tile, values ``8 (t % 96) ..`` of it; scales
-    in the 128x4 atom layout (module docstring). Rows past the limit hold no
-    FC1 output and are read as zero, not stored."""
-    r = thread // H_THREADS
-    t = thread - r * H_THREADS
-    row = tile * TILE + r
-    keep = Uint32(0) - Uint32(row < limit)
-    loaded = load_global_u32x4(h.iterator + row * (INTERMEDIATE // 2) + t * 4)
-    words = cute.make_rmem_tensor((4,), Uint32)
-    for i in cutlass.range_constexpr(4):
-        words[i] = loaded[i] & keep
-    amax = local_amax(words)
-    row_amax = warp_max(amax)
-    if cute.arch.lane_idx() == 0:
-        warp_amax[thread // 32] = row_amax
-    cute.arch.sync_threads()
-    first = r * (H_THREADS // 32)
-    row_amax = Float32(warp_amax[first])
-    for w in cutlass.range_constexpr(1, H_THREADS // 32):
-        row_amax = max_f32(row_amax, warp_amax[first + w])
-    pt, encode = per_token_scales(row_amax)
-    block_amax = max_f32(amax, cute.arch.shuffle_sync_bfly(amax, 1))
-    codes, sf = quantize_x8(words, block_amax, encode)
-    block = t // 2
-    if row < limit:
-        h_quant[row * (INTERMEDIATE // 8) + t] = codes
-        if t % 2 == 0:
-            h_scale[tile * H_TILE_BYTES + (block // 4) * 512 + r * 16 + block % 4] = (
-                Uint8(sf)
-            )
-        if t == 0:
-            h_pt[row] = pt

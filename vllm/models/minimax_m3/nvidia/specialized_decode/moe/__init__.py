@@ -44,13 +44,14 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
-    WIDTHS as GEMM_WIDTHS,
-)
-from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
+    TILE,
     cta_words,
     max_ctas,
     route_words,
     width,
+)
+from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm import (  # noqa: E501
+    WIDTHS as GEMM_WIDTHS,
 )
 from vllm.utils.torch_utils import aux_stream
 
@@ -60,9 +61,7 @@ from .front_cute import (
     HIDDEN,
     INTERMEDIATE,
     MAX_ROWS,
-    TILE,
     TOP_K,
-    Fc2InputQuant,
     LowBatchFront,
 )
 from .gemm_cute import RoutedFc1, RoutedFc2
@@ -88,7 +87,8 @@ SWIGLU_BETA = 1.0
 # 1, 4 and 8 rows) against FC1 4/6 stages, FC2 3/6/8, shared FC1 3-5 and 96-128
 # routed CTAs: FC2 at 4 stages gains 6% at one row; no other setting moves a
 # row count by 3% or more, and fewer routed CTAs slow eight rows.
-ROUTED_CTA_K = 256
+ROUTED_FC1_CTA_K = 256
+ROUTED_FC2_CTA_K = 256
 ROUTED_FC1_STAGES = 8
 ROUTED_FC2_STAGES = 4
 ROUTED_CTAS: int | None = None
@@ -196,7 +196,10 @@ class LowBatchFfn:
         words = Int32(cta_words(tiles))
         weights = torch.empty((rows, TOP_K), dtype=torch.bfloat16, device=device)
         permuted = torch.empty((rows, TOP_K), dtype=torch.int32, device=device)
-        record = torch.empty(route_words(tiles), dtype=torch.int32, device=device)
+        # The record, then one FC1 item count per tile (zeroed by the front).
+        record = torch.empty(
+            route_words(tiles) + cta_words(tiles), dtype=torch.int32, device=device
+        )
         x_quant = torch.empty((rows, HIDDEN // 2), dtype=torch.uint8, device=device)
         x_scale = torch.empty((rows, HIDDEN // 16), dtype=torch.uint8, device=device)
         x_pt = torch.empty(rows, dtype=torch.float32, device=device)
@@ -232,22 +235,16 @@ class LowBatchFfn:
             _ptr(cutlass.Float32, x_pt),
             _ptr(cutlass.Float32, self.alpha1),
             _ptr(cutlass.Uint32, h),
+            _ptr(cutlass.Uint32, h_quant),
+            _ptr(cutlass.Uint8, h_scale),
+            _ptr(cutlass.Float32, h_pt),
             _ptr(cutlass.Int32, record),
+            _ptr(cutlass.Int32, record[route_words(tiles) :]),
             Int32(rows),
             Int32(EXPERTS),
             words,
             Int32(h_rows),
             ctas,
-            stream,
-        )
-        _fc2_input(self.device_index)(
-            _ptr(cutlass.Uint32, h),
-            _ptr(cutlass.Int32, record),
-            _ptr(cutlass.Uint32, h_quant),
-            _ptr(cutlass.Uint8, h_scale),
-            _ptr(cutlass.Float32, h_pt),
-            Int32(tiles),
-            words,
             stream,
         )
         _fc2(self.device_index)(
@@ -369,26 +366,10 @@ def _front(device_index: int, built: int):
 
 
 @cache
-def _fc2_input(device_index: int):
-    with torch.accelerator.device_index(device_index):
-        return cute.compile(
-            Fc2InputQuant(),
-            _fake(cutlass.Uint32),
-            _fake(cutlass.Int32),
-            _fake(cutlass.Uint32),
-            _fake(cutlass.Uint8),
-            _fake(cutlass.Float32),
-            Int32(TOP_K),
-            Int32(4),
-            make_fake_stream(),
-        )
-
-
-@cache
 def _fc1(device_index: int):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedFc1(HIDDEN, INTERMEDIATE, ROUTED_CTA_K, ROUTED_FC1_STAGES),
+            RoutedFc1(HIDDEN, INTERMEDIATE, ROUTED_FC1_CTA_K, ROUTED_FC1_STAGES),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
@@ -397,6 +378,10 @@ def _fc1(device_index: int):
             _fake(cutlass.Float32),
             _fake(cutlass.Float32),
             _fake(cutlass.Uint32),
+            _fake(cutlass.Uint32),
+            _fake(cutlass.Uint8),
+            _fake(cutlass.Float32),
+            _fake(cutlass.Int32),
             _fake(cutlass.Int32),
             Int32(1),
             Int32(EXPERTS),
@@ -411,7 +396,13 @@ def _fc1(device_index: int):
 def _fc2(device_index: int):
     with torch.accelerator.device_index(device_index):
         return cute.compile(
-            RoutedFc2(HIDDEN, INTERMEDIATE, ROUTED_CTA_K, ROUTED_FC2_STAGES),
+            RoutedFc2(
+                HIDDEN,
+                INTERMEDIATE,
+                2 * INTERMEDIATE // 128,  # FC1's m tiles: a tile's ready count
+                ROUTED_FC2_CTA_K,
+                ROUTED_FC2_STAGES,
+            ),
             _fake(cutlass.Float4E2M1FN, 32),
             _fake(cutlass.Float8E4M3FN),
             _fake(cutlass.Float4E2M1FN, 32),
@@ -491,7 +482,6 @@ def _shared_fc2(device_index: int):
 
 _KERNELS = (
     _fc1,
-    _fc2_input,
     _fc2,
     _shared_input,
     _shared_fc1,
