@@ -54,10 +54,6 @@ WeightsTransformFn: TypeAlias = Callable[
 unrecognized tensors through unchanged."""
 
 
-def _escape_replacement(replacement: str) -> str:
-    return replacement.replace("\\", "\\\\")
-
-
 @dataclass
 class WeightsMapper:
     """Maps the name of each weight if they match the following patterns.
@@ -88,18 +84,18 @@ class WeightsMapper:
         orig_to_new_prefix: Mapping[str, str | None] | None,
         orig_to_new_suffix: Mapping[str, str | None] | None,
     ) -> None:
+        def replacement(new: str | None, leading: str = "") -> str | None:
+            return None if new is None else leading + new.replace("\\", "\\\\")
+
         regex = dict(self.orig_to_new_regex)
         for substr, new in (orig_to_new_substr or {}).items():
-            pattern = re.compile(rf"(?s)\A(.*?){re.escape(substr)}")
-            regex[pattern] = (
-                None if new is None else rf"\g<1>{_escape_replacement(new)}"
+            regex[re.compile(rf"(?s)\A(.*?){re.escape(substr)}")] = replacement(
+                new, r"\g<1>"
             )
         for prefix, new in (orig_to_new_prefix or {}).items():
-            pattern = re.compile(rf"\A{re.escape(prefix)}")
-            regex[pattern] = None if new is None else _escape_replacement(new)
+            regex[re.compile(rf"\A{re.escape(prefix)}")] = replacement(new)
         for suffix, new in (orig_to_new_suffix or {}).items():
-            pattern = re.compile(rf"{re.escape(suffix)}\Z")
-            regex[pattern] = None if new is None else _escape_replacement(new)
+            regex[re.compile(rf"{re.escape(suffix)}\Z")] = replacement(new)
         self.orig_to_new_regex = regex
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
