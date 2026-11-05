@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
         skip_tokenizer_init: false,
         hf_overrides: Default::default(),
         generation_config: Default::default(),
+        override_generation_config: Default::default(),
         served_model_name: vec![],
         listener_mode: HttpListenerMode::BindTcp {
             host: "127.0.0.1".to_string(),
