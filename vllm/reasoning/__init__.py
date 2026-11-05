@@ -169,6 +169,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "qwen3_engine_reasoning_parser",
         "Qwen3ParserReasoningAdapter",
     ),
+    "ripple": (
+        "ripple_engine_reasoning_parser",
+        "RippleParserReasoningAdapter",
+    ),
     "seed_oss": (
         "seed_oss_engine_reasoning_parser",
         "SeedOssParserReasoningAdapter",

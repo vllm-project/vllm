@@ -779,6 +779,12 @@ class SpeculativeConfig:
             # Qwen3 DSpark drafts reuse the DeepSeek-V4 DSpark architecture name.
             hf_config.update({"architectures": ["Qwen3DSparkModel"]})
             return hf_config
+        if initial_architecture == "DFlash2DraftModel" and getattr(
+            hf_config, "no_rope_layers", None
+        ):
+            # Ripple's DFlash2 drafter is the one with NoPE layers.
+            hf_config.update({"architectures": ["DFlash2RicursiveDraftModel"]})
+            return hf_config
         if initial_architecture == "Gemma4DSparkModel":
             # Normalize the Gemma4 DSpark draft's config keys to DSpark's.
             if (

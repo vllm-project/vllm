@@ -30,6 +30,7 @@ vLLM currently supports the following reasoning models:
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
+| [Ripple-65B Preview](https://huggingface.co/ricursiveAI/Ripple-65B-Preview) | `ripple` | `json`, `regex` | ✅ |
 | [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 | [ZAYA1 series](https://huggingface.co/Zyphra/ZAYA1-8B) | `zaya` | `json`, `regex` | ✅ |
 
@@ -40,6 +41,7 @@ vLLM currently supports the following reasoning models:
     Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+    Ripple decides per turn whether to reason and has no switch for it. Structured outputs apply from the first token, so constrained responses answer without reasoning.
     Kolibri 1 reasoning is enabled by default. To disable it, set `reasoning_effort="none"` or pass `enable_thinking=False` in your `chat_template_kwargs`.
 
 ## Quickstart
