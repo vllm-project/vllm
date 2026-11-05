@@ -5,17 +5,21 @@
 A ``TraceTensor`` stands in for one checkpoint tensor while ``load_weights``
 runs. View ops (``VIEW_OPS``) return a child that knows, as a meta view over
 the checkpoint tensor, where each of its elements sits in that tensor.
-``copy_`` from a trace, ops outside ``VIEW_OPS`` and value reads go to the
-trace's sink; nothing moves data.
+What a trace cannot settle by itself (``copy_`` from it, ops outside
+``VIEW_OPS``, value reads) it hands to the bake's ``_PlanSink`` (``bake.py``),
+which decides what each means for the plan; nothing moves data.
 """
 
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.utils import _pytree as pytree
 
-__all__ = ["TraceSink", "TraceTensor", "VIEW_OPS"]
+if TYPE_CHECKING:
+    from .bake import _PlanSink
+
+__all__ = ["TraceTensor", "VIEW_OPS"]
 
 # Pure views of their source; ``contiguous`` copies but keeps each element.
 VIEW_OPS = frozenset(
@@ -52,24 +56,6 @@ _VALUE_READS = frozenset(
 )
 
 
-class TraceSink:
-    """Receives what a trace cannot answer by itself."""
-
-    def accept_copy(self, dest: torch.Tensor, src: "TraceTensor") -> torch.Tensor:
-        """``dest.copy_(src)``; returns what ``copy_`` returns."""
-        raise NotImplementedError
-
-    def unsupported(
-        self, func: Callable, args: tuple, kwargs: dict, traces: "list[TraceTensor]"
-    ) -> Any:
-        """An op outside ``VIEW_OPS`` on ``traces``; returns the op's result."""
-        raise NotImplementedError
-
-    def value_read(self, func: Callable, trace: "TraceTensor") -> Any:
-        """``.item()``, ``bool()`` and the like on ``trace``."""
-        raise NotImplementedError
-
-
 class TraceTensor(torch.Tensor):
     """Zero-storage meta tensor that records how a loader slices a checkpoint
     tensor.
@@ -77,13 +63,14 @@ class TraceTensor(torch.Tensor):
     ``_geom`` is a meta view over a contiguous meta tensor of the checkpoint
     shape: its offset and strides say which checkpoint element each element of
     this tensor is. It is ``None`` (and ``_lost`` says why) once this tensor
-    is no longer a view of the checkpoint tensor.
+    is no longer a view of the checkpoint tensor. ``_sink`` is the bake that
+    owns the trace.
     """
 
     # Declared at class scope so mypy can infer attribute types on instances
     # built via ``_make_wrapper_subclass``.
     _name: str
-    _sink: TraceSink
+    _sink: "_PlanSink"
     _geom: torch.Tensor | None
     _lost: str | None
 
@@ -93,7 +80,7 @@ class TraceTensor(torch.Tensor):
         name: str,
         shape: torch.Size,
         dtype: torch.dtype,
-        sink: TraceSink,
+        sink: "_PlanSink",
         geom: torch.Tensor | None,
         lost: str | None = None,
     ) -> "TraceTensor":
@@ -108,7 +95,7 @@ class TraceTensor(torch.Tensor):
 
     @classmethod
     def checkpoint(
-        cls, name: str, shape: torch.Size, dtype: torch.dtype, sink: TraceSink
+        cls, name: str, shape: torch.Size, dtype: torch.dtype, sink: "_PlanSink"
     ) -> "TraceTensor":
         """The whole checkpoint tensor ``name``."""
         return cls(

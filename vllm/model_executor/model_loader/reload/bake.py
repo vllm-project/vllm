@@ -24,7 +24,7 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from vllm.logger import init_logger
 
 from .direct import loadable_tensors
-from .trace import TraceSink, TraceTensor
+from .trace import TraceTensor
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta
@@ -92,7 +92,12 @@ class Copy:
 
 
 @dataclass
-class _PlanSink(TraceSink):
+class _PlanSink:
+    """One bake's record. Traces call ``accept_copy`` for a ``copy_`` from
+    them, ``unsupported`` for any other op outside ``VIEW_OPS`` and
+    ``value_read`` for ``.item()`` and the like; it turns these into copies,
+    fallbacks and bake stops."""
+
     targets: Targets
     copies: dict[str, list[Copy]] = field(default_factory=lambda: defaultdict(list))
     fallback: dict[str, str] = field(default_factory=dict)
