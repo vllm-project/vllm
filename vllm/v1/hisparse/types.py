@@ -16,9 +16,6 @@ class SparseKVPageTransfer:
     host_block_id: int
     resident_block_ids: tuple[int, ...]
     restore: bool = False
-    # The resident page holds rows no forward mirrored to the host, so an
-    # eager-mirror worker must still copy the whole page.
-    unmirrored: bool = False
 
 
 @dataclass(frozen=True)

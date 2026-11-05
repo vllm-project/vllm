@@ -1614,14 +1614,19 @@ class KVCacheConfig:
 
     @cached_property
     def transfer_group_index_by_layer(self) -> dict[str, int]:
-        """Transfer-group tuple index for each participating layer, by its
-        name and by the name it takes in transfers."""
-        return {
-            name: group_index
+        """Transfer-group tuple index for each participating layer, by the name
+        it takes in transfers and, taking precedence, by its own name."""
+        index_by_name = {
+            self.transfer_layer_names[layer_name]: group_index
             for group_index, group in enumerate(self.transfer_groups)
             for layer_name in group.layer_names
-            for name in (layer_name, self.transfer_layer_names[layer_name])
         }
+        index_by_name.update(
+            (layer_name, group_index)
+            for group_index, group in enumerate(self.transfer_groups)
+            for layer_name in group.layer_names
+        )
+        return index_by_name
 
     @cached_property
     def transfer_layer_names(self) -> dict[str, str]:

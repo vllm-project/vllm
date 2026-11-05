@@ -63,8 +63,6 @@ class _HiSparseRequestState:
     publication: _PendingPublication | None = None
     copies_recorded_blocks: int = 0
     pinned_clean: set[int] = field(default_factory=set)
-    # Leading pages an external load wrote straight into resident pages.
-    num_unmirrored_pages: int = 0
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
@@ -554,20 +552,6 @@ class HiSparseCoordinator:
             self._import_pages[request_id] = self._sized_import[1]
         self._sized_import = None
 
-    def record_gpu_import(self, request_id: str, num_tokens: int) -> None:
-        """Note a prefix an external load writes straight into resident pages.
-
-        No forward mirrors those rows to the host, so their write-backs copy
-        whole pages even in eager-mirror mode.
-        """
-        self._resident_requests.discard(request_id)
-        if self._sized_import is not None and self._sized_import[0] == request_id:
-            self._import_pages[request_id] = self._sized_import[1]
-        self._sized_import = None
-        assert self.host_manager is not None
-        state = self._get_request_state(request_id)
-        state.num_unmirrored_pages = cdiv(num_tokens, self.host_manager.block_size)
-
     def size_import(self, request_id: str, num_pages: int) -> None:
         """Note the full-sequence host pages of an import being admitted.
 
@@ -613,12 +597,33 @@ class HiSparseCoordinator:
         state.valid_pages = set(range(num_pages))
         state.ready_prefix_pages = num_pages
         if num_computed_tokens:
-            self._plan_page_transfer(
-                request_id,
-                (num_computed_tokens - 1) // block_size,
-                restore=True,
-            )
+            tail_page = (num_computed_tokens - 1) // block_size
+            self._plan_page_transfer(request_id, tail_page, restore=True)
+            self._adopt_landed_pages(request_id, state, min(num_pages, tail_page))
         self._publish_host_blocks_if_ready(request_id)
+
+    def can_land_import(self, num_blocks: int) -> bool:
+        """Whether an import's resident pages fit above the transition
+        watermark, so landing it on the GPU does not push others to host."""
+        assert self.gpu_pool is not None
+        spare = self.gpu_pool.get_num_free_blocks() - self.transition_watermark
+        return num_blocks * len(self.resident_managers) <= spare
+
+    def _adopt_landed_pages(
+        self, request_id: str, state: _HiSparseRequestState, num_pages: int
+    ) -> None:
+        """Treat imported pages a connector also wrote to resident pages as
+        clean copies of their now-valid host pages."""
+        assert self.host_manager is not None
+        host_blocks = self.host_manager.req_to_blocks.get(request_id, ())
+        for page_idx in range(min(num_pages, len(host_blocks))):
+            if page_idx in state.pending_pages or not all(
+                manager.get_resident_page(request_id, page_idx) is not None
+                for manager in self.resident_managers
+            ):
+                continue
+            self._record_copy(request_id, page_idx, host_blocks[page_idx])
+            self._page_became_clean(request_id, state, page_idx)
 
     def _plan_page_transfer(
         self,
@@ -655,7 +660,6 @@ class HiSparseCoordinator:
             host_block_id=host_block.block_id,
             resident_block_ids=tuple(block.block_id for block in blocks),
             restore=restore,
-            unmirrored=not restore and page_idx < state.num_unmirrored_pages,
         )
         self.pending_spills[spill_id] = _PendingSpill(
             transfer_id=spill_id,

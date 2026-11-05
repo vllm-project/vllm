@@ -557,7 +557,10 @@ class NixlBaseConnectorWorker:
                     f"Engine {engine_id} holds KV layer {layer_name!r}, which "
                     "has no counterpart here."
                 )
-            if len(local_regions) != len(remote_regions):
+            # Several local cache groups may hold a peer's layer: each is a
+            # destination, filled for the requests that have blocks in it.
+            num_destinations, uneven = divmod(len(local_regions), len(remote_regions))
+            if uneven:
                 raise NotImplementedError(
                     f"KV layer {layer_name!r} spans {len(remote_regions)} NIXL "
                     f"regions on engine {engine_id} and {len(local_regions)} here."
@@ -566,13 +569,19 @@ class NixlBaseConnectorWorker:
             layers.add(layer_name)
             # Block ids are listed per group, so the group numbers must match;
             # a region shared by several groups (-1) cannot show that.
-            if remote_layer_groups and remote_layer_groups.get(layer_name) != group:
+            if num_destinations > 1 or (
+                remote_layer_groups and remote_layer_groups.get(layer_name) != group
+            ):
                 groups_match = False
-            for remote, local in zip(remote_regions, local_regions):
+            for i, local in enumerate(local_regions):
+                remote = remote_regions[i % len(remote_regions)]
+                local_group = (
+                    self.region_group_ids[local] if num_destinations > 1 else group
+                )
                 remote_group = remote_groups[remote] if remote_groups else group
                 if remote_group not in (group, _SHARED_REGION_GROUP_ID):
                     groups_match = False
-                triples[(remote, local, group)] = None
+                triples[(remote, local, local_group)] = None
         missing = self._regions_by_layer.keys() - layers
         if missing:
             raise RuntimeError(

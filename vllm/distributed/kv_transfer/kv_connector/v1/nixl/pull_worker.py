@@ -198,7 +198,9 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         elif not pairs.groups_match:
             # The two sides put some layer in different cache groups: read each
             # region at its own blocks.
-            if pairs.remote != pairs.local or len(pairs.local) != self.num_regions:
+            # Each local region reads from one peer region; several local
+            # regions may read the same one.
+            if sorted(pairs.local) != list(range(self.num_regions)):
                 raise NotImplementedError(
                     "Different NIXL cache-group layouts need the same KV regions "
                     "on both sides"
@@ -219,6 +221,12 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_by_region = self._block_ids_by_region(
                 remote_physical_block_ids, remote_region_groups
             )
+            # Line the peer's blocks up with the local regions that read them.
+            remote_of_local = dict(zip(pairs.local, pairs.remote, strict=True))
+            remote_by_region = [
+                remote_by_region[remote_of_local[region]]
+                for region in range(self.num_regions)
+            ]
             local_by_region = self._block_ids_by_region(
                 local_block_ids, local_region_groups
             )
@@ -516,7 +524,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             block_size_ratio=None,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
             region_num_blocks=(self.dst_region_num_blocks.get(dst_engine_id) or None),
-            pairs=(pairs.remote, pairs.remote if by_region else pairs.group),
+            pairs=(pairs.remote, pairs.local if by_region else pairs.group),
             ssm_regions=pairs.remote_ssm_regions,
         )
         local_block_descs_ids = self._compute_desc_ids(

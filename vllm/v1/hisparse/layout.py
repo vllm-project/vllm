@@ -184,8 +184,8 @@ def _lay_out_hisparse_groups(
                     block_size=gpu_block_size,
                     page_size=page_size,
                 ),
-                # Connectors land imports in resident pages: a peer knows them
-                # as its sparse-MLA layers.
+                # Connectors also land an import in resident pages when it has
+                # them: a peer knows these as its sparse-MLA layers.
                 enable_kv_transfer=True,
                 transfer_layer_names=layer_names,
                 transfer_kv_cache_spec=UniformTypeKVCacheSpecs(
@@ -231,8 +231,7 @@ def _lay_out_hisparse_groups(
         source_group_spec,
         role=KVCacheGroupRole.HISPARSE_SOURCE,
         host_resident=True,
-        # Written back from resident pages; connectors never fill it.
-        enable_kv_transfer=False,
+        enable_kv_transfer=True,
     )
     regular_groups = groups[1:]
     return [
