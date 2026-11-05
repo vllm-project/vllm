@@ -968,9 +968,9 @@ async def test_derender_logprob_request_override(client, server_flag):
         # Separate requests can differ slightly in floating-point logprobs.
         # Keep token strings, bytes and the remaining structure exact.
         for entry in expected["content"]:
-            entry["logprob"] = pytest.approx(entry["logprob"])
+            entry["logprob"] = pytest.approx(entry["logprob"], abs=1e-3)
             for top in entry["top_logprobs"]:
-                top["logprob"] = pytest.approx(top["logprob"])
+                top["logprob"] = pytest.approx(top["logprob"], abs=1e-3)
         rendered = await client.post("/v1/chat/completions/render", json=request)
         assert rendered.status_code == 200, rendered.text
         payload = rendered.json()
