@@ -98,11 +98,10 @@ SHARED_FC1_STAGES = 6
 # 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24 and 24/16.
 SHARED_FC1_CTAS = 36
 SHARED_FC2_CTAS = 24
-# Table width of the shared FC2's one-tile routing record.
-SHARED_FC2_WORDS = 4
-# The CuTe shared expert takes one 8-row tile; larger calls run the stock
-# FlashInfer MXFP8 module on the aux stream.
-SHARED_ROWS = TILE
+# The shared expert's 8-row tiles, and its records' table widths.
+SHARED_ROW_TILES = MAX_ROWS // TILE
+SHARED_FC1_WORDS = cta_words(SPLITS * SHARED_ROW_TILES)
+SHARED_FC2_WORDS = cta_words(SHARED_ROW_TILES)
 # The front's builds: the routed-expert GEMMs' row counts up to MAX_ROWS.
 WIDTHS = tuple(w for w in GEMM_WIDTHS if w <= MAX_ROWS)
 assert WIDTHS[-1] == MAX_ROWS
@@ -125,29 +124,29 @@ class LowBatchFfn:
         self.shared_linears = (gate_up, down)
         self.gate_up, self.gate_up_scale = gate_up.weight, gate_up.weight_scale
         self.down, self.down_scale = down.weight, down.weight_scale
-        self.shared_experts = moe.shared_experts
         device = self.w13.device
         self.device_index = device.index
-        # The shared expert's routing records: FC1's tile s is K split s; FC2
-        # has one tile, of 1-8 rows.
-        self.shared_fc1_record = torch.tensor(
-            [TILE * SPLITS, SPLITS, 0, 0]
-            + list(range(SPLITS))
-            + [TILE * (s + 1) for s in range(SPLITS)],
-            dtype=torch.int32,
-            device=device,
-        )
-        self.shared_fc2_records = torch.tensor(
-            [
-                [TILE, 1, 0, 0]
-                + [0] * SHARED_FC2_WORDS
-                + [rows]
-                + [0] * (SHARED_FC2_WORDS - 1)
-                for rows in range(1, SHARED_ROWS + 1)
-            ],
-            dtype=torch.int32,
-            device=device,
-        )
+        # The shared expert's routing records for each row count: FC1's tile
+        # s r + t is rows 8t .. of K split s (r row tiles); FC2's tile t rows
+        # 8t ...
+        fc1, fc2 = [], []
+        for rows in range(1, MAX_ROWS + 1):
+            row_tiles = -(-rows // TILE)
+            limits = [min(TILE * (t + 1), rows) for t in range(row_tiles)]
+            fc1.append(
+                _record(
+                    [s for s in range(SPLITS) for _ in range(row_tiles)],
+                    [
+                        TILE * s * row_tiles + limit
+                        for s in range(SPLITS)
+                        for limit in limits
+                    ],
+                    SHARED_FC1_WORDS,
+                )
+            )
+            fc2.append(_record([0] * row_tiles, limits, SHARED_FC2_WORDS))
+        self.shared_fc1_records = torch.tensor(fc1, dtype=torch.int32, device=device)
+        self.shared_fc2_records = torch.tensor(fc2, dtype=torch.int32, device=device)
         # Compile the kernels now, not inside a CUDA graph capture.
         for built in WIDTHS:
             _front(self.device_index, built)
@@ -184,10 +183,7 @@ class LowBatchFfn:
         self.input_ready.record(main)
         with torch.cuda.stream(self.aux):
             self.input_ready.wait(self.aux)
-            if rows <= SHARED_ROWS:
-                shared_output = self.shared(x)
-            else:
-                shared_output = self.shared_experts(x)
+            shared_output = self.shared(x)
             self.shared_ready.record(self.aux)
 
         logits, _ = self.gate(x)
@@ -276,17 +272,23 @@ class LowBatchFfn:
         """The shared expert's BF16 output (``shared_cute.py``), on the current
         stream."""
         rows = x.size(0)
+        row_tiles = -(-rows // TILE)
+        tiles = SPLITS * row_tiles
         device = x.device
-        x8 = torch.empty(TILE * HIDDEN, dtype=torch.uint8, device=device)
+        x8 = torch.empty(row_tiles * TILE * HIDDEN, dtype=torch.uint8, device=device)
         x8_scale = torch.empty(
-            SPLITS * shared_tile_scale_bytes(SPLIT_K), dtype=torch.uint8, device=device
+            tiles * shared_tile_scale_bytes(SPLIT_K), dtype=torch.uint8, device=device
         )
         partial = torch.empty(
-            SPLITS * TILE * 2 * INTERMEDIATE, dtype=torch.float32, device=device
+            tiles * TILE * 2 * INTERMEDIATE, dtype=torch.float32, device=device
         )
-        h8 = torch.empty(TILE * INTERMEDIATE, dtype=torch.uint8, device=device)
+        h8 = torch.empty(
+            row_tiles * TILE * INTERMEDIATE, dtype=torch.uint8, device=device
+        )
         h8_scale = torch.empty(
-            shared_tile_scale_bytes(INTERMEDIATE), dtype=torch.uint8, device=device
+            row_tiles * shared_tile_scale_bytes(INTERMEDIATE),
+            dtype=torch.uint8,
+            device=device,
         )
         output = torch.empty((rows, HIDDEN), dtype=torch.bfloat16, device=device)
         stream = current_cu_stream()
@@ -297,6 +299,7 @@ class LowBatchFfn:
             _ptr(cutlass.Uint32, x8),
             _ptr(cutlass.Uint8, x8_scale),
             Int32(rows),
+            Int32(row_tiles),
             stream,
         )
         _shared_fc1(index)(
@@ -305,8 +308,9 @@ class LowBatchFfn:
             _ptr(cutlass.Float8E4M3FN, x8),
             _ptr(cutlass.Float8E8M0FNU, x8_scale),
             _ptr(cutlass.Float32, partial),
-            _ptr(cutlass.Int32, self.shared_fc1_record),
-            Int32(SPLITS),
+            _ptr(cutlass.Int32, self.shared_fc1_records[rows - 1]),
+            Int32(row_tiles),
+            Int32(SHARED_FC1_WORDS),
             Int32(min(sms, SHARED_FC1_CTAS)),
             stream,
         )
@@ -315,6 +319,7 @@ class LowBatchFfn:
             _ptr(cutlass.Uint32, h8),
             _ptr(cutlass.Uint8, h8_scale),
             Int32(rows),
+            Int32(row_tiles),
             stream,
         )
         _shared_fc2(index)(
@@ -325,11 +330,19 @@ class LowBatchFfn:
             _ptr(cutlass.BFloat16, output),
             _ptr(cutlass.Int32, self.shared_fc2_records[rows - 1]),
             Int32(rows),
+            Int32(row_tiles),
             Int32(SHARED_FC2_WORDS),
             Int32(min(sms, SHARED_FC2_CTAS)),
             stream,
         )
         return output
+
+
+def _record(experts: list[int], limits: list[int], words: int) -> list[int]:
+    """A static routing record (``routed_expert_route_cute.py``'s first
+    words) of ``len(experts)`` tiles in a table of ``words``."""
+    pad = [0] * (words - len(experts))
+    return [TILE * len(experts), len(experts), 0, 0] + experts + pad + limits + pad
 
 
 def _ptr(dtype: type[cutlass.Numeric], tensor: torch.Tensor, align: int = 16):
@@ -428,6 +441,7 @@ def _shared_input(device_index: int):
             _fake(cutlass.Uint32),
             _fake(cutlass.Uint8),
             Int32(1),
+            Int32(1),
             make_fake_stream(),
         )
 
@@ -443,7 +457,8 @@ def _shared_fc1(device_index: int):
             _fake(cutlass.Float8E8M0FNU),
             _fake(cutlass.Float32),
             _fake(cutlass.Int32),
-            Int32(SPLITS),
+            Int32(1),
+            Int32(SHARED_FC1_WORDS),
             Int32(1),
             make_fake_stream(),
         )
@@ -457,6 +472,7 @@ def _shared_act(device_index: int):
             _fake(cutlass.Float32),
             _fake(cutlass.Uint32),
             _fake(cutlass.Uint8),
+            Int32(1),
             Int32(1),
             make_fake_stream(),
         )
@@ -474,7 +490,8 @@ def _shared_fc2(device_index: int):
             _fake(cutlass.BFloat16),
             _fake(cutlass.Int32),
             Int32(1),
-            Int32(4),
+            Int32(1),
+            Int32(SHARED_FC2_WORDS),
             Int32(1),
             make_fake_stream(),
         )

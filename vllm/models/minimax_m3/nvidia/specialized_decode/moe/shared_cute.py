@@ -8,19 +8,20 @@ SwiGLU-OAI, quantization, down GEMM) runs five kernels; its gate_up GEMM puts
 
 1. :class:`SharedInputQuant`: the input rows to MXFP8 (per 32 values a
    UE8M0 scale rounded up from amax / 448, E4M3 values; FlashInfer's
-   ``mxfp8_quantize``), one CTA per row, into :data:`SPLITS` 8-row tiles of
-   512 columns (tile ``s``: the rows' columns ``512 s ..``, [96, 512]) with
-   their scales in the per-tile 128x4 atom layout;
+   ``mxfp8_quantize``), one CTA per row, into 8-row tiles of 512 columns
+   (with ``r`` row tiles of 8 rows, tile ``s r + t``: rows ``8t ..``, columns
+   ``512 s ..``) with their scales in the per-tile 128x4 atom layout;
 2. :class:`SharedFc1`: ``gate_up = x @ w_gate_up^T`` split over K into
    :data:`SPLITS` slices of 512 columns, so the 1536 weight rows give 144
-   work items: the persistent ``tcgen05`` GEMM the routed FC1 and FC2 build
-   on (DeepSeek-V4.1's ``RoutedExpertGemm``), with the split as the A
-   operand's batch mode and the B operand's token tile; each item stores its
-   FP32 partial sums;
+   work items per row tile: the persistent ``tcgen05`` GEMM the routed FC1
+   and FC2 build on (DeepSeek-V4.1's ``RoutedExpertGemm``), with the split as
+   the A operand's batch mode and the B operand's token tiles; each item
+   stores its FP32 partial sums;
 3. :class:`SharedAct`: the partial sums added in split order, rounded to
    BF16 as the stock GEMM stores ``gate_up``, SwiGLU-OAI to BF16 ``h`` and
    ``h`` to MXFP8;
-4. :class:`SharedFc2`: ``h @ w_down^T`` (48 items), stored as BF16.
+4. :class:`SharedFc2`: ``h @ w_down^T`` (48 items per row tile), stored as
+   BF16.
 
 The weights are the MXFP8 linears' tensors as vLLM prepares them for
 FlashInfer (K-major E4M3 values, E8M0 scales in the 128x4 layout), read in
@@ -83,14 +84,16 @@ def store_mxfp8(
     row: Int32,
     first: Int32,
     split: cutlass.Constexpr[int],
+    row_tiles: Int32,
 ):
     """Quantize the eight values at column ``first`` of ``row`` and store them
-    and their block's scale. Columns are cut into tiles of ``split``: tile
-    ``s`` of the operand is rows ``8 s ..`` with columns ``s * split ..``
-    (``quant`` as words), its scales one atom block."""
+    and their block's scale. Columns are cut into slices of ``split`` and rows
+    into 8-row tiles: operand tile ``s * row_tiles + t`` (``quant`` as words,
+    ``split`` columns a row) holds rows ``8t ..`` of column slice ``s``, its
+    scales one atom block."""
     lo, hi, code = mxfp8_x8(words)
-    tile = first // split
-    offset = (tile * TILE + row) * split + first % split
+    tile = first // split * row_tiles + row // TILE
+    offset = (tile * TILE + row % TILE) * split + first % split
     quant[offset // 4] = lo
     quant[offset // 4 + 1] = hi
     if first % SF_VEC == 0:
@@ -98,7 +101,7 @@ def store_mxfp8(
         scales[
             tile * tile_scale_bytes(split)
             + (block // 4) * ATOM_BYTES
-            + row * 16
+            + row % TILE * 16
             + block % 4
         ] = Uint8(code)
 
@@ -114,35 +117,42 @@ class SharedInputQuant:
         quant_ptr: cute.Pointer,
         scale_ptr: cute.Pointer,
         rows: Int32,
+        row_tiles: Int32,
         stream: cuda.CUstream,
     ):
-        """``x``: BF16 [rows, 6144] as words; ``quant``: E4M3 [96, 512] as
-        words (module docstring); ``scale``: :data:`SPLITS` tiles of atoms."""
+        """``x``: BF16 [rows, 6144] as words; ``quant``: E4M3 [12 x
+        ``row_tiles`` x 8, 512] as words (module docstring); ``scale``: one
+        atom block per tile."""
+        tiles = SPLITS * row_tiles
         self.kernel(
             cute.make_tensor(x_ptr, cute.make_layout(rows * HIDDEN // 2)),
-            cute.make_tensor(quant_ptr, cute.make_layout(TILE * HIDDEN // 4)),
+            cute.make_tensor(quant_ptr, cute.make_layout(tiles * TILE * SPLIT_K // 4)),
             cute.make_tensor(
-                scale_ptr, cute.make_layout(SPLITS * tile_scale_bytes(SPLIT_K))
+                scale_ptr, cute.make_layout(tiles * tile_scale_bytes(SPLIT_K))
             ),
+            row_tiles,
         ).launch(
             grid=(rows, 1, 1), block=[HIDDEN // 8, 1, 1], stream=stream, use_pdl=True
         )
 
     @cute.kernel
-    def kernel(self, x: cute.Tensor, quant: cute.Tensor, scales: cute.Tensor):
+    def kernel(
+        self, x: cute.Tensor, quant: cute.Tensor, scales: cute.Tensor, row_tiles: Int32
+    ):
         cute.arch.griddepcontrol_launch_dependents()
         thread, _, _ = cute.arch.thread_idx()
         row, _, _ = cute.arch.block_idx()
         cute.arch.griddepcontrol_wait()
         words = load_global_u32x4(x.iterator + row * (HIDDEN // 2) + thread * 4)
-        store_mxfp8(quant, scales, words, row, thread * 8, SPLIT_K)
+        store_mxfp8(quant, scales, words, row, thread * 8, SPLIT_K, row_tiles)
 
 
 class SharedFc1(RoutedExpertGemm):
     """gate_up, split over K (module docstring). The A operand's batch mode
     and the routing record's tile expert are the split; B's token tile ``s``
     is the input's columns of split ``s``. Item (split, m tile) stores its
-    FP32 partial sums [split, 8 rows, 1536]."""
+    FP32 partial sums [split, 8 rows, 1536]. With ``r`` row tiles, B's tile
+    ``s r + t`` is rows ``8t ..`` of split ``s``."""
 
     def __init__(self, cta_k: int = 256, num_ab_stage: int = 6) -> None:
         super().__init__(
@@ -158,13 +168,15 @@ class SharedFc1(RoutedExpertGemm):
         sfb_ptr: cute.Pointer,
         out_ptr: cute.Pointer,
         route_ptr: cute.Pointer,
+        row_tiles: Int32,
         cta_words: Int32,
         ctas: Int32,
         stream: cuda.CUstream,
     ):
         """A: w_gate_up (1536, 6144) E4M3, K-major, E8M0 scales in the 128x4
-        layout; B: the quantized input (96, 512), tile ``s`` K split ``s``;
-        out FP32."""
+        layout; B: the quantized input (12 x ``row_tiles`` x 8, 512); out
+        FP32."""
+        tiles = SPLITS * row_tiles
         self.a_dtype = a_ptr.value_type
         self.b_dtype = b_ptr.value_type
         self.sf_dtype = sfa_ptr.value_type
@@ -189,18 +201,18 @@ class SharedFc1(RoutedExpertGemm):
         )
         b = cute.make_tensor(
             b_ptr,
-            cute.make_ordered_layout((SPLITS * TILE, SPLIT_K, 1), order=(1, 0, 2)),
+            cute.make_ordered_layout((tiles * TILE, SPLIT_K, 1), order=(1, 0, 2)),
         )
         sfb = cute.make_tensor(
             sfb_ptr,
             blockscaled_utils.tile_atom_to_shape_SF(
                 cute.make_ordered_layout(
-                    (SPLITS * 128, SPLIT_K, 1), order=(1, 0, 2)
+                    (tiles * 128, SPLIT_K, 1), order=(1, 0, 2)
                 ).shape,
                 SF_VEC,
             ),
         )
-        out = cute.make_tensor(out_ptr, cute.make_layout(SPLITS * TILE * m))
+        out = cute.make_tensor(out_ptr, cute.make_layout(tiles * TILE * m))
         route = cute.make_tensor(route_ptr, cute.make_layout(4 + 2 * cta_words))
         # A static record: no ready words.
         self._launch(
@@ -220,7 +232,7 @@ class SharedFc1(RoutedExpertGemm):
         item: Int32,
         exchange: cute.Tensor,
     ):
-        """The FP32 partial sums, at [split * 8 + row, weight row]."""
+        """The FP32 partial sums, at [tile * 8 + row, weight row]."""
         (mOut,) = epi
         for i in cutlass.range_constexpr(cute.size(tDrAcc)):
             coord = tDcC[i]
@@ -239,18 +251,24 @@ class SharedAct:
         quant_ptr: cute.Pointer,
         scale_ptr: cute.Pointer,
         rows: Int32,
+        row_tiles: Int32,
         stream: cuda.CUstream,
     ):
-        """``partial``: FP32 [SPLITS, 8, 1536]; ``quant``: E4M3 [8, 768] as
-        words; ``scale``: one tile of atoms."""
+        """``partial``: FP32 [SPLITS, ``row_tiles`` x 8, 1536]; ``quant``:
+        E4M3 [``row_tiles`` x 8, 768] as words; ``scale``: one atom block per
+        row tile."""
         self.kernel(
             cute.make_tensor(
-                partial_ptr, cute.make_layout(SPLITS * TILE * 2 * INTERMEDIATE)
+                partial_ptr,
+                cute.make_layout(SPLITS * row_tiles * TILE * 2 * INTERMEDIATE),
             ),
-            cute.make_tensor(quant_ptr, cute.make_layout(TILE * INTERMEDIATE // 4)),
             cute.make_tensor(
-                scale_ptr, cute.make_layout(tile_scale_bytes(INTERMEDIATE))
+                quant_ptr, cute.make_layout(row_tiles * TILE * INTERMEDIATE // 4)
             ),
+            cute.make_tensor(
+                scale_ptr, cute.make_layout(row_tiles * tile_scale_bytes(INTERMEDIATE))
+            ),
+            row_tiles,
         ).launch(
             grid=(rows, 1, 1),
             block=[INTERMEDIATE // 8, 1, 1],
@@ -259,7 +277,13 @@ class SharedAct:
         )
 
     @cute.kernel
-    def kernel(self, partial: cute.Tensor, quant: cute.Tensor, scales: cute.Tensor):
+    def kernel(
+        self,
+        partial: cute.Tensor,
+        quant: cute.Tensor,
+        scales: cute.Tensor,
+        row_tiles: Int32,
+    ):
         cute.arch.griddepcontrol_launch_dependents()
         thread, _, _ = cute.arch.thread_idx()
         row, _, _ = cute.arch.block_idx()
@@ -270,7 +294,7 @@ class SharedAct:
         up.fill(0.0)
         cute.arch.griddepcontrol_wait()
         for split in cutlass.range_constexpr(SPLITS):
-            base = (split * TILE + row) * 2 * INTERMEDIATE + first
+            base = (split * row_tiles * TILE + row) * 2 * INTERMEDIATE + first
             for i in cutlass.range_constexpr(8):
                 gate[i] = gate[i] + partial[base + i]
                 up[i] = up[i] + partial[base + INTERMEDIATE + i]
@@ -284,7 +308,7 @@ class SharedAct:
                 _bf16_round(up[2 * i + 1]),
                 _bf16_round(gate[2 * i + 1]),
             )
-        store_mxfp8(quant, scales, words, row, first, INTERMEDIATE)
+        store_mxfp8(quant, scales, words, row, first, INTERMEDIATE, row_tiles)
 
 
 @cute.jit
@@ -310,12 +334,14 @@ class SharedFc2(RoutedExpertGemm):
         out_ptr: cute.Pointer,
         route_ptr: cute.Pointer,
         rows: Int32,
+        row_tiles: Int32,
         cta_words: Int32,
         ctas: Int32,
         stream: cuda.CUstream,
     ):
         """A: w_down (6144, 768) E4M3, K-major, E8M0 scales in the 128x4
-        layout; B: the quantized ``h`` (8, 768); out: BF16 [rows, 6144]."""
+        layout; B: the quantized ``h`` (``row_tiles`` x 8, 768); out: BF16
+        [rows, 6144]."""
         self.a_dtype = a_ptr.value_type
         self.b_dtype = b_ptr.value_type
         self.sf_dtype = sfa_ptr.value_type
@@ -326,12 +352,15 @@ class SharedFc2(RoutedExpertGemm):
             sfa_ptr, blockscaled_utils.tile_atom_to_shape_SF(a.shape, SF_VEC)
         )
         b = cute.make_tensor(
-            b_ptr, cute.make_ordered_layout((TILE, self.k, 1), order=(1, 0, 2))
+            b_ptr,
+            cute.make_ordered_layout((row_tiles * TILE, self.k, 1), order=(1, 0, 2)),
         )
         sfb = cute.make_tensor(
             sfb_ptr,
             blockscaled_utils.tile_atom_to_shape_SF(
-                cute.make_ordered_layout((128, self.k, 1), order=(1, 0, 2)).shape,
+                cute.make_ordered_layout(
+                    (row_tiles * 128, self.k, 1), order=(1, 0, 2)
+                ).shape,
                 SF_VEC,
             ),
         )
