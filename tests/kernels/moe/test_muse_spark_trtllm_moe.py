@@ -22,7 +22,12 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -31,7 +36,10 @@ from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNormWithInputScale,
 )
 from vllm.models.muse_spark.nvidia.mega_moe import MuseSparkMegaMoEExperts
-from vllm.models.muse_spark.nvidia.muse_moe_runner import MuseSparkTrtLlmNvFp4Experts
+from vllm.models.muse_spark.nvidia.muse_moe_runner import (
+    MusePostExpertFinalize,
+    MuseSparkTrtLlmNvFp4Experts,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -432,3 +440,125 @@ def test_muse_spark_moe_cudagraph(nvfp4, dist_init, workspace_init):
         ckpt, quant_config = _bf16_checkpoint(), None
     _, _, _, vllm_config, runner = build_moe(MuseSpark1xRMSNorm, ckpt, quant_config)
     assert_cudagraph_replays(runner, vllm_config, *_inputs(5), *_inputs(6))
+
+
+@torch.inference_mode()
+def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
+    """Shared TRT storage must preserve native MegaMoE outputs and graph replay."""
+    from vllm.models.muse_spark.nvidia.mega_moe import _get_deep_gemm
+    from vllm.models.muse_spark.nvidia.ops.prepare_megamoe_nvfp4 import (
+        prepare_megamoe_nvfp4_inputs,
+    )
+
+    torch.manual_seed(137)
+    ckpt = _nvfp4_checkpoint()
+    norm = MuseSpark1xRMSNormWithInputScale(
+        hidden_size=K,
+        eps=1e-8,
+        has_weight=True,
+        is_post_norm=True,
+        zero_centered_gamma=True,
+    ).cuda()
+    norm.weight.copy_(torch.linspace(-0.5, 0.5, K, device="cuda"))
+    layers = []
+    for layout, tp_size in (("native", 1), ("trtllm", 4)):
+        config = VllmConfig(
+            kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
+            quant_config=nvfp4_quant_config(),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=tp_size,
+                enable_expert_parallel=True,
+                distributed_executor_backend="mp",
+            ),
+        )
+        with set_current_vllm_config(config):
+            layer = MuseSparkMegaMoEExperts(
+                config,
+                num_experts=E,
+                num_local_experts=E,
+                experts_start_idx=0,
+                top_k=TOPK,
+                hidden_size=K,
+                intermediate_size=N,
+                post_expert_norm=norm,
+                num_max_tokens_per_rank=128,
+                prefix=f"shared_layout.{layout}",
+            ).cuda()
+            assert layer.weight_layout == layout
+            assert set(layer.load_weights(ckpt.items())) == set(ckpt)
+            layer.finalize_weights()
+            layers.append(layer)
+    native, shared = layers
+    for view, parameter in (
+        (shared._transformed_l1[0], shared.w13_weight),
+        (shared._transformed_l1[1], shared.w13_weight_scale),
+        (shared._transformed_l2[0], shared.w2_weight),
+        (shared._transformed_l2[1], shared.w2_weight_scale),
+    ):
+        assert view.data_ptr() == parameter.data_ptr()
+        assert view.untyped_storage().nbytes() == parameter.untyped_storage().nbytes()
+    shared.finalize_weights()  # Must not shuffle the already finalized weights again.
+
+    dg = _get_deep_gemm()
+    buffer = dg.SymmBuffer(
+        torch.distributed.group.WORLD, E, 128, TOPK, K, N, mma_type="fp4xfp4"
+    )
+    try:
+        for tokens in (1, 8, 32, 64):
+            x = torch.randn(tokens, K, device="cuda", dtype=torch.bfloat16) / 10
+            weights, ids = torch.randn(tokens, E, device="cuda").topk(TOPK)
+            weights = weights.softmax(-1)
+            ids = ids.int()
+            ids[::3, -1] = -1
+            buffer.topk_idx.fill_(-1)
+            buffer.topk_weights.zero_()
+
+            def stage(x=x, weights=weights, ids=ids, tokens=tokens):
+                prepare_megamoe_nvfp4_inputs(
+                    x,
+                    weights,
+                    ids,
+                    buffer.x[:tokens],
+                    buffer.x_sf[:tokens].view(torch.uint8),
+                    buffer.topk_idx[:tokens],
+                    buffer.topk_weights[:tokens],
+                    None,
+                )
+
+            stage()
+            expected = native.forward_prepared(x, buffer)
+            actual = shared.forward_prepared(x, buffer)
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                actual = shared.forward_prepared(x, buffer)
+            for _ in range(3):
+                x.normal_(std=0.1)
+                ids.copy_(torch.randn(tokens, E, device="cuda").topk(TOPK).indices)
+                stage()
+                expected = native.forward_prepared(x, buffer)
+                graph.replay()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    finally:
+        buffer.destroy()
+
+
+def test_post_expert_norm_weight_refilled_after_reload():
+    """The activation-dtype norm weight is built on the first forward; a weight
+    reload must refresh it where captured CUDA graphs read it."""
+    from types import SimpleNamespace
+
+    norm = SimpleNamespace(has_weight=True, weight=torch.rand(8), hidden_size=8)
+    finalize = MusePostExpertFinalize.__new__(MusePostExpertFinalize)
+    finalize._norm = norm
+    finalize._fused_weight = None
+
+    finalize.process_weights_after_loading()  # cold start: not built yet
+    assert finalize._fused_weight is None
+    first = finalize._effective_weight(torch.bfloat16, torch.device("cpu"))
+
+    norm.weight = norm.weight * 3
+    finalize.process_weights_after_loading()
+
+    assert finalize._fused_weight is first
+    torch.testing.assert_close(first, norm.weight.to(torch.bfloat16))
