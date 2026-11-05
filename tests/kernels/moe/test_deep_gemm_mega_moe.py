@@ -1074,9 +1074,8 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""
-    from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
-
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
 
     device = torch.device("cuda")
     hidden_size, top_k, shared_block_m = 5120, 8, 32

@@ -183,14 +183,13 @@ def test_mega_moe_block_matches_the_qat_reference(dist_init, num_tokens):
     loaded from a compressed-tensors checkpoint, reproduces the QAT recipe:
     per-token FC1 input scales and the fixed FC2 input scale on the unweighted
     SwiGLU output. Routing weights scale the BF16 expert outputs in combine."""
-    from vllm.third_party.deep_gemm.utils.nvfp4 import (
-        cast_back_from_nvfp4,
-        per_token_cast_to_nvfp4,
-    )
-
     from vllm.third_party.deep_gemm.utils import (
         cast_back_from_fp8,
         per_token_cast_to_fp8,
+    )
+    from vllm.third_party.deep_gemm.utils.nvfp4 import (
+        cast_back_from_nvfp4,
+        per_token_cast_to_nvfp4,
     )
 
     torch.manual_seed(0)

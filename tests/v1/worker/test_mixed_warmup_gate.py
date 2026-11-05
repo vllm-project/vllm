@@ -5,11 +5,22 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.gpu import warmup
 from vllm.v1.worker.gpu.warmup import run_mixed_prefill_decode_warmup
+
+
+def _kv_cache_spec():
+    return FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+        dcp_sharded=False,
+    )
 
 
 def _fail(*args, **kwargs):
@@ -41,17 +52,7 @@ def test_mixed_warmup_disables_watermarking():
         max_num_tokens=32,
         speculative_config=None,
         kv_cache_config=SimpleNamespace(
-            kv_cache_groups=[
-                SimpleNamespace(
-                    kv_cache_spec=SimpleNamespace(
-                        block_size=16,
-                        dcp_sharded=False,
-                        max_num_blocks_per_req=lambda vllm_config, max_len: cdiv(
-                            max_len, 16
-                        ),
-                    )
-                )
-            ],
+            kv_cache_groups=[SimpleNamespace(kv_cache_spec=_kv_cache_spec())],
             num_blocks=128,
         ),
         vllm_config=SimpleNamespace(
@@ -92,11 +93,7 @@ def test_mixed_warmup_reserves_drafting_slots():
         max_num_tokens=32,
         speculative_config=SimpleNamespace(max_num_new_slots_for_drafting=1),
         kv_cache_config=SimpleNamespace(
-            kv_cache_groups=[
-                SimpleNamespace(
-                    kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False)
-                )
-            ],
+            kv_cache_groups=[SimpleNamespace(kv_cache_spec=_kv_cache_spec())],
             num_blocks=128,
         ),
         vllm_config=SimpleNamespace(
