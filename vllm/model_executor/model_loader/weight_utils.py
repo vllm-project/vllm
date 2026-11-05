@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -47,9 +48,11 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.model_loader.ep_weight_filter import (
     should_skip_weight,
 )
+from vllm.model_executor.utils import copy_weight_
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
+from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -966,27 +969,6 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
     return sum(os.path.getsize(f) for f in files)
 
 
-def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits."""
-    import psutil
-
-    host_available = psutil.virtual_memory().available
-
-    from vllm.utils.cpu_resource_utils import (
-        get_cgroup_memory_limit,
-        get_cgroup_memory_usage,
-    )
-
-    cgroup_limit = get_cgroup_memory_limit()
-    if cgroup_limit is None:
-        return host_available
-    cgroup_usage = get_cgroup_memory_usage()
-    cgroup_available = (
-        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
-    )
-    return min(host_available, cgroup_available)
-
-
 def _get_fs_type(files: list[str]) -> str:
     """Get the filesystem type of the first file in *files* (Linux only)."""
     if not files:
@@ -1136,7 +1118,7 @@ def safetensors_weights_iterator(
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
-    avail_bytes = _get_available_ram_bytes()
+    avail_bytes = get_available_memory()
     ram_threshold_pct = 90
     fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
     fs_name = fs_type.upper() if fs_type else "unknown"
@@ -1293,10 +1275,13 @@ def runai_safetensors_weights_iterator(
             else "cpu"
         )
 
+        # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
+        owned = "owned" in inspect.signature(streamer.stream_files).parameters
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **({"owned": True} if owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1313,7 +1298,7 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(
@@ -1385,13 +1370,20 @@ def fastsafetensors_weights_iterator(
             pl.close()
 
 
+_ENGRAM_WEIGHT_RE = re.compile(
+    r"(?:^|\.)(?:engram\.embed\.(?:weight|scale)|"
+    r"ple\.ple_embedding\.ngram_embedding\.shard_[0-9]+\.weight)$"
+)
+
+
 def instanttensor_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     local_expert_ids: set[int] | None = None,
+    *,
+    load_engram_on_cpu: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files
-    using instanttensor library."""
+    """Load with InstantTensor, optionally mapping Engram tables on CPU."""
     try:
         import instanttensor
     except ImportError as e:
@@ -1410,53 +1402,63 @@ def instanttensor_weights_iterator(
     else:
         process_group = world_group.device_group if world_group.world_size > 1 else None
 
-    device = current_platform.current_device()
+    gpu_weight_names: list[str] = []
+    cpu_weights: dict[str, list[str]] = {}
+    for path in hf_weights_files:
+        with safe_open(path, framework="pt") as metadata:
+            for name in metadata.keys():  # noqa: SIM118
+                # Engram tables can exceed device memory before TP sharding.
+                if load_engram_on_cpu and _ENGRAM_WEIGHT_RE.search(name) is not None:
+                    cpu_weights.setdefault(path, []).append(name)
+                else:
+                    gpu_weight_names.append(name)
 
-    extra_kwargs: dict[str, Any] = {}
-    if local_expert_ids is not None:
-        checkpoint_names: list[str] = []
-        for path in hf_weights_files:
-            with safe_open(path, framework="pt") as metadata:
-                checkpoint_names.extend(metadata.keys())  # noqa: SIM118
-        # Every rank must make the same decision about collective loading.
-        empty_expert_ids: set[int] = set()
-        if any(should_skip_weight(name, empty_expert_ids) for name in checkpoint_names):
-            process_group = None
-            extra_kwargs["tensor_filter"] = [
-                name
-                for name in checkpoint_names
-                if not should_skip_weight(name, local_expert_ids)
-            ]
-            extra_kwargs["tensor_name_match_mode"] = "exact"
+    # Every rank must make the same decision about collective loading.
+    empty_expert_ids: set[int] = set()
+    filter_experts = local_expert_ids is not None and any(
+        should_skip_weight(name, empty_expert_ids) for name in gpu_weight_names
+    )
+    tensor_filter: list[str] | None = None
+    if cpu_weights or filter_experts:
+        process_group = None
+        tensor_filter = [
+            name
+            for name in gpu_weight_names
+            if not should_skip_weight(name, local_expert_ids)
+        ]
 
-    # copy=True yields tensors that own their memory, staying valid after the
-    # context exits or InstantTensor reuses its buffer.
-    with instanttensor.safe_open(
-        hf_weights_files,
-        framework="pt",
-        device=device,
-        process_group=process_group,
-        copy=True,
-        **extra_kwargs,
-    ) as f:
-        # Track bytes so the bar reports load throughput (GB/s).
-        pbar = tqdm(
-            total=f.total_tensor_size,
-            desc="Loading safetensors using InstantTensor loader",
-            disable=not enable_tqdm(use_tqdm_on_load),
-            bar_format=_BAR_FORMAT,
-            position=tqdm._get_free_pos(),
-            unit="B",
-            unit_scale=True,
-            unit_divisor=1024,
-            mininterval=1.0,
-        )
-        try:
+    if gpu_weight_names:
+        # copy=True keeps tensors valid after InstantTensor reuses its buffer.
+        with (
+            instanttensor.safe_open(
+                hf_weights_files,
+                framework="pt",
+                device=current_platform.current_device(),
+                process_group=process_group,
+                copy=True,
+                tensor_filter=tensor_filter,
+                tensor_name_match_mode="exact",
+            ) as f,
+            tqdm(
+                total=f.total_tensor_size,
+                desc="Loading safetensors using InstantTensor loader",
+                disable=not enable_tqdm(use_tqdm_on_load),
+                bar_format=_BAR_FORMAT,
+                position=tqdm._get_free_pos(),
+                unit="B",
+                unit_scale=True,
+                unit_divisor=1024,
+                mininterval=1.0,
+            ) as pbar,
+        ):
             for name, tensor in f.tensors():
                 pbar.update(tensor.numel() * tensor.element_size())
                 yield name, tensor
-        finally:
-            pbar.close()
+
+    for path, names in cpu_weights.items():
+        with safe_open(path, framework="pt", device="cpu") as f:
+            for name in names:
+                yield name, f.get_tensor(name)
 
 
 def pt_weights_iterator(
@@ -1509,6 +1511,55 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Run every module's own post-load hook after a full load or reload,
+    each module after all of its submodules.
+
+    Quantization methods, the submodules of quantized layers (their quant
+    method processes them) and attention layers are skipped: the loader runs
+    them in its earlier per-layer passes, which later passes may read.
+    """
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+
+    seen: set[torch.nn.Module] = set()
+
+    def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        quantized = isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        )
+        # a module shared by several parents runs once, before all of them
+        for child in [] if quantized else module.children():
+            if child not in seen:
+                seen.add(child)
+                yield from children_first(child)
+        yield module
+
+    for module in children_first(model):
+        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
+            module
+        ):
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if callable(hook):
+            hook()
+
+
+@torch.no_grad()
+def refresh_derived_weights(model: torch.nn.Module) -> None:
+    """Call ``refresh_derived_weights()`` on every module that defines it, to
+    rebuild tensors kept out of ``state_dict()`` after the weights were
+    overwritten in place. Hooks must be idempotent, write in place and run no
+    collectives.
+    """
+    for module in model.modules():
+        refresh = getattr(module, "refresh_derived_weights", None)
+        if callable(refresh):
+            refresh()
+
+
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
     """Default weight loader."""
     try:
@@ -1516,14 +1567,14 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
             # reshape to match before copying
-            param.data.copy_(loaded_weight.view(param.shape))
+            copy_weight_(param.data, loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
                 f"into parameter ({param.size()})"
             )
 
-            param.data.copy_(loaded_weight)
+            copy_weight_(param.data, loaded_weight)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.
