@@ -137,16 +137,17 @@ variants:
         docker_image: "vllm/vllm-openai:kimi-k31-cu134"
         install: { pip: false }
       # TPU serving runs through vllm-torchtpu (vllm-project/vllm-torchtpu).
-      # K3.1 support lands with vllm-project/vllm-torchtpu#2775: the Install
-      # tab carries the source build; no published image has it. The TPU path
-      # is text-only (the vision tower is not loaded) and was validated at
-      # TP32 / EP32 on a 2x2x4 TPU v7x slice (4 hosts, 16 chips, 32 devices).
+      # K3.1 support is under review as vllm-project/vllm-torchtpu#2775; until
+      # it merges, the Install tab builds from the staging branch kimi-k31pro.
+      # The TPU path is text-only (the vision tower is not loaded) and was
+      # validated at TP32 / EP32 on a 2x2x4 TPU v7x slice (4 hosts, 16 chips,
+      # 32 devices).
       ironwood:
         install:
           docker: false
           pip:
-            command: "git clone https://github.com/vllm-project/vllm-torchtpu.git && cd vllm-torchtpu && git fetch origin refs/pull/2775/head && git checkout FETCH_HEAD && VLLM_TARGET_DEVICE=empty uv sync --group vllm && source .venv/bin/activate"
-            note: "Source build of vLLM-TorchTPU at vllm-torchtpu#2775 (Python 3.12, uv; its vllm group builds the pinned vLLM 0.32.0). Once #2775 merges, `uv sync --group vllm` on main is enough."
+            command: "git clone https://github.com/vllm-project/vllm-torchtpu.git && cd vllm-torchtpu && git checkout kimi-k31pro && VLLM_TARGET_DEVICE=empty uv sync --group vllm && source .venv/bin/activate"
+            note: "Source build of vLLM-TorchTPU from the kimi-k31pro branch (Python 3.12, uv; its vllm group builds the pinned vLLM 0.32.0). Tracks vllm-torchtpu#2775 until it merges into main."
         extra_env:
           TPU_VLLM_ENABLE_UNIFIED_BLOCK_POOL: "1"
           TPU_MOE_HIERARCHICAL_EP: "1"
@@ -554,10 +555,10 @@ guide: |
   ## TPU serving
 
   TPU serving runs through [vLLM torch-TPU](https://github.com/vllm-project/vllm-torchtpu) and
-  is text-only: the vision tower is not loaded. K3.1 support lands with
+  is text-only: the vision tower is not loaded. K3.1 support is under review as
   [vllm-torchtpu#2775](https://github.com/vllm-project/vllm-torchtpu/pull/2775); until it merges,
-  the Install tab on TPU carries the source build (Python 3.12, uv). No published image or wheel
-  carries it yet.
+  the Install tab on TPU builds from the `kimi-k31pro` staging branch (Python 3.12, uv). No
+  published image or wheel carries it yet.
 
   The generated command uses vllm-torchtpu's default multiprocessing multi-host backend: run the
   head command on the slice's first host and the worker commands on the remaining hosts (the
