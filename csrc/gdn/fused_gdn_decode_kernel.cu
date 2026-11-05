@@ -192,6 +192,13 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
     int H, int HV, int state_indices_width, int dt_bias_type,
     bool norm_weight_is_bf16, float scale, float norm_eps,
     GdnDecodeStrides strides) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 900
+  // Reduce binary size on architectures without cluster support.
+  if constexpr (SplitV > 1) {
+    __trap();
+    return;
+  }
+#endif
   constexpr int kChunksPerCta = kNumChunks / SplitV;
   constexpr int kSliceV = kDimV / SplitV;
   const int request = blockIdx.x;
@@ -428,7 +435,8 @@ __global__ __launch_bounds__(kThreads, 2) void gdn_decode_post_conv_mtp_kernel(
 }
 
 // Split V over a cluster while the split grid still fits in one wave (2 CTAs
-// per SM). On B300 this picks 4 up to 2 requests and 2 at 4 requests (HV=32).
+// per SM). On B300 this picks 4 up to 2 requests and 2 at 4 requests (value
+// heads HV=32).
 // TODO: sweeps on B300 and H100 suggest splits still pay off up to ~3 CTAs per
 // SM. Benchmark more GPUs before raising the limit.
 int choose_split_v(int num_blocks, int device) {
@@ -454,9 +462,7 @@ cudaError_t launch_split(dim3 grid, cudaStream_t stream, Args... args) {
                                       SplitV>;
   cudaLaunchAttribute attribute{};
   attribute.id = cudaLaunchAttributeClusterDimension;
-  attribute.val.clusterDim.x = 1;
-  attribute.val.clusterDim.y = 1;
-  attribute.val.clusterDim.z = SplitV;
+  attribute.val.clusterDim = {1, 1, SplitV};
   cudaLaunchConfig_t config{};
   config.gridDim = grid;
   config.blockDim = dim3(kThreads);
