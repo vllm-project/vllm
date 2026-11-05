@@ -141,6 +141,11 @@ class BaseSpeculator(ABC):
         requests have finished. No-op by default."""
         return
 
+    def update_max_model_len(self, max_model_len: int) -> None:
+        """Apply a reduced max_model_len. Auto-fit can call this after capture,
+        when CUDA graphs no longer see Python values. No-op by default."""
+        return
+
 
 class DraftModelSpeculator(BaseSpeculator):
     # Draft prefill runs on the target's batch, so it can reuse the target
@@ -164,8 +169,8 @@ class DraftModelSpeculator(BaseSpeculator):
         # Draft steps in CUDA graphs read the length limit from here rather
         # than a constant baked at capture, so an auto-fit reduction after
         # capture (`update_max_model_len`) also applies to graph replays.
-        self.max_model_len_gpu = torch.full(
-            (1,), self.max_model_len, dtype=torch.int32, device=device
+        self.max_model_len_gpu = torch.tensor(
+            self.max_model_len, dtype=torch.int32, device=device
         )
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -261,7 +266,6 @@ class DraftModelSpeculator(BaseSpeculator):
         return self.vllm_config.model_config.max_model_len
 
     def update_max_model_len(self, max_model_len: int) -> None:
-        """Apply a max_model_len that auto-fit reduced after capture."""
         self.max_model_len_gpu.fill_(max_model_len)
 
     @abstractmethod

@@ -631,7 +631,7 @@ def _update_draft_inputs_kernel(
     hidden_states_ptr,
     hidden_states_stride,
     hidden_size,
-    max_model_len_ptr,  # [1]
+    max_model_len_ptr,  # scalar
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
     ADVANCE_DRAFT_POSITIONS: tl.constexpr,
@@ -698,7 +698,7 @@ def update_draft_inputs(
     input_buffers: InputBuffers,
     sample_src_positions: torch.Tensor,
     num_reqs: int,
-    max_model_len: torch.Tensor,  # [1] device tensor, loaded inside the kernel
+    max_model_len: torch.Tensor,  # scalar device tensor, loaded inside the kernel
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ):

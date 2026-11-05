@@ -411,11 +411,9 @@ class EngineCore:
                 scheduler_kv_cache_config,
                 compilation_times,
             )
-            if vllm_config.model_config.max_model_len != max_model_len_after:
-                self.collective_rpc(
-                    "update_max_model_len",
-                    args=(vllm_config.model_config.max_model_len,),
-                )
+            max_model_len = vllm_config.model_config.max_model_len
+            if max_model_len != max_model_len_after:
+                self.collective_rpc("update_max_model_len", args=(max_model_len,))
             self.model_executor.extend_kv_cache(num_blocks)
         # Under the extensible KV cache, workers create the connector in
         # `extend_kv_cache`, so ask for its block count only afterwards.

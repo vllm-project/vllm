@@ -729,7 +729,7 @@ def test_captured_draft_update_reads_reduced_max_model_len():
         positions=torch.zeros(num_reqs, dtype=torch.int64, device=device),
         seq_lens=torch.zeros(num_reqs, dtype=torch.int32, device=device),
     )
-    max_model_len = torch.full((1,), 100, dtype=torch.int32, device=device)
+    max_model_len = torch.tensor(100, dtype=torch.int32, device=device)
     draft_tokens = torch.zeros(num_reqs, dtype=torch.int64, device=device)
     output_draft_tokens = torch.zeros(
         num_reqs, num_steps, dtype=torch.int64, device=device

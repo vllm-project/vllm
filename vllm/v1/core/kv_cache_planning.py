@@ -1432,8 +1432,7 @@ def _auto_fit_max_model_len(
         if after_warmup:
             logger.info(
                 "Auto-fit max_model_len: using max_model_len=%d, which fits in "
-                "the KV cache memory left after CUDA graph capture and warmup "
-                "(%s).",
+                "the KV cache memory left after CUDA graph capture and warmup (%s).",
                 original_max,
                 kv_cache_memory,
             )
@@ -1867,11 +1866,7 @@ def finalize_extensible_kv_cache(
             for groups in groups_per_worker
         ]
         _auto_fit_max_model_len(
-            builder,
-            vllm_config,
-            groups_per_worker,
-            available_memory,
-            after_warmup=True,
+            builder, vllm_config, groups_per_worker, available_memory, after_warmup=True
         )
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
