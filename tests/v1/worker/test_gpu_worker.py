@@ -544,9 +544,8 @@ class _OrderedHandle:
 def test_execute_model_waits_previous_pp_send_before_forward(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Without send buffers, the previous send's device handles are waited
-    before the forward pass; the metadata handle is left to the
-    GroupCoordinator's reaper."""
+    """The previous send's device handles are waited before the forward pass;
+    the metadata handle is left to the GroupCoordinator's reaper."""
     import torch
 
     from vllm.distributed.pp_transport.nccl import NcclTransport
@@ -583,7 +582,7 @@ def test_execute_model_waits_previous_pp_send_before_forward(
         use_v2_model_runner=True,
         model_runner=SimpleNamespace(execute_model=run_model, is_pooling_model=False),
         annotate_profile=lambda scheduler_output: nullcontext(),
-        _pp_transport=NcclTransport(SimpleNamespace(), None),
+        _pp_transport=NcclTransport(SimpleNamespace()),
     )
     worker._pp_transport._send_work = [previous_tensor_send]
     scheduler_output = SimpleNamespace(
@@ -594,37 +593,6 @@ def test_execute_model_waits_previous_pp_send_before_forward(
 
     assert log == ["wait:prev-tensor", "forward", "isend"]
     assert worker._pp_transport._send_work == [tensor_handle]
-
-
-def test_nccl_pp_transport_send_buffers_wait_only_on_slot_reuse() -> None:
-    """With send buffers, the next forward does not wait for the previous
-    send; a buffer's send is waited only when the buffer is reused."""
-    import torch
-
-    from vllm.distributed.pp_transport.nccl import NcclTransport
-
-    log: list[str] = []
-    sent: list[dict] = []
-    step = 0
-
-    def isend_tensor_dict(tensors, all_gather_group=None, all_gather_tensors=None):
-        sent.append(tensors)
-        return [_OrderedHandle(log, "meta"), _OrderedHandle(log, f"send{step}")]
-
-    pp_group = SimpleNamespace(isend_tensor_dict=isend_tensor_dict)
-    transport = NcclTransport(SimpleNamespace(), {"hidden_states": torch.zeros(4, 2)})
-    outputs = torch.zeros(3, 2)
-    for step in range(3):
-        transport.before_forward()
-        log.append(f"forward{step}")
-        outputs.fill_(step)
-        transport.send({"hidden_states": outputs}, pp_group)
-
-    assert log == ["forward0", "forward1", "forward2", "wait:send0"]
-    # Sends read the two buffers in turn, never the reused outputs.
-    ptrs = [t["hidden_states"].data_ptr() for t in sent]
-    assert outputs.data_ptr() not in ptrs
-    assert ptrs[0] != ptrs[1] and ptrs[2] == ptrs[0]
 
 
 def test_jit_monitor_activation_follows_enable_jit_warmup(
