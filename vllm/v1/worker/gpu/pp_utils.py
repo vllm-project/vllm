@@ -121,9 +121,17 @@ class PPHandler:
         # Whether sampled tokens were broadcast this step.
         self.sampled_tokens_broadcast = False
         self.aux_hidden_state_relay_keys: tuple[str, ...] = ()
+        self.checked_received_dtypes = False
 
     def on_req_idx_freed(self, req_idx: int) -> None:
         self.req_idx_gen_np[req_idx] += 1
+
+    def check_received_dtypes(
+        self, received: dict[str, torch.Tensor], buffers: dict[str, torch.Tensor]
+    ) -> None:
+        if not self.checked_received_dtypes:
+            warn_on_lossy_receive(received, buffers)
+            self.checked_received_dtypes = True
 
     def _sample_len(self, input_batch: InputBatch) -> int:
         # Width of the sampled-token broadcast. Must be the same on all ranks.

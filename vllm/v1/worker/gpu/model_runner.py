@@ -149,7 +149,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
-from vllm.v1.worker.gpu.pp_utils import PPHandler, warn_on_lossy_receive
+from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.batch_shard import (
     BatchSharder,
     all_to_all_vocab_shards,
@@ -251,7 +251,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Persistent buffer for intermediate tensors (non-first PP ranks).
         self.intermediate_tensors: IntermediateTensors | None = None
-        self.checked_received_dtypes = False
 
         # Dual batch overlap. Created in initialize_kv_cache(), once everything
         # it runs the microbatched forward with exists.
@@ -2088,11 +2087,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare the intermediate tensors.
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
-            if not dummy_run and not self.checked_received_dtypes:
-                warn_on_lossy_receive(
+            if not dummy_run:
+                assert self.pp_handler is not None
+                self.pp_handler.check_received_dtypes(
                     intermediate_tensors.tensors, self.intermediate_tensors.tensors
                 )
-                self.checked_received_dtypes = True
             n = input_batch.num_tokens_after_padding
             new_tensors = {
                 k: v[:n]
