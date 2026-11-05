@@ -77,9 +77,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -264,12 +261,9 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             return build_linear_method(self, self.quant_method, prefix)
         elif isinstance(layer, RoutedExperts):
-            quant_method = self.FusedMoEMethodCls(
+            return self.FusedMoEMethodCls(
                 quant_config=self, moe_config=layer.moe_config
             )
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
 
         return None
 
@@ -2084,7 +2078,6 @@ class RuntimeDtypes:
 
     input_dtype: torch.dtype
     out_dtype: torch.dtype
-    marlin_input_dtype: torch.dtype | None = None
 
 
 @dataclass(frozen=True)
@@ -2713,10 +2706,6 @@ class ModelOptLinearMethod(LinearMethodBase):
         )
         self.out_dtype = dtype
         self.input_dtype = dtype
-        self.marlin_input_dtype = None
-        # Kernel/backend are chosen in create_weights (after get_quant_method),
-        # so the front-end marlin poke stays dormant here — same as the old
-        # NVFP4 methods.
         self.kernel: Any = None
 
     @property
@@ -2763,7 +2752,7 @@ class ModelOptLinearMethod(LinearMethodBase):
             self.akey.create_weights(layer, ACT, self.ctx, shapes, weight_loader)
         self.fmt.extra_weights(layer, shapes, self.ctx, weight_loader)
 
-        rt = RuntimeDtypes(self.input_dtype, self.out_dtype, self.marlin_input_dtype)
+        rt = RuntimeDtypes(self.input_dtype, self.out_dtype)
         self.kernel = select_linear_kernel(
             self.spec,
             layer,
