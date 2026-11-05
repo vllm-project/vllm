@@ -86,12 +86,16 @@ SpecResources` with the reduced capabilities. The result may only take less than
 that branches runs as a chain of the same length.
 
 A tree speculator should override `adapt_resources` to pick its own chain, because a
-64-row tree is not a 64-token chain.
+64-row tree is not a 64-token chain. A request verifies at most the largest entry
+of the adapted `capture_rows` (`max_rows`), so dropping the largest entry shortens
+the chain.
 
-The engine logs one line per limit that lowers the declared plan kind:
+The engine logs one line per limit that lowers the declared plan kind, and one when
+`max_rows` drops:
 
 ```text
 spec decode: tree -> chain (<layer kind>, <n> layers: <reason>)
+spec decode: max_rows <declared> -> <adapted> (adapt_resources)
 ```
 
 The scheduler, the runner, the CUDA graph manager and the speculator then run with

@@ -24,7 +24,8 @@ class SpecResources:
     """What speculation holds.
 
     The runner captures a decode CUDA graph for each entry of ``capture_rows``,
-    and no request verifies more rows than the largest (``max_rows``).
+    and no request verifies more rows than the largest (``max_rows``): an
+    ``adapt_resources`` that drops the largest entry verifies fewer drafts.
 
     The speculator's config declares them (``SpeculatorConfig.resources``), and the
     KV and recurrent-state pools are sized for ``num_speculative_tokens``. The engine

@@ -230,7 +230,8 @@ def resolve_spec_resources(
     """The resources speculation runs with: the speculator's declaration adapted
     to what every rank verifies (``capabilities``, one per worker).
 
-    Logs one line per cap that lowers the declared plan kind. Raises when the
+    Logs one line per cap that lowers the declared plan kind, and one when the
+    adapted ``capture_rows`` lower ``max_rows``. Raises when the
     adapted resources exceed the declared ones or the capabilities. A speculator
     that must not run with a lower plan kind raises in its ``adapt_resources``.
     """
@@ -249,6 +250,12 @@ def resolve_spec_resources(
         )
     effective = speculator_config.adapt_resources(declared, caps)
     validate_effective_resources(declared, effective, caps)
+    if effective.max_rows < declared.max_rows:
+        logger.info(
+            "spec decode: max_rows %d -> %d (adapt_resources)",
+            declared.max_rows,
+            effective.max_rows,
+        )
     return effective
 
 

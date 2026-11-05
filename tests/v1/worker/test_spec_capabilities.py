@@ -351,7 +351,7 @@ class _TreeConfig(SpeculatorConfig):
         self.changes = changes
 
     def resources(self, max_num_seqs):
-        return SpecResources(capture_rows=(4,), max_branching=2)
+        return SpecResources(capture_rows=(1, 4), max_branching=2)
 
     def adapt_resources(self, declared, caps):
         if not self.changes:
@@ -373,6 +373,13 @@ _CHAIN = SpecCapabilities.from_limits(
         (_TreeConfig(), _TREE, "declared", []),
         (_speculative_config().speculator_config, _CHAIN, "declared", []),
         (_TreeConfig(max_branching=2), _CHAIN, "plan_kind 'tree' is above", []),
+        # Dropping the widest graph verifies fewer rows, and says so.
+        (
+            _TreeConfig(max_branching=1, capture_rows=(1,)),
+            _CHAIN,
+            "lowered",
+            ["(a: x)", "(b: y)", "max_rows 4 -> 1"],
+        ),
         (
             _TreeConfig(max_branching=1, capture_rows=(5,)),
             _CHAIN,
@@ -385,6 +392,7 @@ _CHAIN = SpecCapabilities.from_limits(
         "tree-kept",
         "chain-kept",
         "bad-kind",
+        "narrowed",
         "bad-rows",
     ],
 )
@@ -399,7 +407,7 @@ def test_resolve_spec_resources(config, caps, want, logged, caplog):
     if want == "declared":
         assert effective == declared
     else:
-        assert effective == replace(declared, max_branching=1)
+        assert effective == replace(declared, **{"max_branching": 1, **config.changes})
         assert effective.plan_kind == "chain"
     lines = [r.getMessage() for r in caplog.records if "spec decode" in r.getMessage()]
     assert len(lines) == len(logged)
