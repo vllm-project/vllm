@@ -39,6 +39,7 @@ from vllm.config.model import get_served_model_name
 from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
@@ -1049,6 +1050,7 @@ class Gemma4ForConditionalGeneration(
     # causal-only for images larger than the sliding window).
     mm_prefix_clamp_sliding_window: bool = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     packed_modules_mapping: dict[str, list[str]] = {
         "qkv_proj": [
@@ -1100,6 +1102,7 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            self.vision_input_norm = build_mm_input_norm(vllm_config.model_config)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
@@ -1299,6 +1302,23 @@ class Gemma4ForConditionalGeneration(
         cost = patches_per_item * 4 * position_embedding_size * 8
         return max(1, budget // cost) if cost > 0 else 1
 
+    def _embed_patches(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+        padding_positions: torch.Tensor,
+    ) -> torch.Tensor:
+        # With mm_device_do_normalize the processor skips the rescale, so
+        # pixel_values hold raw uint8 patches; the patch embedder expects
+        # [0, 1] floats. Patches are channel-last, so normalize per pixel.
+        num_channels = getattr(self.vision_tower.config, "num_channels", 3)
+        pixel_values = self.vision_input_norm(
+            pixel_values.reshape(-1, num_channels), self.model_dtype
+        ).view(pixel_values.shape)
+        return self.vision_tower.patch_embedder(
+            pixel_values, pixel_position_ids, padding_positions
+        ).to(self.model_dtype)
+
     # ------------------------------------------------------------------ #
     # Image processing
     # ------------------------------------------------------------------ #
@@ -1404,11 +1424,7 @@ class Gemma4ForConditionalGeneration(
                 )
                 pad_tensor = (pp_tensor == -1).all(dim=-1)
 
-                inputs_embeds = vt.patch_embedder(
-                    pv_tensor,
-                    pp_tensor,
-                    pad_tensor,
-                ).to(self.model_dtype)
+                inputs_embeds = self._embed_patches(pv_tensor, pp_tensor, pad_tensor)
                 # HuggingFace's mask builder probes `padding_mask.all()` to
                 # decide whether the mask can be skipped, which syncs.
                 with gpu_sync_allowed():
@@ -1522,11 +1538,7 @@ class Gemma4ForConditionalGeneration(
             pp_chunk = pixel_position_ids[i : i + max_batch_size]
             pad_chunk = padding_positions[i : i + max_batch_size]
 
-            inputs_embeds = vt.patch_embedder(
-                pv_chunk,
-                pp_chunk,
-                pad_chunk,
-            ).to(self.model_dtype)
+            inputs_embeds = self._embed_patches(pv_chunk, pp_chunk, pad_chunk)
             # HuggingFace's mask builder probes `padding_mask.all()`.
             with gpu_sync_allowed():
                 encoder_outputs = vt.encoder(
@@ -1874,7 +1886,7 @@ class Gemma4ForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
-        dtype = dtype or torch.float32
+        dtype = self.vision_input_norm.input_dtype or dtype or torch.float32
 
         assert axis_keys is not None
         (per_item_output,) = axis_keys
@@ -2036,11 +2048,9 @@ class Gemma4ForConditionalGeneration(
         pad_tensor = (pixel_position_ids == -1).all(dim=-1)
 
         vt = self.vision_tower
-        inputs_embeds = vt.patch_embedder(
-            pixel_values,
-            pixel_position_ids,
-            pad_tensor,
-        ).to(self.model_dtype)
+        inputs_embeds = self._embed_patches(
+            pixel_values, pixel_position_ids, pad_tensor
+        )
 
         encoder_outputs = vt.encoder(
             inputs_embeds=inputs_embeds,
