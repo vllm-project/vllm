@@ -824,6 +824,20 @@ if is_kv_cache_spec_uniform(specs):
     )
 
 
+def test_sliding_window_mla_spec_uniformity_compares_cache_shape():
+    def spec(head_size: int) -> SlidingWindowMLASpec:
+        return SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=head_size,
+            dtype=torch.float32,
+            sliding_window=128,
+        )
+
+    assert is_kv_cache_spec_uniform({"layer_1": spec(576), "layer_2": spec(576)})
+    assert not is_kv_cache_spec_uniform({"layer_1": spec(576), "layer_2": spec(512)})
+
+
 @pytest.mark.parametrize(
     ("model_id", "max_model_len", "want_estimated_max_len"),
     [
