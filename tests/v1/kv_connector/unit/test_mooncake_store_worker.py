@@ -1246,6 +1246,32 @@ def test_partial_tail_offload_skips_null_source_blocks():
     ]
 
 
+def test_superseded_checkpoint_is_removed_a_lease_after_its_successor(monkeypatch):
+    """The load that admitted the request leased the checkpoint it supersedes,
+    so the removal waits one lease and is not retried."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
+    store.batch_remove.side_effect = lambda keys: [-706] * len(keys)
+    now = 100.0
+    monkeypatch.setattr(mooncake_store_worker.time, "monotonic", lambda: now)
+    thread = _make_partial_tail_send_thread(store)
+    req = _resolve_partial_tail(thread, _make_partial_tail_req([1, 2, 3]))
+    req.superseded_boundary = 8
+
+    _run_store_req(thread, req)
+    now += mooncake_store_worker.MOONCAKE_KV_LEASE_TTL_S - 1
+    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    store.batch_remove.assert_not_called()
+
+    now += 1
+    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    _run_store_req(thread, _make_partial_tail_req([1, 2, 3]))
+    store.batch_remove.assert_called_once_with(
+        [thread.token_databases[1].store_layout.key_for(0, b"a1")]
+    )
+
+
 @pytest.mark.parametrize("saved", [0, 16])
 def test_partial_tail_offload_is_independent_of_worker_progress(saved):
     store = MagicMock()

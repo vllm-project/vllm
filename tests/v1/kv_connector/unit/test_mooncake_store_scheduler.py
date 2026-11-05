@@ -46,6 +46,7 @@ def _make_bare_scheduler(
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
+    scheduler.remove_superseded_checkpoints = False
     scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.client = _StubLookupClient(hit_tokens=0)
@@ -1683,6 +1684,31 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     assert meta.requests[0].boundary_puts == [(1, 7, 16), (1, 9, 32)]
     store_job_id = meta.requests[0].store_job_id
     assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
+
+
+@pytest.mark.parametrize(
+    ("enabled", "admitted", "superseded"),
+    [
+        # Admitted at the previous turn's prompt-end checkpoint.
+        (True, 20, 20),
+        # Admitted at a block-aligned state, which other prompts branch from.
+        (True, 16, None),
+        (False, 20, None),
+    ],
+)
+def test_prompt_end_checkpoint_supersedes_the_admitted_one(
+    enabled, admitted, superseded
+):
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler.remove_superseded_checkpoints = enabled
+    _register_offload_request(scheduler, prefill_end_tokens=37, num_prompt_tokens=37)
+    scheduler._request_trackers["req-0"].admitted_tokens = admitted
+    # The aligned state at 32 supersedes nothing; the prompt-end one at 36 does.
+    out = _make_offload_only_output([(1, 9, 32), (1, 11, 36)])
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert meta.requests[0].superseded_boundary == superseded
 
 
 def test_boundary_state_job_pins_exact_blocks_once():
