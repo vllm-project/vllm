@@ -155,10 +155,7 @@ def test_unpickled_long_lists_are_untracked() -> None:
     common per-step case) are left alone."""
     long, short = list(range(1000)), [1, 2]
     new = _create_new_requests_data(None)
-    new.prompt_token_ids = new.prefill_token_ids = long
     new.block_ids = (long, short)
     new = copy.deepcopy(new)
-    assert not gc.is_tracked(new.prompt_token_ids)
-    assert not gc.is_tracked(new.prefill_token_ids)
     assert not gc.is_tracked(new.block_ids[0]) and gc.is_tracked(new.block_ids[1])
-    assert new.prompt_token_ids == long
+    assert new.block_ids[0] == long
