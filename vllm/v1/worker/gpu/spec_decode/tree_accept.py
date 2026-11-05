@@ -7,9 +7,9 @@ child whose token equals the current row's target token, until a row has no such
 child. The accepted rows are the path (root first); the committed tokens are the
 target tokens of the path rows, the last of which is the bonus token.
 
-The default ``accept`` for such a plan takes the argmax, which is exact for greedy
-requests. A speculator that verifies sampled requests on trees overrides
-``accept`` and passes its own per-row target tokens to :func:`walk_tree`.
+A speculator that verifies trees overrides ``accept`` and passes its own per-row
+target tokens to :func:`walk_tree`. When its ``accept`` returns None, vLLM takes
+the argmax, which is exact for greedy requests.
 """
 
 from typing import TYPE_CHECKING

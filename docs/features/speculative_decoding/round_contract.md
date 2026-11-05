@@ -200,7 +200,8 @@ internal interface and may change.
 
 Return `None`, the default, to let vLLM verify. vLLM checks a chain with its
 rejection sampler. For a plan that is not a chain, it walks the tree on each row's
-argmax, which only greedy requests accept.
+argmax, which only greedy requests accept. A speculator verifies trees only when
+it overrides `accept`; otherwise startup lowers it to chains.
 
 `AcceptResult` has these fields:
 
@@ -323,8 +324,9 @@ Register the config with `register_speculative_method` as shown in
 ## Example: a tree speculator
 
 A tree speculator also declares branching resources, chooses its chain for models
-that cannot verify trees, and returns a plan each step. `accept` is optional: the
-default walks the tree on each row's argmax, which only greedy requests accept.
+that cannot verify trees, and returns a plan each step. It must override
+`accept`; returning `None` for a batch walks the tree on each row's argmax, which
+only greedy requests accept.
 
 ```python
 from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator

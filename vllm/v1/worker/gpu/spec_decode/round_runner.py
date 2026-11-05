@@ -143,6 +143,9 @@ class SpecRound:
             for what, applies in settings.items()
             if applies
         ]
+        if "accept" not in runner.speculator_hooks:
+            # The default accept walks greedy trees only.
+            limits.append(SpecLimit("chain", "the speculator does not override accept"))
         self.capabilities = SpecCapabilities.from_limits(limits)
         return self.capabilities
 

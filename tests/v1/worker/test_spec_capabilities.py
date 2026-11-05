@@ -293,11 +293,17 @@ _LOWERED = ": keeps verify rows in chain order"
             CacheConfig(mamba_cache_mode="align"),
             _gdn_reason("align"),
         ),
+        (
+            "speculator_hooks",
+            frozenset({"plan"}),
+            "the speculator does not override accept",
+        ),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
-    """The runner's settings, and the Mamba state mode it reads from the cache
-    config, lower a model that verifies trees to chains."""
+    """The runner's settings, the Mamba state mode it reads from the cache
+    config, and a speculator without its own accept lower a model that verifies
+    trees to chains."""
     runner = object.__new__(GPUModelRunner)
     runner.attn_groups, layers = _hybrid(QwenGatedDeltaNetAttention)
     runner.compilation_config = CompilationConfig()
@@ -305,6 +311,7 @@ def test_runner_settings_lower_trees_to_chains(setting, value, reason):
     runner.cache_config, runner.parallel_config = CacheConfig(), ParallelConfig()
     runner.use_pp, runner.pcp_manager, runner.dcp_size = False, None, 1
     runner.batch_sharder = None
+    runner.speculator_hooks = frozenset({"plan", "accept"})
     if setting is not None:
         setattr(runner, setting, value)
     spec_round = object.__new__(SpecRound)

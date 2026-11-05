@@ -188,7 +188,8 @@ class BaseSpeculator(ABC):
         internal interface and may change. Return None (the default) to let vLLM
         verify: a chain through its rejection sampler (path ``arange``), a plan
         that is not a chain by walking the tree on each row's argmax, which only
-        greedy requests accept. The runner commits the KV and the recurrent state
+        greedy requests accept. Trees need this override: without it the model
+        verifies chains. The runner commits the KV and the recurrent state
         along the returned path and takes each committed token's logprobs from
         its path row.
         """
