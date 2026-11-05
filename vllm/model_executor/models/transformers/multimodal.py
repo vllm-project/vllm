@@ -378,8 +378,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
     ) -> MultiModalDataDict:
         data = MultiModalDataBuiltins()
         if self.info._is_audio_model and (num_audios := mm_counts.get("audio", 0)):
-            length = self.info._get_max_audio_length()
-            if length is None:
+            if (length := self.info._get_max_audio_length()) is None:
                 max_tokens = seq_len // num_audios
                 length = int(max_tokens * self.info._audio_samples_per_token)
             data["audio"] = self._get_dummy_audios(

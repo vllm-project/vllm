@@ -52,8 +52,7 @@ class TranscriptionMixin(SupportsTranscription, Base):
         info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
         assert isinstance(info, MultiModalProcessingInfo)
         sample_rate = info._get_audio_sampling_rate()
-        max_length = info._get_max_audio_length()
-        if max_length is None:
+        if (max_length := info._get_max_audio_length()) is None:
             # Chunking would break speaker IDs and timestamps across the chunks
             return SpeechToTextConfig(
                 sample_rate=sample_rate,
