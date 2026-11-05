@@ -24,7 +24,7 @@ from vllm.config import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     FullAttentionSpec,
@@ -598,3 +598,50 @@ def test_standalone_draft_kv_dtype_override(
     )
     assert target.kernel_config.moe_backend == "flashinfer_cutlass"
     assert target.attention_config.backend == AttentionBackendEnum.FLASHINFER
+
+
+def test_speculator_request_hooks():
+    noop = lambda *args, **kwargs: None
+    slots: dict[str, int] = {}
+    events: list[tuple[str, str]] = []
+
+    class RecordingSpeculator:
+        def add_request(self, req_index, new_req_data):
+            events.append(("add", new_req_data.req_id))
+
+        # A hook called after its slot is freed records nothing.
+        def on_requests_finished(self, req_ids):
+            events.extend(("finished", r) for r in req_ids if r in slots)
+
+        def on_requests_preempted(self, req_ids):
+            events.extend(("preempted", r) for r in req_ids if r in slots)
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.speculator = RecordingSpeculator()
+    runner.req_states = SimpleNamespace(
+        req_id_to_index=slots,
+        add_request=lambda req_id, **_: slots.setdefault(req_id, len(slots)),
+        remove_request=lambda req_id: slots.pop(req_id, None),
+        apply_staged_writes=noop,
+    )
+    runner.model_state = SimpleNamespace(
+        add_request=noop, remove_request=noop, apply_staged_writes=noop
+    )
+    runner.draft_tokens_handler = SimpleNamespace(discard=noop)
+    runner.block_tables = SimpleNamespace(append_block_ids=noop)
+    runner.lora_state = SimpleNamespace(add_request=noop, remove_request=noop)
+    runner.adaptive_verification = runner.pooling_runner = runner.pp_handler = None
+    runner.encoder_cache = runner.prompt_logprobs_worker = runner.sampler = None
+    runner.is_last_pp_rank = False
+
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_new_reqs = [
+        NewRequestData(r, [1], [], None, None, ([0],), 0, None, prefill_token_ids=[1])
+        for r in ("a", "b")
+    ]
+    runner.add_requests(scheduler_output)
+    scheduler_output.finished_req_ids = {"a"}
+    scheduler_output.preempted_req_ids = {"b"}
+    runner.finish_requests(scheduler_output)
+
+    assert events == [("add", "a"), ("add", "b"), ("finished", "a"), ("preempted", "b")]
