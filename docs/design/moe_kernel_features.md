@@ -2,6 +2,34 @@
 
 The purpose of this document is to provide an overview of the various MoE kernels (both modular and non-modular) so it will be easier to select an appropriate set of kernels for any particular situation. This includes information about the all2all backends used by modular kernels.
 
+## Experimental MiMo TP MegaMoE
+
+`--moe-backend aiter_mimo_mega_moe_tp` selects AITER MegaMoE for
+MiMo-V2.6-Pro routed experts on gfx950. It requires BF16 model activations,
+MXFP4 expert weights, TP8/DP1/PP1, and AITER MoE enabled. EP, EPLB, context
+parallelism, sequence parallelism, DBO, and shared experts are not supported.
+Dense MLP layers retain their existing implementation.
+
+| Environment variable | Default | Accepted values |
+| --- | --- | --- |
+| `VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE` | `fp8` | `fp8`, `fp4` |
+| `VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE` | `bf16` | `bf16`, `fp8` |
+| `VLLM_ROCM_TP_MEGA_MOE_AR_GATHER` | `bf16` | `bf16`, `fp8`, `auto` |
+
+FP8 activations use MegaMoE for at most 256 token rows, padded to a multiple
+of eight. Larger calls use the ordinary AITER A8W4 path. FP4 activations are
+an explicit precision-changing experiment supporting at most 8192 rows.
+Both limits are capped by the configured scheduler capacity. When fallback
+is reachable, the adapter retains an additional interleaved W13/scale cache.
+Both execution paths return TP-reduced routed outputs.
+
+The required AITER API is `aiter.ops.flydsl.mega_moe_tp.MegaMoeTP`, including
+`prepare`, `set_weights`, and `error_flag`. Historical measurements used
+[AITER eabd1ae](https://github.com/ROCm/aiter/commit/eabd1ae093e50fbb726037686bd2b4a80b3448e5).
+The persistent kernel requires exclusive GPU execution. Standalone operator
+graph tests do not establish full-model graph support; use eager execution
+until the complete serving lifecycle is validated for the deployment.
+
 ## Fused MoE Modular All2All backends
 
 There are a number of all2all communication backends that are used to implement expert parallelism (EP) for the `MoERunner` layer. The different `FusedMoEPrepareAndFinalizeModular` subclasses provide an interface for each all2all backend.
