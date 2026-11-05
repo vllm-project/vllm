@@ -155,7 +155,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             kv_cache_spec[layer_name] = spec
     if vllm_config.attention_config.hisparse_config is not None:
         kv_cache_spec = resolve_hisparse_specs(vllm_config, kv_cache_spec, attn_layers)
-    return fit_mamba_blocks_to_attention(vllm_config, kv_cache_spec, attn_layers)
+        kv_cache_spec = fit_mamba_blocks_to_attention(
+            vllm_config, kv_cache_spec, attn_layers
+        )
+    return kv_cache_spec
 
 
 def get_shared_kv_cache_layers(vllm_config: VllmConfig):
