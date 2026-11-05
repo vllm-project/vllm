@@ -31,6 +31,11 @@ from vllm.assets.image import ImageAsset
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
+pytestmark = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Weight cache IPC sharing requires CUDA or ROCm",
+)
+
 
 class WeightCacheDaemon:
     """Context manager running the real weight cache daemon as a subprocess."""
