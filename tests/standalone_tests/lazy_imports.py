@@ -11,7 +11,9 @@ import sys
 # too many processes before we set the number of compiler threads.
 # Lazy import `cv2` to avoid bothering users who only use text models.
 # `cv2` can easily mess up the environment.
-module_names = ["torch._inductor.async_compile", "cv2"]
+# `openai` belongs to the frontend layer; `vllm.config` is imported by
+# every process and must not pull it in.
+module_names = ["torch._inductor.async_compile", "cv2", "openai"]
 
 # set all modules in `module_names` to be None.
 # if we import any modules during `import vllm`, there would be a
@@ -20,3 +22,4 @@ for module_name in module_names:
     sys.modules[module_name] = None
 
 import vllm  # noqa
+import vllm.config  # noqa

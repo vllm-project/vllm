@@ -17,7 +17,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
-- [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
+- [Custom Speculators (Experimental)](#custom-speculators-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
 - [FLy Verification (Lossy)](fly.md)
@@ -44,10 +44,80 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
-## Custom Proposer Backend (Experimental)
+## Custom Speculators (Experimental)
 
-You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
-Your custom class must accept a `VllmConfig` upon instantiation and implement a `propose` method.
+You can plug in your own speculator with the V2 model runner by registering it
+as a speculative method from a [vLLM plugin](../../design/plugin_system.md), and then using it
+with `"method": "<name>"`. Custom speculative methods require the V2 model
+runner.
+
+A custom speculator consists of:
+
+- The speculator itself: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator.BaseSpeculator`, typically of
+  `DraftModelSpeculator` (for a speculator that runs its own draft model, which
+  the model runner then loads and allocates draft KV cache for) or
+  `TargetDependentARSpeculator` (for EAGLE/MTP-style drafting from the target
+  model's hidden states). It's constructed with `(vllm_config, device)`.
+- Its config: a subclass of
+  `vllm.v1.worker.gpu.spec_decode.speculator_config.SpeculatorConfig`, which
+  names the speculator class and describes how it behaves (KV lookahead slots,
+  whether it needs the target's hidden states, which features it supports,
+  ...). It's used in every vLLM process, including those that never build the
+  speculator, so its module shouldn't import the speculator. A speculator that
+  behaves like a built-in one should subclass that speculator's config (e.g.
+  `Eagle3SpeculatorConfig`), which also determines how its draft model is
+  configured from `model`.
+
+```python
+# my_package/config.py
+from vllm.v1.worker.gpu.spec_decode.eagle.config import Eagle3SpeculatorConfig
+
+
+class MySpeculatorConfig(Eagle3SpeculatorConfig):
+    speculator_class = "my_package.speculator.MySpeculator"
+    # Accept options in `speculator_options` (validated in `apply_options`).
+    supported_options = frozenset({"speculator_options"})
+
+    @classmethod
+    def apply_options(cls, spec):
+        options = spec.speculator_options or {}
+        if unknown := options.keys() - {"my_option"}:
+            raise ValueError(f"Unknown speculator_options: {sorted(unknown)}")
+
+
+# my_package/__init__.py, registered as a `vllm.general_plugins` entry point
+def register():
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        register_speculative_method,
+    )
+
+    register_speculative_method("my_spec", "my_package.config.MySpeculatorConfig")
+```
+
+```bash
+vllm serve <target-model> \
+  --speculative-config '{
+    "method": "my_spec",
+    "model": "<draft-model>",
+    "num_speculative_tokens": 3,
+    "speculator_options": {"my_option": 1}
+  }'
+```
+
+The speculator reads its options from
+`vllm_config.speculative_config.speculator_options`. Once set up,
+`speculative_config.custom_method` is the registered name (`"my_spec"`), and
+`speculative_config.method` is the built-in method its config is based on
+(`"eagle3"`), so vLLM treats it like that built-in speculator.
+
+### V1 Custom Proposer Backend
+
+With the V1 model runner, you can plug in your own custom proposer class by
+setting the method to `custom_class` and providing the full module path to your
+class. Your custom class must accept a `VllmConfig` upon instantiation and
+implement a `propose` method. This is not supported by the V2 model runner, and
+will be removed together with the V1 model runner.
 
 **Example configuration:**
 
@@ -86,7 +156,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
-| `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. |
+| `max_model_len` | `integer >= 1` | `None` | Maximum context length for the draft model. A draft limit below the target's may also lower the engine's `max_model_len`. |
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `standard` | `standard`, `synthetic`, `block`, or the lossy `fly` verifier. |
 | `draft_sample_method` | `string` | `greedy` | `greedy` uses target-only acceptance for random requests; `probabilistic` retains the full draft distribution for probability-ratio acceptance. |
@@ -133,10 +203,11 @@ vllm serve <target-model> \
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `suffix_decoding_max_tree_depth` | `integer` | `24` | Maximum combined prefix-match and speculation tree depth. |
-| `suffix_decoding_max_cached_requests` | `integer` | `10000` | Maximum number of requests cached in the global suffix tree. Set `0` to disable the global cache. |
-| `suffix_decoding_max_spec_factor` | `float` | `1.0` | Caps speculative length as a multiple of prefix-match length. |
-| `suffix_decoding_min_token_prob` | `float` | `0.1` | Minimum estimated token probability required to speculate a token. |
+| `suffix_decoding_max_tree_depth` | `integer` | `24` | V1: maximum combined prefix-match and speculation tree depth. V2: maximum match length. |
+| `suffix_decoding_max_cached_requests` | `integer` | `10000` | V1: maximum number of requests cached in the global suffix tree. Set `0` to disable the global cache (on V2, the corpus). |
+| `suffix_decoding_corpus_tokens` | `integer` | `1048576` | V2 only: token capacity of the GPU corpus of finished responses. Set `0` to match only within each request. |
+| `suffix_decoding_max_spec_factor` | `float` | `1.0` | V1 only: caps speculative length as a multiple of prefix-match length. |
+| `suffix_decoding_min_token_prob` | `float` | `0.1` | V1 only: minimum estimated token probability required to speculate a token. |
 
 Example:
 
@@ -169,7 +240,7 @@ vllm serve <target-model> \
 
   llm = LLM(
       model="Qwen/Qwen3-8B",
-      speculative_config={                               
+      speculative_config={
           "method": "draft_model",
           "model": "HuggingFaceTB/SmolLM2-135M-Instruct",
           "num_speculative_tokens": 3,
