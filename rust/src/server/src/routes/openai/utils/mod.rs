@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+pub mod choices;
 pub mod logprobs;
 pub mod metrics;
 pub mod structured_outputs;
 pub mod types;
 pub mod usage;
 pub mod validated_json;
+
+use std::num::NonZeroU32;
 
 use vllm_text::{PromptTruncation, TruncationSide};
 
@@ -19,6 +22,29 @@ pub(crate) fn validate_generation_prompt_truncation(limit: Option<i64>) -> Resul
         bail_invalid_request!(
             param = "truncate_prompt_tokens",
             "truncate_prompt_tokens must be >= -1."
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the number of choices to generate, checked like Python's
+/// `SamplingParams` checks `n`.
+pub(crate) fn resolve_n(n: Option<u32>) -> Result<NonZeroU32, ApiError> {
+    let n = n.unwrap_or(1);
+    let Some(resolved) = NonZeroU32::new(n) else {
+        bail_invalid_request!(param = "n", "n must be at least 1, got {n}.");
+    };
+    Ok(resolved)
+}
+
+/// Reject more choices than the server's `VLLM_MAX_N_SEQUENCES` allows, like
+/// Python's `SamplingParams` checks `n`.
+pub(crate) fn validate_n_limit(n: u32, max_n_sequences: i64) -> Result<(), ApiError> {
+    if i64::from(n) > max_n_sequences {
+        bail_invalid_request!(
+            param = "n",
+            "n must be at most {max_n_sequences}, got {n}. To increase this limit, set the \
+             VLLM_MAX_N_SEQUENCES environment variable."
         );
     }
     Ok(())

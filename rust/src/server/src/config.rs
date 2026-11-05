@@ -34,6 +34,9 @@ pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 /// Default maximum size of an HTTP request body or a decoded gRPC message.
 pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
+pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -77,6 +80,8 @@ pub struct ApiServerOptions {
     pub enable_per_request_metrics: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, log every error response at ERROR (`--log-error-stack`).
+    pub log_error_stack: bool,
     /// When `true`, register the scale-out `/inference/v1/generate` route.
     pub enable_scale_out: bool,
     /// When `true`, register `/tokenizer_info`.
@@ -84,6 +89,8 @@ pub struct ApiServerOptions {
     /// Accept any requested model name, served by the base model unless it
     /// names a loaded LoRA adapter (`VLLM_SKIP_MODEL_NAME_VALIDATION`).
     pub skip_model_name_validation: bool,
+    /// When `true`, register the development routes (`VLLM_SERVER_DEV_MODE`).
+    pub server_dev_mode: bool,
     /// Idle interval after which streaming SSE responses send a keep-alive
     /// comment. `None` disables keep-alive comments.
     pub sse_keep_alive_interval: Option<Duration>,
@@ -92,6 +99,9 @@ pub struct ApiServerOptions {
     /// limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
+    #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
+    pub max_n_sequences: i64,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and

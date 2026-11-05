@@ -71,7 +71,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.utils import random_uuid
 
-MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
+MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
 
 
 def _merge_fake_deltas(
