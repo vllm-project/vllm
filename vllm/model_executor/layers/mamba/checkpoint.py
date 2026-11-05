@@ -84,6 +84,9 @@ class MambaPrefillCheckpointMetadata:
     # with the same spec can re-derive its own ``state_indices``.
     request_rows: torch.Tensor | None = None
     block_cols: torch.Tensor | None = None
+    # Rows with a checkpoint. Most rows of a mixed batch are decodes without
+    # one, so the exporter launches only these rather than every row.
+    export_rows: torch.Tensor | None = None
 
     def regather_state_indices(
         self, block_table: torch.Tensor
@@ -162,6 +165,11 @@ class MambaPrefillCheckpointBuilder:
             query_lens=query_lens,
             request_rows=request_rows_tensor,
             block_cols=checkpoint_cols_tensor,
+            export_rows=async_tensor_h2d(
+                [i for i, offset in enumerate(checkpoint_offsets) if offset],
+                dtype=torch.int32,
+                device=m.query_start_loc.device,
+            ),
         )
 
 
@@ -211,9 +219,15 @@ class MambaPrefillCheckpointExporter:
             assert recurrent_state is not None
             recurrent_row_size = recurrent_checkpoint[0].numel()
         block_size = 512
+        export_rows = checkpoint.export_rows
+        num_rows = (
+            checkpoint.checkpoint_offsets.numel()
+            if export_rows is None
+            else export_rows.numel()
+        )
         store_cache_checkpoints_kernel[
             (
-                checkpoint.checkpoint_offsets.numel(),
+                num_rows,
                 triton.cdiv(max(width * state_len, recurrent_row_size), block_size),
             )
         ](
@@ -226,6 +240,7 @@ class MambaPrefillCheckpointExporter:
             checkpoint.state_indices,
             recurrent_rows if recurrent_rows is not None else checkpoint.state_indices,
             token_indices if token_indices is not None else cu_seqlens,
+            export_rows if export_rows is not None else checkpoint.checkpoint_offsets,
             raw_qkv.stride(0),
             raw_qkv.stride(1),
             conv_state.stride(0),
@@ -241,6 +256,7 @@ class MambaPrefillCheckpointExporter:
             has_recurrent,
             recurrent_rows is not None,
             token_indices is not None,
+            export_rows is not None,
             block_size,
         )
 
@@ -256,6 +272,7 @@ def store_cache_checkpoints_kernel(
     checkpoint_state_indices_ptr,
     recurrent_rows_ptr,
     token_indices_ptr,
+    export_rows_ptr,
     x_stride_0,
     x_stride_1,
     state_stride_0,
@@ -271,9 +288,12 @@ def store_cache_checkpoints_kernel(
     HAS_RECURRENT: tl.constexpr,
     HAS_RECURRENT_ROWS: tl.constexpr,
     HAS_TOKEN_MAP: tl.constexpr,
+    HAS_EXPORT_ROWS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     seq_idx = tl.program_id(0)
+    if HAS_EXPORT_ROWS:
+        seq_idx = tl.load(export_rows_ptr + seq_idx)
     cols = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     state_idx = tl.load(checkpoint_state_indices_ptr + seq_idx).to(tl.int64)
     checkpoint_offset = tl.load(
