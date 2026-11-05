@@ -21,7 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, iter_layer_specs
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
@@ -389,8 +389,9 @@ def get_current_attn_backends_and_specs(
     Attention caches in a block-outermost layout are skipped: blocks there are
     never split group-wide (``prepare_kernel_block_sizes``), and a cache that
     needs smaller kernel blocks views them inside each block, so its kernel
-    pages never split transferred blocks. Caches written from their block table
-    (compressed ones, or as their backend declares) must be packed so.
+    pages never split transferred blocks. Compressed caches are skipped too
+    (``check_compressed_kernel_split`` guards them); caches whose backend writes
+    them from their block table must be packed.
     """
     layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
     pairs: dict[tuple[type[AttentionBackend], AttentionSpec | None], None] = {}
@@ -404,10 +405,9 @@ def get_current_attn_backends_and_specs(
             spec = specs.get(name, group.kv_cache_spec)
             backend = layer.get_attn_backend()
             if isinstance(spec, AttentionSpec):
-                if (
-                    spec.tokens_per_state > 1
-                    or backend.writes_kv_cache_from_block_table()
-                ):
+                if spec.tokens_per_state > 1:
+                    continue
+                if backend.writes_kv_cache_from_block_table():
                     assert layout.is_block_outermost, (
                         "Kernel-paged caches must be packed"
                     )
@@ -419,6 +419,26 @@ def get_current_attn_backends_and_specs(
     if not has_layers:
         return fallback, [None] * len(fallback)
     return [backend for backend, _ in pairs], [spec for _, spec in pairs]
+
+
+def check_compressed_kernel_split(
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig, kernel_block_size: int
+) -> None:
+    """A layer-outer layout cannot split compressed pages into kernel blocks."""
+    if vllm_config.cache_config.get_resolved_kv_cache_layout().is_block_outermost:
+        return
+    for group in kv_cache_config.transfer_groups:
+        for spec in iter_layer_specs(group.kv_cache_spec):
+            if (
+                isinstance(spec, AttentionSpec)
+                and spec.tokens_per_state > 1
+                and spec.block_size % kernel_block_size == 0
+                and spec.block_size != kernel_block_size
+            ):
+                raise NotImplementedError(
+                    "Compressed KV caches cannot be split into kernel blocks "
+                    "with a layer-outermost KV cache layout."
+                )
 
 
 def get_current_attn_backend(

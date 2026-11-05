@@ -19,6 +19,7 @@ from ...ops import attn_res
 from ..cutedsl.attn_res.prepared import PreparedAttnRes
 from ..cutedsl.common.embedding import PreparedEmbedding
 from ..cutedsl.common.twoshot import TwoShot
+from ..cutedsl.kda.prepared import PreparedKda
 from ..cutedsl.moe.dense import PreparedDenseMLP
 from ..cutedsl.moe.experts_runtime import PersistentExperts
 from ..cutedsl.moe.front import SharedFront
@@ -247,6 +248,7 @@ class SpecializedDecode:
         for d in layers:  # before the prefetch tables take the weight addresses
             if attention_kind(d.self_attn) == "dsa":
                 pack_dsa_projection(d.self_attn)
+        self.packed = packed
         prefetch = self.prefetch = PrefetchController(self, layers, packed)
         state = self.moe_state = MoEScratch(tp, device, batches)
         mailbox, tail_box, moe_layers = (
@@ -300,6 +302,24 @@ class SpecializedDecode:
         """Install the runner-state side of the deferred RecoverSSM on the model
         runner state (``recoverssm.state.install_model_state``)."""
         install_recoverssm_model_state(state)
+
+    @torch.no_grad()
+    def process_weights_after_loading(self):
+        """After a weight reload: re-derive, in place, the copies built from the
+        weights. Everything else reads the backbone's tensors directly, which a
+        reload refills at the same addresses."""
+        for layer in self.layers:
+            if layer.is_moe_layer:
+                fresh = pack_front(layer.mlp, self.rank, self.tp)
+                self.packed[layer.layer_idx].copy_(fresh)
+            else:
+                self.feed_forward[layer.layer_idx].process_weights_after_loading(
+                    layer.mlp
+                )
+            core = self.attention[layer.layer_idx].core
+            # KDA keeps derived copies; MLA reads the backbone's tensors
+            if isinstance(core, PreparedKda):
+                core.process_weights_after_loading(layer.self_attn)
 
     def prepare_kv(self):
         """Compile each layer's cores for its bound KV cache layout. The memory

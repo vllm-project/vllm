@@ -515,6 +515,94 @@ def test_one_sided_manager_workspace_grow(world_size):
 
 
 # ---------------------------------------------------------------------------
+# Test 2c: One-sided experts write their output into the combine workspace
+# ---------------------------------------------------------------------------
+
+
+def _one_sided_expert_output_in_workspace_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
+        FlashInferNVLinkOneSidedPrepareAndFinalize,
+    )
+    from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+        TopKWeightAndReduceNoOP,
+    )
+
+    device = torch.device(f"{DEVICE}:{rank}")
+    hidden, top_k, experts_per_rank = 256, world_size, 4
+    manager = FlashInferNVLinkOneSidedManager(get_dp_group().cpu_group)
+    manager.initialize(
+        max_num_tokens=8,
+        top_k=top_k,
+        num_experts=world_size * experts_per_rank,
+        hidden_size=hidden,
+    )
+    comm = manager.get_communication()
+    prepare_finalize = object.__new__(FlashInferNVLinkOneSidedPrepareAndFinalize)
+    prepare_finalize.all2all_manager = manager
+
+    tokens, tokens_per_rank = rank + 3, world_size + 2
+    x = torch.full((tokens, hidden), rank + 1.0, dtype=torch.bfloat16, device=device)
+    # Every token visits one expert on each rank.
+    ids = torch.tensor(
+        [[r * experts_per_rank for r in range(top_k)]] * tokens,
+        dtype=torch.int32,
+        device=device,
+    )
+    weights = torch.ones(tokens, top_k, device=device)
+    received = comm.dispatch(x, ids, weights, max_tokens_per_rank=tokens_per_rank)
+
+    fused_out = prepare_finalize.allocate_fused_expert_output(
+        (world_size * tokens_per_rank, hidden),
+        torch.bfloat16,
+        device,
+        TopKWeightAndReduceNoOP(),
+    )
+    assert fused_out is not None
+    lo, hi = rank * experts_per_rank, (rank + 1) * experts_per_rank
+    local = (received.topk_ids >= lo) & (received.topk_ids < hi)
+    fused_out.copy_(
+        torch.where(
+            local.any(-1, keepdim=True),
+            received.hidden_states * local.sum(-1, keepdim=True),
+            0,
+        )
+    )
+
+    payload_in_workspace = []
+    combine = comm.alltoall.combine
+
+    def spy_combine(*args, **kwargs):
+        payload_in_workspace.append(kwargs["payload_in_workspace"])
+        return combine(*args, **kwargs)
+
+    comm.alltoall.combine = spy_combine
+    output = torch.empty_like(x)
+    prepare_finalize.finalize(
+        output, fused_out, weights, ids, False, TopKWeightAndReduceNoOP()
+    )
+    assert payload_in_workspace == [True]
+    torch.testing.assert_close(output, x * top_k, rtol=0, atol=0)
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_expert_output_in_workspace(world_size):
+    """Experts write into the combine workspace, so combine skips the copy."""
+    _spawn_workers(
+        _one_sided_expert_output_in_workspace_worker,
+        world_size,
+        dp_size=world_size,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Test 3: AgRs dispatch/combine with value validation
 # ---------------------------------------------------------------------------
 #

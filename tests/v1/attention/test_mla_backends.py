@@ -356,6 +356,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.act_dtype = torch.float32
     layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
@@ -363,7 +364,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     )
 
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
         assert isinstance(layer.W_UV, torch.nn.Parameter)
         assert isinstance(layer.W_UK_T, torch.nn.Parameter)
         w_uv_ptr = layer.W_UV.data_ptr()
@@ -372,7 +373,7 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
         old_w_uk_t = layer.W_UK_T.clone()
 
         layer.kv_b_proj.weight.add_(100)
-        layer.process_weights_after_loading(torch.float32)
+        layer.process_weights_after_loading()
 
     assert layer.W_UV.data_ptr() == w_uv_ptr
     assert layer.W_UK_T.data_ptr() == w_uk_t_ptr
@@ -471,6 +472,13 @@ for backend in BACKENDS_TO_TEST:
     BACKEND_BLOCK_SIZES[backend] = block_size
 
 torch.manual_seed(42)
+
+
+@pytest.fixture(autouse=True)
+def _reseed_each_test():
+    # Inputs must not depend on which tests ran earlier in the process: CI
+    # shards this file, so the preceding tests differ per shard.
+    set_random_seed(42)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -1767,7 +1775,10 @@ def _run_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
-    if hf_config_override and current_platform.is_xpu():
+    # model_arch_config is resolved before the override reaches it, so the
+    # backends would otherwise see the full model's heads at every TP size.
+    # Not yet on CUDA, whose backends have head-count limits of their own.
+    if hf_config_override and (current_platform.is_xpu() or current_platform.is_rocm()):
         vllm_config.model_config.model_arch_config.total_num_attention_heads = (
             hf_config_override["num_attention_heads"]
         )

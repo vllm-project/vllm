@@ -78,6 +78,9 @@ def test_compute_probs_and_sample_next_token_uses_fp64_exponential_race():
     ("architecture", "expected"),
     [
         ("DeepSeekMTPModel", True),
+        ("Glm4MoeMTPModel", True),
+        ("Glm4MoeLiteMTPModel", True),
+        ("GlmOcrMTPModel", True),
         ("MiniMaxM3ForCausalLM", False),
     ],
 )

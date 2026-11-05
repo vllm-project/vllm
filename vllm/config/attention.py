@@ -129,6 +129,16 @@ class AttentionConfig:
     for steps whose contexts are too short for the pool to pay; it is not
     enabled by default there."""
 
+    indexer_logits_dtype: Literal["auto", "float32", "bfloat16"] = "auto"
+    """Output dtype of DeepGEMM's dense MQA-logits kernels in the DeepSeek
+    sparse-attention indexer. "auto" (default) picks the model's default:
+    "bfloat16" for DeepSeek-V3.2 and DeepSeek-V4 on SM100, "float32" otherwise.
+    "float32" reduces the head-weighted scores in FP32 and feeds them to the
+    top-k as is. "bfloat16" halves the logits memory; on SM100 it also reduces
+    in BF16 with BF16 head weights and lets the DeepSelect top-k rank the
+    logits directly, while other top-k kernels read an FP32 copy. The sparse
+    MQA-logits path (`indexer_sparse_logits`) always emits BF16."""
+
     indexer_tp_shard_min_rows: int | None = None
     """Deprecated and has no effect: TP row sharding of the sparse-attention
     indexer was replaced by `sparse_mla_shard_q`. It will be removed in
@@ -243,6 +253,14 @@ class AttentionConfig:
         if self.indexer_kv_dtype == "auto":
             return default
         return self.indexer_kv_dtype
+
+    def resolve_indexer_logits_dtype(
+        self, default: Literal["float32", "bfloat16"]
+    ) -> Literal["float32", "bfloat16"]:
+        """Resolve `indexer_logits_dtype`, substituting `default` for "auto"."""
+        if self.indexer_logits_dtype == "auto":
+            return default
+        return self.indexer_logits_dtype
 
     def compute_hash(self) -> str:
         """Provide a hash that uniquely identifies all the configs

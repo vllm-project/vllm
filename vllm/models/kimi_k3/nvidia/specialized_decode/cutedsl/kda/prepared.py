@@ -250,6 +250,13 @@ class PreparedKda:
         self.fused = False  # set by prepare_caches (deferred_supported)
         self.flushes = set()  # deferred steps that fold the replays first (keys)
 
+    @torch.no_grad()
+    def process_weights_after_loading(self, attention):
+        """Refill the derived conv weight and FP32 norm after a weight reload."""
+        conv_w, *_, norm = self.weights
+        conv_w.copy_(decode_conv_weight(attention.conv1d.weight))
+        norm.copy_(attention.o_norm.weight)
+
     def _operands(self, caches, projected, slots, out, accepted=None, deferred=()):
         """Kernel tensors in launch order: 13 before the scalars, then F_B (and the
         verify step's accepted counts and RecoverSSM records; fused: the record rows

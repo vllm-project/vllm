@@ -1645,6 +1645,12 @@ class KimiLinearForCausalLM(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
+    def process_weights_after_loading(self) -> None:
+        """The specialized decode is built after the first load and keeps copies
+        derived from the weights; refresh them after a reload."""
+        if self.specialized_decode is not None:
+            self.specialized_decode.process_weights_after_loading()
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     KimiK3MultiModalProcessor,
