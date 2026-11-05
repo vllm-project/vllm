@@ -375,7 +375,10 @@ def test_needs_split_local_xfer_handles(use_mla, source_ranks, tp_ratio, expecte
 
 
 @pytest.mark.cpu_test
-def test_update_state_after_alloc_tracks_cached_blocks_per_group():
+@pytest.mark.parametrize("null_count,num_external_tokens", [(0, 2), (128, 2), (128, 0)])
+def test_update_state_after_alloc_tracks_cached_blocks_per_group(
+    null_count, num_external_tokens
+):
     """Hybrid SWA+FA requests can have different prefix-cache-hit counts per
     KV cache group. Each group's count must be tracked independently rather
     than collapsed to a single scalar, or DCP read-phase alignment
@@ -386,15 +389,10 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
-    scheduler = object.__new__(NixlPullConnectorScheduler)
-    scheduler._reqs_in_batch = set()
-    scheduler._reqs_need_save = {}
-    scheduler._reqs_need_recv = {}
-    scheduler.use_host_buffer = False
-    scheduler.is_bidirectional_kv_xfer_enabled = False
-    scheduler._is_hma_required = False
-    scheduler.kv_cache_config = MagicMock(
-        select_transfer_block_ids=lambda block_ids: block_ids
+    scheduler = NixlPullConnectorScheduler(
+        create_vllm_config(block_size=16),
+        "test-engine",
+        make_kv_cache_config(block_size=16, swa_enabled=True, sw_size=32),
     )
 
     def cached(block_id):
@@ -405,24 +403,25 @@ def test_update_state_after_alloc_tracks_cached_blocks_per_group():
 
     # Group 0 (full-attention): 2 of 3 blocks cached.
     # Group 1 (sliding-window): 1 of 3 blocks cached.
+    nulls = [KVCacheBlock(block_id=0, is_null=True)] * null_count
     blocks = KVCacheBlocks(
         blocks=(
             [cached(0), cached(1), uncached(2)],
-            [cached(10), uncached(11), uncached(12)],
+            nulls + [cached(10), uncached(11), uncached(12)],
         )
     )
 
     request = create_request(do_remote_prefill=True)
 
-    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=2)
+    scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
-    _, _, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
+    _, local_ids, local_num_computed_blocks, awaiting_kvs = scheduler._reqs_need_recv[
         request.request_id
     ]
     assert local_num_computed_blocks == (2, 1)
-    # There are external tokens to pull, so the scheduler parks the request and
-    # is waiting to see it in finished_recving.
-    assert awaiting_kvs is True
+    assert local_ids == (([2], [11, 12]) if num_external_tokens else ())
+    assert awaiting_kvs is bool(num_external_tokens)
+    scheduler.shutdown()
 
 
 @pytest.mark.cpu_test
