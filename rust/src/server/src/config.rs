@@ -34,6 +34,9 @@ pub const DEFAULT_LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
 /// Default maximum size of an HTTP request body or a decoded gRPC message.
 pub const DEFAULT_REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+/// Default upper bound on a request's `n`, like Python's `VLLM_MAX_N_SEQUENCES`.
+pub const DEFAULT_MAX_N_SEQUENCES: i64 = 16384;
+
 /// How the HTTP or gRPC server obtains its listening socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum HttpListenerMode {
@@ -96,6 +99,9 @@ pub struct ApiServerOptions {
     /// limit.
     #[educe(Default(expression = Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES)))]
     pub request_body_limit_bytes: Option<usize>,
+    /// Upper bound on a request's `n` (`VLLM_MAX_N_SEQUENCES`, default 16384).
+    #[educe(Default(expression = DEFAULT_MAX_N_SEQUENCES))]
+    pub max_n_sequences: i64,
 }
 
 /// Which generated outputs to log, like Python's `--enable-log-outputs` and
