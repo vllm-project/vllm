@@ -10,11 +10,14 @@ import pytest
 import torch
 
 from tests.utils import create_new_process_for_each_test
-from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import MemoryProfilingResult, MemorySnapshot
 from vllm.v1.worker import gpu_worker, startup_plan
-from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
+from vllm.v1.worker.gpu_worker import (
+    charge_memory_retained_by_graph_profiling,
+    maybe_rocm_profiling_fallback,
+)
 from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
@@ -357,57 +360,6 @@ def _profile_result(consumed, reserved_before=0, reserved_after=0):
     )
 
 
-@pytest.mark.parametrize("apply_graph_estimate", [False, True])
-@pytest.mark.parametrize("graph_estimate", [0, GiB_bytes])
-def test_kv_budget_reserves_workspace_retained_by_graph_setup(
-    monkeypatch, apply_graph_estimate, graph_estimate
-):
-    """Late attention workspaces are persistent, regardless of graph accounting."""
-    result = _profile_result(MEASURED_DROP)
-    result.transient_peak_headroom = GiB_bytes
-    result.non_kv_cache_memory = MEASURED_DROP + GiB_bytes
-    retained_memory = 2 * GiB_bytes
-    after_graph_setup = _snapshot(result.after_profile.free_memory - retained_memory)
-    compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
-    worker = SimpleNamespace(
-        device="cuda:0",
-        init_snapshot=SimpleNamespace(
-            free_memory=ANY_FREE_MEMORY, total_memory=ANY_FREE_MEMORY
-        ),
-        requested_memory=ANY_FREE_MEMORY,
-        model_runner=SimpleNamespace(
-            model_memory_usage=0,
-            profile_run=lambda: None,
-            profile_cudagraph_memory=lambda: graph_estimate,
-        ),
-        vllm_config=SimpleNamespace(compilation_config=compilation_config),
-        cache_config=SimpleNamespace(
-            kv_cache_memory_bytes=None, gpu_memory_utilization=1.0
-        ),
-        model_config=SimpleNamespace(multimodal_config=None),
-        parallel_config=SimpleNamespace(),
-        _scoped_allocator_max_split=lambda **_: nullcontext(),
-    )
-    monkeypatch.setattr(gpu_worker, "maybe_apply_startup_plan", lambda _: None)
-    monkeypatch.setattr(
-        gpu_worker, "memory_profiling", lambda *a, **kw: nullcontext(result)
-    )
-    monkeypatch.setattr(gpu_worker, "MemorySnapshot", lambda **kw: after_graph_setup)
-    monkeypatch.setattr(
-        gpu_worker, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
-    )
-    monkeypatch.setattr(
-        gpu_worker.envs,
-        "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS",
-        apply_graph_estimate,
-    )
-
-    available = gpu_worker.Worker.determine_available_memory(worker)
-
-    assert worker.total_consumed == MEASURED_DROP + retained_memory
-    assert available == GiB_bytes - (graph_estimate if apply_graph_estimate else 0)
-
-
 @pytest.fixture
 def rocm(request):
     with patch.object(
@@ -455,6 +407,75 @@ def test_profiling_fallback_declines_off_rocm(rocm):
     result = _profile_result(consumed=-RELEASED_BY_OTHERS)
 
     assert maybe_rocm_profiling_fallback(result) is None
+
+
+def _measured_profile(consumed, reserved_after=0):
+    """A real profiling result whose free memory dropped by `consumed`."""
+    result = MemoryProfilingResult(
+        before_create=MemorySnapshot(
+            device="cpu", auto_measure=False, free_memory=ANY_FREE_MEMORY
+        )
+    )
+    result.after_profile = MemorySnapshot(
+        device="cpu",
+        auto_measure=False,
+        free_memory=ANY_FREE_MEMORY - consumed,
+        torch_memory=reserved_after,
+    )
+    result.total_consumed = consumed
+    result.non_kv_cache_memory = consumed
+    return result
+
+
+def _after_graph_profiling(free_memory, torch_memory=0):
+    return MemorySnapshot(
+        device="cpu",
+        auto_measure=False,
+        free_memory=free_memory,
+        torch_memory=torch_memory,
+    )
+
+
+def test_graph_profiling_charges_retained_memory():
+    """Workspaces kept after graph profiling persist, so the KV budget pays them."""
+    retained = GiB_bytes
+    result = _measured_profile(MEASURED_DROP)
+    after = _after_graph_profiling(result.after_profile.free_memory - retained)
+
+    charge_memory_retained_by_graph_profiling(result, after)
+
+    assert result.total_consumed == MEASURED_DROP + retained
+    assert result.non_kv_cache_memory == MEASURED_DROP + retained
+    assert result.after_profile is after
+
+
+@pytest.mark.parametrize("rocm", [True, False], indirect=True)
+def test_graph_profiling_ignores_memory_released_by_others(rocm):
+    """A release elsewhere during graph profiling leaves the measurement as it
+    was, so the ROCm fallback and the profiling assertion still agree."""
+    result = _measured_profile(MEASURED_DROP)
+    after = _after_graph_profiling(ANY_FREE_MEMORY + RELEASED_BY_OTHERS)
+
+    charge_memory_retained_by_graph_profiling(result, after)
+
+    assert result.total_consumed == MEASURED_DROP
+    assert maybe_rocm_profiling_fallback(result) is None
+    assert result.before_create.free_memory >= result.after_profile.free_memory
+
+
+@pytest.mark.parametrize("rocm", [True], indirect=True)
+def test_rocm_fallback_counts_memory_retained_by_graph_profiling(rocm):
+    """The ROCm fallback reads torch reserved after graph profiling, so retained
+    workspaces stay charged when others released memory during profiling."""
+    retained = GiB_bytes
+    result = _measured_profile(-RELEASED_BY_OTHERS, reserved_after=TORCH_RESERVED)
+    after = _after_graph_profiling(
+        result.after_profile.free_memory - retained, TORCH_RESERVED + retained
+    )
+
+    charge_memory_retained_by_graph_profiling(result, after)
+
+    assert maybe_rocm_profiling_fallback(result) == TORCH_RESERVED + retained
 
 
 class _OrderedHandle:
