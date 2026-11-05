@@ -782,13 +782,22 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
                 self.initialized = False
 
 
+# VLLM_FLASHINFER_MOE_A2A_TRANSPORT -> NVLinkOneSidedConfig fields
+_FLASHINFER_A2A_TRANSPORTS: dict[str, dict[str, bool | None]] = {
+    "fence": {"cft": False, "lamport": False},
+    "cft": {"cft": None, "lamport": False},
+    "lamport": {"cft": False, "lamport": True},
+    "auto": {"cft": None, "lamport": None},
+}
+
+
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
     """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
             "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
-            "Please install FlashInfer 0.7.2 or later."
+            "Please install FlashInfer 0.7.3 or later."
         )
         super().__init__(cpu_group)
         self.initialized = False
@@ -880,6 +889,8 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             extra_payload_bytes_per_token=extra_payload_bytes_per_token,
             use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
+            # FlashInfer enables CFT and Lamport by default; keep them opt-in.
+            **_FLASHINFER_A2A_TRANSPORTS[envs.VLLM_FLASHINFER_MOE_A2A_TRANSPORT],
         )
         if communication is not None:
             # Growth happens during model initialization, before graph capture.
@@ -900,10 +911,12 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.num_experts = num_experts
         self.initialized = True
         logger.info(
-            "FlashInfer One-sided NVLink initialized for rank %s, size %s, hidden %s",
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s, "
+            "hidden %s, transport %s",
             self.rank,
             self.world_size,
             params.hidden_size,
+            envs.VLLM_FLASHINFER_MOE_A2A_TRANSPORT,
         )
         dist.barrier(group=self.cpu_group)
 
@@ -924,12 +937,9 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
 
     def checkpoint_prepare(self) -> None:
         if self.communication is not None:
-            communication = self.communication
-            if hasattr(communication, "checkpoint_prepare"):
-                communication.checkpoint_prepare()
-            else:
-                # FlashInfer 0.7.2 exposes checkpoints on the wrapped backend.
-                communication.alltoall.checkpoint_prepare()
+            # CFT endpoint metadata, like bootstrap metadata, stays on the CPU.
+            with torch.device("cpu"):
+                self.communication.checkpoint_prepare()
 
     def checkpoint_restore(self) -> None:
         if self.initialized:
@@ -938,11 +948,8 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             )
 
             communicator = CustomCommunicator(self.cpu_group)
-            communication = self.get_communication()
-            if hasattr(communication, "checkpoint_restore"):
-                communication.checkpoint_restore(communicator)
-            else:
-                communication.alltoall.checkpoint_restore(communicator)
+            with torch.device("cpu"):
+                self.get_communication().checkpoint_restore(communicator)
 
 
 class MoriAll2AllManager(All2AllManagerBase):

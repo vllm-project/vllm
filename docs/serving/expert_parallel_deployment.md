@@ -44,6 +44,38 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
+### Transports for FlashInfer one-sided all-to-all
+
+`flashinfer_nvlink_one_sided` signals arrivals with fences and flags by default.
+On supported GPUs it can instead carry small, decode-sized steps with CFT
+(Compute Fabric Transport) counted writes or the Lamport transport, in which
+every pushed vector carries its own arrival. Both are off by default. Opt in by
+setting `VLLM_FLASHINFER_MOE_A2A_TRANSPORT` to the same value on every EP rank:
+
+| Value | Behavior |
+| ----- | -------- |
+| `fence` (default) | Fences for every step. |
+| `cft` | CFT for steps whose busiest EP rank has at most 128 tokens (applied separately to dispatch and combine); fences for larger steps. |
+| `lamport` | Lamport for steps up to FlashInfer's limit (159 to 512 tokens per rank, depending on the GPU and payload); fences for larger steps. |
+| `auto` | FlashInfer chooses per step: Lamport where it applies, then CFT, then fences. |
+
+Requirements, checked by FlashInfer across all EP ranks:
+
+- CFT: compute capability 10.0 or newer, FlashInfer kernels built with CUDA
+  13.4+ (the `cu134` `flashinfer-jit-cache` wheels; the `cu130` ones are built
+  without CFT), NVIDIA driver 615 or newer, and fabric memory handles (IMEX). Every
+  payload row must be a multiple of 16 bytes. The expert IDs and weights take 4
+  bytes per selected expert, so dispatch uses fences unless `top_k` is a
+  multiple of 4; combine can still use CFT.
+- Lamport: compute capability 10.0 or 10.3, at most 64 EP ranks, BF16 combine
+  (not `VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE`), and a BF16, MXFP8,
+  per-128 FP8 or NVFP4 dispatch format.
+
+When any EP rank lacks support, all ranks use fences. FlashInfer logs the
+reason as a warning for `lamport`, but only at info level for `cft` and `auto`.
+The choice is made per forward step on the host, so a CUDA graph keeps the
+transport chosen for its captured batch size. The setting is fixed at startup.
+
 ## Single Node Deployment
 
 ### Configuration

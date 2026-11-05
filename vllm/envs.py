@@ -230,6 +230,9 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
+    VLLM_FLASHINFER_MOE_A2A_TRANSPORT: Literal["fence", "cft", "lamport", "auto"] = (
+        "fence"
+    )
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1902,6 +1905,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when the installed FlashInfer MoeAlltoAll kernel supports it.
     "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE": lambda: bool(
         int(os.getenv("VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE", "0"))
+    ),
+    # Transport of the flashinfer_nvlink_one_sided all-to-all. "fence" uses
+    # fence-and-flag signalling for every step. "cft" (CFT counted writes) and
+    # "lamport" (Lamport transport) take steps up to FlashInfer's tokens-per-rank
+    # limits and leave larger steps to fences. "auto" lets FlashInfer choose
+    # among all three. Transports the GPUs, driver or payload layout do not
+    # support fall back to fences.
+    "VLLM_FLASHINFER_MOE_A2A_TRANSPORT": env_with_choices(
+        "VLLM_FLASHINFER_MOE_A2A_TRANSPORT",
+        "fence",
+        ["fence", "cft", "lamport", "auto"],
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
