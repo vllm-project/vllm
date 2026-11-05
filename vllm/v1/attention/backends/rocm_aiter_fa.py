@@ -57,6 +57,18 @@ _PAGED_MTP_MODE = os.environ.get("VLLM_ROCM_AITER_FA_PAGED_MTP", "0").strip().lo
 # tokens instead of the 32K-slice gather/dequant + varlen + merge loop.
 _FP8_CTX_ATTN = os.environ.get("VLLM_ROCM_MUSE_FP8_CTX_ATTN", "0") == "1"
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
+
+
+def _per_tensor_quant_rows(query: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-tensor fp8 quant of q [T, H, D] as T contiguous rows of H * D: AITER's
+    dynamic quant takes one atomic max per row, so [T, H, D] (T * H rows) serializes,
+    and it assumes contiguous rows (q is a strided slice of qkv)."""
+    q_fp8, q_descale = rocm_aiter_ops.per_tensor_quant(
+        query.contiguous().view(query.shape[0], -1), current_platform.fp8_dtype()
+    )
+    return q_fp8.view(query.shape), q_descale
+
+
 if current_platform.is_rocm():
     from vllm.triton_utils import tl, triton
 
@@ -1156,9 +1168,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if self.use_fp8_paged_extend and attn_metadata.causal:
             start = attn_metadata.num_decodes
             seq_lens = attn_metadata.seq_lens[start : start + attn_metadata.num_extends]
-            q_fp8, q_descale = rocm_aiter_ops.per_tensor_quant(
-                query.contiguous(), current_platform.fp8_dtype()
-            )
+            q_fp8, q_descale = _per_tensor_quant_rows(query)
             fp8_paged_extend_attention(
                 q_fp8,
                 key_cache,
@@ -1440,6 +1450,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # Single-token SWA decode on the trimmed block table is ~2x
             # faster on the paged kernel than unified_attention.
             decode_md = attn_metadata.decode_metadata
+
             # paged_attention_v1 takes uniform multi-token decodes (spec-decode
             # verify batches) as one mtp launch: at 150K context it is ~10x the
             # triton unified kernel on fp8 caches.
