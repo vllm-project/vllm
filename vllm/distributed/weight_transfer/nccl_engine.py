@@ -86,11 +86,13 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     """Have the workers write received tensors of the target model through a
     load plan instead of `load_weights` where the plan allows (off by default).
     The workers get `source.metadata` at init and plan from it at the first
-    weight update, inside `start_weight_update`, so that update's start takes
-    longer (the plan's trace time). Every later update must send a subset of
-    that metadata with the same dtypes and shapes; `send_weights` checks this
-    before contacting the workers. The inference server must run with
-    `VLLM_RELOAD_MODE=direct`."""
+    weight update, inside `start_weight_update`, so that call takes longer by
+    the plan's trace time (with `HTTPVLLMWeightSyncClient`, raise its
+    `timeout` for a very large model). Every update must send a subset of that
+    metadata with the same dtypes and shapes; `send_weights` checks this on
+    every trainer rank before contacting the workers. The inference server
+    must run with `VLLM_RELOAD_MODE=direct` and without EPLB; the workers
+    refuse otherwise at init."""
 
 
 @dataclass
@@ -127,8 +129,13 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 Manifest = Mapping[str, tuple[torch.dtype, tuple[int, ...]]]
 
 
-def _manifest(metadata: Iterable[ParamMeta]) -> dict[str, tuple]:
+def _manifest(metadata: Iterable[ParamMeta]) -> Manifest:
     return {m.name: (m.dtype, tuple(m.shape)) for m in metadata}
+
+
+def _dtype_name(dtype: torch.dtype) -> str:
+    """The wire name of ``dtype`` (``torch.bfloat16`` -> ``"bfloat16"``)."""
+    return str(dtype).split(".")[-1]
 
 
 def _check_manifest(
@@ -139,16 +146,23 @@ def _check_manifest(
     before an update; the worker checks again for trainers that drive it out
     of band."""
     for name, dtype, shape in sent:
-        if manifest.get(name) != (dtype, tuple(shape)):
-            raise ValueError(
-                f"NCCL weight transfer: {name!r} ({dtype}, {list(shape)}) is not "
-                "in the metadata sent at init with use_load_plan; re-init the "
-                "engine to re-plan"
-            )
+        declared = manifest.get(name)
+        if declared == (dtype, tuple(shape)):
+            continue
+        if declared is None:
+            problem = "was not declared in the metadata sent at init"
+        else:
+            problem = f"was declared at init as ({declared[0]}, {list(declared[1])})"
+        raise ValueError(
+            f"NCCL weight transfer: {name!r} sent as ({dtype}, {list(shape)}) "
+            f"{problem}; with use_load_plan, re-init the engine to re-plan"
+        )
 
 
-def _metadata_payload(metadata: Iterable[ParamMeta]) -> list:
-    return [(m.name, str(m.dtype).split(".")[-1], list(m.shape)) for m in metadata]
+def _metadata_payload(
+    metadata: Iterable[ParamMeta],
+) -> list[tuple[str, str, list[int]]]:
+    return [(m.name, _dtype_name(m.dtype), list(m.shape)) for m in metadata]
 
 
 class NCCLWeightTransferEngine(
@@ -185,7 +199,7 @@ class NCCLWeightTransferEngine(
         ] = {}
         # With `use_load_plan`: the trainer's metadata from init, and the plan
         # for the target model, built at its first update.
-        self._plan_manifest: dict[str, tuple] | None = None
+        self._plan_manifest: Manifest | None = None
         self._plan_metadata: list[ParamMeta] | None = None
         self._plan: LoadPlan | None = None
 
@@ -196,9 +210,18 @@ class NCCLWeightTransferEngine(
 
         Args:
             init_info: NCCL initialization info containing master address, port,
-                      rank offset, world size, and the packed wire params
+                      rank offset, world size, and the packed wire params;
+                      with `use_load_plan`, the trainer's metadata, which the
+                      first target update plans from
+
+        Raises:
+            ValueError: `use_load_plan` without metadata.
+            RuntimeError: `use_load_plan` with a configuration no load plan
+                supports (`check_plannable`).
 
         """
+        from vllm.model_executor.model_loader.reload import check_plannable
+
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
@@ -208,14 +231,17 @@ class NCCLWeightTransferEngine(
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
-        # After the group forms, so this error reaches the trainer instead of
-        # leaving it in the rendezvous. Planning happens at the first update.
+        # After the group forms, so these errors reach the trainer instead of
+        # leaving it in the rendezvous; and before any `start_reload`, so a
+        # refused configuration leaves the model untouched. Planning itself
+        # happens at the first target update.
         if init_info.use_load_plan:
             if not init_info.metadata:
                 raise ValueError(
                     "NCCL weight transfer: use_load_plan needs the trainer's "
                     "metadata in the init info"
                 )
+            check_plannable(self._default_model)
             self._plan_metadata = [
                 ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
                 for name, dtype_name, shape in init_info.metadata
@@ -240,10 +266,24 @@ class NCCLWeightTransferEngine(
             # applied, its single layout source. Do not move it back to init
             # or before `start_reload`: re-deriving the layout there disagrees
             # with `begin` (e.g. a storage moved by `set_` into a fused
-            # buffer) and the plan would write at the wrong offset. A failure
-            # raises from this call, which the trainer makes before it
-            # broadcasts anything.
-            self._plan = plan_loads(self.model, self._plan_metadata)
+            # buffer) and the plan would write at the wrong offset.
+            # A failure raises from this call. On the trainer, rank 0 makes it
+            # before broadcasting and raises; other trainer ranks stay in their
+            # collectives until torn down, as with any failed start.
+            try:
+                self._plan = plan_loads(self.model, self._plan_metadata)
+            except Exception as e:
+                # No rollback: the model is mid-reload, as after any failed
+                # start. Later updates go through load_weights, which repairs
+                # it; planning again needs a new init.
+                self._plan_metadata = None
+                e.add_note(
+                    "NCCL weight transfer: load planning failed after "
+                    "start_reload, so the model is mid-reload; later updates "
+                    "use load_weights, which repairs it; re-init the engine "
+                    "to retry planning"
+                )
+                raise
 
     def finish_weight_update(self) -> None:
         """Finish reloading after all weights have been received."""
@@ -261,6 +301,12 @@ class NCCLWeightTransferEngine(
         from `self.packed` / `self.packed_*`, set at the init handshake from the
         trainer's init info, so it is guaranteed to match how the trainer
         encoded.
+
+        With a load plan, a target update first checks each name, dtype and
+        shape against the metadata sent at init (the trainer engine checks the
+        same before sending; this catches trainers that drive the worker out
+        of band), then writes through `load_planned`. Draft updates use
+        `load_weights`.
 
         Args:
             update_info: Parameter names, dtypes, shapes and `src`; empty lists
@@ -381,7 +427,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         # Metadata the worker already holds; an unchanged round sends none.
         self._sent_meta: list[ParamMeta] | None = None
         # With `use_load_plan`: the metadata the workers plan from, sent at init.
-        self._plan_manifest: dict[str, tuple] | None = None
+        self._plan_manifest: Manifest | None = None
 
     @classmethod
     def _build_worker_init_payload(
@@ -543,7 +589,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         else:
             update_info = NCCLWeightTransferUpdateInfo(
                 names=[m.name for m in meta],
-                dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
+                dtype_names=[_dtype_name(m.dtype) for m in meta],
                 shapes=[list(m.shape) for m in meta],
                 src=src,
             )

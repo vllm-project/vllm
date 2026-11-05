@@ -136,11 +136,12 @@ class SparseNCCLWeightTransferEngine(
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize the NCCL process group with the trainer."""
-        if init_info.use_load_plan:
-            raise ValueError("use_load_plan is supported by the dense NCCL backend")
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
+        # after the group forms, so the error reaches the trainer
+        if init_info.use_load_plan:
+            raise ValueError("use_load_plan is supported by the dense NCCL backend")
 
     def start_weight_update(self) -> None:
         """No-op: sparse patches are applied in place, no layerwise reload."""
