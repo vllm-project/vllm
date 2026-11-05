@@ -4582,10 +4582,14 @@ def test_early_recv_reports_successes_only_through_poll(recv_worker, collect_in_
 
 
 @pytest.mark.cpu_test
-def test_early_recv_waits_for_post_processing(recv_worker, monkeypatch):
+@pytest.mark.parametrize("collect_in_step", [False, True])
+def test_early_recv_waits_for_post_processing(
+    recv_worker, monkeypatch, collect_in_step
+):
     """A request aborted before it runs frees its blocks once reported, so a
     pull is reported only after its post-processing has run on the device."""
     worker = recv_worker
+    worker.device_type = "cuda"
     worker._early_recved = []
     worker._recving_metadata["request"].region_blocks_to_zero = ([7],)
     worker._zero_region_blocks = MagicMock()
@@ -4594,12 +4598,78 @@ def test_early_recv_waits_for_post_processing(recv_worker, monkeypatch):
     monkeypatch.setattr(torch, "Event", lambda: event)
     worker._recving_transfers["request"] = [101]
     worker.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    if collect_in_step:
+        assert worker.get_transfer_results().finished_recving == set()
     assert worker.poll_finished_recving() == set()
     event.record.assert_called_once()
     assert worker.has_pending_recving()
     event.query.return_value = True
     assert worker.poll_finished_recving() == {"request"}
     assert not worker.has_pending_recving()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("collect_in_step", [False, True])
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_early_recv_cpu_post_processing(dist_init, monkeypatch, collect_in_step):
+    """Synchronous CPU layout conversion completes once without a device event."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+    from vllm.platforms.cpu import CpuPlatform
+
+    config = create_vllm_config(block_size=32, enable_permute_local_kv=True)
+    config.kv_transfer_config.kv_buffer_device = "cpu"
+    config.kv_transfer_config.enable_early_recv = True
+    monkeypatch.setattr(base_worker, "current_platform", CpuPlatform())
+    monkeypatch.setattr(CpuPlatform, "discover_numa_topology", staticmethod(lambda: []))
+    # Exercise the real CPU event backend even on accelerator test hosts.
+    event_factory = torch.Event
+    monkeypatch.setattr(torch, "Event", lambda: event_factory(device="cpu"))
+    worker = FakeNixlConnectorWorker(
+        config, "cpu", hand_shake_latency=0, kv_cache_layout="LBNHC"
+    )
+    try:
+        cache = (
+            torch.arange(3 * 32 * 4 * 32)
+            .remainder(127)
+            .to(torch.float16)
+            .reshape(3, 32, 4, 32)
+            .transpose(1, 2)
+        )
+        expected = cache.clone()
+        expected[1] = cache[1].transpose(0, 1).reshape(4, 32, 32)
+        worker.device_kv_caches = {"layer0": cache, "layer2": cache.clone()}
+        metadata = NixlConnectorMetadata()
+        metadata.add_new_req_to_recv(
+            request_id="request",
+            local_block_ids=([1],),
+            kv_transfer_params={
+                "remote_block_ids": ([1],),
+                "remote_engine_id": worker.REMOTE_ENGINE_ID,
+                "remote_request_id": "prefill-request",
+                "remote_host": "localhost",
+                "remote_port": 1234,
+                "remote_tp_size": 1,
+            },
+        )
+        worker.start_load_kv(metadata)
+        deadline = time.monotonic() + 10
+        finished = set[str]()
+        while not finished and time.monotonic() < deadline:
+            worker.start_load_kv(NixlConnectorMetadata())
+            if collect_in_step:
+                assert worker.get_transfer_results().finished_recving == set()
+            finished = worker.poll_finished_recving()
+        assert finished == {"request"}
+        for converted in worker.device_kv_caches.values():
+            assert torch.equal(converted, expected)
+        assert worker.poll_finished_recving() == set()
+        assert worker.get_transfer_results().finished_recving == set()
+        assert not worker.has_pending_recving()
+    finally:
+        worker.shutdown()
 
 
 @pytest.mark.cpu_test

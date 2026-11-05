@@ -3288,7 +3288,7 @@ class NixlBaseConnectorWorker:
     ) -> bool:
         """Notify the producers and post-process the KV of finished receives.
 
-        Returns whether post-processing was queued on the current stream.
+        Returns whether KV post-processing was performed (synchronous on CPU).
         """
         assert self.transfer_topo is not None
         block_ids_for_blocksize_post_process = defaultdict(list)

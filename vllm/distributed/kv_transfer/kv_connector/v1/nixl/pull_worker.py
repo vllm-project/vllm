@@ -72,7 +72,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             # Hold post-processed receives until the device has run the work;
             # reporting an aborted request allows its blocks to be freed.
             event = None
-            if post_processed:
+            # CPU post-processing is synchronous and has no device events.
+            if post_processed and self.device_type != "cpu":
                 event = torch.Event()
                 event.record()
             self._early_recved.append((event, succeeded))
