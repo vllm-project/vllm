@@ -59,6 +59,9 @@ pub(crate) struct ClientInner {
     /// Whether the connected engines record stats. See
     /// [`crate::EngineCoreClientConfig::engine_stats_enabled`].
     engine_stats_enabled: bool,
+    /// The engines' `max_loras`, reported as the `max_lora` label of
+    /// `vllm:lora_requests_info`.
+    max_loras: u32,
     /// Scheduler-stats metric handles, present only when engines record stats
     /// so that gauges are not exported with values no engine ever reports.
     scheduler_stats_recorder: Option<SchedulerStatsRecorder>,
@@ -93,6 +96,9 @@ impl ClientInner {
                 Some((engine, handles))
             })
             .collect();
+        // Every engine reports the same `max_loras`, validated before the
+        // client is built.
+        let max_loras = engines[0].ready_response.max_loras;
         Self {
             input_send,
             handle,
@@ -101,6 +107,7 @@ impl ClientInner {
             client_index,
             msgpack_zero_copy_threshold: msgpack_zero_copy_threshold(),
             engine_stats_enabled,
+            max_loras,
             scheduler_stats_recorder,
             iteration_metrics,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
@@ -548,7 +555,7 @@ pub(crate) async fn run_output_dispatcher_loop(
 ) {
     // LoRA phases come from request lifecycle events, which engines only emit
     // when they record stats.
-    let mut lora_info = inner.engine_stats_enabled.then(LoraInfoExporter::default);
+    let mut lora_info = inner.engine_stats_enabled.then(|| LoraInfoExporter::new(inner.max_loras));
 
     let result: Result<()> = async {
         loop {
