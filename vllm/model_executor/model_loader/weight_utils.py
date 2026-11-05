@@ -1845,6 +1845,15 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         (r"\.([qkv])_scale$", r".attn.\1_scale"),
         (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
     ]
+    if attn_str != "attn":
+        # The quant config's cache-scale mapper, applied by AutoWeightsLoader
+        # before the model's load_weights, has already renamed the checkpoint
+        # scales (e.g. ModelOpt's .self_attn.k_proj.k_scale) to
+        # .self_attn.attn.{k,v}_scale. MLA keeps them under {attn_str}.
+        scale_mapping_patterns.insert(
+            0,
+            (r"\.self_attn\.attn\.([kv])_scale$", rf".self_attn.{attn_str}.\1_scale"),
+        )
 
     # Check if name ends with k_scale or v_scale
     if name.endswith(

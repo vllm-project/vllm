@@ -115,6 +115,31 @@ def test_maybe_remap_kv_scale_name():
     assert remapped in params_dict or remapped == name or remapped is None
 
 
+@pytest.mark.parametrize("kv", ["k", "v"])
+def test_deepseek_eagle3_mapper_routes_kv_scales_to_mla(kv):
+    """ModelOpt KV-cache scales of an EAGLE-3 DeepSeek drafter must reach its
+    MLA layer after the quant config's cache-scale mapper has renamed them."""
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig,
+    )
+    from vllm.model_executor.models.deepseek_eagle3 import DeepseekV2Eagle3Model
+
+    # AutoWeightsLoader does `mapper |= quant_config.get_cache_scale_mapper()`
+    mapper = (
+        DeepseekV2Eagle3Model.hf_to_vllm_mapper
+        | QuantizationConfig.get_cache_scale_mapper()
+    )
+    assert (
+        mapper.map_name(f"midlayer.self_attn.{kv}_proj.{kv}_scale")
+        == f"layers.0.self_attn.mla_attn.mla_attn.{kv}_scale"
+    )
+    # other weights of the layer are unchanged
+    assert (
+        mapper.map_name("midlayer.self_attn.kv_b_proj.weight")
+        == "layers.0.self_attn.kv_b_proj.weight"
+    )
+
+
 def test_eagle3_lm_head_receives_quant_config():
     """Eagle3LlamaForCausalLM must pass quant_config to ParallelLMHead.
 

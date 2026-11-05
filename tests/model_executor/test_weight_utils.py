@@ -256,6 +256,37 @@ class TestMaybeRemapKvScaleName:
         )
         assert result is None
 
+    MLA_PARAMS_DICT = {
+        "model.layers.0.self_attn.mla_attn.mla_attn.k_scale": None,
+        "model.layers.0.self_attn.mla_attn.mla_attn.v_scale": None,
+        "model.layers.0.self_attn.fused_qkv_a_proj.weight": None,
+    }
+
+    @pytest.mark.parametrize("kv", ["k", "v"])
+    def test_mla_modelopt_kv_proj_scale(self, kv):
+        """ModelOpt format on an MLA model (DeepSeek-V2/V3):
+        {k,v}_proj.{k,v}_scale -> mla_attn.mla_attn.{k,v}_scale."""
+        result = maybe_remap_kv_scale_name(
+            f"model.layers.0.self_attn.{kv}_proj.{kv}_scale", self.MLA_PARAMS_DICT
+        )
+        assert result == f"model.layers.0.self_attn.mla_attn.mla_attn.{kv}_scale"
+
+    @pytest.mark.parametrize("kv", ["k", "v"])
+    def test_mla_name_from_cache_scale_mapper(self, kv):
+        """`AutoWeightsLoader` applies the quant config's cache-scale mapper
+        before the model's `load_weights`, so an MLA model receives
+        `.self_attn.attn.{k,v}_scale` instead of the ModelOpt name. It must
+        still reach the MLA attention layer."""
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizationConfig,
+        )
+
+        mapper = QuantizationConfig.get_cache_scale_mapper()
+        name = mapper.map_name(f"model.layers.0.self_attn.{kv}_proj.{kv}_scale")
+        assert name == f"model.layers.0.self_attn.attn.{kv}_scale"
+        result = maybe_remap_kv_scale_name(name, self.MLA_PARAMS_DICT)
+        assert result == f"model.layers.0.self_attn.mla_attn.mla_attn.{kv}_scale"
+
 
 def test_checkpoint_weight_mapper_discards_serialized_g_idx():
     from vllm.model_executor.layers.quantization.base_config import (
