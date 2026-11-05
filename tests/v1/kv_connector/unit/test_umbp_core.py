@@ -27,6 +27,8 @@ from tests.v1.kv_connector.umbp_test_utils import (
     make_request,
     make_scheduler_output,
 )
+from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
     UMBPStoreConnector,
@@ -48,7 +50,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     TransferJobStatus,
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
+    UMBPHandshakeMetadata,
     UMBPNamespace,
+    tp_replicated_group_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeConfig,
@@ -1891,3 +1895,157 @@ def test_worker_submits_stores_once(grouped):
     completed = worker.build_connector_worker_meta()
     assert completed.store_events == {19: StoreEventResult(1)}
     assert worker.get_kv_connector_stats().reduce()["store_num_bytes"] == 32
+
+
+def _replicated_kv_cache_config() -> KVCacheConfig:
+    """Group 0 is replicated across TP (``max_tp_shards=1``); group 1 is not."""
+    replicated = replace(_LAYER1_SPEC, max_tp_shards=1)
+    return KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["mla"], replicated),
+            KVCacheGroupSpec(["gqa"], _LAYER2_SPEC),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "topology, expected",
+    [
+        (RankTopology(tp_size=2), {0}),
+        (RankTopology(tp_size=1), set()),
+        (RankTopology(tp_size=2, dcp_size=2), set()),
+    ],
+)
+def test_tp_replicated_groups_follow_max_tp_shards(topology, expected):
+    config = _replicated_kv_cache_config()
+
+    assert tp_replicated_group_ids(config, topology) == expected
+
+
+def test_codec_keys_replicated_groups_once_across_tp():
+    topology = RankTopology(tp_size=2, pp_size=2)
+    codecs = [
+        BlockIdentityCodec(
+            UMBPNamespace("ns"), tp_rank=rank, replicated_groups=frozenset({0})
+        )
+        for rank in range(2)
+    ]
+
+    assert codecs[0].key(b"h", 0) == codecs[1].key(b"h", 0)
+    assert codecs[0].key(b"h", 1) != codecs[1].key(b"h", 1)
+    assert [codec.stores_group(0) for codec in codecs] == [True, False]
+    for group_id, width in ((0, 2), (1, 4)):
+        keys = codecs[0].keys_for_topology(b"h", topology, (group_id,))
+        assert len(set(keys)) == width
+        assert codecs[0].keys_per_object(topology, group_id) == width
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+@pytest.mark.parametrize("group_ids", [[0, 1], [0, 0]])
+def test_worker_stores_replicated_groups_only_on_tp_rank_zero(
+    tp_rank, group_ids, monkeypatch
+):
+    """Other TP ranks skip replicated objects but still finish the event."""
+    codec = BlockIdentityCodec(
+        UMBPNamespace("ns"), tp_rank=tp_rank, replicated_groups=frozenset({0})
+    )
+    handle = _StoreRecordingWorkerHandle()
+    calls = []
+
+    def store_blocks(batch):
+        calls.append(batch)
+        job = TransferJobState(batch)
+        job.start()
+        job.complete()
+        return job
+
+    monkeypatch.setattr(handle, "store_blocks", store_blocks, raising=False)
+    worker = UMBPStoreConnectorWorker(handle, codec=codec)
+    batch = BlockStoreBatch(
+        keys=[codec.key(b"a", group_ids[0]), codec.key(b"b", group_ids[1])],
+        block_ids=[1, 2],
+        group_ids=group_ids,
+        block_hashes=[b"a", b"b"],
+        parent_block_hashes=[None, b"a"],
+        token_ids=[tuple(range(16)), tuple(range(16, 32))],
+        block_sizes=[16, 16],
+        request_id="request",
+    )
+
+    worker.enqueue_stores(
+        UMBPConnectorMetadata(store_event=5, store_requests={"request": batch})
+    )
+    worker.wait_for_save()
+
+    stored = [group for call in calls for group in call.group_ids]
+    expected = group_ids if tp_rank == 0 else [g for g in group_ids if g != 0]
+    assert stored == expected
+    assert worker.build_connector_worker_meta().store_events == {5: StoreEventResult(1)}
+
+
+def test_scheduler_adopts_matching_worker_replicated_groups(monkeypatch):
+    install_memory_runtime(monkeypatch)
+    vllm_config = _vllm_config(
+        {"mode": "embedded", "key_namespace": "ns"},
+        tensor_parallel_size=2,
+        world_size=2,
+    )
+    scheduler = UMBPStoreConnector(
+        vllm_config, KVConnectorRole.SCHEDULER, _kv_cache_config()
+    )
+    try:
+        with pytest.raises(ValueError, match="replicated groups"):
+            scheduler.set_xfer_handshake_metadata(
+                {
+                    0: UMBPHandshakeMetadata("ns", (0,)),
+                    1: UMBPHandshakeMetadata("ns", ()),
+                }
+            )
+        scheduler.set_xfer_handshake_metadata(
+            {rank: UMBPHandshakeMetadata("ns", (0,)) for rank in range(2)}
+        )
+
+        assert scheduler.connector_scheduler.codec.replicated_groups == {0}
+    finally:
+        scheduler.shutdown()
+
+
+def _kv_transfer_config(connector: str, **extra) -> KVTransferConfig:
+    return KVTransferConfig(
+        kv_connector=connector, kv_role="kv_both", kv_connector_extra_config=extra
+    )
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        (_kv_transfer_config("UMBPStoreConnector"), True),
+        (_kv_transfer_config("UMBPStoreConnector", key_namespace="v2"), False),
+        (
+            _kv_transfer_config(
+                "MultiConnector",
+                connectors=[
+                    {"kv_connector": "UMBPStoreConnector", "kv_role": "kv_both"}
+                ],
+            ),
+            True,
+        ),
+        (
+            _kv_transfer_config(
+                "MultiConnector",
+                connectors=[
+                    {"kv_connector": "UMBPStoreConnector", "kv_role": "kv_both"},
+                    {"kv_connector": "ExampleConnector", "kv_role": "kv_both"},
+                ],
+            ),
+            False,
+        ),
+        (_kv_transfer_config("MultiConnector", connectors=[]), False),
+    ],
+)
+def test_only_derived_umbp_namespaces_restore_canonical_kv(config, expected):
+    connector_cls = KVConnectorFactory.get_connector_class(config)
+
+    assert connector_cls.only_restores_canonical_kv(config) is expected

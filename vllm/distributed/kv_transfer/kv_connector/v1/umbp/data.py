@@ -26,12 +26,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorWorkerMetadata,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
@@ -89,8 +88,9 @@ def tp_replicated_group_ids(
 ) -> frozenset[int]:
     """Groups whose blocks are byte-identical on every TP rank.
 
-    MLA-style latents (incl. sparse indexers and compressor states) are
-    replicated across TP; context parallelism shards them, so it opts out.
+    Every layer must declare a single TP shard (``max_tp_shards=1``, e.g. MLA
+    latents and sparse indexers); context parallelism shards them, so it opts
+    out.
     """
     if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
         return frozenset()
@@ -100,7 +100,7 @@ def tp_replicated_group_ids(
         if group.enable_kv_transfer
         and group.layer_names
         and all(
-            isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            isinstance(spec, AttentionSpec) and spec.max_tp_shards == 1
             for spec in _layer_specs(group).values()
         )
     )

@@ -102,9 +102,11 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def only_restores_canonical_kv(cls, kv_transfer_config: KVTransferConfig) -> bool:
-        # Objects are whole blocks this cache layout stored; the namespace
-        # fingerprints every per-layer spec, so foreign bytes cannot match.
-        return True
+        # Objects are whole blocks this cache layout stored, and the derived
+        # namespace fingerprints every per-layer spec. An explicit
+        # key_namespace skips that fingerprint, so it may hold foreign bytes.
+        extra = kv_transfer_config.kv_connector_extra_config
+        return extra.get("key_namespace", "auto") == "auto"
 
     def __init__(
         self,
@@ -137,8 +139,8 @@ class UMBPStoreConnector(KVConnectorBase_V1, SupportsHMA):
         runtime = UMBPRuntimeFactory.build(runtime_config)
         self._runtime = runtime
         self._topology = topology
-        # MLA latents (e.g. DeepSeek-V4 on ROCm) are identical on every TP
-        # rank; a node-shared pool keeps one copy instead of tp_size copies.
+        # TP-replicated KV (e.g. MLA latents) is identical on every TP rank;
+        # a node-shared pool keeps one copy instead of tp_size copies.
         self._dedup_tp_replicated = getattr(
             runtime, "shares_pool_across_ranks", False
         ) and bool(runtime_config.options.get("dedup_tp_replicated_kv", True))

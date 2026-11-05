@@ -72,13 +72,13 @@ logger = init_logger(__name__)
 
 def _trust_dsv4_extra_cache_nan_free(
     kv_cache_dtype: str,
-    has_kv_transfer: bool,
+    has_foreign_kv_writer: bool,
     has_extra_cache: bool,
 ) -> bool:
     return (
         _ON_GFX950
         and kv_cache_dtype == "fp8_ds_mla"
-        and not has_kv_transfer
+        and not has_foreign_kv_writer
         and has_extra_cache
     )
 
@@ -101,14 +101,14 @@ def _has_foreign_kv_writer(vllm_config: VllmConfig) -> bool:
     return not connector_cls.only_restores_canonical_kv(kv_transfer_config)
 
 
-def _aiter_sparse_mla_enabled(has_kv_transfer: bool) -> bool:
+def _aiter_sparse_mla_enabled(has_foreign_kv_writer: bool) -> bool:
     from vllm._aiter_ops import rocm_aiter_ops
 
     if not rocm_aiter_ops.is_triton_sparse_mla_enabled():
         return False
     # The aiter kernel does not scrub NaNs, so like the trust check above it
     # needs a cache only the canonical writer has touched.
-    if has_kv_transfer:
+    if has_foreign_kv_writer:
         logger.warning_once(
             "VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA is ignored with a KV "
             "connector that may load non-canonical KV; DeepSeek V4 keeps the "
