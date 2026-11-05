@@ -14,26 +14,26 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.coordinator import (  # noqa: E501
     MooncakeStoreCoordinator,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.data import (
     BoundaryPut,
     ChunkedTokenDatabase,
     LoadSpec,
     ReqMeta,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.layout import (  # noqa: E501
     KeyMetadata,
     PoolKey,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.scheduler import (  # noqa: E501
     _partial_tail_non_mamba_puts,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (  # noqa: E501
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store.worker import (  # noqa: E501
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
@@ -130,26 +130,26 @@ def _build_worker_with_dict_store(vllm_config, kv_cache_config, store):
         sc.enable_offload = False
         with (
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_tensor_model_parallel_rank",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_tensor_model_parallel_rank",
                 return_value=0,
             ),
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_tensor_model_parallel_world_size",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_tensor_model_parallel_world_size",
                 return_value=1,
             ),
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_pcp_group"
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_pcp_group"
             ) as mock_pcp,
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_dcp_group"
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_dcp_group"
             ) as mock_dcp,
             patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake"
-                ".store.worker.get_ip",
+                "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_store"
+                ".worker.get_ip",
                 return_value="127.0.0.1",
             ),
         ):

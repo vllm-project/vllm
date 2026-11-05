@@ -283,7 +283,7 @@ steps:
   - vllm/v1/core/
   - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
   - vllm/distributed/kv_transfer/kv_connector/v1/simple_cpu_offload_connector.py
-  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake_store/
   - vllm/distributed/mooncake_store.py
   - vllm/v1/simple_kv_offload/
   - vllm/v1/spec_decode/
