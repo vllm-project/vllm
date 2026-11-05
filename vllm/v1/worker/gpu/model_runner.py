@@ -89,7 +89,7 @@ from vllm.v1.outputs import (
 from vllm.v1.watermarking import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import (
-    create_speculative_target_watermarker,
+    create_sampler_watermarker,
     speculative_target_watermark_key,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -515,7 +515,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 wm_config = self.vllm_config.watermark_config
                 watermarker = create_watermarker(wm_config)
                 if self.speculative_config is not None:
-                    watermarker = create_speculative_target_watermarker(watermarker)
+                    watermarker = create_sampler_watermarker(
+                        watermarker, self.speculative_config.draft_sample_method
+                    )
                 self.sampler = GPUWatermarkSampler(
                     watermarker,
                     deduplicate_contexts=wm_config.deduplicate_contexts,

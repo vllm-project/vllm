@@ -1530,17 +1530,16 @@ class VllmConfig:
                     "share of output tokens supplied by accepted drafts.",
                     scope="global",
                 )
-            if watermark_config.algorithm == "dual_key_gumbel" and (
-                watermark_config.alpha != get_field(WatermarkConfig, "alpha").default
+            if (
+                probabilistic_drafts
+                and watermark_config.algorithm == "dual_key_gumbel"
+                and watermark_config.alpha
+                != get_field(WatermarkConfig, "alpha").default
             ):
                 logger.warning_once(
                     "Speculative decoding selects the watermark key by token role: "
-                    "%s. The configured alpha=%s is not used.",
-                    (
-                        "draft tokens use key A, recovery and bonus tokens use key B"
-                        if probabilistic_drafts
-                        else "every output token uses key B"
-                    ),
+                    "draft tokens use key A, recovery and bonus tokens use key B. "
+                    "The configured alpha=%s is not used.",
                     watermark_config.alpha,
                     scope="global",
                 )

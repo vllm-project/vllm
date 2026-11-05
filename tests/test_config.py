@@ -4338,7 +4338,7 @@ def test_watermarking_allows_greedy_drafting(caplog_vllm, disable_log_dedup, alg
     assert "Target-only watermarking" not in caplog_vllm.text
 
 
-def test_dual_key_gumbel_alpha_warning_names_the_greedy_draft_key(
+def test_dual_key_gumbel_alpha_applies_with_greedy_drafts(
     caplog_vllm, disable_log_dedup
 ):
     config = _watermarked_vllm_config()
@@ -4355,8 +4355,7 @@ def test_dual_key_gumbel_alpha_warning_names_the_greedy_draft_key(
     with caplog_vllm.at_level(logging.WARNING):
         config._check_supports_watermarking()
 
-    assert "every output token uses key B" in caplog_vllm.text
-    assert "The configured alpha=0.25 is not used" in caplog_vllm.text
+    assert "is not used" not in caplog_vllm.text
 
 
 @pytest.mark.parametrize(
