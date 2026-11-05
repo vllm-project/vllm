@@ -131,13 +131,6 @@ class GlmMoeDsaForCausalLM(VerifyAndUpdateConfig):
         ):
             cache_config.cache_dtype = "fp8_e4m3"
             logger.info_once("Using fp8 kv-cache for GlmMoeDsaForCausalLM on SM10x")
-            spec_config = vllm_config.speculative_config
-            if (
-                spec_config is not None
-                and spec_config.method not in ("mtp", "dspark", "dflash")
-                and spec_config.kv_cache_dtype is None
-            ):
-                spec_config.kv_cache_dtype = "auto"
 
         # For Glm-Moe-DSA, qrep + a2a is better than the default all-gather + ag-rs
         # in most cases.
@@ -166,7 +159,7 @@ class Glm5NextModelConfig(VerifyAndUpdateConfig):
         spec_config = vllm_config.speculative_config
         if (
             spec_config is not None
-            and spec_config.method != "mtp"
+            and spec_config.method not in ("mtp", "dspark")
             and spec_config.kv_cache_dtype is None
         ):
             spec_config.kv_cache_dtype = "auto"
