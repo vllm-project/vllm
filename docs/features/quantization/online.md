@@ -77,7 +77,9 @@ string. A string resolves first against the `--quantization` shorthands
 (taking the matching layer-kind slot), then against `QUANT_KEY_NAMES` as a
 weight name. Unset fields fall back to the `--quantization` shorthand's
 defaults, or for already-quantized checkpoints to whatever the checkpoint
-declares.
+declares. An explicitly configured `activation: null` is not the same as an
+omitted activation: it requests unquantized (BF16) activations instead of the
+method's default.
 
 On XPU, non-block FP8 scaled-mm linear layers default to W8A16; setting `--linear-backend xpu` forces W8A8. Use `--linear-backend xpu_woq` to explicitly select weight-only quantization (W8A16). Setting `--linear-backend torch` also forces W8A8 but runs the GEMM through `torch._scaled_mm` instead of the custom XPU kernel.
 
@@ -88,12 +90,23 @@ vllm serve <model> --quantization-config '{"moe":{"activation":"mxfp8"}}'
 vllm serve <model> --quantization-config.moe.activation mxfp8
 ```
 
-### Activation overrides on already-quantized checkpoints
+### Activation overrides
 
-For checkpoint-quantized models, `quantization_config` lets you pick an
-activation format independently of the baked-in weights. The supported
-overrides are checkpoint-specific; today this is wired up for MXFP4 MoE
-checkpoints (gpt-oss) where you can opt into FP8 activations:
+`quantization_config` lets you select an activation format independently of
+the weight format. For online quantization, it can be used to override the
+default activation quantization of MXFP4 layers; other online weight formats
+reject an activation override.
+
+For example, to enable MXFP4 MoE weights along MXFP8 activations:
+
+```bash
+vllm serve Qwen/Qwen3.5-35B-A3B --quantization online \
+    --quantization-config '{"moe":{"weight":"mxfp4","activation":"mxfp8"}}'
+```
+
+For pre-quantized models, the supported activation overrides are specific to each
+weight quantization type; today this is for example available for MXFP4
+MoE checkpoints where you can opt into e.g. FP8 activations:
 
 ```bash
 vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
@@ -228,7 +241,7 @@ llm = LLM(
 
 ### Fine-Grained Per-Layer Quantization Schemes
 
-Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`).
+Use the `targets` parameter to apply different online shorthands to different layers, instead of one scheme applied everywhere via `linear`/`moe`. Keys are exact layer names, regex patterns (prefixed with `re:`), or patterns understood by [`fnmatch.fnmatch`](https://docs.python.org/3/library/fnmatch.html#fnmatch.fnmatch); values are shorthand names (`fp8_per_tensor`, `fp8_per_block`, `fp8_per_channel`, `mxfp8`, `mxfp4`, `mxfp4_hadamard32`, `int8_per_channel_weight_only`, `nvfp4_per_token`) or a `{weight, activation}` spec, which allows overriding the activation quantization of a single layer.
 
 Example:
 
@@ -246,6 +259,8 @@ llm = LLM(
             r"re:.*self_attn\.qkv_proj.*": "mxfp8",
             # fnmatch: quantize all MoE experts
             "*mlp.experts*": "mxfp4",
+            # spec form: MXFP4 experts with BF16 (unquantized) activations
+            "*shared_expert*": {"weight": "mxfp4", "activation": None},
         },
     },
 )
