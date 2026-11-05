@@ -1557,10 +1557,13 @@ class MooncakeStoreWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
-        self.pp_rank = (parallel_config.rank // self.tp_size) % self.pp_size
 
         self.pcp_size = get_pcp_group().world_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
+        # Workers are laid out as PP x PCP x TP, TP innermost.
+        self.pp_rank = (
+            parallel_config.rank // (self.tp_size * self.pcp_size)
+        ) % self.pp_size
         self.dcp_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 

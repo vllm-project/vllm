@@ -21,6 +21,7 @@ steps:
   - pytest -v -s distributed/test_shm_broadcast.py
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
+  - pytest -v -s distributed/test_pipeline_partition.py
   mirror:
     amd:
       automatic_shard: true
