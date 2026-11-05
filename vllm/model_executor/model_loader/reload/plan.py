@@ -3,17 +3,18 @@
 """Load plan: which part of each checkpoint tensor this rank needs, and where
 in live memory those bytes go.
 
-``plan_loads`` traces the model's ``load_weights`` once (``bake.py``), on
-the first weight update after ``start_reload`` (so on the layout direct mode
-actually restored), and reduces each traced ``copy_`` to a box of the
-checkpoint tensor and a strided region of the target's storage
-(``geometry.py``). A name is direct only if every byte it writes is a copy of
-one incoming byte; anything else is a fallback, which the engine sends in full
-through ``load_weights``. The plan is reused for every later update.
+``plan_loads`` traces the model's ``load_weights`` once (``bake.py``),
+between ``start_reload`` and ``finish_reload`` so that it sees the layout
+direct mode actually restored (the NCCL engine does it at its first target
+update), and reduces each traced ``copy_`` to a box of the checkpoint tensor
+and a strided region of the target's storage (``geometry.py``). A name is
+direct only if every byte it writes is a copy of one incoming byte; anything
+else is a fallback, which the engine sends in full through ``load_weights``.
+The plan holds for every later update of the same model.
 
-Engines that receive full tensors call ``load_planned``. ``get_boxes`` and
-``get_dest`` are for engines that send or read only the slices a rank needs
-(sharded RDT, NCCL M2N follow-ups); the NCCL engine uses ``load_planned``.
+``load_planned`` loads full checkpoint tensors through ``get_dest``; the NCCL
+engine uses it. ``get_boxes`` (with ``get_dest``) is for engines that send or
+read only the slices a rank needs (sharded RDT, NCCL M2N follow-ups).
 """
 
 import heapq
@@ -30,7 +31,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .bake import Copy, StandIns, Traced, trace_loads
-from .direct import direct_reload_enabled
+from .direct import direct_reload_active, direct_reload_enabled
 from .geometry import (
     Box,
     Fallback,
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-__all__ = ["Box", "LoadPlan", "load_planned", "plan_loads"]
+__all__ = ["Box", "LoadPlan", "check_plannable", "load_planned", "plan_loads"]
 
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
@@ -79,7 +80,10 @@ class LoadPlan:
         its tensor's shape, into that tensor is exactly what the loader would
         have written. ``None``: fallback, send the full tensor through
         ``load_weights``. Write only between ``start_reload`` and
-        ``finish_reload``; never read."""
+        ``finish_reload``; never read.
+
+        ``load_planned`` copies full tensors through it; an engine that sends
+        only ``get_boxes`` copies its slices the same way."""
         if self.entries[name].writes is None:
             return None
         return list(self.dests[name])
@@ -91,14 +95,20 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
 
     Call between ``start_reload`` and ``finish_reload``: the plan takes every
     tensor's layout from what ``begin_direct_reload`` applied, its single
-    source. It is a dry run on meta stand-ins and changes nothing in the model.
+    source. It is a dry run on meta stand-ins and changes no parameter or
+    persistent buffer.
 
     Raises:
         ValueError: a name is declared twice.
         RuntimeError: the model cannot be planned.
 
     """
-    _check_plannable(model)
+    check_plannable(model)
+    if not direct_reload_active(model):
+        raise RuntimeError(
+            "load plan: call plan_loads between start_reload and finish_reload; "
+            "the plan takes its layout from what the direct reload restored"
+        )
     metas: dict[str, ParamMeta] = {}
     for meta in metadata:
         if meta.name in metas:
@@ -152,16 +162,18 @@ def load_planned(
         model.load_weights(fallbacks)
 
 
-def _check_plannable(model: torch.nn.Module) -> None:
-    """Layerwise mode, a model outside a direct reload, and EPLB. Direct
-    reload's own refusals ran in ``begin_direct_reload``."""
+def check_plannable(model: torch.nn.Module) -> None:
+    """Refuse a configuration no load plan supports: a reload mode other than
+    direct, and EPLB. Reads only configuration, so an engine can call it
+    before ``start_reload`` changes the model. Direct reload's own refusals
+    run in ``begin_direct_reload``.
+
+    Raises:
+        RuntimeError: the configuration cannot be planned.
+
+    """
     if not direct_reload_enabled():
         raise RuntimeError("load plan: requires VLLM_RELOAD_MODE=direct")
-    if not getattr(model, "_direct_reload_begun", False):
-        raise RuntimeError(
-            "load plan: plan between start_reload and finish_reload, on the "
-            "layout the direct reload restored"
-        )
     for name, module in model.named_modules():
         moe_config = getattr(module, "moe_config", None)
         parallel = getattr(moe_config, "moe_parallel_config", None)
@@ -287,7 +299,8 @@ def _report(plan: LoadPlan, seconds: float, rebakes: int) -> None:
         )
     logger.info(
         "load plan: %d names: %d direct (%.1f MiB), %d fallback (%.1f MiB), "
-        "%d not needed on this rank; traced in %.2f s (%d value-read re-bakes)",
+        "%d not needed on this rank; traced in %.2f s (%d re-bakes after names "
+        "that stopped the bake)",
         len(plan.entries),
         counts["direct"][0],
         counts["direct"][1] / (1 << 20),

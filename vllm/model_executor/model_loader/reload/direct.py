@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 __all__ = [
     "begin_direct_reload",
+    "direct_reload_active",
     "direct_reload_enabled",
     "finish_direct_reload",
     "loadable_slots",
@@ -56,6 +57,11 @@ _LOADER_ATTRS = (
 def direct_reload_enabled() -> bool:
     """Whether weight updates reload in place (``VLLM_RELOAD_MODE=direct``)."""
     return envs.VLLM_RELOAD_MODE == "direct"
+
+
+def direct_reload_active(model: torch.nn.Module) -> bool:
+    """Whether ``model`` is between ``begin_direct_reload`` and its finish."""
+    return getattr(model, "_direct_reload_begun", False)
 
 
 def _layout(t: torch.Tensor) -> tuple:

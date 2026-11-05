@@ -5,6 +5,7 @@ every parameter and persistent buffer replaced by a meta stand-in of itself as
 ``begin_direct_reload`` left it, and record each ``copy_`` and every reason a
 name cannot be written directly."""
 
+import itertools
 from collections import defaultdict
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ import torch
 from torch.utils import _pytree as pytree
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from vllm.logger import init_logger
 from vllm.model_executor.utils import storage_view
 
 from .direct import loadable_slots
@@ -22,6 +24,8 @@ from .trace import TraceSink, TraceTensor
 
 if TYPE_CHECKING:
     from vllm.distributed.weight_transfer.base import ParamMeta
+
+logger = init_logger(__name__)
 
 _META = torch.device("meta")
 
@@ -106,7 +110,7 @@ def _storage_key(t: torch.Tensor) -> int | None:
 # ---- the sink
 
 
-class _ValueRead(Exception):
+class _BakeStopped(Exception):
     """A loader needs a traced tensor's values, or an op on it fails on meta;
     the bake cannot continue."""
 
@@ -168,7 +172,7 @@ class _PlanSink(TraceSink):
 
     def value_read(self, func: Callable, trace: TraceTensor) -> Any:
         self.stops.setdefault(trace._name, _VALUE_READ)
-        raise _ValueRead
+        raise _BakeStopped
 
     def unsupported(
         self, func: Callable, args: tuple, kwargs: dict, traces: list[TraceTensor]
@@ -196,10 +200,17 @@ class _PlanSink(TraceSink):
         try:
             out = func(*meta_args, **meta_kwargs)
         except Exception as e:  # no meta kernel, a shape error, ...
-            self.stops.setdefault(
-                traces[0]._name, f"{func.__name__} fails on meta stand-ins ({e!r})"
+            # the error stays out of the reason, which groups the report
+            logger.debug(
+                "load plan: %s on %s fails on meta stand-ins: %r",
+                func.__name__,
+                traces[0]._name,
+                e,
             )
-            raise _ValueRead from e
+            self.stops.setdefault(
+                traces[0]._name, f"{func.__name__} fails on meta stand-ins"
+            )
+            raise _BakeStopped from e
         originals = {id(m): a for m, a in zip(meta_flat, flat)}
         first = traces[0]
 
@@ -370,7 +381,7 @@ def _bake(
         try:
             with torch.no_grad(), _TargetGuard(sink):
                 model.load_weights(weights())
-        except _ValueRead:
+        except _BakeStopped:
             pass  # in sink.stops; the caller reruns without the name
         finally:
             changed = snapshot.restore()
@@ -382,21 +393,19 @@ class Traced:
     copies: dict[str, list[Copy]]  # per name, from the full bake
     reasons: dict[str, str]  # fallback names and why
     lonely: list[str]  # fallbacks that write nothing when loaded alone
-    rebakes: int = 0  # full bakes rerun after a name stopped one
+    rebakes: int  # full bakes rerun after a name stopped one
 
 
 def trace_loads(
     model: torch.nn.Module, metas: dict[str, "ParamMeta"], stand_ins: StandIns
 ) -> Traced:
     """Bake all names. Each name whose loader reads tensor values (or runs an
-    op that fails on meta) reruns the whole bake without it (one full bake per
-    such name). Names that change module state are then found by bisecting,
-    only if the full bake did."""
+    op that fails on meta) reruns the whole bake without it (at most one full
+    bake per such name). Names that change module state are then found by
+    bisecting, only if the full bake did."""
     reasons: dict[str, str] = {}
     names = list(metas)
-    rebakes = -1
-    while True:
-        rebakes += 1
+    for rebakes in itertools.count():
         try:
             sink, changed = _bake(model, metas, names, stand_ins)
         except Exception as e:

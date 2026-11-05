@@ -10,6 +10,7 @@ weights, at the same addresses, on the first update and on later ones that
 reuse the plan.
 """
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -481,10 +482,11 @@ def test_meta_failure_is_not_called_a_value_read():
     fallback reason is the error, not "reads tensor values"."""
 
     def loader(model, param, loaded):
-        try:
-            loaded + torch.ones(3)  # a shape error, swallowed by the loader
-        except RuntimeError:
-            pass
+        # A shape error. On the real path the loader swallows it; under the
+        # trace the op stops the bake, and the loader swallows that too: the
+        # stop is still recorded and the bake reruns without the name.
+        with contextlib.suppress(Exception):
+            loaded + torch.ones(3)
         param.copy_(loaded)
 
     make, shapes = _two_names(loader)
