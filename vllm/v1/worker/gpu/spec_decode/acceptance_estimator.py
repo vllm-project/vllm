@@ -317,7 +317,7 @@ def _predict_kernel(
     #
     # Every term is added, never subtracted, and none exceeds the total, so the
     # complement keeps fp32 relative accuracy however small it is -- which is
-    # the point, since the feature is its logarithm and is read at e^-80.
+    # the point, since the feature is its logarithm and is read down to e^-40.
     global_max, best_block = tl.max(maxes, axis=0, return_indices=True)
     scale = tl.where(blocks_mask, tl.exp(maxes - global_max), 0.0)
     complement_sumexp = tl.sum(
