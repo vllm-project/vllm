@@ -402,10 +402,13 @@ class AttentionGroup:
         if kv_cache.shape[-2] == kernel_rows:
             return kv_cache
         # Token and pooled caches are written through manager-block slot
-        # mappings, so only compressed caches (written from their block table)
-        # can be mapped.
+        # mappings, so only caches written from their block table (compressed
+        # ones, or as their backend declares) can be mapped.
         if (
-            spec.tokens_per_state <= 1
+            (
+                spec.tokens_per_state <= 1
+                and not self.backend.writes_kv_cache_from_block_table()
+            )
             or kv_cache.shape[1] != 1
             or kv_cache.stride(0) % (kernel_rows * kv_cache.stride(-2))
         ):

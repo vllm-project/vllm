@@ -733,6 +733,35 @@ class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             ):
                 quant_config["quant_method"] = "mxfp4"
 
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Default the kv-cache dtype when the text backbone carries DSA:
+        per-tensor fp8 for FLASHINFER_MLA_SPARSE, the default on SM10x, and
+        "fp8_ds_mla" otherwise."""
+        hf_config = vllm_config.model_config.hf_config
+        hf_text_config = getattr(hf_config, "text_config", hf_config)
+        if getattr(hf_text_config, "dsa_config", None) is None:
+            return
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        cache_config = vllm_config.cache_config
+        backend = vllm_config.attention_config.backend
+        if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE or (
+            backend is None
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            # FlashInfer reads per-tensor fp8 MLA rows, not the ds_mla formats.
+            if cache_config.cache_dtype == "auto":
+                cache_config.cache_dtype = "fp8_e4m3"
+                logger.info("Using per-tensor fp8 kv-cache for Kimi K3 DSA")
+        elif cache_config.cache_dtype == "auto" or cache_config.cache_dtype.startswith(
+            "fp8"
+        ):
+            cache_config.cache_dtype = "fp8_ds_mla"
+            logger.info("Using custom fp8 kv-cache format for Kimi K3 DSA")
+
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
@@ -1485,6 +1514,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
+    "KimiK31ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
     "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,

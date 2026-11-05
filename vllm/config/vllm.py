@@ -114,6 +114,7 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
+        "KimiK31ForConditionalGeneration",
         "KimiK3MTPModel",
         "KimiLinearForCausalLM",
         "MiniMaxM3SparseForCausalLM",
@@ -3941,6 +3942,7 @@ class VllmConfig:
         kda_architectures = (
             "KimiLinearForCausalLM",
             "KimiK3ForConditionalGeneration",
+            "KimiK31ForConditionalGeneration",
         )
         is_kda_model = (
             self.model_config is not None

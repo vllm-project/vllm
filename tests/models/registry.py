@@ -1062,6 +1062,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "moonshotai/Kimi-K3",
         trust_remote_code=True,
     ),
+    "KimiK31ForConditionalGeneration": _HfExamplesInfo(
+        "moonshotai/Kimi-K3.1-Pro",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "KimiVLForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-VL-A3B-Instruct",
         extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},

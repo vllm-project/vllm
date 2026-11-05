@@ -354,6 +354,13 @@ _TRTLLM_GEN_SOFTMAX_GUARD_BYTES = 1024 * 1024
 _DEFAULT_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
 
 
+def trtllm_gen_query_heads(num_heads: int) -> int:
+    """Query heads the trtllm-gen MLA decode runs: it takes no head count strictly
+    between 64 and 128 (e.g. Kimi-K3.1's 96 heads gathered under ShardQ), so
+    those are zero-padded to 128."""
+    return 128 if 64 < num_heads < 128 else num_heads
+
+
 def compute_trtllm_sparse_mla_workspace_bytes(
     base_workspace_bytes: int,
     dcp_world_size: int,
@@ -377,7 +384,7 @@ def compute_trtllm_sparse_mla_workspace_bytes(
         return base_workspace_bytes
     softmax_bytes = (
         _TRTLLM_GEN_SOFTMAX_STAT_BYTES
-        * (num_heads_per_rank * dcp_world_size)
+        * trtllm_gen_query_heads(num_heads_per_rank * dcp_world_size)
         * min(max_num_batched_tokens, _TRTLLM_GEN_MAX_REQUESTS)
         * _TRTLLM_GEN_SOFTMAX_SLOTS_PER_TOKEN
         + _TRTLLM_GEN_SOFTMAX_GUARD_BYTES
@@ -640,12 +647,19 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 topk_lens = prepare_sparse_mla_safe_lengths(topk_indices, seq_lens)
 
         num_tokens, num_heads = q.shape[0], q.shape[1]
+        padded_heads = trtllm_gen_query_heads(num_heads)
+        if padded_heads != num_heads:
+            # Zero query heads: computed, then dropped.
+            pad = query.new_zeros(
+                (num_tokens, 1, padded_heads - num_heads, q.shape[-1])
+            )
+            query = torch.cat([query, pad], dim=2)
         out = q.new_empty(
-            (num_tokens, num_heads, self.kv_lora_rank), dtype=torch.bfloat16
+            (num_tokens, padded_heads, self.kv_lora_rank), dtype=torch.bfloat16
         )
         lse = None
         if self.need_to_return_lse_for_decode:
-            lse = q.new_empty((num_tokens, num_heads), dtype=torch.float32)
+            lse = q.new_empty((num_tokens, padded_heads), dtype=torch.float32)
 
         # One trtllm-gen request per token, and requests map to gridDim.z: a
         # launch over more than 65535 tokens fails without raising and leaves
@@ -674,6 +688,9 @@ class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
                 return_lse=lse is not None,
                 **extra_kwargs,
             )
+        out = out[:, :num_heads]
+        if lse is not None:
+            lse = lse[:, :num_heads]
         if self.is_nope_mla and needs_empty_query_guard:
             empty_queries = seq_lens == 0
             if lse is not None:
