@@ -15,6 +15,7 @@ from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.parser.granite import GraniteParser
 from vllm.parser.granite_thinking import GraniteThinkingParser
+from vllm.parser.granite_toolcall import GraniteToolCallParser
 from vllm.parser.inkling import InklingParser
 from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.llama_json import LlamaJsonParser
@@ -27,6 +28,7 @@ from vllm.parser.plamo3 import Plamo3Parser
 from vllm.parser.qwen3 import Qwen3Parser
 from vllm.parser.seed_oss import SeedOssParser
 from vllm.parser.step3p5 import Step3p5Parser
+from vllm.parser.zaya import ZayaParser
 
 (
     DeepSeekV32ParserReasoningAdapter,
@@ -74,6 +76,11 @@ from vllm.parser.step3p5 import Step3p5Parser
 ) = make_adapters(GraniteThinkingParser)
 
 (
+    GraniteToolCallParserReasoningAdapter,
+    GraniteToolCallParserToolAdapter,
+) = make_adapters(GraniteToolCallParser)
+
+(
     NemotronV3ParserReasoningAdapter,
     NemotronV3ParserToolAdapter,
 ) = make_adapters(NemotronV3Parser)
@@ -82,6 +89,11 @@ from vllm.parser.step3p5 import Step3p5Parser
     Qwen3ParserReasoningAdapter,
     Qwen3ParserToolAdapter,
 ) = make_adapters(Qwen3Parser)
+
+(
+    ZayaParserReasoningAdapter,
+    ZayaParserToolAdapter,
+) = make_adapters(ZayaParser)
 
 (
     MiMoParserReasoningAdapter,

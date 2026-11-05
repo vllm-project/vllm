@@ -48,6 +48,7 @@ def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
         max_model_len=64,
         max_num_seqs=2,
         async_scheduling=False,
+        kv_sharing_fast_prefill=True,
         aux_output_config={"enable_hidden_states": True},
     ) as runner:
         for case in ("n", "stop", "resumable", "aux"):
@@ -55,6 +56,22 @@ def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
                 runner.llm.llm_engine.add_request(
                     "capture", invalid_request(case), SamplingParams()
                 )
+        with pytest.raises(VLLMValidationError, match="kv-sharing-fast-prefill"):
+            runner.llm.generate(
+                {"prompt_token_ids": [100, 200, 300]},
+                SamplingParams(
+                    max_tokens=1,
+                    extra_args={
+                        "hidden_state_capture": {
+                            "start": 0,
+                            "end": 1,
+                            "coordinate": "absolute",
+                            "collection_id": "fast-prefill",
+                        }
+                    },
+                ),
+                use_tqdm=False,
+            )
         output = runner.llm.generate(
             "Hello", SamplingParams(max_tokens=1), use_tqdm=False
         )

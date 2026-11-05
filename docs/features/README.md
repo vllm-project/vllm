@@ -4,10 +4,12 @@
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
 
-## Compatibility Matrix
+## Training Data Capture
 
-See [windowed hidden-state capture](speculative_decoding/windowed_hidden_states.md)
-for request-local training features returned through the Python generation API.
+See [windowed hidden-state capture](windowed_hidden_states.md)
+for request-local training features returned through the Python and HTTP APIs.
+
+## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
 
@@ -85,4 +87,4 @@ th:not(:first-child) {
 | beam-search | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 !!! note
-    For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on feature support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/) documentation.

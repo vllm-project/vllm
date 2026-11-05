@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 from threading import Lock
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
@@ -508,23 +508,27 @@ def validate_capture_request(
         raise VLLMValidationError(
             "Hidden capture requires n=1, no stop strings or streaming input"
         )
-    if plan.aux_layer_ids:
-        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-            requires_aux_hidden_states,
+    if plan.aux_layer_ids and (
+        config.speculative_config is None
+        or not config.speculative_config.uses_aux_hidden_states
+    ):
+        raise VLLMValidationError(
+            "Auxiliary hidden capture requires an auxiliary-layer speculator"
         )
-
-        if config.speculative_config is None or not requires_aux_hidden_states(
-            config.speculative_config
-        ):
-            raise VLLMValidationError(
-                "Auxiliary hidden capture requires an auxiliary-layer speculator"
-            )
     if plan.logprob_topk > config.model_config.get_vocab_size():
         raise VLLMValidationError("logprob_topk exceeds the model vocabulary")
     maximum = config.model_config.max_logprobs
     if maximum != -1 and plan.logprob_topk > maximum:
         raise VLLMValidationError("logprob_topk exceeds max_logprobs")
     rows = plan.window_end_abs - plan.window_start_abs
+    if (
+        plan.window_start_abs < plan.output_start
+        and config.cache_config.kv_sharing_fast_prefill
+    ):
+        raise VLLMValidationError(
+            "Prompt hidden capture is incorrect with --kv-sharing-fast-prefill; "
+            "disable it for scoring"
+        )
     if rows > config.model_config.max_model_len:
         raise VLLMValidationError("Hidden capture window exceeds max_model_len")
     hidden_width = config.model_config.get_hidden_size() * (
@@ -659,10 +663,9 @@ def _public_capture_model_name(name: str | list[str] | None) -> str | None:
     if isinstance(name, list):
         name = name[0] if name else None
     if name and (
-        Path(name).is_absolute()
+        PurePosixPath(name).is_absolute()
         or PureWindowsPath(name).is_absolute()
         or name.startswith(".")
-        or Path(name).exists()
     ):
         return None
     return name
@@ -706,7 +709,6 @@ class HiddenStateWorker:
     def __init__(self, model: torch.nn.Module, config: VllmConfig) -> None:
         from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
             get_eagle3_aux_layers_from_config,
-            requires_aux_hidden_states,
         )
 
         self.plans: dict[str, HiddenStateCapturePlan] = {}
@@ -715,8 +717,9 @@ class HiddenStateWorker:
         self.carry = HiddenCaptureCarry()
         self.logits_contract = _logits_contract(model, config)
         layers: tuple[int, ...] = ()
-        if config.speculative_config is not None and requires_aux_hidden_states(
-            config.speculative_config
+        if (
+            config.speculative_config is not None
+            and config.speculative_config.uses_aux_hidden_states
         ):
             layers = (
                 get_eagle3_aux_layers_from_config(config.speculative_config)

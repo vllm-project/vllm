@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.umbp_test_utils import (
+    MemoryRuntime,
     _EmbeddedRuntime,
     _hybrid_kv_cache_config,
     _kv_cache_config,
@@ -18,6 +19,7 @@ from tests.v1.kv_connector.umbp_test_utils import (
     _WorkerHandle,
     make_request,
     make_scheduler_output,
+    mori_has_umbp,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp import (
@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockIdentityCodec,
     BlockTransferPlan,
+    KVLayoutPlanner,
     LoadSpec,
     RankTopology,
     RequestTracker,
@@ -37,6 +40,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     UMBPConnectorMetadata,
     UMBPConnectorWorkerMetadata,
     UMBPNamespace,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
+    EmbeddedRuntime,
+    UMBPRuntimeConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.factory import (
     UMBPRuntimeFactory,
@@ -54,6 +61,7 @@ from vllm.v1.core.kv_cache_utils import make_block_hash_with_group_id
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowSpec,
     SparseCacheRole,
@@ -887,6 +895,141 @@ def test_finished_hybrid_tail_pins_full_pages_until_all_workers_finish():
         )
         assert [block.ref_cnt for block in blocks] == ([1, 1] if rank == 0 else [0, 0])
     assert not scheduler.has_pending_push_work()
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not mori_has_umbp(), reason="MORI was built without UMBP"
+            ),
+        ),
+    ],
+)
+def test_finished_hybrid_tail_restores_every_byte(socket_dir, device):
+    """A hash-only tail survives request cleanup, then restores byte for byte."""
+    if device == "cpu":
+        runtime = MemoryRuntime()
+    else:
+        runtime = EmbeddedRuntime.from_config(
+            UMBPRuntimeConfig(
+                "embedded", {"capacity_bytes": 16 << 20, "lookup_dir": socket_dir}
+            )
+        )
+    config = _hybrid_kv_cache_config()
+    groups = config.kv_cache_groups
+    config = replace(
+        config,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=8 * group.kv_cache_spec.page_size_bytes,
+                layers=group.layer_names,
+                layer_stride=8 * group.kv_cache_spec.page_size_bytes,
+                block_stride=group.kv_cache_spec.page_size_bytes,
+            )
+            for group in groups
+        ],
+    )
+    topology = RankTopology()
+    layout = KVLayoutPlanner.from_kv_cache_config(config)
+    descriptor = layout.describe(topology)
+    scheduler = UMBPStoreConnectorScheduler(
+        _vllm_config(
+            {"enable_partial_hash_hits": True, "load_async": True},
+            prefix_match_unit=4,
+        ),
+        config,
+        runtime.create_scheduler_handle("tail", topology, descriptor),
+        BlockIdentityCodec(UMBPNamespace("tail")),
+    )
+    worker = UMBPStoreConnectorWorker(
+        runtime.create_worker_handle("tail", topology, descriptor), layout
+    )
+    pool = BlockPool(8, True, 4)
+    scheduler.bind_gpu_block_pool(pool)
+    caches = {
+        group.layer_names[0]: torch.zeros(
+            (8, group.kv_cache_spec.page_size_bytes), dtype=torch.uint8, device=device
+        )
+        for group in groups
+    }
+    # Distinct int32 words, so a K/V swap or a shifted range cannot match.
+    pages = {
+        name: torch.arange(
+            group << 16,
+            (group << 16) + cache.shape[1] // 4,
+            dtype=torch.int32,
+            device=device,
+        ).view(torch.uint8)
+        for group, (name, cache) in enumerate(caches.items())
+    }
+    for block_id, (name, cache) in enumerate(caches.items(), 1):
+        cache[block_id] = pages[name]
+    worker.register_kv_caches(caches)
+    request = make_request(
+        "tail",
+        num_tokens=13,
+        num_computed_tokens=12,
+        block_hashes=[b"a", b"b", b"c"],
+    )
+    source_ids = ([1], [2])
+    scheduler.update_state_after_alloc(
+        request, SimpleNamespace(get_block_ids=lambda group_ids: source_ids), 0
+    )
+    sources = [pool.blocks[1], pool.blocks[2]]
+    pool.touch(sources)
+    assert not scheduler.register_finished_partial_tail(
+        request, source_ids, [(1, 2, 12)]
+    )
+    assert scheduler.request_finished(request, source_ids) == (False, None)
+    pool.free_blocks(sources)
+    output = make_scheduler_output(finished={"tail"})
+    try:
+        metadata = scheduler.build_connector_meta(output)
+        assert len(metadata.store_plans) == 2
+        worker.enqueue_stores(metadata)
+        worker.wait_for_save()
+        deadline = time.monotonic() + 10
+        while scheduler.has_pending_push_work():
+            assert time.monotonic() < deadline, "store completion was not reported"
+            worker.get_finished(set())
+            scheduler.update_connector_output(
+                SimpleNamespace(
+                    kv_connector_worker_meta=worker.build_connector_worker_meta()
+                )
+            )
+            time.sleep(0.001)
+        assert [block.ref_cnt for block in sources] == [0, 0]
+        for cache in caches.values():
+            cache.zero_()
+
+        request.request_id = "replay"
+        assert scheduler.get_num_new_matched_tokens(request, 0) == (12, True)
+        scheduler.update_state_after_alloc(
+            request, SimpleNamespace(get_block_ids=lambda group_ids: ([3], [4])), 12
+        )
+        output.finished_req_ids = set()
+        worker.start_load_kv(None, scheduler.build_connector_meta(output))
+        deadline = time.monotonic() + 10
+        while (finished := worker.get_finished(set())) == (None, None):
+            assert time.monotonic() < deadline, "load completion was not reported"
+            time.sleep(0.001)
+        assert finished == (None, {"replay"})
+        assert worker.get_failed_recving() == set()
+        for block_id, (name, cache) in enumerate(caches.items(), 3):
+            expected = torch.zeros_like(cache)
+            expected[block_id] = pages[name]
+            assert torch.equal(cache, expected), name
+        counters = worker.get_kv_connector_stats().reduce()
+        page_bytes = sum(group.kv_cache_spec.page_size_bytes for group in groups)
+        assert counters["load_num_bytes"] == page_bytes
+        assert counters["store_num_bytes"] == page_bytes
+    finally:
+        worker.close()
+        scheduler.close()
 
 
 @pytest.mark.parametrize("failure", [None, "missing-rank", "exception", "short"])

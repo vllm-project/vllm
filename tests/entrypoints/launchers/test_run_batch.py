@@ -13,6 +13,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter
+from starlette.responses import StreamingResponse
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -40,14 +43,19 @@ from vllm.entrypoints.launchers.run_batch import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.completion.protocol import CompletionResponse
-from vllm.entrypoints.serve.engine.protocol import ErrorResponse
+from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingResponse,
+    EmbeddingResponseData,
+)
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse, UsageInfo
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.exceptions import RetryableRequestError, VLLMValidationError
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.v1.engine.exceptions import EngineDeadError
 
-CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
+CHAT_MODEL_NAME = "vllm-project/tiny-random-LlamaForCausalLM"
+EMBEDDING_MODEL_NAME = "vllm-project/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"
@@ -626,6 +634,46 @@ def test_completions_invalid_input():
         assert proc.returncode != 0, f"{proc=}"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_factory", [JSONResponse, create_json_response])
+async def test_batch_embedding_json_responses(response_factory):
+    expected = EmbeddingResponse(
+        id="embd-test",
+        model=EMBEDDING_MODEL_NAME,
+        data=[EmbeddingResponseData(index=0, embedding=[0.25, -0.5])],
+        usage=UsageInfo(prompt_tokens=3, total_tokens=3),
+    )
+
+    async def handler(request):
+        return response_factory(expected.model_dump())
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.custom_id == request.custom_id
+    assert result.error is None
+    assert result.response is not None
+    assert result.response.status_code == 200
+    assert result.response.body == expected
+
+
+@pytest.mark.asyncio
+async def test_batch_rejects_json_stream():
+    async def handler(request):
+        return StreamingResponse(iter([b"{}"]), media_type="application/json")
+
+    request = run_batch_module.BatchRequestInput.model_validate_json(
+        INPUT_EMBEDDING_BATCH.splitlines()[0]
+    )
+    result = await run_batch_module.run_request(handler, request)
+
+    assert result.response is not None
+    assert result.response.status_code == 400
+    assert result.error == "Request must not be sent in stream mode"
+
+
 def test_embeddings():
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
@@ -649,11 +697,26 @@ def test_embeddings():
         proc.wait()
         assert proc.returncode == 0, f"{proc=}"
 
-        contents = output_file.read()
-        for line in contents.strip().split("\n"):
-            # Ensure that the output format conforms to the openai api.
-            # Validation should throw if the schema is wrong.
+        outputs = [
             BatchRequestOutput.model_validate_json(line)
+            for line in output_file.read().splitlines()
+        ]
+        assert [output.custom_id for output in outputs] == [
+            "request-1",
+            "request-2",
+            "request-3",
+            "request-4",
+        ]
+        for output in outputs[:3]:
+            assert output.error is None
+            assert output.response is not None
+            assert output.response.status_code == 200
+            assert isinstance(output.response.body, EmbeddingResponse)
+            assert len(output.response.body.data) == 1
+            assert len(output.response.body.data[0].embedding) == 384
+        assert outputs[3].response is not None
+        assert outputs[3].response.status_code == 404
+        assert outputs[3].error is not None
 
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
@@ -1287,6 +1350,43 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         pytest.raises(ValueError, match=f"line {bad_line}:"),
     ):
         validate_batch(f)
+
+
+@pytest.mark.asyncio
+async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
+    """Building a TypeAdapter rebuilds its schema, too slow to do per request."""
+    type_adapter = MagicMock(wraps=TypeAdapter)
+    monkeypatch.setattr(run_batch_module, "TypeAdapter", type_adapter)
+
+    fallback_line = json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/unknown",
+            "body": {"model": EMBEDDING_MODEL_NAME, "input": "Hello world!"},
+        }
+    )
+    lines = [
+        *INPUT_EMBEDDING_BATCH.split("\n"),
+        *INPUT_SCORE_BATCH.split("\n"),
+        fallback_line,
+    ]
+    requests = [BatchRequestInput.model_validate_json(line) for line in lines]
+
+    async def handler(_body):
+        error = {"message": "bad", "type": "BadRequestError", "code": 400}
+        return JSONResponse(content={"error": error}, status_code=400)
+
+    output = await run_request(handler, requests[0])
+
+    assert [type(r.body).__name__ for r in requests] == [
+        *["EmbeddingCompletionRequest"] * 4,
+        *["ScoreQueriesDocumentsRequest"] * 2,
+        "EmbeddingCompletionRequest",
+    ]
+    assert isinstance(output.error, ErrorResponse)
+    assert output.response.status_code == 400
+    type_adapter.assert_not_called()
 
 
 @pytest.mark.asyncio

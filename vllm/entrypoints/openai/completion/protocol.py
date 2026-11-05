@@ -118,7 +118,6 @@ class CompletionRequest(OpenAIBaseModel):
         | list[str]
         | None
     ) = None
-    hidden_state_capture: HiddenStateCaptureRequest | None = None
     echo: bool | None = False
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
@@ -176,6 +175,7 @@ class CompletionRequest(OpenAIBaseModel):
     # --8<-- [end:completion-sampling-params]
 
     # --8<-- [start:completion-extra-params]
+    hidden_state_capture: HiddenStateCaptureRequest | None = None
     prompt_embeds: bytes | list[bytes] | None = None
     add_special_tokens: bool = Field(
         default=True,
@@ -750,8 +750,6 @@ class CompletionLogProbs(OpenAIBaseModel):
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
-    hidden_state_capture: HiddenStateCaptureResponse | None = None
-    hidden_capture_skip_reason: str | None = None
     index: int
     text: str
     logprobs: CompletionLogProbs | None = None
@@ -779,6 +777,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
     routed_experts: str | None = None
     # Contiguous weight version spans over output-token indexes.
     weight_versions: list[WeightVersionSpan] | None = None
+
+    hidden_state_capture: HiddenStateCaptureResponse | None = None
+    hidden_capture_skip_reason: str | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
