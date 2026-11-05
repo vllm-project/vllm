@@ -380,6 +380,8 @@ fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
     if error.is_request_validation_error() {
         Status::invalid_argument(message)
+    } else if error.is_unavailable() {
+        Status::unavailable(message)
     } else {
         Status::internal(message)
     }

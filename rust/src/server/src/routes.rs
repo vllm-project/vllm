@@ -133,14 +133,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     build_router_with_gates(state, gates)
 }
 
-fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
+fn build_router_with_gates(state: Arc<AppState>, mut gates: RouteGates) -> Router {
+    // Admin, LoRA lifecycle, checkpoint, and KV event routes drive the
+    // engine-core client directly, so they are only served over an
+    // `EngineCoreLlm`.
+    let has_engine_core = state.has_engine_core_client();
+    gates.dev_mode &= has_engine_core;
+    gates.runtime_lora_updating &= has_engine_core;
+
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
         .route("/metrics", get(metrics::scrape))
         .route("/load", get(load::load))
         .route("/version", get(version::version))
-        .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))
@@ -199,11 +205,9 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     }
 
     // Process checkpoint lifecycle, which requires sleep mode.
-    if state
-        .engine_core_client()
-        .ready_responses()
-        .iter()
-        .all(|ready| ready.enable_sleep_mode)
+    if has_engine_core
+        && (state.engine_core_client().ready_responses().iter())
+            .all(|ready| ready.enable_sleep_mode)
     {
         router = router
             .route("/checkpoint/prepare", post(checkpoint::prepare))
@@ -264,6 +268,10 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
             .route("/get_world_size", get(world_size::get_world_size))
+    }
+
+    if has_engine_core {
+        router = router.route("/kv_event_sources", get(kv_event_sources::kv_event_sources));
     }
 
     if let Some(profiler) = &state.profiler {

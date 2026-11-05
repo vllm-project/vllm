@@ -255,15 +255,22 @@ impl AppState {
         (self.llm() as &dyn Any).downcast_ref()
     }
 
+    /// Whether the server runs an [`EngineCoreLlm`], so routes and services
+    /// that need its engine-core client can be served.
+    pub(crate) fn has_engine_core_client(&self) -> bool {
+        self.engine_core_llm().is_some()
+    }
+
     /// Return a reference to the underlying engine core client for utility
     /// calls.
     ///
     /// # Panics
     ///
-    /// Panics if the server does not run an [`EngineCoreLlm`], which cannot
-    /// happen yet: the server always builds its state around one.
+    /// Panics if the server does not run an [`EngineCoreLlm`]. Routes and
+    /// services that call this are only built when
+    /// [`Self::has_engine_core_client`] holds.
     pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        (self.engine_core_llm().expect("the server runs an `EngineCoreLlm`")).engine_core_client()
+        (self.engine_core_llm().expect("route requires an `EngineCoreLlm`")).engine_core_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

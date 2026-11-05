@@ -482,7 +482,7 @@ async fn start_grpc_test_server(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health, true).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
