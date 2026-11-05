@@ -2114,6 +2114,7 @@ class EngineCoreProc(EngineCore):
                 else None
             ),
             prefix_hash_config=self.prefix_hash_config,
+            cache_config_info=self.vllm_config.cache_config.metrics_info(),
         )
 
     def process_input_sockets(
