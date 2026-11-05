@@ -48,9 +48,9 @@ class Target:
 
 
 class Targets:
-    """Every checkpoint tensor in the layout ``begin_direct_reload`` applied
-    (its single layout source; for example, a tensor ``set_`` into a fused
-    buffer keeps its new offset), by storage and by name."""
+    """Every checkpoint tensor in the layout ``begin_direct_reload`` applied,
+    by storage and by name. Writes name their tensor, for readable plans and
+    tests; ``by_name`` looks it up."""
 
     def __init__(self, model: torch.nn.Module):
         self.by_storage: dict[int, Target] = {}
