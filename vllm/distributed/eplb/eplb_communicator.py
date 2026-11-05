@@ -95,6 +95,16 @@ class EplbCommunicator(ABC):
 
         """
 
+    def release_departed_peers(  # noqa: B027
+        self, previous: "EplbCommunicator"
+    ) -> None:
+        """Drop connections to the ranks this reconfiguration removed.
+
+        Called once this communicator has taken over from ``previous``, so a
+        backend that holds per peer state can let go of the ranks that are
+        gone. Default is a no-op.
+        """
+
     @property
     def needs_recv_rows(self) -> bool:
         """Whether set_transfer_context must be given every rank's recv rows."""
@@ -686,6 +696,31 @@ class NixlEplbCommunicator(EplbCommunicator):
             self._expert_to_src_row = None
             self._layer_idx = None
 
+    def release_departed_peers(self, previous: EplbCommunicator) -> None:
+        if (
+            not isinstance(previous, NixlEplbCommunicator)
+            or previous._nixl_wrapper is not self._nixl_wrapper
+        ):
+            # A separate agent holds those connections and drops them with
+            # itself, so there is nothing for this one to release.
+            return
+        # Compared by name rather than by rank, since scaling down renumbers
+        # the survivors while the shared agent keeps each worker's name.
+        departed = set(previous._remote_agents.values()) - set(
+            self._remote_agents.values()
+        )
+        for agent_name in departed:
+            try:
+                self._nixl_wrapper.remove_remote_agent(agent_name)
+            except Exception:
+                logger.warning(
+                    "Could not disconnect from departed EPLB peer %s.",
+                    agent_name,
+                    exc_info=True,
+                )
+        if departed and is_local_first_rank():
+            logger.info("EPLB disconnected from %d departed peers.", len(departed))
+
     def __del__(self) -> None:
         # At interpreter shutdown the module globals this body needs, down to
         # `contextlib` itself, may already be None, and every worker exit then
@@ -706,8 +741,8 @@ class NixlEplbCommunicator(EplbCommunicator):
                 with contextlib.suppress(Exception):
                     self._nixl_wrapper.release_dlist_handle(remote_h)
         # Registrations and remote agents belong to the shared agent and may
-        # still be used by a newer communicator; NIXL releases them when the
-        # agent itself is destroyed.
+        # still be used by a newer communicator, which releases the departed
+        # ones itself; NIXL drops the rest with the agent.
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
