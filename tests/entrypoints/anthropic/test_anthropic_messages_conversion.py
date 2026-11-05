@@ -1644,17 +1644,10 @@ class TestMessagesFullConverter:
 
 
 class TestZeroTokenPrewarm:
-    def test_zero_token_request_is_accepted_by_messages_route(self):
+    def test_zero_token_request_is_rejected_by_messages_route(self):
         app, handler = TestCacheSalt._make_api_app()
-        handler.create_messages.return_value = AnthropicMessagesResponse(
-            id="msg-prewarm",
-            content=[],
-            model="test-model",
-            stop_reason="max_tokens",
-            usage={"input_tokens": 4, "output_tokens": 0},
-        )
 
-        with TestClient(app) as client:
+        with TestClient(app, raise_server_exceptions=False) as client:
             response = client.post(
                 "/v1/messages",
                 json={
@@ -1664,88 +1657,40 @@ class TestZeroTokenPrewarm:
                 },
             )
 
-        assert response.status_code == HTTPStatus.OK
-        assert response.json()["content"] == []
-        assert response.json()["stop_reason"] == "max_tokens"
-        assert response.json()["usage"]["output_tokens"] == 0
-        handler.create_messages.assert_awaited_once()
-
-    def test_zero_token_response_preserves_cache_usage(self):
-        converter = AnthropicServingMessages.__new__(AnthropicServingMessages)
-        response = ChatCompletionResponse(
-            id="chatcmpl-prewarm",
-            model="test-model",
-            choices=[],
-            usage=UsageInfo(
-                prompt_tokens=12,
-                completion_tokens=1,
-                total_tokens=13,
-                prompt_tokens_details=PromptTokenUsageInfo(
-                    cached_tokens=8,
-                    created_cache_tokens=4,
-                ),
-            ),
-        )
-
-        result = converter._zero_token_response(response)
-
-        assert result.content == []
-        assert result.stop_reason == "max_tokens"
-        assert result.usage.input_tokens == 0
-        assert result.usage.cache_read_input_tokens == 8
-        assert result.usage.cache_creation_input_tokens == 4
-        assert result.usage.output_tokens == 0
-
-    @pytest.mark.asyncio
-    async def test_zero_token_stream_has_no_content_block(self):
-        response = AnthropicMessagesRequest(
-            model="test-model",
-            max_tokens=0,
-            messages=[{"role": "user", "content": "Hello"}],
-        )
-        usage = UsageInfo(prompt_tokens=4, completion_tokens=0, total_tokens=4)
-        message = AnthropicServingMessages._zero_token_response(
-            ChatCompletionResponse(
-                id="chatcmpl-prewarm",
-                model=response.model,
-                choices=[],
-                usage=usage,
-            )
-        )
-
-        events = [
-            json.loads(event.split("data: ", 1)[1])
-            for event in [
-                event
-                async for event in AnthropicServingMessages._zero_token_stream(message)
-            ]
-        ]
-
-        assert [event["type"] for event in events] == [
-            "message",
-            "message_delta",
-            "message_stop",
-        ]
-        assert events[0]["content"] == []
-        assert events[1]["delta"]["stop_reason"] == "max_tokens"
-        assert events[1]["usage"]["output_tokens"] == 0
-
-    @pytest.mark.parametrize("max_tokens", [0, 1, 128])
-    def test_non_negative_max_tokens_are_accepted(self, max_tokens):
-        request = AnthropicMessagesRequest(
-            model="test-model",
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": "Hello"}],
-        )
-        assert request.max_tokens == max_tokens
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert "prompt-cache pre-warming" in response.json()["error"]["message"]
+        handler.create_messages.assert_not_awaited()
 
     def test_negative_max_tokens_are_rejected(self):
-        with pytest.raises(ValidationError, match="max_tokens must be non-negative"):
+        with pytest.raises(ValidationError, match="max_tokens must be positive"):
             AnthropicMessagesRequest(
                 model="test-model",
                 max_tokens=-1,
                 messages=[{"role": "user", "content": "Hello"}],
             )
+
+    def test_positive_max_tokens_still_reaches_messages_handler(self):
+        app, handler = TestCacheSalt._make_api_app()
+        handler.create_messages.side_effect = None
+        handler.create_messages.return_value = AnthropicMessagesResponse(
+            id="msg-positive",
+            content=[],
+            model="test-model",
+            usage={"input_tokens": 1, "output_tokens": 0},
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+        assert response.status_code == HTTPStatus.OK
+        handler.create_messages.assert_awaited_once()
 
 
 # ======================================================================
