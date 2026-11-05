@@ -706,7 +706,9 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
 @pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 1025, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
 def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils import (  # type: ignore[attr-defined]
+        per_token_cast_to_fp8,
+    )
 
     device = torch.device("cuda")
     top_k = 8
@@ -912,7 +914,9 @@ def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
 @requires_sm100
 @pytest.mark.parametrize("shared_block_m", [8, 32, 96, 128, 192])
 def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils import (  # type: ignore[attr-defined]
+        per_token_cast_to_fp8,
+    )
 
     device = torch.device("cuda")
     num_tokens = shared_block_m + 7
@@ -990,7 +994,9 @@ def test_prepare_megamoe_inputs_stages_shared_scale_tma_layout(shared_block_m):
 @pytest.mark.parametrize("num_tokens", [7, 65, 135])
 def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, quantize):
     """Padded tokens are unrouted; BF16 dispatch copies the hidden states."""
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
+    from vllm.third_party.deep_gemm.utils import (  # type: ignore[attr-defined]
+        per_token_cast_to_fp8,
+    )
 
     device = torch.device("cuda")
     hidden_size = 256
@@ -1074,8 +1080,11 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""
-    from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
     from vllm.third_party.deep_gemm.utils.nvfp4 import per_token_cast_to_nvfp4
+
+    from vllm.third_party.deep_gemm.utils import (  # type: ignore[attr-defined]
+        per_token_cast_to_fp8,
+    )
 
     device = torch.device("cuda")
     hidden_size, top_k, shared_block_m = 5120, 8, 32

@@ -178,6 +178,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import (
     DraftTokensHandler,
     get_drafter_hidden_states,
+    max_num_tokens_after_draft_slots,
 )
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
@@ -924,8 +925,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             num_tokens = min(
                 num_tokens,
-                self.max_num_tokens
-                - num_reqs * self.speculative_config.max_num_new_slots_for_drafting,
+                max_num_tokens_after_draft_slots(
+                    self.max_num_tokens,
+                    num_reqs,
+                    self.speculative_config.max_num_new_slots_for_drafting,
+                ),
             )
 
         assert num_tokens <= self.max_num_tokens, (
