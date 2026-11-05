@@ -503,7 +503,6 @@ def test_zen_cpu_conversion_logs_the_width(mock_zentorch_ops, caplog, num_bits):
             backend=WNA16MoEBackend.ZEN_CPU,
             layer=torch.nn.Module(),
             quant_config=_ct_quant_args(num_bits=num_bits, group_size=32),
-            input_dtype=torch.bfloat16,
             w13=w13,
             w2=w2,
             w13_scale=w13_scale,
