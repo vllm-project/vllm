@@ -667,8 +667,52 @@ def _mapped_weight_name(weights_mapper: "WeightsMapper | None", key: str) -> str
     return weights_mapper.map_name(key)
 
 
+def _hf_prefix_maps_to_lm(
+    new_name: str | None, lm_module_prefixes: tuple[str, ...]
+) -> bool:
+    if not new_name:
+        return False
+    new_p = new_name if new_name.endswith(".") else f"{new_name}."
+    return any(new_p.startswith(p) or p.startswith(new_p) for p in lm_module_prefixes)
+
+
+def _shared_hf_root_module_prefixes(
+    lm_module_prefixes: tuple[str, ...],
+    weights_mapper: "WeightsMapper | None",
+) -> tuple[str, ...]:
+    """Module prefixes that are also an HF root for non-LM weights.
+
+    E.g. Molmo/Phi-4-MM/Muse mark LM as ``model`` while vision HF keys stay
+    under ``model.vision_*`` / ``model.embed_tokens_extend.*``. Detected via
+    ``WeightsMapper.orig_to_new_prefix`` (no hard-coded name list).
+    """
+    if weights_mapper is None:
+        return ()
+    mapping = weights_mapper.orig_to_new_prefix
+    if not mapping:
+        return ()
+
+    non_lm_origs: list[str] = []
+    for orig, new in mapping.items():
+        orig_p = orig if orig.endswith(".") else f"{orig}."
+        if not _hf_prefix_maps_to_lm(new, lm_module_prefixes):
+            non_lm_origs.append(orig_p)
+
+    if not non_lm_origs:
+        return ()
+
+    shared = [
+        p
+        for p in lm_module_prefixes
+        if any(orig.startswith(p) for orig in non_lm_origs)
+    ]
+    return tuple(shared)
+
+
 def resolve_mm_encoder_only_lm_prefixes(
     language_model_names: Iterable[str] | None,
+    *,
+    weights_mapper: "WeightsMapper | None" = None,
 ) -> tuple[str, ...] | None:
     """Resolve vLLM LM *module* prefixes for ``--mm-encoder-only`` shard skip.
 
@@ -678,9 +722,25 @@ def resolve_mm_encoder_only_lm_prefixes(
     hard-code Qwen/HF nest lists.
 
     Returns ``None`` (leave the safetensors file list unchanged) when
-    ``_language_model_names`` is empty/missing.
+    ``_language_model_names`` is empty/missing, or when a module prefix is a
+    shared HF checkpoint root for both LM and non-LM weights — fail-closed so
+    Molmo / Phi-4-MM / Muse cannot under-load the encoder.
     """
-    return _normalize_module_prefixes(language_model_names) or None
+    prefixes = _normalize_module_prefixes(language_model_names)
+    if not prefixes:
+        return None
+    shared = _shared_hf_root_module_prefixes(prefixes, weights_mapper)
+    if shared:
+        logger.warning_once(
+            "mm-encoder-only whole-shard filter not applied: LM module "
+            "prefix(es) %s share an HF checkpoint root with non-LM weights "
+            "(via WeightsMapper). Encoder-only load keeps the full "
+            "safetensors file list; finer HF prefixes or key-level "
+            "filtering can enable skip later.",
+            shared,
+        )
+        return None
+    return prefixes
 
 
 def filter_mm_encoder_only_safetensors_files(
@@ -701,10 +761,8 @@ def filter_mm_encoder_only_safetensors_files(
     Without a mapper, HF names are compared directly (identity checkpoint
     layout, e.g. Kimi ``language_model.*``).
 
-    A shard is kept if it contains any non-LM key. Without an index file, or when
-    an LM module prefix is also the HF root of non-LM keys, returns
-    ``hf_weights_files`` unchanged: this fails closed so Molmo / Phi-4-MM / Muse
-    cannot under-load the encoder.
+    A shard is kept if it contains any non-LM key. Without an index file,
+    returns ``hf_weights_files`` unchanged.
     """
     prefixes = tuple(language_model_prefixes)
     if not prefixes:
@@ -730,21 +788,6 @@ def filter_mm_encoder_only_safetensors_files(
         if mapped is None:
             return False
         return any(mapped.startswith(p) for p in prefixes)
-
-    shared_root_keys = [
-        key for key in weight_map if key.startswith(prefixes) and not _is_lm_key(key)
-    ]
-    if shared_root_keys:
-        logger.warning_once(
-            "mm-encoder-only whole-shard filter not applied: LM module "
-            "prefix(es) %s share an HF checkpoint root with non-LM weights "
-            "(e.g. %s). Encoder-only load keeps the full safetensors file "
-            "list; finer HF prefixes or key-level filtering can enable skip "
-            "later.",
-            prefixes,
-            shared_root_keys[0],
-        )
-        return hf_weights_files
 
     def _is_lm_only(weight_file: str) -> bool:
         keys = keys_by_file.get(weight_file)
