@@ -127,6 +127,29 @@ def test_plan_and_resources_are_validated(make, match):
         make()
 
 
+@pytest.mark.parametrize("is_chain", [False, True])
+@pytest.mark.parametrize(
+    "max_candidates, rows, match",
+    [
+        (3, [4], "max_candidates 3"),
+        (4, [4, 4], "every request"),
+        (8, [5], "verifies up to 5"),
+    ],
+)
+def test_spec_round_checks_a_plan_with_counts(is_chain, max_candidates, rows, match):
+    """A plan with counts is laid out from its parents, so its shape is
+    checked even when it is a chain: it fits the resources and has a column
+    for every row it verifies."""
+    spec_round = object.__new__(SpecRound)
+    spec_round.resources = SpecResources(
+        max_candidates=max_candidates, capture_shapes=()
+    )
+    plan = _plan(_PARENT, [4])
+    plan.is_chain = is_chain
+    with pytest.raises(ValueError, match=match):
+        spec_round._check_plan(plan, np.array(rows), chain_only=False)
+
+
 def test_valid_plan_and_resources():
     # Only the runner's own chain plan leaves its counts and tokens to it.
     assert VerifyPlan(parent=_t(_PARENT), count=None, is_chain=True).tokens is None
@@ -153,25 +176,33 @@ def _random_batch(gen, max_rows):
 
 
 @requires_kernels
-@pytest.mark.parametrize("kind", ["tree", "chain-as-tree", "runner-chain"])
+@pytest.mark.parametrize("kind", ["tree", "bad-tree", "chain-as-tree", "runner-chain"])
 @pytest.mark.parametrize("seed", range(3))
 def test_layout_matches_reference(kind, seed):
     """Plan rows are the last ``count`` tokens of each query: each sits at the
     root's position plus its depth, with the plan's token, a query-local parent
     and plan-relative ancestor bits. Tokens in front of a plan, and every token
-    of the runner's chain, attend causally (no ancestor bits). ``restore``
-    brings the chain positions back."""
+    of the runner's chain, attend causally (no ancestor bits). A parent that is
+    not an earlier row is a chain step. ``restore`` brings the chain positions
+    back."""
     gen = np.random.default_rng(seed)
     max_rows = int(gen.integers(2, 9))
     qsl, query_lens, counts = _random_batch(gen, max_rows)
     num_reqs, num_tokens = len(counts), int(qsl[-1])
-    if kind == "tree":
+    if kind in ("tree", "bad-tree"):
         parent = _random_tree(gen, num_reqs, max_rows)
     else:
         parent = chain_parents(num_reqs, max_rows, DEVICE).cpu().numpy()
     tokens = gen.integers(100, 1000, (num_reqs, max_rows)).astype(np.int32)
     if kind == "runner-chain":
         plan = VerifyPlan(parent=_t(parent), count=None, is_chain=True)
+    elif kind == "bad-tree":
+        # Parents at their own row or later are laid out as chain steps.
+        rows = np.arange(max_rows)
+        bad = gen.random(parent.shape) < 0.5
+        late = rows + gen.integers(0, 3, parent.shape)
+        plan = _plan(np.where(bad, late, parent), counts, tokens)
+        parent = np.where(bad, rows - 1, parent)
     else:
         plan = _plan(parent, counts, tokens)
     # Each query continues its request's sequence.

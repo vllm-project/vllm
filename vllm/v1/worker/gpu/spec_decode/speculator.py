@@ -171,8 +171,8 @@ class BaseSpeculator(ABC):
         the drafts past it leave the batch and count as rejected. A plan that is
         not a chain needs ``SpecResources.max_branching > 1`` (in the bound
         resources, see `bind_resources`) and a batch that is not
-        ``inputs.chain_only``. The plan's device ``count`` may stop short of its
-        bound: the rows past it are never accepted.
+        ``inputs.chain_only``. The plan's device ``count`` equals the rows each
+        request verifies; a row with no candidate to verify holds token -1.
         """
         return None
 

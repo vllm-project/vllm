@@ -70,6 +70,9 @@ def _plan_layout_kernel(
     rows = tl.arange(0, CP)
     is_row = rows < count
     parents = tl.load(parent_ptr + b * stride_parent + rows, mask=rows < C, other=-1)
+    # A parent that is not an earlier row is a chain step, so a bad plan stays
+    # within its request.
+    parents = tl.where((parents >= 0) & (parents < rows), parents, rows - 1)
 
     # Rows are ordered parent first, so one pass in row order sees every parent done.
     depth = tl.zeros([CP], dtype=tl.int32)

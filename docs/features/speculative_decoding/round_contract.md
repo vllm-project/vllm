@@ -169,8 +169,9 @@ commit returns, so that CUDA graph replays read stable addresses.
 `PlanBound` gives the host integers the runner needs before the device plan exists.
 `rows[r]` is how many rows request `r` verifies, at most `scheduled_rows[r]`. The
 drafts past it leave the batch and count as rejected. `rows=None` verifies every
-scheduled row. The batch's graph shape follows from the rows. The device `count` may
-stop short of the bound, and rows past it are never accepted.
+scheduled row. The batch's graph shape follows from the rows. The device `count`
+equals the rows each request verifies; a row with no candidate to verify holds
+token -1.
 
 A plan that is not a chain needs `max_branching > 1` in the bound resources, and a
 batch that is not `chain_only`. The runner checks each plan against the effective

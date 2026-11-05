@@ -136,8 +136,9 @@ class VerifyPlan:
     parent: torch.Tensor
     """``[R, C]`` int32, ``parent[r, 0] == -1``."""
     count: torch.Tensor | None
-    """``[R]`` int32 in ``[1, C]``; 1 is a plain decode. None only for the chain plan
-    the runner builds itself, whose counts are the scheduled drafts plus one."""
+    """``[R]`` int32 in ``[1, C]``: the rows each request verifies (``PlanBound.rows``,
+    else ``PlanInputs.scheduled_rows``); 1 is a plain decode. None only for the chain
+    plan the runner builds itself, whose counts are the scheduled drafts plus one."""
     tokens: torch.Tensor | None = None
     """``[R, C]`` int32 candidate tokens (``tokens[r, 0]`` is ignored: the root token is
     known). None only for the runner's chain plan, whose tokens are in its draft

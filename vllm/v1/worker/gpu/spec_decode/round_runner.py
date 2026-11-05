@@ -208,7 +208,8 @@ class SpecRound:
         verify_plan, bound = None, PlanBound()
         if planned is not None:
             verify_plan, bound = planned
-            self._check_plan(verify_plan, len(req_ids), chain_only)
+            rows = num_draft_tokens + 1 if bound.rows is None else bound.rows
+            self._check_plan(verify_plan, rows, chain_only)
         if bound.rows is None:
             return idx_mapping, verify_plan, None
         # Unverified drafts leave the batch; they count as rejected.
@@ -235,7 +236,23 @@ class SpecRound:
         assert sampler is not None
         return sampler.reads_row_prefix(idx_mapping_np)
 
-    def _check_plan(self, plan: VerifyPlan, num_reqs: int, chain_only: bool) -> None:
+    def _check_plan(self, plan: VerifyPlan, rows: np.ndarray, chain_only: bool) -> None:
+        # A plan with counts is laid out from its parents, a chain too.
+        if plan.count is not None:
+            num_reqs, width = plan.parent.shape
+            max_candidates = self.resources.max_candidates
+            if width > max_candidates:
+                raise ValueError(
+                    f"a plan has {width} rows per request; the "
+                    f"speculator runs with max_candidates {max_candidates}"
+                )
+            if num_reqs < len(rows):
+                raise ValueError("a plan must cover every request of the batch")
+            if len(rows) and width < rows.max():
+                raise ValueError(
+                    f"a plan has {width} rows per request but verifies up to "
+                    f"{rows.max()}"
+                )
         if plan.is_chain:
             return
         if chain_only:
@@ -243,14 +260,6 @@ class SpecRound:
                 "the speculator returned a plan that is not a chain for a batch "
                 "that can only verify chains (PlanInputs.chain_only)"
             )
-        resources = self.resources
-        if plan.parent.shape[1] > resources.max_candidates:
-            raise ValueError(
-                f"a plan has {plan.parent.shape[1]} rows per request; the "
-                f"speculator runs with max_candidates {resources.max_candidates}"
-            )
-        if plan.parent.shape[0] < num_reqs:
-            raise ValueError("a plan must cover every request of the batch")
 
     def lay_out(self, input_batch: "InputBatch") -> None:
         """Lay out the batch's plan: move its rows' positions to
