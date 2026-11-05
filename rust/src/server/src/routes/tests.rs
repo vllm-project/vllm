@@ -42,6 +42,7 @@ use vllm_engine_core_client::protocol::output::{
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::stats::PrefillStats;
+use vllm_engine_core_client::protocol::tensor::WireNdArray;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, decode_add_request, decode_prompt_token_ids, spawn_mock_engine_task,
@@ -4015,6 +4016,111 @@ async fn openai_return_weight_versions_reports_spans_on_final_choice() {
                 }
             }
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn openai_non_stream_returns_routed_experts_cut_at_stop_string() {
+    use base64::Engine as _;
+
+    for endpoint in ["/v1/chat/completions", "/v1/completions"] {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-openai-routed-experts".to_vec(),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    let params = request.sampling_params.as_ref().expect("sampling params");
+                    assert_eq!(params.routed_experts_prompt_start, 1);
+                    // One `[layer, top_k] = [1, 2]` row per token, plus a
+                    // leading prompt row on the first output. The stop string
+                    // `!` ends the request locally inside the last output, so
+                    // the row of the trailing `x` is cut.
+                    for (token_ids, rows) in
+                        [(&b"h"[..], &[0, b'h'][..]), (b"i", b"i"), (b"!x", b"!x")]
+                    {
+                        let mut output = request_output(
+                            &request.request_id,
+                            token_ids.iter().map(|&token| token as u32).collect(),
+                            None,
+                        );
+                        output.routed_experts = Some(Box::new(WireNdArray::from_raw(
+                            TensorDtype::U8,
+                            vec![rows.len(), 1, 2],
+                            rows.iter().flat_map(|&row| [row, 7]).collect(),
+                        )));
+                        send_outputs(
+                            push,
+                            RequestBatchOutputs {
+                                outputs: vec![output],
+                                ..Default::default()
+                            }
+                            .into(),
+                        )
+                        .await;
+                    }
+                })
+            },
+        ));
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+        let mut app = build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )));
+
+        let mut body = json!({
+            "max_tokens": 8,
+            "stop": ["!"],
+            "routed_experts_prompt_start": 1,
+        });
+        if endpoint == "/v1/chat/completions" {
+            body["messages"] = json!([{"role": "user", "content": "hi"}]);
+        } else {
+            body["prompt"] = json!("hi");
+        }
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK, "{endpoint}");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        engine_task.await.expect("mock engine task");
+        let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+        let encoded = json["choices"][0]["routed_experts"].as_str().expect("routed_experts");
+        let npy = base64::engine::general_purpose::STANDARD.decode(encoded).expect("base64");
+        let header = String::from_utf8_lossy(&npy[10..npy.len() - 8]);
+        assert!(
+            header.contains("'shape': (4, 1, 2)"),
+            "{endpoint}: {header}"
+        );
+        assert_eq!(
+            &npy[npy.len() - 8..],
+            [0, 7, b'h', 7, b'i', 7, b'!', 7],
+            "{endpoint}"
+        );
     }
 }
 

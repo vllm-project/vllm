@@ -23,7 +23,8 @@ use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::logprobs::{Logprobs, PositionLogprobs};
 use vllm_engine_core_client::protocol::multimodal::MmFeatureSpec;
 use vllm_llm::{
-    CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStreamExt as _, TokenUsage,
+    AuxOutputRows, CollectedGenerateOutput, FinishReason, GenerateOutput,
+    GenerateOutputStreamExt as _, TokenUsage,
 };
 
 use self::convert::{ResponseOptions, prepare_generate_request};
@@ -36,7 +37,6 @@ pub(crate) use self::types::{GenerateRequest, GenerateSamplingParams};
 pub(crate) use self::validate::validate_request_compat;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, engine_error, server_error, text_submit_error};
-use crate::utils::npy_base64;
 use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::metrics::{
     SpeculativeDecodingMetrics, StreamingSpeculativeDecodingMetrics,
@@ -45,6 +45,7 @@ use crate::routes::openai::utils::types::Usage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
+use crate::utils::npy_base64;
 use crate::utils::{resolve_request_context, sse_response, unix_timestamp};
 
 /// Validate one token-in/token-out request and proxy it into the shared
@@ -178,10 +179,12 @@ async fn generate_chunk_stream(
     let mut prompt_token_ids = None;
     let mut usage = TokenUsage::default();
     let mut spec_decode_metrics = None;
+    let mut routed_experts = AuxOutputRows::default();
 
     while let Some(next) = stream.next().await {
         match next {
             Ok(output) => {
+                routed_experts.append(output.routed_experts);
                 if let Some(metrics) = output.spec_decode_metrics {
                     spec_decode_metrics = Some(SpeculativeDecodingMetrics::from(*metrics));
                 }
@@ -233,8 +236,16 @@ async fn generate_chunk_stream(
 
                 let stop_reason =
                     finish_reason.as_ref().and_then(|reason| reason.as_stop_reason().cloned());
-                // Like Python, the spans cover the whole output on the final chunk only.
+                // Like Python, the spans and the routed-expert rows cover the
+                // whole request on the final chunk only.
                 let weight_versions = output.weight_versions.filter(|_| finish_reason.is_some());
+                let routed_experts = if finish_reason.is_some() {
+                    std::mem::take(&mut routed_experts)
+                        .concat()
+                        .map_err(|error| server_error!("{}", error.to_report_string()))?
+                } else {
+                    None
+                };
                 let prompt_token_ids = prompt_token_ids.take();
                 y.yield_ok(GenerateStreamResponse {
                     request_id: request_id.clone(),
@@ -245,11 +256,7 @@ async fn generate_chunk_stream(
                         finish_reason: finish_reason.map(|reason| reason.as_str().to_string()),
                         stop_reason,
                         token_ids,
-                        routed_experts: output
-                            .routed_experts
-                            .as_deref()
-                            .map(npy_base64)
-                            .transpose()?,
+                        routed_experts: routed_experts.as_ref().map(npy_base64).transpose()?,
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions,
                     }],
@@ -669,7 +676,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
-                routed_experts: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
             Ok(GenerateOutput {
@@ -691,7 +698,7 @@ mod tests {
                 sampling_mask: None,
                 spec_decode_metrics: None,
                 weight_versions: None,
-                routed_experts: None,
+                routed_experts: Default::default(),
                 timestamps: Default::default(),
             }),
         ]);
@@ -780,7 +787,7 @@ mod tests {
             sampling_mask: None,
             spec_decode_metrics: None,
             weight_versions: None,
-            routed_experts: None,
+            routed_experts: Default::default(),
             timestamps: Default::default(),
         }
     }
@@ -1003,21 +1010,26 @@ mod tests {
 
     #[tokio::test]
     async fn generate_chunk_stream_returns_routed_experts_on_final_chunk() {
-        let rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
+        // Each output carries its own rows; the final chunk joins them.
+        let rows = |start: u8| {
+            AuxOutputRows::from(WireNdArray::from_raw(
+                TensorDtype::U8,
+                vec![1, 3, 2],
+                (start..start + 6).collect(),
+            ))
+        };
+        let mut first = stream_output(Some(&[11]), vec![33], None);
+        first.routed_experts = rows(0);
         let mut terminal = stream_output(None, vec![44], Some(FinishReason::Length));
-        terminal.routed_experts = Some(Box::new(rows.clone()));
+        terminal.routed_experts = rows(6);
 
-        let chunks = collect_chunks(
-            vec![stream_output(Some(&[11]), vec![33], None), terminal],
-            false,
-            None,
-        )
-        .await;
+        let chunks = collect_chunks(vec![first, terminal], false, None).await;
 
         assert_eq!(chunks[0].choices[0].routed_experts, None);
+        let all_rows = WireNdArray::from_raw(TensorDtype::U8, vec![2, 3, 2], (0..12).collect());
         assert_eq!(
             chunks[1].choices[0].routed_experts,
-            Some(npy_base64(&rows).unwrap())
+            Some(npy_base64(&all_rows).unwrap())
         );
     }
 
