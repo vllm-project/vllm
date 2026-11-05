@@ -118,7 +118,7 @@ class GPUWatermarkSampler(Sampler):
             )
         return sampled, output_logits
 
-    def pin_to_watermarked_sample(
+    def set_watermarked_sample_as_argmax(
         self,
         processed_logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,

@@ -284,7 +284,7 @@ class RejectionSampler:
             )
         elif self.watermark_key is not None:
             assert isinstance(self.sampler, GPUWatermarkSampler)
-            temperature, restore_logits = self.sampler.pin_to_watermarked_sample(
+            temperature, restore_logits = self.sampler.set_watermarked_sample_as_argmax(
                 processed_logits,
                 expanded_idx_mapping,
                 idx_mapping_np,
