@@ -61,10 +61,7 @@ def tree_attention(
     output: torch.Tensor,
 ) -> None:
     """Overwrite the output of each request whose query rows carry ancestor
-    bits: row ``i`` attends to the request's context and to the query rows ``j``
-    whose bit is set. ``key_cache`` / ``value_cache`` are ``[blocks, kv_heads,
-    block_size, head_size]``, ``query`` and ``output`` ``[tokens, heads,
-    head_size]``."""
+    bits: row ``i`` attends to its context and the rows ``j`` whose bit is set."""
     query_start_loc = metadata.query_start_loc.tolist()
     seq_lens = metadata.seq_lens.tolist()
     ancestors = metadata.tree_ancestors

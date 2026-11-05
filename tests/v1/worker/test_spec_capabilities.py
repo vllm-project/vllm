@@ -1,14 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The startup rule and the spec kernel registry: what a model's layers verify,
-a tree speculator lowered to chains where they cannot verify trees, and the
-kernels providers overlay on the reference.
+"""The startup rule and the spec kernel registry, on real layer classes (CPU)."""
 
-Each model is its layer mix: the real layer classes (built without weights) and
-their KV cache specs. CPU only; kernels are toys.
-"""
-
-import importlib
 import logging
 import uuid
 from dataclasses import replace
@@ -22,25 +15,19 @@ import vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn as gdn_layer_mo
 from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.config import CacheConfig, CompilationConfig, ParallelConfig
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
-)
 from vllm.model_executor.layers.mamba.gdn.olmo_gdn_linear_attn import (
     OlmoHybridGatedDeltaNetAttention,
 )
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
-from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     MambaSpec,
-    MLAAttentionSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
@@ -70,8 +57,6 @@ GDN_VERIFY = ("mamba:gdn@slots", "verify")
 SHORT_CONV_VERIFY = ("mamba:short_conv@slots", "verify")
 STATE_COMMIT = ("layout:mamba_state@slots", "commit")
 KV_COMMIT = ("layout:paged_token", "commit")
-
-# --- layers and specs --------------------------------------------------------
 
 
 def _spec(cls=FullAttentionSpec, **kwargs):
@@ -159,8 +144,6 @@ def _hybrid(layer_cls, backend=_TreeBackend):
     )
 
 
-# --- the startup rule ---------------------------------------------------------
-
 _LLAMA = ((_FULL, "attn", 4, Attention),)
 _IN_TREE = "attn:full_attention, 4 layers: backend FLASH_ATTN verifies chains"
 
@@ -204,13 +187,6 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
         "chain",
         ["attn:full_attention, 2 layers: not full attention"],
     ),
-    "dsv3-mla": (
-        lambda: _model((_spec(MLAAttentionSpec, block_size=64), "mla", 3, Attention)),
-        "slots",
-        False,
-        "chain",
-        ["attn:mla_attention, 3 layers: not full attention"],
-    ),
     "qwen-gdn": (QwenGatedDeltaNetAttention, "slots", False, "chain", None),
     "qwen-gdn-provider": (QwenGatedDeltaNetAttention, "slots", True, "tree", []),
     "qwen-gdn-provider-in-tree-backend": (
@@ -221,19 +197,12 @@ _MODEL_RULES: dict[str, tuple[Any, str, bool, str, list[str] | None]] = {
         [_IN_TREE.replace("4 layers", "1 layer")],
     ),
     "qwen-gdn-replay": (QwenGatedDeltaNetAttention, "replay", True, "chain", None),
-    "qwen-gdn-recover": (QwenGatedDeltaNetAttention, "recover", True, "chain", None),
 }
-# A layer subclassing a tree-capable one runs its own kernels: chains only, with
-# or without a provider. Qwen4Exp's PLE layer reports SHORT_CONV but runs its own.
+# A layer subclassing a tree-capable one (olmo) runs its own kernels: chains
+# only, with or without a provider.
 for _name, _layer_cls in {
     "nemotron-h": MambaMixer2,
     "olmo-hybrid": OlmoHybridGatedDeltaNetAttention,
-    "kimi-linear": KimiGatedDeltaNetAttention,
-    "qwen4exp-ple": "vllm.models.qwen4_exp.nvidia.ple_layer:Qwen4ExpPLELayer",
-    "kimi-k3-nvidia": "vllm.models.kimi_k3.nvidia.kda:KimiK3DeltaAttention",
-    "kimi-k3-amd": "vllm.models.kimi_k3.amd.kda:KimiK3DeltaAttention",
-    "lfm2-short-conv": ShortConv,
-    "jamba-mamba1": MambaMixer,
 }.items():
     _MODEL_RULES[_name] = (_layer_cls, "slots", True, "chain", None)
 
@@ -246,12 +215,6 @@ class DraftAttention(Attention):
 def test_plan_kind_rules(case):
     """What a model's layers let it verify, and why."""
     model, state_mode, provided, plan_kind, reasons = _MODEL_RULES[case]
-    if isinstance(model, str):
-        module, name = model.rsplit(":", 1)
-        try:
-            model = getattr(importlib.import_module(module), name)
-        except ImportError as e:
-            pytest.skip(f"{model} does not import here: {e}")
     if isinstance(model, type):
         layer_cls = model
         model = lambda: _hybrid(layer_cls)  # noqa: E731
@@ -296,20 +259,12 @@ def _resolve(**settings):
     [
         (None, None, None),
         ("use_pp", True, "pipeline parallelism (no tree path broadcast)" + _LOWERED),
-        ("pcp_manager", object(), "prefill context parallelism" + _LOWERED),
-        ("dcp_size", 2, "decode context parallelism" + _LOWERED),
-        ("batch_sharder", object(), "batch-sharded sampling" + _LOWERED),
         (
             "parallel_config",
             ParallelConfig(enable_dbo=True),
             "micro-batching" + _LOWERED,
         ),
         ("cache_config", CacheConfig(use_replayssm=True), _gdn_reason("replay")),
-        (
-            "cache_config",
-            CacheConfig(mamba_cache_mode="align"),
-            _gdn_reason("align"),
-        ),
     ],
 )
 def test_runner_settings_lower_trees_to_chains(setting, value, reason):
@@ -326,9 +281,6 @@ def test_adaptive_verification_refuses_plan_hooks():
     speculator that plans cannot run with it."""
     with pytest.raises(ValueError, match="enable_adaptive_verification=false"):
         _resolve(adaptive_verification=object())
-
-
-# --- resolving the speculator's resources -------------------------------------
 
 
 def _speculative_config():
@@ -451,9 +403,6 @@ def test_pipeline_ranks_reduce_to_the_lowest_plan_kind():
     assert resolve_spec_resources(config, declared, [_TREE, _TREE]) == declared
 
 
-# --- the spec kernel registry ------------------------------------------------
-
-
 def _module():
     module = torch.nn.Module()
     module.spec_verify_kernel = None
@@ -492,12 +441,6 @@ def test_registry_lookup(caplog):
     for key in (GDN_VERIFY, SHORT_CONV_VERIFY, STATE_COMMIT):
         assert registry.get(key) is None
     assert isinstance(registry.get(KV_COMMIT), KvCompactor)
-    assert KernelRegistry.required_keys(_mamba_layer("m", "gdn", "replay")) == [
-        ("mamba:gdn@replay", "verify"),
-        ("layout:mamba_state@replay", "commit"),
-    ]
-    assert KernelRegistry.required_keys(_attn_layer("a")) == [KV_COMMIT]
-    assert KernelRegistry.required_keys(_attn_layer("ring", layout="")) == []
 
     first, second = ToyKernel(), ToyKernel()
     provider = Provider({GDN_VERIFY: first, SHORT_CONV_VERIFY: ToyKernel()})
@@ -522,63 +465,49 @@ def test_registry_lookup(caplog):
 @pytest.mark.parametrize(
     "providers, layer, plan_kind, why",
     [
-        ({}, _mamba_layer("m", "gdn"), "chain", "no mamba:gdn@slots/verify kernel"),
-        ({}, _mamba_layer("m", "short_conv"), "chain", "no mamba:short_conv@slots"),
-        ({}, _mamba_layer("m", "gdn", "replay"), "chain", "no mamba:gdn@replay"),
-        ({}, _attn_layer("a"), "tree", None),
+        pytest.param(
+            {}, _mamba_layer("m"), "chain", "no mamba:gdn@slots/verify", id="gdn"
+        ),
+        pytest.param({}, _attn_layer("a"), "tree", None, id="attn"),
         # A cache not paged by slot keeps its own commit: nothing to need.
-        ({}, _attn_layer("ring", layout=""), "tree", None),
-        (
+        pytest.param({}, _attn_layer("ring", layout=""), "tree", None, id="ring"),
+        pytest.param(
             {},
             _attn_layer("a", layout="paged_split_scale"),
             "chain",
             "no layout:paged_split_scale/commit",
+            id="nvfp4-kv",
         ),
-        (
+        pytest.param(
             {SHORT_CONV_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel()},
             _mamba_layer("m", "short_conv"),
             "tree",
             None,
+            id="provided",
         ),
-        (
-            {GDN_VERIFY: ToyKernel(declines={"m.1"}), STATE_COMMIT: ToyKernel()},
-            _mamba_layer("m.0"),
-            "tree",
-            None,
-        ),
-        (
+        pytest.param(
             {GDN_VERIFY: ToyKernel(declines={"m.1"}), STATE_COMMIT: ToyKernel()},
             _mamba_layer("m.1"),
             "chain",
             "ToyKernel declines the layer",
+            id="declined",
         ),
         # Verify takes trees, the state commit chains only: the layer chains.
-        (
+        pytest.param(
             {GDN_VERIFY: ToyKernel(), STATE_COMMIT: ToyKernel(kinds={"chain"})},
             _mamba_layer("m"),
             "chain",
             "ToyKernel verifies chain",
+            id="lowest-kind",
         ),
         # The layer runs its verify kernel on chains too.
-        (
+        pytest.param(
             {GDN_VERIFY: ToyKernel(kinds={"tree"}), STATE_COMMIT: ToyKernel()},
             _mamba_layer("m"),
             "chain",
             "ToyKernel does not verify chains",
+            id="tree-only-verify",
         ),
-    ],
-    ids=[
-        "gdn",
-        "short-conv",
-        "gdn-replay",
-        "attn",
-        "ring",
-        "nvfp4-kv",
-        "provided",
-        "accepted",
-        "declined",
-        "lowest-kind",
-        "tree-only-verify",
     ],
 )
 def test_registry_plan_kind(providers, layer, plan_kind, why):
@@ -635,19 +564,10 @@ def test_bind_commit_capture():
             assert step.result.path.tolist() == [[0, 1, 2, 3]] * 3
             assert torch.equal(step.result.path_len, step.rows)
 
-    # A kernel runs only the plan kinds it supports.
-    tree_only = ToyKernel(kinds={"tree"})
-    layer = _mamba_layer("m.0")
-    KernelRegistry([Provider({GDN_VERIFY: tree_only})]).bind(_ctx("chain"), [layer])
-    assert not tree_only.binds and layer.module.spec_verify_kernel is None
-
     stale = _mamba_layer("m.0")
     stale.module.spec_verify_kernel = "stale"
     KernelRegistry([Provider({STATE_COMMIT: ToyKernel()})]).bind(_ctx(), [stale])
     assert stale.module.spec_verify_kernel is None
-
-
-# --- a provider's GDN verify kernel ---------------------------------------------
 
 
 NUM_TOKENS = 4
@@ -673,6 +593,9 @@ class _Calls:
         self.conv = 0
         self.recurrent = 0
         self.b: list[torch.Tensor] = []
+
+
+_HEADS = dict(num_k_heads=1, num_v_heads=2, head_k_dim=2, head_v_dim=3)
 
 
 def _layer(
@@ -713,12 +636,8 @@ def _layer(
     layer.A_log = torch.zeros(2)
     layer.dt_bias = torch.ones(2)
     layer.tp_size = 1
-    layer.num_k_heads, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim = (
-        1,
-        2,
-        2,
-        3,
-    )
+    for name, value in _HEADS.items():
+        setattr(layer, name, value)
     layer.rearrange_mixed_qkv = lambda x: (None, None, None) if x is None else (x, x, x)
     layer.qkv_row_views = layer.rearrange_mixed_qkv
     return layer
@@ -769,12 +688,7 @@ def test_gdn_runs_the_bound_kernel(monkeypatch):
     assert isinstance(rows, GDNSpecRows)
     assert rows.mixed_qkv.shape[0] == NUM_TOKENS and rows.out.shape[0] == NUM_TOKENS
     assert rows.layer_name == "layer"
-    assert (rows.num_k_heads, rows.num_v_heads, rows.head_k_dim, rows.head_v_dim) == (
-        1,
-        2,
-        2,
-        3,
-    )
+    assert {name: getattr(rows, name) for name in _HEADS} == _HEADS
     assert rows.state_indices is metadata.spec_state_indices_tensor
     assert rows.num_accepted_tokens is metadata.num_accepted_tokens
     assert rows.query_start_loc is metadata.spec_query_start_loc

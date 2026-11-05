@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test-only speculative methods and the tree attention backend (as the CUSTOM
-backend), registered as a vLLM general plugin so that every process (engine core
-and workers, forked or spawned) has them."""
+"""Test speculators and the CUSTOM tree attention backend, as a general plugin."""
 
 # Method name -> config class in `configs`, imported lazily by qualified name.
 TEST_SPECULATORS = {

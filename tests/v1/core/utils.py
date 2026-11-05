@@ -32,7 +32,10 @@ from vllm.v1.core import kv_cache_planning
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
+from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
+    register_all_kvcache_specs,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -404,6 +407,16 @@ def new_mamba_spec(
         page_size_padded=page_size_padded,
         mamba_cache_mode=mamba_cache_mode,
         num_speculative_blocks=num_speculative_blocks,
+    )
+
+
+def held_spec_blocks(*managers) -> int:
+    """Spec blocks the requests hold past their state block, over the managers."""
+    return sum(
+        len(manager.req_to_blocks[req_id]) - 1 - state_idx
+        for manager in managers
+        if isinstance(manager, MambaManager)
+        for req_id, state_idx in manager._spec_state_idx.items()
     )
 
 

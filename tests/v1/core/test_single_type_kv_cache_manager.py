@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_request
-from tests.v1.core.utils import new_mamba_spec
+from tests.v1.core.utils import held_spec_blocks, new_mamba_spec
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.utils.math_utils import cdiv
@@ -1052,14 +1052,8 @@ def test_pop_blocks_for_free_trims_null_head():
     assert block_pool.get_num_free_blocks() == num_free_blocks
 
 
-# --- Dynamic speculative blocks for recurrent state -------------------------
-#
-# `MambaManager.allocate_new_blocks(..., num_draft_tokens=n)` holds one
-# speculative state block per draft, at most `num_speculative_blocks`, and never
-# fewer than reach the end of the previous step's span: the next step reads the
-# state the previous verify accepted, which may sit in any of its draft columns.
-# The tests replay random draft counts against a model of the worker's block
-# table row (truncate to the reported count, then append the new blocks).
+# Dynamic spec blocks: one state block per draft, never fewer than reach the end
+# of the previous step's span, replayed against a model of the worker's table row.
 
 
 def _manager(
@@ -1187,16 +1181,6 @@ class _Request:
         self.span_end = 0
 
 
-def _held(*managers) -> int:
-    """Spec blocks the requests hold past their state block, over the managers."""
-    return sum(
-        len(manager.req_to_blocks[req_id]) - 1 - state_idx
-        for manager in managers
-        if isinstance(manager, MambaManager)
-        for req_id, state_idx in manager._spec_state_idx.items()
-    )
-
-
 def _check_invariants(manager: MambaManager, pool: BlockPool, requests, free0):
     held = {
         r.req_id: len(r.blocks) - 1 - manager._spec_state_idx[r.req_id]
@@ -1238,7 +1222,7 @@ def test_spec_blocks_follow_random_drafts(seed: int, mode: str):
     for request in requests:
         if request.started:
             request.free()
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
     assert pool.get_num_free_blocks() == free0
 
 
@@ -1312,7 +1296,7 @@ def test_spec_blocks_with_a_step_in_flight(seed: int, mode: str):
     for request in requests:
         if request.started:
             request.free()
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
     assert pool.get_num_free_blocks() == free0
 
 
@@ -1351,15 +1335,15 @@ def _shrink_keeps_the_previous_span():
     assert len(request.blocks) == 1
     request.step(3, 4)
     assert len(request.blocks) == 4
-    assert _held(manager) == 3
+    assert held_spec_blocks(manager) == 3
     request.step(1, 2)
     assert len(request.blocks) == 4
     request.step(0, 1)
     assert len(request.blocks) == 2
-    assert _held(manager) == 1
+    assert held_spec_blocks(manager) == 1
     request.step(0, 1)
     assert len(request.blocks) == 1
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
 
 
 def _boundary_crossing_while_shrinking():
@@ -1382,7 +1366,7 @@ def _boundary_crossing_while_shrinking():
     assert manager.last_state_block_idx["r"] == 1
     assert request.blocks[1].block_id == state_block
     assert manager._spec_state_idx["r"] == 2
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
 
 
 def _preempt_mid_shrink(mode: str):
@@ -1399,12 +1383,12 @@ def _preempt_mid_shrink(mode: str):
     assert len(manager.req_to_blocks["r"]) < len(request.row)  # shrank
     manager.free("r")
     assert manager.take_spec_state_block_counts() == {}
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
     assert pool.get_num_free_blocks() == free0
     # Resumed, it starts over from its prefill layout.
     resumed = _Request(manager, "r", num_tokens)
     resumed.step(0)
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
 
 
 @pytest.mark.parametrize(
@@ -1489,7 +1473,7 @@ def _run_hybrid_with_prefix_caching(seed: int, dynamic: bool) -> tuple[int, int]
     sibling = make_request("b", list(request.all_token_ids), attn_block_size, sha256)
     _, num_hit, _ = manager.get_computed_blocks(sibling)
     manager.free(request)
-    assert _held(*manager.coordinator.single_type_managers) == 0
+    assert held_spec_blocks(*manager.coordinator.single_type_managers) == 0
     return num_hit, max_blocks
 
 

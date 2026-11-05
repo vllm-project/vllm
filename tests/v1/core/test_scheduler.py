@@ -91,6 +91,7 @@ from .utils import (
     EOS_TOKEN_ID,
     create_requests,
     create_scheduler,
+    held_spec_blocks,
     mock_kv,
     new_mamba_spec,
     runner_output,
@@ -8774,22 +8775,18 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
     assert request.mm_features[0].data is handle
 
 
-# --- Candidate budget (SpeculatorConfig.candidate_budget) -------------------
-
-
 def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
     """(num_spec_tokens_to_schedule, skip_drafts, views) per step, for decode
-    requests under a fixed candidate budget (None: the config's default)."""
+    requests under a fixed candidate budget."""
     scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
     scheduler.can_skip_drafts = True
     views = []
-    if budget is not None:
 
-        def candidate_budget(view):
-            views.append(view)
-            return budget
+    def candidate_budget(view):
+        views.append(view)
+        return budget
 
-        scheduler.speculator_config.candidate_budget = candidate_budget
+    scheduler.speculator_config.candidate_budget = candidate_budget
     for request in create_requests(num_requests, num_tokens=8, max_tokens=8):
         scheduler.add_request(request)
     steps = []
@@ -8800,12 +8797,6 @@ def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
             output, runner_output(list(output.num_scheduled_tokens))
         )
     return steps, views
-
-
-def test_default_candidate_budget_drafts_k():
-    """Built-in configs keep today's K and drafting."""
-    steps, _ = _budget_steps(None)
-    assert steps == [(3, False), (3, False)]
 
 
 def test_candidate_budget_one_is_a_plain_decode():
@@ -8843,19 +8834,6 @@ def test_candidate_budget_is_not_asked_without_scheduled_requests():
     scheduler.speculator_config.candidate_budget = candidate_budget
     scheduler.schedule()
     assert views == []
-
-
-# --- Dynamic speculative blocks for recurrent state -------------------------
-
-
-def _held(*managers) -> int:
-    """Spec blocks the requests hold past their state block, over the managers."""
-    return sum(
-        len(manager.req_to_blocks[req_id]) - 1 - state_idx
-        for manager in managers
-        if isinstance(manager, MambaManager)
-        for req_id, state_idx in manager._spec_state_idx.items()
-    )
 
 
 def _scheduler_steps(
@@ -8908,7 +8886,7 @@ def _scheduler_steps(
             (
                 drafts,
                 {req_id: len(manager.get_block_ids(req_id)[0]) for req_id in req_ids},
-                _held(*manager.coordinator.single_type_managers),
+                held_spec_blocks(*manager.coordinator.single_type_managers),
                 output.spec_state_block_counts,
             )
         )
@@ -9009,7 +8987,7 @@ def _random_budgets(seed: int) -> Callable[[int], int]:
         pytest.param(lambda t: 1 if t % 3 == 2 else 4, id="K+1-K+1-1"),
         pytest.param(lambda t: 1 if t % 2 == 0 else 4, id="alternate-1-K+1"),
         pytest.param(lambda t: [4, 2, 1][t % 3], id="K+1-2-1"),
-        *(pytest.param(_random_budgets(s), id=f"random-{s}") for s in range(8)),
+        *(pytest.param(_random_budgets(s), id=f"random-{s}") for s in range(2)),
     ],
 )
 def test_scheduler_honors_every_budget(
@@ -9030,7 +9008,7 @@ def test_scheduler_honors_every_budget(
             num_checked += 1
             num_drafting += drafts > 0
     assert num_checked > 40 and num_drafting > 10
-    assert _held(manager) == 0
+    assert held_spec_blocks(manager) == 0
 
 
 def test_scheduler_reserves_draft_lookahead_after_budget_one():

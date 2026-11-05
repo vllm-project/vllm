@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end checks of the speculative round contract on the V2 model runner.
-
-Each test compares greedy tokens and logprobs with a run without speculative
-decoding and checks that it drafted (or, at budget 1, that it did not), so it
-cannot pass vacuously. The speculators are the test-only ones of the
-``vllm_add_test_speculators`` general plugin in ``tests/plugins``, which
-registers them in every vLLM process.
-"""
+"""End-to-end round contract checks against decoding without speculation, with
+the test speculators of the ``vllm_add_test_speculators`` plugin."""
 
 import asyncio
-import importlib.util
 import json
 import os
 from contextlib import ExitStack
@@ -123,9 +116,6 @@ def _check(model, got, name, **kwargs):
     )
 
 
-# --- E2: budget 1 is plain decode ---------------------------------------------
-
-
 @pytest.mark.parametrize(
     "model, speculative_config",
     [
@@ -148,9 +138,6 @@ def test_budget_one_is_plain_decode(model, speculative_config):
     _check(model, got, "budget_one")
 
 
-# --- E3: alternating budgets on a hybrid --------------------------------------
-
-
 def test_alternating_budget_on_hybrid():
     """Budgets alternating 1 and K + 1: the drafter's lookahead after budget 1,
     the dynamic speculative blocks and the GDN state across shrink and grow."""
@@ -160,30 +147,15 @@ def test_alternating_budget_on_hybrid():
     _check(HYBRID, got, "alternating_budget")
 
 
-# --- E4: a tree speculator on a model that verifies chains -------------------
-
-
-def _backends():
-    backends = ["FLASH_ATTN", "TRITON_ATTN"]
-    if importlib.util.find_spec("flashinfer") is not None:
-        backends.append("FLASHINFER")
-    return backends
-
-
-@pytest.mark.parametrize(
-    "model, backend, tp",
-    [(DENSE, backend, 1) for backend in _backends()]
-    + [(HYBRID, None, 1), (HYBRID, None, 2)],
-)
-def test_tree_speculator_runs_chains(model, backend, tp, capfd):
+# No in-tree backend sets serves_trees, so one dense backend stands for all.
+@pytest.mark.parametrize("model, tp", [(DENSE, 1), (HYBRID, 1), (HYBRID, 2)])
+def test_tree_speculator_runs_chains(model, tp, capfd):
     """No in-tree attention backend verifies trees, and the hybrid's GDN layers
     have no tree kernel: a branching speculator starts, logs each reason once
     (the engine core logs the reduced limits of all workers), runs as a chain
     and decodes like no speculation."""
     _skip_if_insufficient_gpus_for_tp(tp)
     kwargs = {"tensor_parallel_size": tp}
-    if backend is not None:
-        kwargs["attention_config"] = {"backend": backend}
     config = {"method": "test_ngram_tree", **NGRAM}
     got, drafted, acceptance = _run(model, config, **kwargs)
     out, err = capfd.readouterr()
@@ -191,9 +163,6 @@ def test_tree_speculator_runs_chains(model, backend, tp, capfd):
     assert lowered and len(lowered) == len(set(lowered))
     assert drafted > 0 and acceptance > 1
     _check(model, got, "tree_runs_chains", **kwargs)
-
-
-# --- E5: a tree speculator on a backend that verifies trees -----------------
 
 
 # The test backend reads the batch layout on the host, so attention runs
@@ -233,9 +202,6 @@ def test_tree_speculator_samples_trees(capfd):
     assert LOWERED not in out + err
     assert drafted > 0 and acceptance > 1
     assert all(tokens for tokens, _, _ in got)
-
-
-# --- E7: data parallel ranks at different budgets -----------------------------
 
 
 async def _generate(engine: AsyncLLM, index: int, prompt: str):

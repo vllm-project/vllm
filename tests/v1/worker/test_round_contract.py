@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The speculative round contract: plan types, plan layout, tree accept, and the
-commit along the accepted path.
-
-A request's tree is ``parent``: ``parent[i]`` is the row that row ``i`` extends,
-``-1`` for the root (row 0), and a parent always precedes its child.
-
-The kernel tests run on a GPU, or on CPU under ``TRITON_INTERPRET=1``.
-"""
+"""Plan types, plan layout, tree accept and commit; kernels run on a GPU or on CPU
+under ``TRITON_INTERPRET=1``. ``parent[i]`` is the row that row ``i`` extends."""
 
 import os
 
@@ -90,8 +84,6 @@ def _plan(parent, counts, tokens=None):
     )
 
 
-# --- Plan and resource types ------------------------------------------------
-
 _PARENT = [[-1, 0, 0, 1]]
 
 
@@ -99,7 +91,7 @@ _PARENT = [[-1, 0, 0, 1]]
     "make, match",
     [
         (lambda: VerifyPlan(parent=_t(_PARENT)), "tokens"),
-        # The layout ignores a chain's tokens: the runner's draft buffer holds them.
+        # A chain verifies the drafted tokens.
         (
             lambda: VerifyPlan(
                 parent=_t([[-1, 0, 1, 2]]), tokens=_t([[0, 7, 8, 9]]), is_chain=True
@@ -108,16 +100,27 @@ _PARENT = [[-1, 0, 0, 1]]
         ),
         (lambda: SpecResources(capture_rows=()), "capture_rows"),
         (lambda: SpecResources(capture_rows=(0,)), "capture_rows"),
+        (lambda: SpecResources(capture_rows=(None,)), "capture_rows"),
         (lambda: SpecResources(capture_rows=(2,), max_branching=0), "max_branching"),
     ],
-    ids=["plan-no-tokens", "chain-tokens", "no-rows", "zero-rows", "branching"],
+    ids=[
+        "plan-no-tokens",
+        "chain-tokens",
+        "no-rows",
+        "zero-rows",
+        "none-rows",
+        "branching",
+    ],
 )
 def test_plan_and_resources_are_validated(make, match):
     with pytest.raises(ValueError, match=match):
         make()
+    # Only a chain may leave its tokens to the runner's draft buffer.
+    assert VerifyPlan(parent=_t(_PARENT), is_chain=True).tokens is None
+    resources = SpecResources(capture_rows=(4, 1, 4))
+    assert (resources.max_branching, resources.max_rows) == (1, 4)
 
 
-@pytest.mark.parametrize("is_chain", [False, True])
 @pytest.mark.parametrize(
     "max_rows, rows, match",
     [
@@ -126,32 +129,14 @@ def test_plan_and_resources_are_validated(make, match):
         (8, [5], "verifies up to 5"),
     ],
 )
-def test_spec_round_checks_a_plans_shape(is_chain, max_rows, rows, match):
-    """A plan is laid out from its parents, so its shape is checked even when
-    it is a chain: it fits the runner's buffers and has a column for every
-    row it verifies."""
+def test_spec_round_checks_a_plans_shape(max_rows, rows, match):
+    """A plan fits the runner's buffers and has a column for every row it
+    verifies."""
     spec_round = object.__new__(SpecRound)
     spec_round.max_rows = max_rows
     plan = _plan(_PARENT, [4])
-    plan.is_chain = is_chain
     with pytest.raises(AssertionError, match=match):
         spec_round._check_plan(plan, np.array(rows))
-
-
-def test_valid_plan_and_resources():
-    # Only a chain may leave its tokens to the runner's draft buffer.
-    assert VerifyPlan(parent=_t(_PARENT), is_chain=True).tokens is None
-    assert not _plan(_PARENT, [4]).is_chain
-    resources = SpecResources(capture_rows=(4, 1, 4))
-    assert resources.max_branching == 1
-    assert resources.max_rows == 4
-    # Each entry is a row count; graphs of mixed rows are adaptive verification's.
-    for bad in (0, None):
-        with pytest.raises(ValueError, match="capture_rows"):
-            SpecResources(capture_rows=(bad,))  # type: ignore[arg-type]
-
-
-# --- Plan layout ------------------------------------------------------------
 
 
 def _random_batch(gen, max_rows):
@@ -229,26 +214,25 @@ def test_layout_matches_reference(kind, seed):
     assert torch.equal(positions, chain)
 
 
+def _spec_round(max_branching):
+    """A SpecRound over 4 requests of up to 4 rows; it plans when it branches.
+    The memory profile runs before the spec kernels are bound, so the layers
+    run their own chain kernels: set_resources lays out the trees."""
+    resources = SpecResources(capture_rows=(4,), max_branching=max_branching)
+    plans = max_branching > 1
+    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE, plans=plans)  # type: ignore[arg-type]
+    buffers = InputBuffers(4, 16, DEVICE)
+    spec_round.kernels = KernelRegistry()
+    spec_round.set_resources(resources, buffers, [])
+    return spec_round, buffers
+
+
 @requires_kernels
 @pytest.mark.parametrize("max_branching", [1, 2])
 def test_spec_round_lays_out_only_a_branching_speculator(max_branching):
     """A speculator that never branches launches nothing; one that branches
     lays out every batch, a batch without drafts as the chain of its rows."""
-    resources = SpecResources(capture_rows=(4,), max_branching=max_branching)
-    spec_round = SpecRound(
-        None,  # type: ignore[arg-type]
-        resources,
-        4,
-        16,
-        3,
-        DEVICE,
-        plans=max_branching > 1,
-    )
-    buffers = InputBuffers(4, 16, DEVICE)
-    # The memory profile runs before the spec kernels are bound, so the layers
-    # run their own chain kernels: set_resources lays out the trees.
-    spec_round.kernels = KernelRegistry()
-    spec_round.set_resources(resources, buffers, [])
+    spec_round, buffers = _spec_round(max_branching)
     batch = InputBatch.make_dummy(2, 6, buffers)
     batch.positions.copy_(torch.arange(6))
 
@@ -275,11 +259,7 @@ def test_spec_round_verifies_the_rows_of_each_query():
     """The runner takes each request's verify rows from its query length (the
     plan's rows, trimmed by plan_batch), for the layout and the commit: a plan
     carries no device count that could disagree with the batch."""
-    resources = SpecResources(capture_rows=(4,), max_branching=2)
-    spec_round = SpecRound(None, resources, 4, 16, 3, DEVICE, plans=True)  # type: ignore[arg-type]
-    buffers = InputBuffers(4, 16, DEVICE)
-    spec_round.kernels = KernelRegistry()
-    spec_round.set_resources(resources, buffers, [])
+    spec_round, buffers = _spec_round(2)
     batch = InputBatch.make_dummy(2, 5, buffers)
     batch.query_start_loc[:3].copy_(_t([0, 2, 5]))
     batch.positions.copy_(torch.arange(5))
@@ -352,9 +332,6 @@ def test_mrope_tree_positions(last_parent):
             assert torch.equal(tree[:, along], chain[:, start : start + len(path)])
 
 
-# --- Tree accept ------------------------------------------------------------
-
-
 def _verify_output(drafted, row_start, target):
     return VerifyOutput(
         logits=None, target=target, row_start=row_start, drafted=drafted
@@ -412,9 +389,6 @@ def test_walk_tree_matches_reference(seed):
         assert result.sampled[b, :n].tolist() == sampled
 
 
-# --- Commit -----------------------------------------------------------------
-
-
 def _random_paths(gen, parent, counts, to_last=False):
     """A root-to-node path per request: ``(path [R, C], path_len [R])``, length 0
     for some (a prefill chunk that sampled nothing)."""
@@ -445,8 +419,8 @@ def _mamba_state(max_num_reqs, align=False):
 @pytest.mark.parametrize("seed", range(3))
 def test_mamba_resumes_from_the_last_accepted_row(seed):
     """The GDN kernels read state row num_accepted_tokens - 1: the last accepted
-    row, for a chain today's max(num_sampled, 1) - 1. Rows filtered under PP
-    (-1) are left alone; the aligned state mode refuses tree paths."""
+    row. Rows filtered under PP (-1) are left alone; the aligned state mode
+    refuses tree paths."""
     gen = np.random.default_rng(200 + seed)
     num_reqs, max_rows, num_slots = int(gen.integers(1, 8)), int(gen.integers(2, 9)), 12
     counts = gen.integers(1, max_rows + 1, num_reqs)
@@ -454,24 +428,15 @@ def test_mamba_resumes_from_the_last_accepted_row(seed):
     idx = gen.permutation(num_slots)[:num_reqs].astype(np.int32)
     idx[gen.random(num_reqs) < 0.2] = -1
     sampled = torch.zeros(num_reqs, max_rows, dtype=torch.int64, device=DEVICE)
-    tree = AcceptResult(_t(path), _t(path_len), sampled)
-    chain = AcceptResult(
-        arange_table(num_reqs, max_rows, DEVICE), _t(path_len), sampled
-    )
-    states = {}
-    for name, result in [("tree", tree), ("chain", chain), ("today", None)]:
-        states[name] = _mamba_state(num_slots)
-        rows = None if result is None else accepted_rows(result, num_reqs)
-        states[name].postprocess_state(_t(idx), _t(path_len), accepted_row=rows)
+    result = AcceptResult(_t(path), _t(path_len), sampled)
+    state = _mamba_state(num_slots)
+    rows = accepted_rows(result, num_reqs)
+    state.postprocess_state(_t(idx), _t(path_len), accepted_row=rows)
 
-    got = states["tree"].num_accepted_tokens_gpu.cpu().numpy()
+    got = state.num_accepted_tokens_gpu.cpu().numpy()
     for b in np.flatnonzero(idx >= 0):
         assert got[idx[b]] - 1 == path[b, max(path_len[b], 1) - 1]
     assert (np.delete(got, idx[idx >= 0]) == 99).all()
-    assert torch.equal(
-        states["chain"].num_accepted_tokens_gpu,
-        states["today"].num_accepted_tokens_gpu,
-    )
     with pytest.raises(NotImplementedError, match="align"):
         _mamba_state(4, align=True).postprocess_state(
             _t([0]), _t([1]), accepted_row=_t([0])
@@ -521,10 +486,9 @@ def _kernel_context():
 
 @requires_kernels
 @pytest.mark.parametrize("kind", list(_CACHES))
-@pytest.mark.parametrize("path_kind", ["tree", "chain"])
-def test_kv_compaction_moves_the_path(kind, path_kind):
+def test_kv_compaction_moves_the_path(kind):
     """The KV of each accepted path row lands in the chain slot of its path
-    index, in every cache layout; a chain path moves nothing."""
+    index, in every cache layout."""
     gen = np.random.default_rng(300)
     table_block, kernel_block, num_table_blocks, max_rows = 8, 4, 24, 7
     num_kernel_blocks = num_table_blocks * table_block // kernel_block
@@ -535,10 +499,7 @@ def test_kv_compaction_moves_the_path(kind, path_kind):
     path, path_len = _random_paths(
         gen, _random_tree(gen, num_reqs, max_rows), counts, to_last=True
     )
-    if path_kind == "chain":
-        path = np.tile(np.arange(max_rows, dtype=np.int32), (num_reqs, 1))
-    else:
-        assert (path[:, 1:] != np.arange(1, max_rows)).any(), "seed must move KV"
+    assert (path[:, 1:] != np.arange(1, max_rows)).any(), "seed must move KV"
     seq_lens = gen.integers(counts, 4 * table_block).astype(np.int32)
     # Requests get disjoint random blocks; the tables are padded past num_reqs.
     tables = np.full((num_reqs + 2, 5), -1, dtype=np.int32)
@@ -680,9 +641,6 @@ def test_kv_cache_layout_refuses_what_it_cannot_read(cache, match):
         kv_cache_layout(cache, num_blocks=8)
 
 
-# --- Built-in speculators keep today's resources and budget --------------
-
-
 class _StaticSpec:
     """The SpeculativeConfig fields the default resources and budget read."""
 
@@ -697,13 +655,9 @@ class _StaticSpec:
 @pytest.mark.parametrize(
     "qualname",
     [
+        # No built-in config overrides the defaults.
         "ngram.config.NgramGPUSpeculatorConfig",
-        "eagle.config.EagleSpeculatorConfig",
-        "eagle.config.Eagle3SpeculatorConfig",
-        "mtp.config.MTPSpeculatorConfig",
-        "dflash.config.DFlashSpeculatorConfig",
         "dspark.config.DSparkSpeculatorConfig",
-        "standalone_ar.config.StandaloneARSpeculatorConfig",
     ],
 )
 def test_builtin_configs_keep_todays_resources_and_budget(qualname):

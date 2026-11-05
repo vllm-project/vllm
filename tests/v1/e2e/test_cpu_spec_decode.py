@@ -171,12 +171,11 @@ def test_v2_speculator_smoke(model: str, speculative_config: dict):
 
 
 _NGRAM = {"prompt_lookup_max": 5, "prompt_lookup_min": 3, "num_speculative_tokens": 3}
-_NEEDS_TRITON = pytest.mark.skipif(
+
+
+@pytest.mark.skipif(
     not HAS_TRITON, reason="the V2 runner needs triton-cpu, which CI builds"
 )
-
-
-@_NEEDS_TRITON
 @pytest.mark.parametrize(
     "method, drafts",
     [("test_ngram_budget_one", False), ("test_ngram_tree", True)],
