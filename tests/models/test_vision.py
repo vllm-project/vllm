@@ -472,7 +472,7 @@ def run_dp_sharded_mrope_vision_model_undeclared_dtype_worker(
 
     with (
         torch.inference_mode(),
-        pytest.raises(ValueError, match="Set `dtype` on the vision model"),
+        pytest.raises(ValueError, match="Define `dtype` on the vision model"),
     ):
         run_dp_sharded_mrope_vision_model(
             vision_model, pixel_values, grid_thw_list, rope_type="rope_3d"
