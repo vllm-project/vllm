@@ -42,7 +42,7 @@ BASE_MODELS_TO_TEST = [
     # "databricks/dbrx-instruct",
     "tiiuae/falcon-7b",
     "tiiuae/falcon-40b",
-    "luccafong/deepseek_mtp_main_random",
+    "vllm-project/deepseek_mtp_main_random",
     "Qwen/Qwen3-Next-80B-A3B-Instruct",
     "tiny-random/qwen3-next-moe",
     "zai-org/GLM-4.5",
@@ -55,10 +55,22 @@ BASE_MODELS_TO_TEST = [
 
 # (target_model, draft_model, trust_remote_code)
 SPECULATIVE_MODELS = [
-    ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
-    ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
-    ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
-    ("meta-llama/Llama-3.1-8B-Instruct", "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", True),
+    (
+        "vllm-project/deepseek_mtp_main_random",
+        "vllm-project/deepseek_mtp_draft_random",
+        True,
+    ),
+    ("vllm-project/deepseek-v3-random", "vllm-project/eagle-deepseek-v3-random", True),
+    (
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "vllm-project/EAGLE-LLaMA3-Instruct-8B",
+        True,
+    ),
+    (
+        "meta-llama/Llama-3.1-8B-Instruct",
+        "vllm-project/EAGLE3-LLaMA3.1-Instruct-8B",
+        True,
+    ),
 ]
 
 
