@@ -281,14 +281,8 @@ def test_default_splits_match_unsplit(num_reqs, ctx):
     assert torch.equal(out, _decode(q, cache, topk, table, seq_lens, 8))
 
 
-@pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24, 40])
-def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
-    """The default split count is the XCD table at one KV head per rank and the
-    cost model otherwise, counted over every request including padding
-    (seq_len 0), and agrees with the unsplit kernel."""
-    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
-
+def _default_split_case(num_kv_heads, num_reqs):
+    """A decode batch with padding requests (seq_len 0) for the default-splits tests."""
     torch.manual_seed(num_reqs)
     lens = [0 if r % 3 == 2 else 20000 + 700 * r for r in range(num_reqs)]
     live = [max(s, 1) for s in lens]
@@ -299,7 +293,11 @@ def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
     q = (
         torch.randn(num_reqs * 8, GROUP * num_kv_heads, D, device="cuda") * 0.05
     ).bfloat16()
+    return q, cache, topk, table, seq_lens
 
+
+def _record_kernels(monkeypatch, host):
+    """The (splits, topk, xcds) of every kernel the default path compiles."""
     chosen = []
     real = host._get_kernel
 
@@ -308,10 +306,69 @@ def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
         return real(*args)
 
     monkeypatch.setattr(host, "_get_kernel", record)
+    return chosen
+
+
+@pytest.mark.parametrize(
+    "queried, gfx950, expected",
+    [(8, True, 8), (4, True, 0), (2, True, 0), (0, True, 0), (8, False, 0)],
+)
+def test_xcd_grid_needs_the_tuned_topology(monkeypatch, queried, gfx950, expected):
+    """The XCD-aware grid is on only for 8 XCDs on gfx950: a DPX/QPX partition
+    of the same GPU reports fewer and keeps the grid off."""
+    import vllm.platforms.rocm as rocm
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    monkeypatch.setattr(host, "_query_xcd_count", lambda device_index: queried)
+    monkeypatch.setattr(rocm, "on_gfx950", lambda: gfx950)
+    host._xcd_count.cache_clear()
+    try:
+        assert host._xcd_count(0) == expected
+    finally:
+        host._xcd_count.cache_clear()
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("num_reqs", [1, 9, 40])
+def test_default_splits_without_the_xcd_grid(monkeypatch, num_kv_heads, num_reqs):
+    """On a device without the 8-XCD topology (e.g. a DPX partition) the default
+    path uses the cost model on a plain grid and agrees with the unsplit kernel."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    monkeypatch.setattr(host, "_xcd_count", lambda device_index: 0)
+    q, cache, topk, table, seq_lens = _default_split_case(num_kv_heads, num_reqs)
+    chosen = _record_kernels(monkeypatch, host)
+    out = _decode(q, cache, topk, table, seq_lens, 8)
+
+    rows = num_reqs * 8
+    expected = host.decode_splits(rows * num_kv_heads, 16, host.cu_count(q.device))
+    if rows * num_kv_heads > host.MAX_SPLIT_ROWS:
+        expected = 1
+    assert chosen == [(expected, 16, 0)]
+    unsplit = _decode(q, cache, topk, table, seq_lens, 8, splits=1)
+    real_rows = (seq_lens.repeat_interleave(8) > 0).cpu()
+    assert torch.isfinite(out).all()
+    assert (out[~real_rows] == 0).all()
+    assert _rel(out[real_rows], unsplit[real_rows]) < 3e-3
+
+
+@pytest.mark.parametrize("num_kv_heads", [1, 2, 4])
+@pytest.mark.parametrize("num_reqs", [1, 5, 8, 9, 16, 17, 24, 40])
+def test_default_splits_are_chosen_per_xcd(monkeypatch, num_kv_heads, num_reqs):
+    """The default split count is the XCD table at one KV head per rank and the
+    cost model otherwise, counted over every request including padding
+    (seq_len 0), and agrees with the unsplit kernel."""
+    from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode import host
+
+    # The table is tuned for the full 8-XCD device; partitioned (DPX/QPX)
+    # devices report fewer XCDs and run the default path without the XCD grid.
+    if host._xcd_count(torch.accelerator.current_device_index()) != 8:
+        pytest.skip("needs an 8-XCD device")
+    q, cache, topk, table, seq_lens = _default_split_case(num_kv_heads, num_reqs)
+    chosen = _record_kernels(monkeypatch, host)
     out = _decode(q, cache, topk, table, seq_lens, 8)
 
     xcds = host._xcd_count(q.device.index)
-    assert xcds == 8
     rows = num_reqs * 8
     expected = host._xcd_splits(num_reqs, xcds, 16, 8, num_kv_heads)
     if expected is None:
