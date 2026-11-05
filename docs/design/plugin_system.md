@@ -55,6 +55,11 @@ Every plugin has three parts:
 
 - **Endpoint plugins** (with group name `vllm.endpoint_plugins`): The primary use case for these plugins is to register custom, out-of-the-tree HTTP routes on the OpenAI compatible API server. Unlike the other plugin groups above, endpoint plugins are loaded only in the API server front end process and are **not loaded by default**. See [Endpoint Plugins](endpoint_plugins.md) for the interface and [Security](../usage/security.md#endpoint-plugins) for the opt-in and trust model.
 
+Some components are not registered through entry points but selected by class name, so a plugin package only has to be importable:
+
+- `--worker-cls` and `--worker-extension-cls` replace or extend the worker.
+- `--pp-group-cls` replaces the pipeline parallel `GroupCoordinator` with a subclass, e.g. one whose `isend_tensor_dict` / `irecv_tensor_dict` move the intermediate tensors between stages over a different transport. The subclass is constructed with the same arguments as `GroupCoordinator`, in every worker. With the V2 model runner the last stage also sends the sampled tokens to the other stages, through `make_sibling_device_group` / `sibling_broadcast`, which the subclass can override as well.
+
 ## Guidelines for Writing Plugins
 
 - **Being re-entrant**: The function specified in the entry point should be re-entrant, meaning it can be called multiple times without causing issues. This is necessary because the function might be called multiple times in some processes.
