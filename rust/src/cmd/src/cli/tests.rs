@@ -224,6 +224,7 @@ fn serve_args_forward_python_flags_with_separator() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -256,6 +257,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -267,6 +269,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -363,6 +366,117 @@ fn serve_args_auto_forward_enable_lora_to_python() {
 }
 
 #[test]
+fn serve_args_accept_python_underscore_flag_names() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--served_model_name",
+        "qwen",
+        "--max_model_len=1024",
+        "--enforce_eager",
+        "--kv_transfer_config.kv_role",
+        "kv_both",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("1024"));
+    expect![[r#"
+        [
+            "--enforce-eager",
+            "--kv-transfer-config.kv_role",
+            "kv_both",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_merge_dotted_forms_of_frontend_flags() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.rope_scaling.rope_type",
+        "yarn",
+        "--compilation-config.mode",
+        "3",
+        "--hf-overrides.rope_scaling.factor=4",
+        "--hf-overrides.max_position_embeddings",
+        "32k",
+        "--hf-overrides.sliding_window=4K",
+        "--hf-overrides.note",
+        "1.5K",
+        "--structured-outputs-config.backend",
+        "guidance",
+        "--default-chat-template-kwargs.enable_thinking",
+        "false",
+        "--default-chat-template-kwargs.tags+",
+        "a,b",
+        "--default-chat-template-kwargs.tags+=c",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let hf_overrides = serde_json::json!({
+        "rope_scaling": {"rope_type": "yarn", "factor": 4},
+        "max_position_embeddings": 32000,
+        "sliding_window": 4096,
+        "note": "1.5K",
+    });
+    assert_eq!(
+        serde_json::to_value(&args.runtime.hf_overrides).unwrap(),
+        hf_overrides
+    );
+    assert_eq!(
+        serde_json::to_value(&args.runtime.default_chat_template_kwargs).unwrap(),
+        serde_json::json!({"enable_thinking": false, "tags": ["a", "b", "c"]})
+    );
+    // Shared flags still reach the engine; dotted forms of engine-only flags
+    // are left for Python to expand.
+    let engine = args.to_managed_engine_config(5555, &topology(&args), None);
+    let forwarded = |flag: &str| {
+        let index = engine.python_args.iter().position(|arg| arg == flag).unwrap();
+        serde_json::from_str::<serde_json::Value>(&engine.python_args[index + 1]).unwrap()
+    };
+    assert_eq!(forwarded("--hf-overrides"), hf_overrides);
+    assert_eq!(
+        forwarded("--structured-outputs-config"),
+        serde_json::json!({"backend": "guidance"})
+    );
+    expect![[r#"
+        [
+            "--compilation-config.mode",
+            "3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
+fn serve_args_reject_dotted_frontend_flag_without_value() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--hf-overrides.max_position_embeddings",
+    ])
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("a value is required for '--hf-overrides.max_position_embeddings'"),
+        "{error}"
+    );
+}
+
+#[test]
 fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -388,6 +502,51 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
         ]
     "#]]
     .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn skip_tokenizer_init_reaches_backends_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--skip-tokenizer-init",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert!(
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .skip_tokenizer_init
+    );
+    // The engine must not load a tokenizer for structured outputs either.
+    expect![[r#"
+        [
+            "--skip-tokenizer-init",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&args.to_managed_engine_config(5555, &topology(&args), None).python_args);
+
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-listener-fd",
+        "999999",
+        "--output-listener-fd",
+        "999998",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","skip_tokenizer_init":true}"#,
+    ])
+    .unwrap();
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.into_config().skip_tokenizer_init);
 }
 
 #[test]
@@ -611,6 +770,7 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     assert_eq!(config.log_stats_interval, Some(Duration::from_secs(10)));
     assert!(!config.disable_request_id_randomization);
     assert!(!config.api_server_options.skip_model_name_validation);
+    assert!(!config.api_server_options.server_dev_mode);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -618,8 +778,8 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
 
     // Set through `VLLM_LOG_STATS_INTERVAL`,
     // `VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`,
-    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, and
-    // `VLLM_SKIP_MODEL_NAME_VALIDATION`, which bind these hidden flags.
+    // `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`, `VLLM_SKIP_MODEL_NAME_VALIDATION`,
+    // and `VLLM_SERVER_DEV_MODE`, which bind these hidden flags.
     let config = parse(&[
         "--log-stats-interval",
         "2.5",
@@ -629,10 +789,13 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
         "1048576",
         "--skip-model-name-validation",
         "1",
+        "--server-dev-mode",
+        " 1",
     ]);
     assert_eq!(config.log_stats_interval, Some(Duration::from_millis(2500)));
     assert!(config.disable_request_id_randomization);
     assert!(config.api_server_options.skip_model_name_validation);
+    assert!(config.api_server_options.server_dev_mode);
     assert_eq!(
         config.api_server_options.request_body_limit_bytes,
         Some(1024 * 1024)
@@ -643,15 +806,16 @@ fn serve_args_forward_env_only_settings_to_frontend_config() {
     let config = parse(&["--http-max-request-body-size", "0"]);
     assert_eq!(config.api_server_options.request_body_limit_bytes, None);
 
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--http-max-request-body-size",
-        "32MiB",
-    ])
-    .unwrap_err();
-    assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    for invalid in [
+        ["--http-max-request-body-size", "32MiB"],
+        // Python's `int()` fails startup on a non-integer dev mode.
+        ["--server-dev-mode", "true"],
+    ] {
+        let error =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(&invalid))
+                .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+    }
 }
 
 #[test]
@@ -668,6 +832,7 @@ fn args_json_reads_env_only_settings_from_env() {
     assert_eq!(args.log_stats_interval(), Some(Duration::from_secs(10)));
     assert!(!args.disable_request_id_randomization);
     assert!(!args.api_server_options().skip_model_name_validation);
+    assert!(!args.api_server_options().server_dev_mode);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(32 * 1024 * 1024)
@@ -678,11 +843,13 @@ fn args_json_reads_env_only_settings_from_env() {
         ("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "1"),
         ("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "1048576"),
         ("VLLM_SKIP_MODEL_NAME_VALIDATION", " TRUE "),
+        ("VLLM_SERVER_DEV_MODE", " 1"),
     ])
     .unwrap();
     assert_eq!(args.log_stats_interval(), Some(Duration::from_millis(500)));
     assert!(args.disable_request_id_randomization);
     assert!(args.api_server_options().skip_model_name_validation);
+    assert!(args.api_server_options().server_dev_mode);
     assert_eq!(
         args.api_server_options().request_body_limit_bytes,
         Some(1024 * 1024)
@@ -698,6 +865,7 @@ fn args_json_reads_env_only_settings_from_env() {
         apply(&[("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "true")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "32MiB")]).unwrap_err(),
         apply(&[("VLLM_HTTP_MAX_REQUEST_BODY_SIZE", "-1")]).unwrap_err(),
+        apply(&[("VLLM_SERVER_DEV_MODE", "true")]).unwrap_err(),
     ];
     expect![[r#"
         [
@@ -705,9 +873,50 @@ fn args_json_reads_env_only_settings_from_env() {
             "invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: `true` is not an integer",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `32MiB` is not a number of bytes",
             "invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: `-1` is not a number of bytes",
+            "invalid VLLM_SERVER_DEV_MODE: `true` is not an integer",
         ]
     "#]]
     .assert_debug_eq(&errors);
+}
+
+/// `--log-error-stack` falls back to `VLLM_SERVER_DEV_MODE`. Python leaves the
+/// flag out of `--args-json` when it matches that default, so check both paths.
+#[test]
+fn log_error_stack_defaults_to_server_dev_mode() {
+    let serve = |extra_args: &[&str]| {
+        let cli =
+            Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"].iter().chain(extra_args))
+                .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve args");
+        };
+        args.to_frontend_config("tcp://127.0.0.1:62100".to_string(), &topology(&args))
+            .api_server_options
+            .log_error_stack
+    };
+    // `--server-dev-mode` is the hidden flag bound to `VLLM_SERVER_DEV_MODE`.
+    assert!(!serve(&[]));
+    assert!(serve(&["--log-error-stack"]));
+    assert!(serve(&["--server-dev-mode", "1"]));
+    assert!(!serve(&[
+        "--server-dev-mode",
+        "1",
+        "--log-error-stack",
+        "false"
+    ]));
+
+    let json = |args_json: &str, vars: &[(&str, &str)]| {
+        let vars: HashMap<_, _> = vars.iter().copied().collect();
+        let mut args: SharedRuntimeArgs = serde_json::from_str(args_json).unwrap();
+        args.apply_env_fallbacks(|name| vars.get(name).map(|value| value.to_string()))
+            .unwrap();
+        args.api_server_options().log_error_stack
+    };
+    let model_only = r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#;
+    let disabled = r#"{"model_tag":"Qwen/Qwen3-0.6B","log_error_stack":false}"#;
+    assert!(!json(model_only, &[]));
+    assert!(json(model_only, &[("VLLM_SERVER_DEV_MODE", "1")]));
+    assert!(!json(disabled, &[("VLLM_SERVER_DEV_MODE", "1")]));
 }
 
 #[test]
@@ -1625,6 +1834,7 @@ fn frontend_args_accept_json() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -1657,6 +1867,7 @@ fn frontend_args_accept_json() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -1668,6 +1879,7 @@ fn frontend_args_accept_json() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2552,6 +2764,7 @@ fn serve_args_accept_handshake_aliases() {
                             tokenizer: None,
                             tokenizer_revision: None,
                             hf_config_path: None,
+                            skip_tokenizer_init: false,
                         },
                         hf_overrides: HfOverrides(
                             {},
@@ -2584,6 +2797,7 @@ fn serve_args_accept_handshake_aliases() {
                         enable_prompt_tokens_details: false,
                         enable_per_request_metrics: false,
                         enable_request_id_headers: false,
+                        log_error_stack: None,
                         enable_scale_out: false,
                         enable_tokenizer_info_endpoint: false,
                         sse_keep_alive_interval: 0,
@@ -2595,6 +2809,7 @@ fn serve_args_accept_handshake_aliases() {
                         disable_request_id_randomization: false,
                         http_max_request_body_size: None,
                         skip_model_name_validation: false,
+                        server_dev_mode: false,
                         served_model_name: [],
                         allowed_origins: JsonStringList(
                             [],
@@ -2847,6 +3062,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -2883,9 +3099,11 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -2974,6 +3192,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3010,9 +3229,11 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
@@ -3215,6 +3436,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             revision: None,
             tokenizer: None,
             hf_config: None,
+            skip_tokenizer_init: false,
             hf_overrides: HfOverrides(
                 {},
             ),
@@ -3250,9 +3472,11 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 default_return_tokens_as_token_ids: false,
                 enable_per_request_metrics: false,
                 enable_request_id_headers: false,
+                log_error_stack: false,
                 enable_scale_out: false,
                 enable_tokenizer_info_endpoint: false,
                 skip_model_name_validation: false,
+                server_dev_mode: false,
                 sse_keep_alive_interval: None,
                 request_body_limit_bytes: Some(
                     33554432,
